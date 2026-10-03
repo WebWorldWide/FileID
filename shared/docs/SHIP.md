@@ -1,9 +1,34 @@
 # FileID — Ship readiness (v1.0)
 
+## Native persistent search checkpoint (2026-10-02)
+
+Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas are implemented with catalog v23 provenance and restart/divergence checks. Local 461-test Swift validation passed. This closes the previous unwired-index groundwork item only for the pinned native CLIP space; real 100,000-file end-to-end latency, durable cancellation/resource admission, text/catalog indexes, person/event filters and port behavior remain open. Exact-head/main CI, physical accuracy/hardware, offline capture, the existing six runtime-egress blockers and the skipped broader Windows app-service suites remain separate acceptance requirements.
+
+## Latest Mac checkpoint and runner acceptance (2026-10-02)
+
+PRs #195/#196 integrate verified CLIP compatibility and native graph/snapshot groundwork; all 450 native tests pass. Both PRs passed their exact-head checks and fresh merged-main Mac/policy validation. All nineteen health merged-main checks passed, including Adlon Linux/Windows and the genuine zero-skip 48-test IPC gate. Full legacy Windows service tests, physical hardware and the remaining `NEXT_VERSION.md` gates remain open. No release was published.
+
+## Current owner priority and retrieval gate (2026-10-02)
+
+Complete the Mac next-version implementation first; new Windows/Linux implementation and physical acceptance are deferred until the owner works on the PC. Verified CLIP cache identity is a prerequisite, not completion of the persistent search-index gate. Native accuracy, broad best-take evaluation, conversion fidelity, physical hardware, strict offline egress, signing and all remaining `NEXT_VERSION.md` acceptance gates remain open.
+
+## 2026-10-02 — CI infrastructure checkpoint, release still blocked
+
+Reviewed main Linux and Windows builds route to repository-scoped Adlon runners on separate existing CI guest disks; PRs, macOS and native Windows ARM64 remain hosted. See CI_RUNNERS.md for exact service accounts, completed results and the capacity/compiler fixes. Corpus /srv/data remains unmounted and untouched. No release was published for this runner setup.
+
+The Windows app workflow's passing packaging jobs currently skip both suites because of a doubled relative Tests path. Full app-test acceptance is therefore still blocked. An archived repair restores strict TRX execution but exposes missing safety APIs; complete it and require every suite, analyzer/format and native gate before release. The broader feature, model/hardware, held-out accuracy, fidelity, privacy and signing gates in NEXT_VERSION.md remain open. Recovery tags are backups, not release approval.
+
 > The v1.0 release-readiness inventory. Tracks what's done, what's left, and the
 > bar each piece is held to. Not a session log — for *what happened* see
 > [`STATE.md`](STATE.md); for *what's next* see [`NEXT.md`](NEXT.md); for *why*
 > see [`DECISIONS.md`](DECISIONS.md).
+
+
+## Next-version release status (2026-10-01)
+
+The next-version branch is not release-ready. Its implemented foundation and unfinished features are tracked in [NEXT_VERSION.md](NEXT_VERSION.md). Native macOS catalog/manual-marker UI and sampled timeline jobs and initial local chat/photo/chapter exports do not establish automatic chapters, best takes, full conversion/enhancement, hybrid conversational search, or port parity. The existing notarized v0.1.0 release remains separate from this work.
+
+Block release until all accepted feature milestones, held-out accuracy tests, 100,000-file search/interactive-contention benchmarks, original/derived output fidelity, protected-source write tracing, offline network capture, exact dependency/model distribution review, native platform builds, hardware acceptance, signing, and hosted CI pass. Record measured results; do not present proposed targets as achieved.
 
 ## What FileID is
 
@@ -193,3 +218,20 @@ Windows v1.0 ships when at least 4 of the rows are green — CPU plus at least o
 each from NVIDIA / AMD / Intel. All rows is the goal; Snapdragon may launch in a
 follow-on if hardware availability blocks. macOS ships once WS-MAC lockstep lands
 and its existing CI + on-device checks pass.
+
+## Initial tools milestone
+
+Native macOS photo/chapter exports and Rust adapter contracts now exist; TOOLS.md lists exact supported pairs and fidelity/recovery limits. These do not satisfy the full conversion, enhancement, reframing, broad toolbox, port UI, or hardware gates. Keep the draft PR open until the accepted feature scope and release checks are actually complete.
+
+Initial memory headroom checks, native residency cancellation, and decoder-watchdog coverage are implemented. Parallel model/resource admission, inference worker isolation, and model/hardware measurements remain release gates; refer to SCHEDULER.md.
+
+Face-cache acceptance additionally requires legacy clustering-space isolation, complete resumable refresh/backlog handling, same-size/same-mtime replacement detection, held-out identity precision/recall and actual model inference checks. v22 provenance and synthetic geometry/migration tests establish none of those accuracy targets.
+
+Native H.264/AAC SDR export has generated portrait/audio/metadata/Undo tests. It still requires portable worker/UI parity and the full real-world timing/color/fidelity matrix before release; its bounded presets do not establish stabilization, AI enhancement or tracked reframing.
+
+Face comparison rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Stable reclustering identity persistence and atomic explicit-merge regression fixtures pass locally. Explicit source aliases/history, incremental refresh/assignment and held-out accuracy calibration remain release gates. Legacy person centroids lack provenance and cannot drive inheritance. See FACE_CACHE.md for whole-pass refresh limitations.
+
+
+### Health-contract follow-up (under review, 2026-10-02)
+
+A dedicated Windows IPC schema suite/report/format gate replaces the prior absence of IPC test execution. The isolated Adlon Windows VM passes 48 IPC tests and nine report-guard fixtures; new exact-head CI is still pending. The legacy app-service test discovery is still broken, so the full Windows safety/test repair and app-suite release gate remain open. Actual-process nonce/PID and invalid-probe checks are now required in macOS, Linux and native Windows engine CI. No server runner or corpus configuration changed in this follow-up.

@@ -15,8 +15,12 @@ namespace FileID.IpcSchema;
 
 [JsonConverter(typeof(EventPayloadJsonConverter))]
 public abstract record EventPayload;
+public sealed record ChatResponseEvent(ChatResponse Response) : EventPayload;
+public sealed record ToolResponseEvent(ToolResponse Response) : EventPayload;
+public sealed record CatalogResponseEvent(CatalogResponse Response) : EventPayload;
 
 public sealed record ReadyEvent(EngineInfo Info) : EventPayload;
+public sealed record HealthCheckResultEvent(HealthCheckResult Result) : EventPayload;
 public sealed record ProgressEvent(ScanProgress Progress) : EventPayload;
 public sealed record PhaseChangedEvent(ScanPhase Phase) : EventPayload;
 
@@ -74,7 +78,11 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
 
         EventPayload payload = variant switch
         {
+            "chatResponse" => new ChatResponseEvent(ReadWrapped<ChatResponse>(ref reader, options)),
+            "toolResponse" => new ToolResponseEvent(ReadWrapped<ToolResponse>(ref reader, options)),
+            "catalogResponse" => new CatalogResponseEvent(ReadWrapped<CatalogResponse>(ref reader, options)),
             "ready" => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
+            "healthCheckResult" => new HealthCheckResultEvent(ReadWrapped<HealthCheckResult>(ref reader, options)),
             "progress" => new ProgressEvent(ReadWrapped<ScanProgress>(ref reader, options)),
             "phaseChanged" => new PhaseChangedEvent(ReadWrapped<ScanPhase>(ref reader, options)),
             "discoveryComplete" => new DiscoveryCompleteEvent(ReadDiscoveryComplete(ref reader)),
@@ -113,7 +121,11 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
         writer.WriteStartObject();
         switch (value)
         {
+            case ChatResponseEvent v: WriteWrapped(writer, "chatResponse", v.Response, options); break;
+            case ToolResponseEvent v: WriteWrapped(writer, "toolResponse", v.Response, options); break;
+            case CatalogResponseEvent v: WriteWrapped(writer, "catalogResponse", v.Response, options); break;
             case ReadyEvent v: WriteWrapped(writer, "ready", v.Info, options); break;
+            case HealthCheckResultEvent v: WriteWrapped(writer, "healthCheckResult", v.Result, options); break;
             case ProgressEvent v: WriteWrapped(writer, "progress", v.Progress, options); break;
             case PhaseChangedEvent v: WriteWrapped(writer, "phaseChanged", v.Phase, options); break;
             case DiscoveryCompleteEvent v: WriteDiscoveryComplete(writer, v); break;

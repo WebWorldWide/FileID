@@ -12,6 +12,7 @@
 import Testing
 import Foundation
 import GRDB
+import FileIDShared
 import AsyncAlgorithms
 @testable import FileIDEngine
 // Disambiguate from GRDB.Database (both modules export `Database`).
@@ -21,6 +22,12 @@ private typealias Database = FileIDEngine.Database
 struct DBWriterClipBackfillTests {
 
     private static let fixedMtime = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func clipVector(_ index: Int = 0) -> Data {
+        var values = [Float](repeating: 0, count: CLIPEmbeddingSpace.dimension)
+        values[index] = 1
+        return values.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
 
     private func makeFile(url: URL, kind: String, clip: Data?, textStageDone: Bool = false) -> TaggedFile {
         TaggedFile(
@@ -61,7 +68,7 @@ struct DBWriterClipBackfillTests {
         let imgNoEmbedding = tmp.appendingPathComponent("b_no_embedding.jpg")
         let docNoEmbedding = tmp.appendingPathComponent("c_document.pdf")
 
-        await drain(db, makeFile(url: imgEmbedded, kind: "image", clip: Data([1, 2, 3, 4])))
+        await drain(db, makeFile(url: imgEmbedded, kind: "image", clip: clipVector()))
         await drain(db, makeFile(url: imgNoEmbedding, kind: "image", clip: nil))
         await drain(db, makeFile(url: docNoEmbedding, kind: "doc", clip: nil))
 
@@ -103,7 +110,7 @@ struct DBWriterClipBackfillTests {
         let stlNoEmbedding = tmp.appendingPathComponent("c_shape.stl")
         let objUnrenderable = tmp.appendingPathComponent("d_corrupt.obj")  // render ran (done) but failed
 
-        await drain(db, makeFile(url: objEmbedded, kind: "model", clip: Data([1, 2, 3, 4])))
+        await drain(db, makeFile(url: objEmbedded, kind: "model", clip: clipVector()))
         await drain(db, makeFile(url: objNoEmbedding, kind: "model", clip: nil))
         await drain(db, makeFile(url: stlNoEmbedding, kind: "model", clip: nil))
         await drain(db, makeFile(url: objUnrenderable, kind: "model", clip: nil, textStageDone: true))
@@ -175,7 +182,7 @@ struct DBWriterClipBackfillTests {
 
         // CLIP installed; rescan an UNCHANGED file (same size+mtime) now yields a
         // blob — the backfill branch must fill it without rebuilding children.
-        await drain(db, makeFile(url: url, kind: "image", clip: Data([9, 8, 7, 6])))
+        await drain(db, makeFile(url: url, kind: "image", clip: clipVector(1)))
         count = try await db.pool.read { db in
             try Int.fetchOne(db, sql:
                 "SELECT COUNT(*) FROM clip_embeddings WHERE file_id = ?", arguments: [fileID]) ?? -1
@@ -183,11 +190,65 @@ struct DBWriterClipBackfillTests {
         #expect(count == 1, "unchanged-file backfill inserts the missing embedding")
 
         // A later unchanged scan with a blob present must not duplicate the row.
-        await drain(db, makeFile(url: url, kind: "image", clip: Data([5, 4, 3, 2])))
+        await drain(db, makeFile(url: url, kind: "image", clip: clipVector(2)))
         count = try await db.pool.read { db in
             try Int.fetchOne(db, sql:
                 "SELECT COUNT(*) FROM clip_embeddings WHERE file_id = ?", arguments: [fileID]) ?? -1
         }
         #expect(count == 1, "backfill is idempotent — exactly one embedding row remains")
+    }
+    @Test("legacy image and video vectors are refreshed without changing user tags")
+    func legacyRefresh() async throws {
+        let (database, root) = try newDB()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for kind in ["image", "video"] {
+            let url = root.appendingPathComponent(kind + ".jpg")
+            await drain(database, makeFile(url: url, kind: kind, clip: clipVector()))
+            let fileID = try await database.pool.write { db in
+                let id = try #require(try Int64.fetchOne(db, sql: "SELECT id FROM files WHERE path_text=?", arguments: [url.path]))
+                try db.execute(sql: "UPDATE clip_embeddings SET model='mobileclip_s2' WHERE file_id=?", arguments: [id])
+                try db.execute(sql: "INSERT INTO tags(file_id,tag,score,source) VALUES(?,'Favorite',1,'user')", arguments: [id])
+                return id
+            }
+            let before = try await database.pool.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE id=? AND \(DBWriter.skipSetClipBackfillExclusionSQL)", arguments: [fileID])
+            }
+            #expect(before == 0)
+            await drain(database, makeFile(url: url, kind: kind, clip: clipVector(1)))
+            try await database.pool.read { db in
+                let model = try String.fetchOne(db, sql: "SELECT model FROM clip_embeddings WHERE file_id=?", arguments: [fileID])
+                #expect(model == CLIPEmbeddingSpace.modelID)
+                let embedding = try Data.fetchOne(db, sql: "SELECT embedding FROM clip_embeddings WHERE file_id=?", arguments: [fileID])
+                #expect(embedding == clipVector(1))
+                let tags = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tags WHERE file_id=? AND source='user' AND tag='Favorite'", arguments: [fileID])
+                #expect(tags == 1)
+                let skippable = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE id=? AND \(DBWriter.skipSetClipBackfillExclusionSQL)", arguments: [fileID])
+                #expect(skippable == 1)
+            }
+        }
+    }
+
+    @Test("a failed legacy model render does not repeat indefinitely")
+    func failedLegacyModelRefresh() async throws {
+        let (database, root) = try newDB()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("legacy.obj")
+        await drain(database, makeFile(url: url, kind: "model", clip: clipVector(), textStageDone: true))
+        try await database.pool.write { db in try db.execute(sql: "UPDATE clip_embeddings SET model='mobileclip_s2'") }
+        #expect(try await database.pool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(DBWriter.skipSetModelClipBackfillExclusionSQL)")
+        } == 0)
+        await drain(database, makeFile(url: url, kind: "model", clip: nil, textStageDone: true))
+        #expect(try await database.pool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE \(DBWriter.skipSetModelClipBackfillExclusionSQL)")
+        } == 1)
+    }
+
+    @Test("malformed vectors are not assigned a verified model identity")
+    func rejectsMalformedVectors() async throws {
+        let (database, root) = try newDB()
+        defer { try? FileManager.default.removeItem(at: root) }
+        await drain(database, makeFile(url: root.appendingPathComponent("invalid.jpg"), kind: "image", clip: Data([1, 2, 3, 4])))
+        #expect(try await database.pool.read { db in try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings") } == 0)
     }
 }

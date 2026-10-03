@@ -649,12 +649,15 @@ public actor DBWriter {
             if let blob = file.clipEmbeddingBlob {
                 let hasEmbedding = try Bool.fetchOne(
                     db.cachedStatement(sql: """
-                        SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ?)
+                        SELECT EXISTS(SELECT 1 FROM clip_embeddings WHERE file_id = ? AND model = ? AND length(embedding) = ?)
                         """),
-                    arguments: [fileID]) ?? false
+                    arguments: [fileID, CLIPEmbeddingSpace.modelID, CLIPEmbeddingSpace.dimension * 4]) ?? false
                 if !hasEmbedding {
                     try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
                 }
+            } else if file.kind == "model", file.textStageDone {
+                try db.execute(sql: "DELETE FROM clip_embeddings WHERE file_id=? AND (model!=? OR length(embedding)!=?)",
+                               arguments: [fileID, CLIPEmbeddingSpace.modelID, CLIPEmbeddingSpace.dimension * 4])
             }
             // Backfill a doc's BGE embedding too (a rescan after BGE was installed
             // post-scan — the common case, since BGE is opt-in). Kept reachable by
@@ -808,8 +811,9 @@ public actor DBWriter {
     /// skip-set's content_hash carve-out (C1-013, scan_session.rs), which likewise
     /// keeps a file whose derived data is still missing IN the pipeline.
     static let skipSetClipBackfillExclusionSQL = """
-        NOT (files.kind = 'image' AND NOT EXISTS (
-            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
+        NOT (files.kind IN ('image','video') AND NOT EXISTS (
+            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id
+              AND model = '\(CLIPEmbeddingSpace.modelID)' AND length(embedding) = 2048))
         """
 
     /// Doc/pdf analog of `skipSetClipBackfillExclusionSQL` for the BGE text embedder.
@@ -836,12 +840,16 @@ public actor DBWriter {
     /// `clip_embeddings` row, would re-walk forever (and a macOS QuickLook render can cost up
     /// to 8 s each). CLIP ships by default, so Discovery ANDs this whenever CLIP is installed.
     static let skipSetModelClipBackfillExclusionSQL = """
-        NOT (files.kind = 'model' AND files.extension = 'obj' AND files.text_stage_done = 0
-             AND NOT EXISTS (
-            SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id))
+        NOT (files.kind = 'model' AND files.extension = 'obj' AND (
+            (files.text_stage_done = 0 AND NOT EXISTS (
+                SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id
+                  AND model = '\(CLIPEmbeddingSpace.modelID)' AND length(embedding) = 2048))
+            OR EXISTS (SELECT 1 FROM clip_embeddings WHERE clip_embeddings.file_id = files.id
+                       AND (model != '\(CLIPEmbeddingSpace.modelID)' OR length(embedding) != 2048))))
         """
 
     private static func insertClipEmbedding(fileID: Int64, blob: Data, db: GRDB.Database) throws {
+        guard CLIPEmbeddingSpace.vector(from: blob) != nil else { return }
         // `blob` is the worker's already-finalized Data; bind it straight to the
         // cached statement (no re-copy on the writer side). The remaining
         // tensor→loop→normalize→Data copies live in the embedding producer
@@ -849,7 +857,7 @@ public actor DBWriter {
         try db.cachedStatement(sql: """
             INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
             VALUES (?, ?, ?)
-            """).execute(arguments: [fileID, blob, "mobileclip_s2"])
+            """).execute(arguments: [fileID, blob, CLIPEmbeddingSpace.modelID])
     }
 
     // BGE document text embedding → text_embeddings (parallel to clip_embeddings, a

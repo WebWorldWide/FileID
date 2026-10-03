@@ -123,7 +123,7 @@ public enum Hardware {
         return Int(info.pti_resident_size / (1024 * 1024))
     }
 
-    /// Available system memory in MB (free + inactive + speculative pages).
+    /// Available system memory in MB (free + inactive pages).
     public static func availableMemoryMB() -> Int {
         var stats = vm_statistics64()
         var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
@@ -136,7 +136,7 @@ public enum Hardware {
         let pageSize = Int(getpagesize())
         let free = Int(stats.free_count) * pageSize
         let inactive = Int(stats.inactive_count) * pageSize
-        let speculative = Int(stats.speculative_count) * pageSize
-        return (free + inactive + speculative) / (1024 * 1024)
+        // XNU already includes speculative pages in free_count.
+        return (free + inactive) / (1024 * 1024)
     }
 }

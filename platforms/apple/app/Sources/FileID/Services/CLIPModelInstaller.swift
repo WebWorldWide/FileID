@@ -163,6 +163,7 @@ public final class CLIPModelInstaller {
     }
 
     public func uninstall() async {
+        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
         guard !uninstalling else { return }
         uninstalling = true
         defer { uninstalling = false }
@@ -193,6 +194,7 @@ public final class CLIPModelInstaller {
     /// Files stage into a sibling dir and atomic-promote on full
     /// success — a partial install never poisons the production tree.
     private func runHubFetch() async {
+        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
         installing = true
         defer { installing = false }
         Self.sweepOrphanedStagingRoots()
@@ -273,6 +275,7 @@ public final class CLIPModelInstaller {
     /// safe: only this installer creates them, one install task runs at
     /// a time (`guard task == nil`), and none can be in flight here.
     private static func sweepOrphanedStagingRoots() {
+        guard (try? ReadOnlyLocations.requireWritable(modelsRoot)) != nil else { return }
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: modelsRoot, includingPropertiesForKeys: nil) else { return }
@@ -420,6 +423,7 @@ public final class CLIPModelInstaller {
     }
 
     private func runExtract(zipAt zipURL: URL, deleteZipAfter: Bool) async {
+        guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
         status = .extracting
         let modelsRoot = Self.modelsRoot
         try? FileManager.default.createDirectory(at: modelsRoot, withIntermediateDirectories: true)
@@ -754,6 +758,7 @@ public final class CLIPModelInstaller {
     }
 
     private static func prepareSafeDestination(_ destination: URL, modelsRoot: URL) throws {
+        try ReadOnlyLocations.requireWritable(destination)
         let fileManager = FileManager.default
         let root = modelsRoot.standardizedFileURL
         let destination = destination.standardizedFileURL

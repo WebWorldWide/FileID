@@ -9,6 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{
+    HealthCheckPayload, HealthCheckResult,
     ApplyRestructurePayload, ApplyTagsPayload, BatchSummary, BulkActionItem, BulkActionResult,
     CancelPrewarmPayload, ClipTextEmbedding, CommandPayload, DeepAnalyzeAllPayload,
     DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload,
@@ -186,11 +187,15 @@ fn assert_tag_sets_match(
 /// compilation here until its wire tag + an exemplar below are added.
 fn command_tag(payload: &CommandPayload) -> &'static str {
     match payload {
+        CommandPayload::ChatRequest(_) => "chatRequest",
+        CommandPayload::ToolRequest(_) => "toolRequest",
+        CommandPayload::CatalogRequest(_) => "catalogRequest",
         CommandPayload::StartScan(_) => "startScan",
         CommandPayload::PauseScan(_) => "pauseScan",
         CommandPayload::ResumeScan(_) => "resumeScan",
         CommandPayload::CancelScan(_) => "cancelScan",
         CommandPayload::RequestStatus(_) => "requestStatus",
+        CommandPayload::HealthCheck(_) => "healthCheck",
         CommandPayload::Shutdown(_) => "shutdown",
         CommandPayload::RunFaceClustering(_) => "runFaceClustering",
         CommandPayload::DeepAnalyzeFile(_) => "deepAnalyzeFile",
@@ -224,7 +229,11 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
 /// compilation here until its wire tag + an exemplar below are added.
 fn event_tag(payload: &EventPayload) -> &'static str {
     match payload {
+        EventPayload::ChatResponse(_) => "chatResponse",
+        EventPayload::ToolResponse(_) => "toolResponse",
+        EventPayload::CatalogResponse(_) => "catalogResponse",
         EventPayload::Ready(_) => "ready",
+        EventPayload::HealthCheckResult(_) => "healthCheckResult",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
         EventPayload::DiscoveryComplete(_) => "discoveryComplete",
@@ -292,6 +301,9 @@ fn restructure_move() -> RestructureMove {
 /// exercised against the schema's `properties`.
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"chatRequest":{"request":{"requestID":"chat","conversationID":"c","action":"send","text":"birthday","useModel":true}}})).unwrap(),
+        serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","recipe":{"kind":"video","format":"mp4","maxDimension":1920},"operationID":"plan"}}})).unwrap(),
+        serde_json::from_value(serde_json::json!({"catalogRequest":{"request":{"requestID":"r1","action":"search","query":"birthday"}}})).unwrap(),
         CommandPayload::StartScan(StartScanPayload {
             root_path: r"C:\Photos".to_string(),
             root_display: None,
@@ -302,6 +314,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::ResumeScan(Empty {}),
         CommandPayload::CancelScan(Empty {}),
         CommandPayload::RequestStatus(Empty {}),
+        CommandPayload::HealthCheck(HealthCheckPayload { request_id: "probe-1".into() }),
         CommandPayload::Shutdown(Empty {}),
         CommandPayload::RunFaceClustering(Empty {}),
         CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
@@ -394,6 +407,10 @@ fn command_exemplars() -> Vec<CommandPayload> {
 /// exercised against the schema's `properties`.
 fn event_exemplars() -> Vec<EventPayload> {
     vec![
+        serde_json::from_value(serde_json::json!({"chatResponse":{"_0":{"requestID":"chat","conversationID":"c","status":"completed","message":"Found","messages":[{"id":"m","role":"user","text":"birthday","createdAt":1}],"hits":[]}}})).unwrap(),
+        serde_json::from_value(serde_json::json!({"toolResponse":{"_0":{"requestID":"tool","status":"ok","message":"Exported","operationID":"plan","outputs":[{"fileID":1,"sourcePath":"/internal/a.png","outputPath":"/internal/b.png","state":"completed","message":"Original preserved"}],"capabilities":[{"id":"photo","available":true,"inputFormats":["png"],"outputFormats":["png"],"detail":"Conversion"}]}}})).unwrap(),
+        serde_json::from_value(serde_json::json!({"catalogResponse":{"_0":{"requestID":"r1","status":"ok","hits":[],"chapters":[],"jobs":[]}}})).unwrap(),
+        EventPayload::HealthCheckResult(Wrap::new(HealthCheckResult { request_id: "probe-1".into(), pid: 4242 })),
         EventPayload::Ready(Wrap::new(EngineInfo {
             version: "0.1.0".into(),
             pid: 4242,

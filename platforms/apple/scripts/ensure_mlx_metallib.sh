@@ -36,6 +36,34 @@ if [ ! -d "$MLX_SOURCE" ]; then
     exit 1
 fi
 
+XCODE_MAJOR="$(DEVELOPER_DIR="$XCODE_DEV_DIR" xcodebuild -version | awk '/^Xcode / { split($2, parts, "."); print parts[1] }')"
+if [[ "$XCODE_MAJOR" =~ ^[0-9]+$ ]] && [ "$XCODE_MAJOR" -ge 27 ]; then
+    # Pinned MLX needs Metal 3.2 and its fence fallback under Xcode 27.
+    python3 - "$MLX_SOURCE/mlx/backend/metal/kernels" <<'PY'
+from pathlib import Path
+import stat
+import sys
+
+root = Path(sys.argv[1])
+
+def patch(path, old, new):
+    source = path.read_text()
+    if new in source:
+        return
+    if source.count(old) != 1:
+        raise SystemExit(f"Cannot patch pinned MLX source at {path}")
+    path.chmod(path.stat().st_mode | stat.S_IWUSR)
+    path.write_text(source.replace(old, new))
+
+patch(
+    root / "CMakeLists.txt",
+    "set(METAL_FLAGS -Wall -Wextra -fno-fast-math -Wno-c++17-extensions)",
+    "set(METAL_FLAGS -std=metal3.2 -Wall -Wextra -fno-fast-math -Wno-c++17-extensions)",
+)
+patch(root / "fence.metal", "#ifndef __METAL_MEMORY_SCOPE_SYSTEM__", "#if __METAL_VERSION__ < 400")
+PY
+fi
+
 LOG="$PROJECT_DIR/.build/cache/metallib-build.log"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fileid-mlx-metallib.XXXXXX")"
 CACHE_TMP=""

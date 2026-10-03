@@ -1,0 +1,156 @@
+{
+  "cases": [
+    {
+      "name": "named owners cannot share a raw cluster",
+      "raw": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          4
+        ]
+      ],
+      "owners": [
+        {
+          "face": 1,
+          "person": 10
+        },
+        {
+          "face": 3,
+          "person": 20
+        },
+        {
+          "face": 4,
+          "person": 10
+        }
+      ],
+      "different": [],
+      "excluded": [],
+      "expected": [
+        [
+          1,
+          4
+        ],
+        [
+          3
+        ],
+        [
+          2
+        ]
+      ]
+    },
+    {
+      "name": "different faces under one owner split",
+      "raw": [
+        [
+          1,
+          2,
+          3,
+          4
+        ]
+      ],
+      "owners": [
+        {
+          "face": 1,
+          "person": 10
+        },
+        {
+          "face": 2,
+          "person": 10
+        },
+        {
+          "face": 3,
+          "person": 10
+        }
+      ],
+      "different": [
+        [
+          1,
+          3
+        ]
+      ],
+      "excluded": [],
+      "expected": [
+        [
+          2
+        ],
+        [
+          1
+        ],
+        [
+          3
+        ],
+        [
+          4
+        ]
+      ]
+    },
+    {
+      "name": "ownerless verdict endpoints stay separate",
+      "raw": [
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "owners": [],
+      "different": [
+        [
+          1,
+          2
+        ]
+      ],
+      "excluded": [],
+      "expected": [
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ]
+    },
+    {
+      "name": "preserved faces are not reassigned",
+      "raw": [
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "owners": [
+        {
+          "face": 1,
+          "person": 10
+        },
+        {
+          "face": 2,
+          "person": 10
+        },
+        {
+          "face": 3,
+          "person": 20
+        }
+      ],
+      "different": [],
+      "excluded": [
+        1
+      ],
+      "expected": [
+        [
+          2
+        ],
+        [
+          3
+        ]
+      ]
+    }
+  ]
+}

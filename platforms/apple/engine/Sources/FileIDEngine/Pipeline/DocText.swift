@@ -19,6 +19,7 @@ enum DocText {
     static func extract(path: String, maxChars: Int = 4000) -> String? {
         let url = URL(fileURLWithPath: path)
         let ext = url.pathExtension.lowercased()
+        if ["docx", "pptx", "xlsx", "odt", "epub"].contains(ext), !hasZIPHeader(url) { return nil }
         let raw: String?
         switch ext {
         case "txt", "md", "markdown", "csv", "log", "text":
@@ -44,7 +45,9 @@ enum DocText {
     }
 
     static func extractForDeepAnalyze(path: String, timeoutSeconds: TimeInterval = 10) async -> String? {
-        guard deepAnalyzeCircuit.isOpen else { return nil }
+        guard deepAnalyzeCircuit.isOpen, timeoutSeconds.isFinite, timeoutSeconds > 0, !Task.isCancelled else { return nil }
+        let url = URL(fileURLWithPath: path)
+        if ["docx", "pptx", "xlsx", "odt", "epub"].contains(url.pathExtension.lowercased()), !hasZIPHeader(url) { return nil }
         let state = DocumentTextExtractionState()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -69,6 +72,13 @@ enum DocText {
     }
 
     /// Read at most `maxBytes` of a plain-text file (a multi-GB log can't OOM the plan).
+    private static func hasZIPHeader(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let header = try? handle.read(upToCount: 4), header.count == 4 else { return false }
+        return [Data([0x50, 0x4b, 0x03, 0x04]), Data([0x50, 0x4b, 0x05, 0x06]), Data([0x50, 0x4b, 0x07, 0x08])].contains(header)
+    }
+
     private static func boundedRead(_ url: URL) -> String? {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }

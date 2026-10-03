@@ -27,6 +27,9 @@ public struct IPCCommand: Codable, Sendable {
         case resumeScan
         case cancelScan
         case cancelRestructure
+        case catalogRequest(request: CatalogRequest)
+        case chatRequest(request: ChatRequest)
+        case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
         case requestStatus
         case shutdown
@@ -196,6 +199,9 @@ public struct IPCEvent: Codable, Sendable {
     }
 
     public enum Payload: Codable, Sendable {
+        case catalogResponse(CatalogResponse)
+        case chatResponse(ChatResponse)
+        case toolResponse(ToolResponse)
         case ready(EngineInfo)
         case healthCheckResult(HealthCheckResult)
         case progress(ScanProgress)
@@ -237,6 +243,14 @@ public struct HealthCheckResult: Codable, Sendable {
     public init(requestID: String, pid: Int32) {
         self.requestID = requestID
         self.pid = pid
+    }
+
+    public static func isValidRequestID(_ requestID: String) -> Bool {
+        let bytes = requestID.utf8
+        return (1...128).contains(bytes.count) && bytes.allSatisfy {
+            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0)
+                || $0 == 95 || $0 == 45
+        }
     }
 }
 

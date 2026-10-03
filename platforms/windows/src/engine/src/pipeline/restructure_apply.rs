@@ -102,6 +102,7 @@ impl RestructureApply {
         moves: &[RestructureMove],
         record_undo: bool,
     ) -> Result<RestructureApplyResult> {
+        crate::util::read_only::require_writable(&self.library_root)?;
         let canonical_root = canonicalize_safely(&self.library_root)
             .with_context(|| format!("library root {}", self.library_root.display()))?;
 
@@ -165,6 +166,10 @@ impl RestructureApply {
             }
 
             let dest = PathBuf::from(&m.destination);
+            if crate::util::read_only::require_source_mutation(Path::new(&m.source)).is_err() || crate::util::read_only::require_source_mutation(&dest).is_err() {
+                failed += 1;
+                continue;
+            }
             // Path-traversal guard. The destination's parent must exist
             // OR be createable under library_root. Canonicalize the
             // closest existing ancestor and verify containment.
@@ -343,6 +348,7 @@ impl RestructureApply {
     /// incrementally rather than written once after the loop. (R2 → crash-safe)
     fn open_undo_journal_truncating() -> Option<BufWriter<File>> {
         let path = Self::undo_journal_path()?;
+        crate::util::read_only::require_writable(&path).ok()?;
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -424,6 +430,7 @@ impl RestructureApply {
     /// touch the root itself. Deepest-first so nested empties fully collapse.
     /// Best-effort. (R2 → reversibility completeness)
     fn cleanup_empty_dirs(entries: &[(i64, String, String)], root: &Path) {
+        if crate::util::read_only::require_writable(root).is_err() { return; }
         let mut dirs: Vec<&Path> = entries
             .iter()
             .filter_map(|(_, from, _)| Path::new(from).parent())

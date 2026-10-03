@@ -41,7 +41,8 @@ struct FaceClusteringMergeTests {
                 """, arguments: [fileCount, Date().timeIntervalSince1970,
                                  firstName, isUnknown ? 1 : 0])
             let pid = d.lastInsertedRowID
-            let blob = ArcFaceService.embeddingToBlob(embedding)
+            let vector = embedding.count < 128 ? embedding + [Float](repeating: 0, count: 128 - embedding.count) : embedding
+            let blob = ArcFaceService.embeddingToBlob(vector)
             var faceIDs: [Int64] = []
             for k in 0..<faces {
                 try d.execute(sql: """
@@ -54,9 +55,59 @@ struct FaceClusteringMergeTests {
                     INSERT INTO face_prints (file_id, person_id, print_data, bbox, arcface_embedding)
                     VALUES (?, ?, ?, '0,0,1,1', ?)
                     """, arguments: [fileID, pid, Data(), blob])
-                faceIDs.append(d.lastInsertedRowID)
+                let faceID = d.lastInsertedRowID
+                try d.execute(sql: "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?,'fixture-revision','file-stat-v1',0)", arguments: [fileID])
+                try d.execute(sql: "UPDATE face_prints SET embedding_model='fixture-sface',processing_version='fixture-align',source_revision='fixture-revision' WHERE id=?", arguments: [faceID])
+                faceIDs.append(faceID)
             }
             return (pid, faceIDs)
+        }
+    }
+
+    @Test("legacy person centroids cannot cross model spaces")
+    func legacyCentroidsRequireProvenance() async throws {
+        let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+        let (person, faces) = try await insertPerson(db, firstName: "Confirmed", embedding: [1,0,0])
+        try await db.pool.write { d in
+            try d.execute(sql: "UPDATE persons SET centroid=?,anchor_radius=0.8 WHERE id=?", arguments: [ArcFaceService.embeddingToBlob([Float](repeating: 1, count: 128)),person])
+        }
+        try await db.pool.read { d in
+            let priors = try FaceClustering.priorAnchors(from: d)
+            #expect(priors[0].centroid == nil)
+            #expect(priors[0].faceIDs == Set(faces))
+            #expect(priors[0].firstName == "Confirmed")
+            #expect(throws: FaceClustering.FaceProtectionError.self) {
+                try FaceClustering.loadClusteringFaceRows(from: d, phaseZeroUnknownFaceIDs: [], minQuality: 0, limit: 100, expectedSpace: .init(model: "replacement-weights", processing: "fixture-align"))
+            }
+        }
+    }
+
+    @Test("mixed, legacy, stale and malformed face caches preserve identities")
+    func incompatibleCachesDoNotMerge() async throws {
+        for fault in ["model", "processing", "legacy", "revision", "nan"] {
+            let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
+            let (first, _) = try await insertPerson(db, firstName: "Confirmed", embedding: [1,0,0])
+            let (second, faces) = try await insertPerson(db, embedding: [1,0,0])
+            try await db.pool.write { d in
+                switch fault {
+                case "model": try d.execute(sql: "UPDATE face_prints SET embedding_model='other-weights' WHERE id=?", arguments: [faces[0]])
+                case "processing": try d.execute(sql: "UPDATE face_prints SET processing_version='other-crops' WHERE id=?", arguments: [faces[0]])
+                case "legacy": try d.execute(sql: "UPDATE face_prints SET embedding_model=NULL WHERE id=?", arguments: [faces[0]])
+                case "revision": try d.execute(sql: "UPDATE face_prints SET source_revision='stale' WHERE id=?", arguments: [faces[0]])
+                default: try d.execute(sql: "UPDATE face_prints SET arcface_embedding=? WHERE id=?", arguments: [ArcFaceService.embeddingToBlob([Float](repeating: .nan, count: 128)), faces[0]])
+                }
+            }
+            #expect(await FaceClustering.tightPairAutoMerge(database: db) == 0)
+            #expect(try await personIDs(db) == Set([first,second]))
+            try await db.pool.read { d in
+                #expect(throws: FaceClustering.FaceProtectionError.self) {
+                    try FaceClustering.loadClusteringFaceRows(from: d, phaseZeroUnknownFaceIDs: [], minQuality: 0, limit: 100)
+                }
+                let name = try String.fetchOne(d, sql: "SELECT first_name FROM persons WHERE id=?", arguments: [first])
+                let owner = try Int64.fetchOne(d, sql: "SELECT person_id FROM face_prints WHERE id=?", arguments: [faces[0]])
+                #expect(name == "Confirmed")
+                #expect(owner == second)
+            }
         }
     }
 
@@ -227,7 +278,9 @@ struct FaceClusteringMergeTests {
         #expect(merged == 1, "the two unnamed persons collapse; the unknown stays out of it")
         let ids = try await personIDs(db)
         #expect(ids.contains(u), "the unknown person row survives untouched")
-        #expect(ids.count == 2, "unknown + one survivor of the two unnamed clusters")
+        #expect(ids.count == 3, "auto-merge retains identity records")
+        let active = try await db.pool.read { d in try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM persons WHERE file_count>0") }
+        #expect(active == 2, "unknown and one active unnamed identity")
         let stillUnknown = try await db.pool.read { d in
             try Int.fetchOne(d, sql: "SELECT is_unknown FROM persons WHERE id = ?", arguments: [u])
         }

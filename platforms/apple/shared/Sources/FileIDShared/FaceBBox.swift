@@ -32,19 +32,34 @@ public enum FaceBBox {
                   let data = t.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let px = numeric(obj["x"]), let py = numeric(obj["y"]),
-                  let pw = numeric(obj["w"]), let ph = numeric(obj["h"]) else { return nil }
-            let w = pw / Double(imageWidth)
-            let h = ph / Double(imageHeight)
-            let x = px / Double(imageWidth)
+                  let pw = numeric(obj["w"]), let ph = numeric(obj["h"]),
+                  [px, py, pw, ph].allSatisfy(\.isFinite), pw > 0, ph > 0 else { return nil }
+            let sourceWidth: Double
+            let sourceHeight: Double
+            if obj["sourceWidth"] != nil || obj["sourceHeight"] != nil {
+                guard obj["coordinateSpace"] as? String == "pixel-top-left",
+                      let width = numeric(obj["sourceWidth"]), let height = numeric(obj["sourceHeight"]),
+                      width.isFinite, height.isFinite, width > 0, height > 0 else { return nil }
+                sourceWidth = width
+                sourceHeight = height
+            } else {
+                sourceWidth = Double(imageWidth)
+                sourceHeight = Double(imageHeight)
+            }
+            let w = pw / sourceWidth
+            let h = ph / sourceHeight
+            let x = px / sourceWidth
             // top-left → bottom-left (macOS/Vision convention).
-            let yBottom = 1.0 - (py / Double(imageHeight)) - h
+            let yBottom = 1.0 - (py / sourceHeight) - h
             return (x, yBottom, w, h)
         }
 
         // macOS CSV: normalized, bottom-left — passthrough (byte-identical to the
         // prior `split(",").compactMap(Double.init)` parse).
-        let parts = t.split(separator: ",").compactMap { Double($0) }
-        guard parts.count >= 4 else { return nil }
+        let fields = t.split(separator: ",", omittingEmptySubsequences: false)
+        guard fields.count >= 4 else { return nil }
+        let parts = fields.prefix(4).compactMap { Double($0) }
+        guard parts.count == 4, parts.allSatisfy(\.isFinite), parts[2] > 0, parts[3] > 0 else { return nil }
         return (parts[0], parts[1], parts[2], parts[3])
     }
 

@@ -169,7 +169,7 @@ fn sanity_check_binary(p: &PathBuf) -> Result<()> {
     use std::io::Read;
     let mut f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
     f.read_exact(&mut buf).context("reading PE header")?;
-    if buf != [b'M', b'Z'] {
+    if buf != *b"MZ" {
         bail!("{}: not a PE binary (missing MZ header)", p.display());
     }
     // PE-header + size pass even if dependent DLLs are missing.
@@ -217,6 +217,8 @@ pub async fn caption(
 
     #[cfg(not(feature = "vlm-native"))]
     {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
+        crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path).await?;
         let mut cmd = Command::new(&runner.binary);
         cmd.arg("-m").arg(&req.gguf_path);
         cmd.arg("--mmproj").arg(&req.mmproj_path);

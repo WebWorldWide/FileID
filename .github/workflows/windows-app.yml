@@ -7,6 +7,10 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Tests/FileID.IpcSchema.Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
+      - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
@@ -19,6 +23,10 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Tests/FileID.IpcSchema.Tests/**'
+      - 'platforms/windows/build/assert-test-report.ps1'
+      - 'platforms/windows/build/test-assert-test-report.ps1'
+      - 'shared/ipc-schema/**'
       - 'platforms/windows/Directory.Packages.props'
       - 'platforms/windows/Directory.Build.props'
       - 'platforms/windows/FileID.sln'
@@ -45,7 +53,10 @@ jobs:
             runner: windows-latest
             arch: arm64
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && fromJSON('["self-hosted","Windows","X64","fileid-adlon"]') || matrix.runner }}
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
 
     defaults:
       run:
@@ -54,8 +65,23 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Prepare Adlon command paths
+        if: runner.name == 'adlon-fileid-windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = & C:\Windows\py.exe -3 -c "import sys; print(sys.executable)"
+          if ($LASTEXITCODE -ne 0) { throw "Python launcher failed" }
+          $paths = @('C:\Program Files\Git\bin', (Split-Path $python.Trim()))
+          foreach ($path in $paths) {
+            if (-not (Test-Path $path -PathType Container)) { throw "Missing tool directory: $path" }
+            $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
       - name: Setup .NET 8
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
         with:
           dotnet-version: '8.0.x'
 
@@ -112,6 +138,18 @@ jobs:
           -restore
           -m
         shell: pwsh
+
+      - name: Run IPC schema tests with report verification
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./build/test-assert-test-report.ps1
+          dotnet test Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj -c Debug --verbosity minimal --logger 'trx;LogFileName=ipc-schema.trx' --results-directory Tests/TestResults
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./build/assert-test-report.ps1 -Path Tests/TestResults/ipc-schema.trx
+          dotnet format Tests/FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --verify-no-changes --no-restore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run all test projects
         # V15.3: was IpcSchema-only with continue-on-error. Now runs every

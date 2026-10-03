@@ -475,8 +475,10 @@ impl DbWriter {
                     face_delete
                         .execute(params![file_id])
                         .with_context(|| format!("face delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
+                    let source_revision = format!("{}:{}", f.size_bytes, f.modified_unix.to_bits());
+                    tx.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',?3) ON CONFLICT(file_id) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at WHERE catalog_revisions.revision!=excluded.revision", params![file_id, source_revision, f.scanned_unix])?;
                     for face in &f.faces {
-                        let bbox_json = serde_json::json!({
+                        let mut bbox = serde_json::json!({
                             "x": face.bbox[0],
                             "y": face.bbox[1],
                             "w": face.bbox[2],
@@ -484,9 +486,16 @@ impl DbWriter {
                             "roll": face.roll,
                             "yaw": face.yaw,
                             "pitch": face.pitch,
-                        })
-                        .to_string();
+                        });
+                        if f.image_width > 0 && f.image_height > 0 {
+                            bbox["coordinateSpace"] = serde_json::json!("pixel-top-left");
+                            bbox["sourceWidth"] = serde_json::json!(f.image_width);
+                            bbox["sourceHeight"] = serde_json::json!(f.image_height);
+                        }
+                        let bbox_json = bbox.to_string();
                         let arcface_bytes = floats_to_le_bytes(&face.embedding);
+                        let norm = face.embedding.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+                        let model = face.embedding_model.as_deref().filter(|value| !value.is_empty() && value.len() <= 150 && face.embedding.len() == 128 && face.embedding.iter().all(|v| v.is_finite()) && (0.95..=1.05).contains(&norm));
                         // print_data legacy: same bytes as arcface_embedding so old code keeps working.
                         face_stmt
                             .execute(params![
@@ -496,6 +505,9 @@ impl DbWriter {
                                 arcface_bytes.as_slice(),
                                 face.quality as f64,
                                 face.excluded as i64,
+                                model,
+                                model.map(|_| "rust-align112-v1"),
+                                model.map(|_| source_revision.as_str()),
                             ])
                             .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
 
@@ -835,8 +847,8 @@ const INSERT_CLIP_SQL: &str = r#"
 "#;
 
 const INSERT_FACE_SQL: &str = r#"
-    INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+    INSERT INTO face_prints (file_id, print_data, bbox, arcface_embedding, face_quality, excluded, embedding_model, processing_version, source_revision)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 "#;
 
 /// Convert a slice of f32 to little-endian bytes for BLOB storage.
@@ -1269,7 +1281,7 @@ mod tests {
             let bytes = floats_to_le_bytes(&values);
             proptest::prop_assert_eq!(bytes.len(), values.len() * 4);
             let decoded: Vec<f32> = bytes
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             proptest::prop_assert_eq!(decoded.len(), values.len());
@@ -1805,6 +1817,44 @@ mod tests {
     fn nfc_path_search_is_identity_on_ascii() {
         let p = r"C:\Users\me\Pictures\vacation_2024.jpg";
         assert_eq!(nfc_path_search(p), p, "ASCII paths must not be altered");
+    }
+
+    #[test]
+    fn face_flush_records_verified_model_and_source_revision() {
+        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let mut file = fixture("/internal/face-cache.png");
+        file.faces_evaluated = true;
+        let mut embedding = vec![0.0; 128];
+        embedding[0] = 1.0;
+        file.faces.push(crate::pipeline::tagging::DetectedFace {
+            bbox: [1.0, 2.0, 10.0, 10.0],
+            landmarks: [[0.0; 2]; 5],
+            embedding,
+            embedding_model: Some("fixture-weight-hash".to_owned()),
+            roll: 0.0, yaw: 0.0, pitch: 0.0, quality: 0.9,
+            excluded: false, crop_rgb_112: None,
+        });
+        let expected_revision = format!("{}:{}", file.size_bytes, file.modified_unix.to_bits());
+        let mut buffer = vec![file];
+        writer.flush(&mut buffer, &mut 0, &mut 0, 0).unwrap();
+        let db = conn.lock();
+        let recorded: (String,String,String) = db.query_row("SELECT embedding_model,processing_version,source_revision FROM face_prints", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(recorded, ("fixture-weight-hash".to_owned(),"rust-align112-v1".to_owned(),expected_revision));
+        let evidence: (i64,f64,i64) = db.query_row("SELECT e.dimension,o.confidence,o.stale FROM catalog_embeddings e JOIN catalog_observations o ON o.id=e.entity_id", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(evidence, (128,0.0,0));
+        db.execute("UPDATE face_prints SET excluded=1", []).unwrap();
+        db.execute("UPDATE files SET modified_at=modified_at+1", []).unwrap();
+        db.execute("UPDATE face_prints SET excluded=0", []).unwrap();
+        let stale: i64 = db.query_row("SELECT stale FROM catalog_observations", [], |row| row.get(0)).unwrap();
+        assert_eq!(stale, 1);
+        db.execute("UPDATE catalog_observations SET user_edited=1,region_json='manual marker'", []).unwrap();
+        db.execute("UPDATE face_prints SET bbox='changed region'", []).unwrap();
+        let empty: i64 = db.query_row("SELECT COUNT(*) FROM face_prints WHERE arcface_embedding IS NULL", [], |row| row.get(0)).unwrap();
+        assert_eq!(empty, 1);
+        db.execute("DELETE FROM face_prints", []).unwrap();
+        let preserved: String = db.query_row("SELECT region_json FROM catalog_observations", [], |row| row.get(0)).unwrap();
+        assert_eq!(preserved, "manual marker");
     }
 
     // F-C1-025: the recipe-v1 (legacy) content-hash re-read for an over-cap

@@ -56,7 +56,10 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public static var defaultDBURL: URL {
-        AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
+        if let path = ProcessInfo.processInfo.environment["FILEID_DATABASE_PATH"], !path.isEmpty {
+            return URL(fileURLWithPath: path)
+        }
+        return AppSupportPath.fileID.appendingPathComponent("fileid.sqlite")
     }
 
     private static let suppressedDisplayTags: Set<String> = [
@@ -78,7 +81,8 @@ public final class ReadStore: @unchecked Sendable {
             do {
                 var config = Configuration()
                 config.readonly = true
-                self.queue = try DatabaseQueue(path: dbURL.path, configuration: config)
+                try ReadOnlyLocations.requireWritable(dbURL)
+            self.queue = try DatabaseQueue(path: dbURL.path, configuration: config)
             } catch {
                 reportError("Could not open DB: \(error)")
                 return
@@ -373,6 +377,26 @@ public final class ReadStore: @unchecked Sendable {
     /// scan is O(N·512) and froze the UI for seconds on a 50k library when
     /// run inline on the MainActor. The text embed + ranking happen on a
     /// background task; the caller awaits and publishes results on main.
+    public func semanticVectorAsync(query: String) async -> [Float]? {
+        await Task.detached(priority: .userInitiated) { CLIPTextEncoder.shared.embedText(query) }.value
+    }
+
+    public func catalogFilesAsync(ids: [Int64], kindFilter: String? = nil) async -> [FileRow] {
+        guard !ids.isEmpty, ids.count <= 100, let q = queue else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            (try? q.read { db in
+                let encoded = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
+                let rows = try Row.fetchAll(db, sql: "SELECT * FROM files WHERE failed=0 AND id IN (SELECT value FROM json_each(?))", arguments: [encoded])
+                let byID = Dictionary(uniqueKeysWithValues: rows.map { (($0["id"] as Int64), Self.toFileRow($0)) })
+                var seen = Set<Int64>()
+                return ids.compactMap { id -> FileRow? in
+                    guard seen.insert(id).inserted, let row = byID[id], kindFilter == nil || row.kind == kindFilter else { return nil }
+                    return row
+                }
+            }) ?? []
+        }.value
+    }
+
     public func semanticSearchAsync(query: String, limit: Int = 60) async -> [FileRow]? {
         await Task.detached(priority: .userInitiated) { [self] in
             semanticSearch(query: query, limit: limit)
@@ -385,9 +409,9 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return [] }
         let seedVec: [Float] = (try? q.read { db -> [Float] in
             guard let blob = try Data.fetchOne(db, sql:
-                "SELECT embedding FROM clip_embeddings WHERE file_id = ?",
-                arguments: [seedID]) else { return [] }
-            return blobToFloats(blob)
+                "SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id = ? AND e.model = ? AND f.failed=0",
+                arguments: [seedID, CLIPEmbeddingSpace.modelID]) else { return [] }
+            return CLIPEmbeddingSpace.vector(from: blob) ?? []
         }) ?? []
         guard !seedVec.isEmpty else { return [] }
         return rankByCosine(against: seedVec, limit: limit, excludeID: seedID)
@@ -407,7 +431,10 @@ public final class ReadStore: @unchecked Sendable {
     /// (seed = a CLIP text embedding).
     public func rankByCosine(against query: [Float], limit: Int = 60,
                               excludeID: Int64? = nil) -> [FileRow] {
-        guard let q = queue, !query.isEmpty, limit > 0 else { return [] }
+        guard let q = queue, query.count == CLIPEmbeddingSpace.dimension,
+              query.allSatisfy(\.isFinite), limit > 0 else { return [] }
+        let squaredNorm = query.reduce(0.0) { $0 + Double($1) * Double($1) }
+        guard abs(squaredNorm - 1) <= 0.02 else { return [] }
         return (try? q.read { db -> [FileRow] in
             // failed = 0 at SQL time (parity with Windows
             // SemanticSearchAsync): a failed row scored here would land
@@ -419,16 +446,16 @@ public final class ReadStore: @unchecked Sendable {
                 sql = """
                     SELECT e.file_id, e.embedding FROM clip_embeddings e
                     JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0 AND e.file_id != ?
+                    WHERE f.failed = 0 AND e.model = ? AND e.file_id != ?
                     """
-                args = [exclude]
+                args = [CLIPEmbeddingSpace.modelID, exclude]
             } else {
                 sql = """
                     SELECT e.file_id, e.embedding FROM clip_embeddings e
                     JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0
+                    WHERE f.failed = 0 AND e.model = ?
                     """
-                args = []
+                args = [CLIPEmbeddingSpace.modelID]
             }
             // Stream rows through a cursor and keep only a bounded top-K
             // min-heap. fetchAll would hold every 512-float embedding blob
@@ -443,8 +470,7 @@ public final class ReadStore: @unchecked Sendable {
             while let r = try cursor.next() {
                 guard let fid: Int64 = r["file_id"],
                       let blob: Data = r["embedding"] else { continue }
-                let v = blobToFloats(blob)
-                guard v.count == query.count else { continue }
+                guard let v = CLIPEmbeddingSpace.vector(from: blob) else { continue }
                 var s: Float = 0
                 for i in 0..<v.count { s += query[i] * v[i] }
                 heap.offer(id: fid, score: s, order: order)
@@ -888,7 +914,8 @@ public final class ReadStore: @unchecked Sendable {
 
     public func persons(includeUnknown: Bool = false) -> [PersonRow] {
         guard let q = queue else { return [] }
-        let where_ = includeUnknown ? "" : "WHERE IFNULL(p.is_unknown, 0) = 0"
+        let visible = "EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR COALESCE(p.is_unknown,0)=1 OR length(trim(COALESCE(p.name,'') || COALESCE(p.title,'') || COALESCE(p.first_name,'') || COALESCE(p.middle_name,'') || COALESCE(p.last_name,'') || COALESCE(p.suffix,'')))>0"
+        let where_ = "WHERE (\(visible))" + (includeUnknown ? "" : " AND IFNULL(p.is_unknown,0)=0")
         do {
             return try q.read { db in
                 let rows = try Row.fetchAll(db, sql: """
@@ -1657,6 +1684,8 @@ public final class ReadStore: @unchecked Sendable {
                 skipped += 1; continue
             }
             do {
+                try ReadOnlyLocations.requireSourceMutation(newURL)
+                try ReadOnlyLocations.requireSourceMutation(oldURL)
                 try fm.moveItem(at: newURL, to: oldURL)
                 // Only count as undone once the DB agrees. The DB restore used
                 // to be a `try?`-swallow, leaving the row pointing at a
@@ -1706,6 +1735,7 @@ public final class ReadStore: @unchecked Sendable {
     // throw — silently no-opping the edit, or stranding a trashed file as
     // a ghost DB row. The timeout makes the contended write retry instead.
     private func writeQueue() throws -> DatabaseQueue {
+        try ReadOnlyLocations.requireWritable(dbURL)
         var config = Configuration()
         config.busyMode = .timeout(5)
         return try DatabaseQueue(path: dbURL.path, configuration: config)
@@ -1749,6 +1779,8 @@ public final class ReadStore: @unchecked Sendable {
         }
         guard target != oldURL else { return oldURL }
         do {
+            try ReadOnlyLocations.requireSourceMutation(oldURL)
+            try ReadOnlyLocations.requireSourceMutation(target)
             try FileManager.default.moveItem(at: oldURL, to: target)
         } catch {
             reportError("Rename failed: \(error.localizedDescription)")

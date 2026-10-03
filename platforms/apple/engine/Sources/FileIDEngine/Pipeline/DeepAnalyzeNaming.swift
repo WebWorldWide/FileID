@@ -357,6 +357,7 @@ enum DeepAnalyzeNaming {
         url: URL,
         timeoutSeconds: TimeInterval = 30
     ) async -> String? {
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0, !Task.isCancelled else { return nil }
         let state = SoundAnalysisState()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in

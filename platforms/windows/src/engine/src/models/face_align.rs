@@ -21,13 +21,14 @@ const TEMPLATE: [[f32; 2]; 5] = [
 /// source image's pixel coordinates. Returns 112*112*3 RGB8 bytes, or `None`
 /// if the fit is degenerate.
 pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5]) -> Option<Vec<u8>> {
-    if rgb.len() != (width as usize) * (height as usize) * 3 {
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(3)?;
+    if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 || rgb.len() != expected {
         return None;
     }
     // Fit similarity src->dst: dst = [[a,-b],[b,a]]·src + [tx,ty].
     let (a, b, tx, ty) = fit_similarity(landmarks, &TEMPLATE)?;
     let det = a * a + b * b;
-    if det.abs() < 1e-9 {
+    if !det.is_finite() || det.abs() < 1e-9 {
         return None;
     }
     let mut out = vec![0u8; OUT * OUT * 3];
@@ -51,6 +52,7 @@ pub fn align_112(rgb: &[u8], width: u32, height: u32, landmarks: &[[f32; 2]; 5])
 /// Least-squares 2D similarity fit: solve (a, b, tx, ty) minimizing
 /// Σ ‖[[a,-b],[b,a]]·src_i + [tx,ty] - dst_i‖² via the 4×4 normal equations.
 fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32, f32, f32)> {
+    if src.iter().chain(dst).flatten().any(|value| !value.is_finite()) { return None; }
     let n = src.len() as f64;
     let (mut sxx, mut sx, mut sy) = (0f64, 0f64, 0f64);
     let (mut ba, mut bb, mut bxx, mut byy) = (0f64, 0f64, 0f64, 0f64);
@@ -76,6 +78,7 @@ fn fit_similarity(src: &[[f32; 2]; 5], dst: &[[f32; 2]; 5]) -> Option<(f32, f32,
         [sy, sx, 0.0, n],
     ];
     let p = solve4(m, [ba, bb, bxx, byy])?;
+    if p.iter().any(|value| !(*value as f32).is_finite()) { return None; }
     Some((p[0] as f32, p[1] as f32, p[2] as f32, p[3] as f32))
 }
 
@@ -114,6 +117,8 @@ fn solve4(mut m: [[f64; 4]; 4], mut r: [f64; 4]) -> Option<[f64; 4]> {
 
 /// Bilinear RGB sample with edge clamping.
 fn bilinear(rgb: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
+    let x = x.clamp(0.0, (width - 1) as f32);
+    let y = y.clamp(0.0, (height - 1) as f32);
     let (w, h) = (width as i32, height as i32);
     let x0 = x.floor() as i32;
     let y0 = y.floor() as i32;
@@ -141,6 +146,34 @@ fn bilinear(rgb: &[u8], width: u32, height: u32, x: f32, y: f32) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_alignment_fixtures() {
+        #[derive(serde::Deserialize)]
+        struct Fixture { template: [[f32; 2]; 5], cases: Vec<Case> }
+        #[derive(serde::Deserialize)]
+        struct Case { source: [[f32; 2]; 5], expected: Option<[f32; 4]> }
+        let fixture: Fixture = serde_json::from_str(include_str!("../../../../../../shared/test-corpus/face-alignment.json")).unwrap();
+        assert_eq!(fixture.template, TEMPLATE);
+        for case in fixture.cases {
+            let fit = fit_similarity(&case.source, &TEMPLATE);
+            if let Some(expected) = case.expected {
+                let (a,b,x,y) = fit.unwrap();
+                for (actual, target) in [a,b,x,y].into_iter().zip(expected) { assert!((actual-target).abs() < 0.001); }
+            } else { assert!(fit.is_none()); }
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_geometry_and_empty_images() {
+        assert!(align_112(&[],0,0,&TEMPLATE).is_none());
+        assert!(align_112(&[],u32::MAX,u32::MAX,&TEMPLATE).is_none());
+        let mut invalid = TEMPLATE;
+        invalid[0][0] = f32::NAN;
+        assert!(fit_similarity(&invalid,&TEMPLATE).is_none());
+        assert!(fit_similarity(&TEMPLATE,&invalid).is_none());
+        assert!(align_112(&vec![0;112*112*3],112,112,&invalid).is_none());
+    }
 
     #[test]
     fn identity_fit() {

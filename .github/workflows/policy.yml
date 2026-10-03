@@ -22,6 +22,10 @@ jobs:
         run: python shared/scripts/test_check_workflow_permissions.py
       - name: Enforce least-privilege workflow permissions
         run: python shared/scripts/check_workflow_permissions.py
+      - name: Test trusted self-hosted runner routing
+        run: python shared/scripts/test_check_self_hosted_runner_policy.py
+      - name: Enforce trusted self-hosted runner routing
+        run: python shared/scripts/check_self_hosted_runner_policy.py
       - name: Test bootstrap supply-chain policy
         run: python shared/scripts/test_check_bootstrap_supply_chain.py
       - name: Enforce bootstrap source pins
@@ -32,6 +36,8 @@ jobs:
         run: python shared/scripts/check_runtime_egress.py --known-blockers
       - name: Enforce current documentation contracts
         run: python shared/scripts/check_current_docs.py
+      - name: Enforce catalog migration parity
+        run: python shared/scripts/check_catalog_schema.py
       - name: Test model license policy
         run: python shared/scripts/test_check_model_license_policy.py
       - name: Enforce reviewed model license policy

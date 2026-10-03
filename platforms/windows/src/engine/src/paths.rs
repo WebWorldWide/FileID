@@ -74,6 +74,7 @@ pub fn merge_log_path() -> Result<PathBuf> { Ok(root()?.join("merge_log.json")) 
 pub fn ensure_state_dirs() -> Result<PathBuf> {
     let root = root()?;
     for sub in [&root, &logs_dir()?, &models_dir()?, &hf_cache_dir()?, &thumbs_dir()?, &faces_dir()?] {
+        crate::util::read_only::require_writable(sub)?;
         std::fs::create_dir_all(sub)
             .with_context(|| format!("creating {}", sub.display()))?;
     }

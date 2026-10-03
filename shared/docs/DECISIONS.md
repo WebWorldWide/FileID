@@ -3355,3 +3355,152 @@ Branch `fix/audit-2026-06-10`; full inventory in `shared/docs/audit-2026-06-10/`
   This is the high-integrity reading of "finish everything": every item reaches a terminal state —
   landed, blocked-on-a-named-resource (with a recipe), or deferred-with-rationale — rather than shipping
   unverifiable changes that risk regressing shipped features.
+
+## 2026-09-24 — Prefer Apple Development to ad-hoc signing for local macOS release dry runs
+
+When `scripts/release.sh --skip-notarize` cannot find a Developer ID Application identity, it now uses an installed Apple Development identity before falling back to ad-hoc signing. This tests the same-team signature check between the app and engine with a real Apple certificate. The dry-run output still warns that Gatekeeper will reject it on other Macs; public distribution continues to require Developer ID signing and notarization. A missing `mlx.metallib` remains a hard packaging failure, because silently shipping a bundle without Deep Analyze would misrepresent the release.
+
+For local signing verification, keep the resulting app outside FileProvider-managed folders. Both the Desktop checkout and `~/Applications` acquired `com.apple.FinderInfo` after launch and invalidated the seal; `/Applications/FileID.app` remained valid after launch.
+
+The release script now retains the signed app in its temporary signing directory until notarization and DMG assembly finish. Moving it back into the Desktop checkout before those steps could silently break the code seal when FileProvider restored Finder metadata. The DMG is the release output; the checkout's assembled app is not relied on as a signed artifact.
+
+## 2026-09-25 — Compile pinned MLX Metal kernels in 3.2 mode with Xcode 27
+
+The pinned MLX 0.29.1 CMake target assumes Metal 3.2 semantics. Xcode 27's default mode rejects its GEMM templates, while `-std=metal3.2` compiles those kernels. The `fence.metal` fallback also needs to depend on the selected Metal language version because the newer compiler defines `__METAL_MEMORY_SCOPE_SYSTEM__` even in 3.2 mode without providing `metal::thread_scope_system`. The one-time metallib helper patches only those two lines in SwiftPM's generated checkout when Xcode major version is 27 or newer. This preserves the locked dependency revision and yields a reproducible full library without a second Xcode installation. The release script continues to block packaging when the library is absent.
+
+Xcode 27 also rejects passing GRDB's non-Sendable `Row` across the actor boundary in two existing bulk-mutation tests. Those reads now return Sendable scalar tuples before leaving the database closure. This preserves the assertions and production database behavior while letting the native suite compile under the release toolchain.
+
+
+## 2026-10-01 — Shared evidence catalog, protected sources, and honest timeline coverage
+
+Use one canonical SQL migration for both engines and preserve older tables/corrections. Maintain persistent FTS through triggers; separate embedding models/dimensions in storage. A size/mtime change invalidates generated evidence/proposals while retaining user markers for reconfirmation. Same-size/same-mtime replacement detection and persistent ANN execution remain future work.
+
+Adlon is read-only example data under every workflow. Check resolved existing ancestors before output creation or source mutation; additionally protect managed media-library originals. Tests use internal protected-root fixtures. This is a path-level safeguard, not proof against a concurrent symlink swap; descriptor-based filesystem hardening and whole-app write tracing are release gates.
+
+Start temporal analysis with durable, explicitly incomplete sampling. Decode in a killable subprocess instead of adding another potentially hanging in-process Vision video path. Reuse captions by source revision, pinned model version, and requested sample time; do not label sparse captions as verified event outcomes. The existing serial major-job queue stays until a measured resource-budgeted scheduler replaces it. Manual markers use atomic correction/inverse-operation journals so Undo survives restart.
+
+Keep currently supported weights. Research candidates cannot be promoted from published benchmark claims alone; require exact license/hash/runtime verification and FileID quality/latency tests. No new application dependency or model pack was bundled in this slice. FFmpeg used to generate internal test video is a development tool only. Full next-version scope and gates live in NEXT_VERSION.md.
+
+Chapter Undo uses transaction insertion order rather than wall-clock timestamps so a system-clock adjustment cannot select the wrong inverse operation. Source changes stale take scores without deleting the user's preferred-take choice. Literal protected paths are rejected before any filesystem probing, then existing alias-resolution checks still protect indirect destinations.
+
+Reject dangling file/directory symlinks before opening an output. A missing symlink target can still be created by an output writer, so checking only `fileExists` and appending the missing suffix is insufficient. Internal fixtures cover both forms without touching Adlon.
+
+## 2026-10-01 — Typed export plans, source fingerprints, and pinned-toolchain verification
+
+Photo and chapter tools preview an exact selection and saved recipe before execution. Fingerprint real source bytes to reject same-size/same-mtime replacement, pin marker snapshots, and publish new files through non-overwriting links. Record original/export relationships and durable receipts; Undo moves unchanged generated files into internal recovery storage instead of deleting them. Isolate macOS photo codecs in cancellable bounded workers. Rust keeps explicit decoder/cancellation/color-profile limitations until a validated worker and color-managed adapter are implemented. Track owned staging paths for restart cleanup; never clean arbitrary files by prefix alone. Full publication reconciliation remains a release gate.
+
+The remote main history was rewritten with an identical baseline tree. Replay the feature commit onto that current history and push a new branch, preserving all owner edits; do not overwrite remote main or force-push unrelated histories. GitHub CI revealed that Homebrew cargo-clippy can be selected under `rustup run 1.90 cargo`. Verify the actual Clippy version with the pinned toolchain directory first in PATH. Replace unchecked time arithmetic rather than relying on a lint name that changed between toolchains. Source-digest policy updates require reviewing the existing runtime boundary; the isolated decoder launches only the current local engine with typed arguments and does not add a network transport.
+
+Corrupt ZIP-based office/ebook files now fail their four-byte signature check before entering converter queues. This fixes the observed corrupt-PPTX deadline failure without weakening its assertion or invoking an unnecessary subprocess.
+
+## 2026-10-01 — Patch reviewed HTTP/TLS dependencies across every Rust lockfile
+
+Hosted cargo-deny identified RUSTSEC-2026-0258 (h2) and RUSTSEC-2026-0285 (rustls) in the existing downloader/runtime dependency graph. Update h2 to 0.4.16 and rustls to 0.23.45, including its required rustls-webpki patch, in the engine, Linux, CLI, and TUI locks. Official upstream manifests retain MIT (h2) and Apache-2.0 OR ISC OR MIT (rustls), with MSRVs 1.63 and 1.71, below FileID's 1.90 minimum. This adds no dependency family or network call site. Do not suppress the advisories. Sources: https://rustsec.org/advisories/RUSTSEC-2026-0258.html and https://rustsec.org/advisories/RUSTSEC-2026-0285.html; exact upstream manifests: https://raw.githubusercontent.com/hyperium/h2/v0.4.16/Cargo.toml and https://raw.githubusercontent.com/rustls/rustls/v/0.23.45/rustls/Cargo.toml.
+
+## 2026-10-01 — Bind face landmarks to overlapping observations and reuse rendered pixels
+
+A fixed 8%-of-image center threshold can accept another small face in a group photo. Use normalized bbox overlap, center displacement relative to face size, and an ambiguity margin; abstain to the established bbox crop when correspondence is uncertain. These are geometric correspondence limits, not identity similarity thresholds or accuracy claims. Render one source pixel buffer for all aligned faces in a file. Preserve SFace's raw RGB preprocessing and validate template ordering with shared Swift/Rust fixtures. Cached embeddings are not silently erased; a versioned rebuild remains separate work with identity corrections preserved.
+
+## 2026-10-01 — Deterministic HNSW construction and explicit CI worker executable
+
+A full Rust run reproduced different approximate neighbor sets for identical fixed-seed HNSW inputs. instant-distance 0.6.1 inserts lower layers using Rayon parallel iterators; seed selection alone cannot order those mutations. Run construction inside one reusable one-thread Rayon pool, without changing the caller's query pool. This trades parallel index-build throughput for stable face-clustering neighbors; persistent/incremental indexing remains the planned way to reduce rebuilding. Strengthen the existing test with eight simultaneously requested rebuilds. Rayon 1.12.0 is already locked transitively on all Rust platforms; naming it directly adds no package. The exact upstream manifest confirms MIT OR Apache-2.0 and Rust 1.80, within FileID's 1.90 minimum: https://raw.githubusercontent.com/rayon-rs/rayon/v1.12.0/Cargo.toml. Its standard license texts remain required in distributions.
+
+Hosted native tests need FILEID_TEST_ENGINE_PATH to select the built engine, otherwise CommandLine.arguments[0] names the test runner rather than a photo worker. Set that path explicitly to the verified release product in macOS CI; retain the production engine's existing self-worker behavior. Do not skip export assertions or weaken the worker boundary.
+
+## 2026-10-01 — Evidence-first local chat on the existing inference lane
+
+Return keyword/evidence matches before queued inference. Reuse an already loaded model, bound result/context/output size, and keep conversation messages separate from factual catalog evidence. Treat retrieved text as untrusted input; expose no SQL/shell or implicit file-operation execution through generated text. Clear/cancel owns request IDs and suppresses late responses. Prioritize queued interactive summaries while preserving the existing one-heavy-job limit; this is not a resource-budgeted or multi-model scheduler. Keep the portable adapter's missing generation capability explicit instead of silently downloading or pretending to infer. Native port UI, contextual/hybrid retrieval, typed reversible execution, grounding benchmarks, and full memory admission remain required.
+
+## 2026-10-01 — Deterministic conversational media filters before retrieval limits
+
+Resolve explicit media words and refinement markers through shared fixtures instead of a model-generated SQL clause. Preserve prior subjects only for explicit refinements, reset fresh queries, and filter both file/evidence SQL before limiting results. Bind a validated model-independent kind list through JSON parameters. Keep unsupported exclusions literal; this limited parser does not claim open-ended request understanding. Store the current message and retrieve recent context atomically on Swift; Rust already serializes the connection.
+
+## 2026-10-01 — Reserve memory and retain model ownership until work unwinds
+
+Use a shared physical/available-RAM admission policy before native model loading or portable VLM process startup. Treat missing probes conservatively. Estimates differ by runtime: the existing native registry versus GGUF/projection bytes plus bounded workspace; dedicated-GPU/free-context calibration remains pending. Serialize native loading/unloading/inference with a cancellable lease so prewarm cannot swap weights while inference retains an old container. A cancellation callback must not release a lease already handed to an operation; the holder releases it after unwinding. Shared vectors and handoff races verify the policy without claiming actual model benchmarks.
+
+Apple's primary kernel header states that speculative pages are already counted in free_count; stop adding them again to available-memory estimates: https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/vm_statistics.h. The full native suite also exposed a decoder deadline delay under cooperative executor load. Use a dispatch timer with an absolute deadline and retain the existing timeout assertion, SIGKILL, and awaited child exit. Reviewed source digest changes add local memory/ownership checks and a timer, not a new network transport. Full native-inference worker isolation and multi-resource/multi-model scheduling remain required.
+
+## 2026-10-01 — Preserve identities while recording face processing provenance
+
+Unknown legacy vectors cannot be inferred to belong to a current model merely from 128 dimensions. Append nullable metadata and fingerprint the actual selected SFace file; retain legacy identities/corrections and refresh bounded batches with source/database snapshot checks. Keep model and processing version in the catalog embedding key and distinguish uncalibrated face quality from identity confidence. SQL synchronizes assignment/exclusion, prevents stale-source resurrection and preserves manual markers after deletion. Encode cache JPEGs outside the writer and publish only committed rows. Explicit original decoded dimensions are necessary for portable pixel boxes when macOS decodes thumbnails. No new dependency, model promotion or threshold retuning is introduced. Complete legacy clustering isolation and resumable whole-library refresh remain separate acceptance work.
+
+## 2026-10-01 — Isolate native video export and validate the staged container
+
+Use AVFoundation's operating-system H.264/AAC presets for the initial macOS adapter: https://developer.apple.com/documentation/avfoundation/avassetexportpreset1920x1080. Add no binary/weight/package and retain distribution/patent review as a release-specific gate. Reject unsupported HDR/alpha/extra tracks and protected inputs rather than silently discard content. Forbid all external asset references. Native output validation needs an explicit video/mp4 type hint because the transactional staging suffix is .part. Check reopened duration, streams, codecs, orientation and audio offsets before publishing a new derived file. The reviewed subprocess module invokes only a typed engine worker and is source-digest pinned. Revalidate saved recipes on both engines so a newer or platform-specific operation cannot fall into the chapter-text adapter. Real-world color/fidelity and portable-worker acceptance remain pending.
+
+Keep export state at app scope in a single native Tools window. Closing the main browser must not terminate the engine while another window uses it; stop the engine on app termination. Honor the same database override in readers and engine so UI verification cannot accidentally open the owner catalog. The window lifecycle was verified in an isolated native app bundle without model downloads.
+
+## 2026-10-01 — Treat face embedding provenance as a comparison prerequisite
+
+Dimensions do not establish compatible weights or crops. Reject unknown/mixed model and processing spaces, stale catalog revisions, invalid unit vectors and oversized batches before clustering persistence. Revalidate the snapshot under the writer lock. Unversioned person centroids cannot safely inherit identity across weight changes; retain face-ID inheritance until compatible exemplars/centroid provenance exist. Preserve People on empty portable input. This intentionally defers an incompatible legacy library rather than applying a wrong merge; durable refresh/coverage and incremental stable-ID assignment must remove that transitional limitation before release. No identity threshold is recalibrated from these synthetic checks.
+
+## 2026-10-01 — End the day on validated source and isolate Adlon runners
+
+The owner explicitly requested main integration and a natural stopping point. Preserve the unfinished stable-ID migration as an internal recoverable patch rather than land a native-only persistence rewrite and unused Rust module. Keep the last complete face-space checks and record the parity/transaction work for the next agent. Include preexisting owner release/test/config edits after review; update the bootstrap policy's exact digests and inventory tests for the Xcode 27 Metal fallback and temporary-directory signing changes without weakening download checks.
+
+Use the existing Adlon CI VMs, not the host corpus disk. Install separate FileID runners using official release assets verified against GitHub's release SHA-256; registration tokens are ephemeral and runner updates remain enabled. Route reviewed-main Linux and Windows builds there while retaining hosted PRs and native Apple/ARM checks. Persistent runners must not execute fork or non-main source. Keep a tested routing policy, one FileID runner per guest, and capacity/administration instructions. Existing signing/publication jobs remain hosted; runner registration does not establish full release acceptance.
+
+## 2026-10-02 — Keep runner bootstrap within the non-admin service's workspace
+
+Installed tools and machine PATH do not establish that a Windows service can invoke them. Add verified local Bash/Python directories through the job's GITHUB_PATH before Rust/.NET checks; give setup-dotnet a FileID-owned tool-cache installation directory rather than grant Network Service write access to Program Files. Preserve all compilation/test gates and verify actual service-account jobs. Linux main results already confirm all four jobs on Adlon. Treat the host restart as an infrastructure interruption, not an application failure.
+
+Preserve sync-created numbered source snapshots outside compiler discovery before removing them. Their stale migrations/source guards must not replace canonical tracked files; the invalid duplicated Git ref is not a legitimate branch. The owner resumed the full goal, so day-end milestone boundaries do not imply feature/release completion.
+
+## 2026-10-02 — Retain identity rows across analysis
+
+Reclustering updates analysis fields and face ownership in one transaction while retaining person IDs, names, creation times, offline/unknown identities and foreign-key references. Reuse is deterministic and bijective; a split gives the retained ID to one partition and allocates new IDs for others. Protected names, fresh negative corrections and same-image observations partition raw clusters before assignment. Automatic native consolidation clears an absorbed unnamed row’s analysis instead of deleting it; empty unnamed records stay out of People cards. Explicit user merge aliases and correction UI remain future work. This trades some retained empty rows for durable references; the 8,000-person limit fails before changes rather than silently deleting history.
+
+GitHub does not expose runner context in job-level env. DOTNET_INSTALL_DIR belongs on the setup-dotnet step, where runner.tool_cache is available; use the runner-owned cache without granting service write access to Program Files.
+
+## 2026-10-02 — Supply the missing ARM64 cross-build compiler
+
+The first actual Adlon x64 engine job passed, but ring's aarch64 native compilation explicitly requested clang and failed before FileID compilation because it was missing. Install Microsoft's Visual Studio C++ Clang Compiler component in the existing guest Build Tools instance, without forcing process closure or rebooting. Locate and probe that compiler via vswhere and GITHUB_PATH only on the Adlon cross job. Retain hosted/native ARM routing and all assertions. This is a build-machine prerequisite rather than a shipped app dependency; corpus data remains unmounted. Nine strict TRX regression cases pass on the Windows VM, while full app test parity remains unfinished in draft #191.
+
+## 2026-10-02 — Propagate merge failures and transfer one complete identity
+
+Explicit People merges validate both selections inside the writer transaction. Every SQL error must unwind the transaction; ignored DELETE errors previously committed partial Rust assignments. Copy all name components from one source only when every destination component is empty, and clear its unknown flag only when a real name transfers. Do not combine components from different people. Emit terminal failure for SQL errors and crashed workers so clients do not remain busy. Actual-process SQLite failure fixtures are necessary because a successful helper unit test did not cover ignored handler errors. Retained source aliases/history are separate unfinished work; this patch preserves existing explicit-delete behavior.
+
+Reviewed bulk.rs digest changes add transaction error propagation, name transfer and terminal worker failure reporting. They add no transport, subprocess execution, runtime URL or download host; update the exact source-boundary digest without relaxing the strict egress gate or its known blockers.
+
+
+## 2026-10-02 — Preserve unfinished work without bypassing acceptance
+
+At the owner's day-end request, retain validated integrations on main and archive failed/unreviewed proposal heads as annotated remote tags before exact-lease atomic branch deletion. The Windows safety/test repair has real compile failures; preserving it as a recovery checkpoint does not justify merging it or excluding its tests. Keep the separate owner Store checkout and its independent head. The handoff must state that the current app workflow skips suites rather than treating packaging success as full acceptance.
+
+Linux CI failed during runner setup with a full guest disk. The FileID workspace used only about 3 GB; deleting other repositories' files would be inappropriate and temporary cleanup would provide little headroom. Grow the existing CI guest disk on the spacious host internal filesystem and expand ext4 online. Keep the corpus disk unmounted, preserve other runners and avoid restarts or forced process closure.
+
+
+## 2026-10-02 — Separate a health probe from ready-state refresh
+
+Promote the existing macOS probe to IPC v1.5 and portable mirrors before restoring Windows generation-bound lifecycle checks. `requestStatus` may re-emit ready on Rust and trigger client state/download setup; it is unsuitable for a liveness probe. Echo only a bounded opaque nonce and actual PID, validate the nonce before acknowledging it, and keep storage/model probes out of this command. Add real process fixtures on all engine CI targets and a non-skippable C# IPC suite with positive executed-test report verification. Full Windows app-service test restoration remains a separate unfinished safety repair; do not treat this gate as that suite.
+
+The main.rs source-boundary digest update covers only the reviewed health dispatch arm. No transport, runtime host, download allowlist or subprocess capability changed. The six existing off-policy artifact URLs remain release blockers.
+
+
+## 2026-10-02 — Bind macOS CLIP caches to verified artifacts
+
+The native image worker actually loads OpenCLIP ViT-B/32 while its writer labeled every vector `mobileclip_s2`. Dimension alone cannot establish compatibility. Use one space identity derived from all four pinned artifacts and the existing RGB stretch/BPE/L2 preprocessing contract; verify local files before loading image/text sessions. Refresh legacy derived caches through fresh inference while preserving user evidence. Reject invalid vectors at insertion and retrieval. Keep SQLite authoritative; a future persistent index must use the same identity and remain rebuildable. This adds no dependency and promotes no new model.
+
+The owner deferred new Windows/Linux implementation and physical validation until working on the PC. Continue the full Mac plan and retain narrowly recoverable port work in verified remote tags.
+
+
+## 2026-10-02 — Reuse native HNSW for persistent-index groundwork
+
+Keep the existing Accelerate-backed Swift graph and add a versioned binary storage API, avoiding a new package. Preserve graph IDs, tombstones and RNG state across restart so incremental insertion does not silently change identities or approximate results. Bind snapshots to both model identity and a caller-supplied source revision; verify checksums and graph structure before accepting them. Bound disk reads, dimensions, graph size, neighbour counts and layer depth, and enforce read-only output guards. Catalog integration must supply durable SQLite invalidation and external entity mapping before any automatic reuse; this API alone does not satisfy persistent retrieval acceptance.
+
+
+## 2026-10-02 — Preserve diverse routes in native HNSW
+
+A release-mode synthetic benchmark exposed poor nearest-neighbour recall from closest-only insertion/pruning: 62.5% mean recall at ten on 100,000 × 512 vectors, and 57% on the smaller 16,000 × 128 fixture, including zero-recall queries. Apply diversified neighbour selection during both insertion and trimming, following the [original HNSW paper](https://arxiv.org/abs/1603.09320). Candidate ordering breaks equal-distance ties by node ID to preserve deterministic behavior. Both fixtures reached 100% on their twenty unseen queries; the final 100k run measured 1.07 ms warm index-only p95. Snapshots use construction version 2 so earlier closest-only graphs cannot be reused silently. The committed benchmark and JSON preserve parameters, compiler and source hashes. This does not establish real face accuracy or semantic retrieval acceptance; those gates remain open.
+
+
+## 2026-10-02 — SQLite epochs own native vector-cache validity
+
+Use per-namespace transactional generation, instance and checkpoint nonce records instead of SQLite file timestamps or cache mtimes. The same generation can occur after a database rollback/replacement or divergent write history; nonce/history validation distinguishes those cases and rebuilds when coverage is missing. Persist the bounded graph with a checksummed model-specific mapping manifest, publishing the manifest last. SQLite remains authoritative; snapshot corruption cannot change catalog records. Eligibility updates remove failed files before ANN ranking, and publication checks current vector fingerprints to reject a raced stale candidate. Hybrid reciprocal-rank fusion retains independent chapter/page evidence. Extend optional IPC fields without changing existing keyword requests; PC vector execution is explicitly deferred rather than silently treated as keyword search. No new shipped dependency was needed.
+
+
+The worker result carries an immutable revision receipt alongside its transferred cache. Delayed coalesced awaiters must not read a cache after a newer worker owns it. Refreshed matching waits for actor ownership and performs graph access without another suspension; current vector fingerprints are still checked during SQLite hydration. File-focused results deduplicate with an eager pass before limits: a stateful lazy filter can evaluate its predicate repeatedly and lose eligible hits.
+
+
+Re-reviewed the EngineClient egress inventory after adding only local catalog IPC polling/cancellation. No URL, HTTP request, download path or transport behavior changed; update only its reviewed-source digest and retain all runtime-egress mutation tests and six existing Windows release blockers.

@@ -1,5 +1,98 @@
 # NEXT — resume here
 
+## Owner priority — macOS first (2026-10-02)
+
+Continue the full next-version plan on the Mac. The owner has a Windows/Linux PC and explicitly deferred new port implementation and physical validation until working there. Preserve the archived Windows safety restoration; do not discard tests or claim port acceptance. Shared contracts must remain coherent, and already-running CI still requires inspection. On macOS, finish verified embedding provenance and persistent hybrid retrieval, then the remaining scheduler, chat, rename, face, timeline, best-take and Tools milestones from NEXT_VERSION.md. The Mac version is not complete or perfect yet.
+
+## Current continuation — Mac persistent hybrid retrieval
+
+Catalog v23 and IPC v1.6 connect the native Library to the persistent CLIP index, with incremental SQLite epochs, restart recovery, eligibility checks, and timestamp-preserving hybrid retrieval. Validate the current checkpoint before extending it. Then integrate rebuilding into durable jobs with CPU/I/O/memory admission, cancellation and progress; add text/catalog embedding indexes and person/event/exact filters; measure real 100,000-file end-to-end latency. Existing flat ReadStore helpers remain only as legacy/internal APIs and test coverage, not the Library execution path.
+
+Continue the complete NEXT_VERSION.md plan: model routing, reversible chat operations, naming preferences/companions, face exemplars/corrections/calibration, dense temporal analysis, automatic chapters, best takes, conversion/enhancement/reframing and broader toolbox. No milestone or green CI proves the complete Mac product is finished. Windows/Linux new features and physical acceptance remain deferred to the owner's PC; shared contracts, migration parity and existing CI stay coherent.
+
+## Day-end continuation — 2026-10-02
+
+The full accepted goal remains active after the owner resumed sustained work; this is a recovery checkpoint, not a pause or release completion. Read AGENT_HANDOFF.md and ARCHIVED_BRANCHES.md first. Resume the unfinished Windows safety/test-parity checkpoint from archive/2026-10-02/windows-test-parity-wip; do not merge the recovery snapshot wholesale. Restore real behavior, canonical IPC fields and genuine test execution, then require both test suites, x64/ARM64 builds and format checks. Main app packaging success currently omits the suites because of a path bug.
+
+The compiler-path fix passed all three fresh main Windows engine jobs in run 37033359014 (x64/cross on Adlon, native ARM hosted); all four Linux jobs passed after disk expansion in run 37028488104. Preserve this routing and its assertions. Corpus /srv/data remains strictly read-only and unmounted in CI guests. Continue the complete NEXT_VERSION.md ledger after these safeguards; no release or full feature/accuracy acceptance has been established.
+
+## Historical checkpoints — superseded by the priorities above
+
+The dated notes below retain prior work and release/signing history. Branch names, in-progress status and earlier owner instructions describe those checkpoints; they are not current continuation instructions. Use AGENT_HANDOFF.md and the day-end priorities above.
+
+Adlon x64 engine passed; ARM64 cross failed because clang was absent. Complete the signed Visual Studio LLVM component installation and verify the new cross-job PATH step on actual main before declaring server acceptance. Preserve all test/build gates and corpus isolation. PR #190 contains atomic merge fixes; #191 is an unfinished Windows safety/test-parity draft. Do not merge #191 until every app suite runs and passes without exclusions.
+
+## Immediate continuation — 2026-10-02
+
+The atomic-person-merges follow-up passes local full suites, actual-engine merge fixtures and policy checks. Inspect its fresh hosted results before main integration. Preserve failed completion assertions, structured-name transfer and rollback checks. Source identity aliases/history still need design and migration; explicit merges currently delete the source identity. Inspect every serial Adlon Windows main matrix job, then fix the skipped WinUI test gate without weakening assertions.
+
+Inspect the fresh People merge-head CI after resolving documentation conflicts with main, then integrate PR #189. All sixteen checks passed for its original 7f03fff head. Bootstrap #188 merged at bb33211 after all six checks passed; actual Adlon Windows main jobs still need final results. Continue validating the isolated atomic-person-merges draft, which reproduced swallowed SQL errors and lost structured names. The full next-version goal and NEXT_VERSION ledger remain active; passing these milestones is not release completion. Fix the skipped WinUI test gate and wire the GTK shell before claiming port acceptance.
+
+
+
+## 2026-10-02 — Continue the entire accepted next-version plan
+
+The owner revoked the natural day-end stop and requested sustained work until everything is complete. Finish and verify Adlon Windows service bootstrap, merge the bounded fix into main, and keep the goal active. Then finish stable People IDs and cross-engine transactional persistence, durable refresh and incremental assignment, persistent model-separated hybrid search, resource-budgeted model routing, typed chat execution, full temporal analysis/chapters/best takes, enhancement/reframing and broad conversions, native port parity, real-data/hardware gates and release readiness. NEXT_VERSION.md is the scope ledger; passing existing checks alone is not completion. Keep Adlon example data strictly read-only and use separate CI guest disks.
+
+## 2026-10-01 — Start the next session from the integrated milestone
+
+Read AGENT_HANDOFF.md, NEXT_VERSION.md and CI_RUNNERS.md before editing. Verify main and its exact CI runs; do not reconstruct the superseded branch history or reinstall runners. The full next-version plan remains unfinished. First finish stable person identities across reclustering on both engines: protect named/unknown/offline identities, partition protected/negative constraints before merging, update existing IDs transactionally rather than deleting People, preserve manual observations/corrections, and test rollback/empty/mixed-cache cases. A native/portable-helper prototype exists on the owner's internal Mac; its Rust database handler is not wired and it must not be treated as production code.
+
+Then implement durable face refresh/incremental assignment and persistent model-separated hybrid indexes. Follow the ordered delivery ledger for scheduler, typed chat operations, timeline/ASR/tracks, best takes, stabilization/upscale/reframing, broader toolbox and native ports. Strict runtime egress, GTK wiring, hardware accuracy/fidelity, recovery, licenses and release gates remain open. Adlon runners use only separate CI guest disks; the example-data corpus remains read-only. Unrelated Store/Windows-gate/dependency proposals must be reviewed separately; do not discard another worktree's work.
+
+## 2026-10-01 — Continue from compatible face-space guards
+
+FACE_CACHE.md records the conservative whole-pass guard. Do not relabel legacy vectors, accept mixed processing namespaces or use unversioned person centroids to bypass it. Complete durable bounded refresh and explicit failure/offline coverage, namespace-aware incremental assignment and stable user-managed IDs, then held-out calibration. The current guard can defer clustering until a legacy cache refresh finishes. Native suite is 430; Rust is 385 library/386 executable plus two integrations. The full accepted ledger remains active. Continue verified pushes and keep owner edits and Adlon untouched.
+
+## 2026-10-01 — Continue from bounded native video export
+
+IPC v1.4 and TOOLS.md describe native SDR H.264/AAC exports with actual worker/output/Undo tests. Port the worker and native Tools UI; do not let unsupported persisted recipes execute through a fallback adapter. Complete resource-safe portable execution/cancellation, trim/audio/remux/proxies, stabilization/enhancement/tracked reframing and broad adapters. Persistent hybrid retrieval, full People space isolation/backlog/calibration, typed chat execution, dense timeline/ASR/tracks, automatic chapters/best takes and all release gates remain active. Keep implementing and pushing verified milestones, preserve owner work and never modify Adlon.
+
+## 2026-10-01 — Continue after versioned face metadata
+
+v22 and FACE_CACHE.md define new verified face-cache provenance and bounded refresh. Continue complete clustering-space isolation, durable refresh/backlog and incremental assignment; resolve ambiguous CLIP producer/query model namespaces before persistent hybrid indexing. Complete resource routing, typed chat execution, timeline shots/ASR/tracks/dense outcomes, best takes, media/broad tools and native port UI. Strict runtime egress remains blocked by the existing GitHub/NVIDIA runtime artifact download paths; replace them with vetted packaged runtime provisioning before release. Keep all accepted gates in NEXT_VERSION.md active, preserve owner edits, and keep Adlon read-only.
+
+## 2026-10-01 — Continue from initial model admission
+
+Initial physical/available-memory checks and native residency leases now protect model switches; SCHEDULER.md defines exact limits. Continue persistent hybrid indexes and processing-version caches, durable CPU/I/O/GPU/NPU reservations, multi-model/task routing, fairness and general restart recovery. Then complete typed chat operations, timeline speech/shots/tracks/dense outcomes, automatic chapters, best takes, video/broad tools and native port UI. Preserve owner work and strictly read-only Adlon; push coherent verified milestones to PR #186.
+
+## 2026-10-01 — Search refinement landed; continue scheduler and hybrid retrieval
+
+Contextual media-filtered keyword search now works in both engines and cross-engine history. Continue memory/resource admission and model residency, persistent model-separated hybrid retrieval, versioned People processing, and typed reversible chat operations before timeline/ASR/tracks, best takes, video tools, broad adapters, port UI, and release acceptance. Continue verified incremental pushes to PR #186; preserve owner edits and strictly read-only Adlon.
+
+## 2026-10-01 — Continue after local chat
+
+Work on codex/fileid-next-version-current and draft PR #186. Initial native chat and cross-engine local history now work; CHAT.md records precise boundaries. Complete contextual/filtered hybrid retrieval, resource-budgeted scheduling and model routing, persistent indexes, versioned People processing and incremental assignments, and typed chat operations. Then complete dense timeline/ASR/tracks, automatic chapters, goal-conditioned best takes, video/audio/enhancement/reframing and broad format adapters. Wire and validate native port interfaces before release. Keep pushing verified milestones, leaving AGENT_HANDOFF.md current, and checking hosted CI. Do not modify Adlon or absorb owner release/signing changes.
+
+## 2026-10-01 — Continue the accepted plan from PR #186
+
+Continue on codex/fileid-next-version-current. Safe initial photo/chapter tools are now implemented; consult TOOLS.md for exact pairs and limits. AGENT_HANDOFF.md has continuation instructions and correct pinned-Clippy invocation. Keep pushing coherent verified milestones to draft PR #186, inspect hosted CI, and preserve uncommitted owner release/signing work.
+
+Next implement the memory-budgeted scheduler, persistent hybrid indexes, People accuracy/speed, and local chat; then dense timeline/ASR/tracks, automatic chapters, best takes, video/audio/enhancement/reframing and broad adapters, followed by native port UI and release/hardware acceptance. Rust image decoding/cancellation, complete publication recovery, and cross-filesystem Undo need explicit coverage. Adlon remains strictly read-only; tests and outputs stay internal.
+
+## 2026-10-01 — Next-version implementation in progress
+
+Branch `codex/fileid-next-version` contains Adlon/project-original mutation guards, canonical v21 catalog migrations and IPC v1.1 mirrors, persistent name/evidence FTS, manual chapter editing with durable Undo, macOS frame-sampling jobs with isolated cancellable decoding, and concise naming. See [NEXT_VERSION.md](NEXT_VERSION.md) for the complete accepted delivery ledger, validation commands, and unfinished features. This is not a next-version release.
+
+Next priorities: certify all source/output/companion writes with internal fixtures; finish persistent hybrid indexes and the memory-budgeted scheduler; improve People; implement local chat and unified reversible operations; then add dense timeline/ASR/tracks, automatic chapters, best takes, media tools, broad adapters, and native port UI. Preserve the fast scan and run accuracy/fidelity/hardware gates before promoting models or shipping. The current sampler needs an already loaded visual model, can miss events between samples, and retains incomplete coverage. Windows/Linux have catalog backend contracts, not the new macOS panel or timeline worker.
+
+All tests and generated media in this work use internal temporary directories. Do not modify Adlon or the notarized installed release. Do not overwrite the prior release/signing history below.
+
+
+## 2026-09-25 — Notarized macOS release built; finish owner acceptance
+
+The installed `/Applications/FileID.app` and `platforms/apple/dist/FileID-v0.1.0.dmg` are Developer ID signed, notarized, and stapled with Team ID `RSDJXF7DXN`. Apple accepted both submissions. The DMG and app inside it pass Gatekeeper; the installed app passes strict signature, staple, and Gatekeeper checks and launches. The full 97 MB `mlx.metallib` is present. The pinned MLX build is compatible with Xcode 27 through `scripts/ensure_mlx_metallib.sh`; Xcode 26.6 is no longer needed. The distributable DMG SHA-256 is `e26face2d4c14c7f0cb9c186bc37f257ab9f5618aecd87a99b117a768eb32f78`.
+
+CLIP, RAM++, SFace, BGE-small, and Qwen3-VL 8B are installed. A one-image scan and Deep Analyze completed successfully with the notarized installed engine and a separate temporary database (`processedFiles=1`, `failedFiles=0`, `processed=1`, `failed=0`). All 218 Swift tests pass with scratch output under `/tmp`. A temporary `.build/debug/FileIDEngine` symlink to the scratch engine binary satisfied the process-level scan cancellation test's binary lookup; recreate it if rerunning tests with `--scratch-path` after clearing `.build`.
+
+Owner acceptance can now use a representative personal library in the UI; the release artifact has passed the native build, test, signing, notarization, staple, Gatekeeper, and installed-engine runtime gates. Do not put the app-specific password in chat or scripts; the `fileid-notary` Keychain profile is stored for future releases.
+
+## 2026-09-24 — Finish macOS distribution signing
+
+The local `/Applications/FileID.app` is Apple Development signed and verified after launch, but Gatekeeper rejects it as expected. The paid membership and Team ID `RSDJXF7DXN` were verified on Apple's portal; a G2 Developer ID Application certificate is installed in the login Keychain, and a timestamped test signature passes strict verification. Xcode's Personal Team label is stale but does not block command-line signing. The owner reported storing `fileid-notary`, but `xcrun notarytool history --keychain-profile fileid-notary` still reports no Keychain item. Confirm the profile name and successful output from `xcrun notarytool store-credentials fileid-notary --apple-id adammnolle@gmail.com --team-id RSDJXF7DXN` (secure prompt; never paste the password into chat).
+
+The release binaries build with Xcode 27, but the pinned MLX Metal sources fail to produce `.build/cache/mlx.metallib` (`steel_gemm_segmented` / `mma.h`) under both Xcode 27 and 27.1 beta. Download/install Xcode 26.6 Apple silicon from Apple's More Downloads page, install its Metal Toolchain, then run `DEVELOPER_DIR=/Applications/Xcode-26.6.app/Contents/Developer bash scripts/ensure_mlx_metallib.sh`. `scripts/release.sh` deliberately refuses to ship without the library. Then run `bash scripts/release.sh v0.1.0`, verify the signed app and engine share a Team ID, and test the stapled DMG with Gatekeeper on a quarantined download. `--skip-notarize` now uses Apple Development when available for local dry runs; the release script keeps the signed app in `/tmp` through packaging to prevent FileProvider xattrs from invalidating it.
+
 ## 2026-06-16 — Restructure deep-research sweep: 4 verified wins landed; research-backed roadmap for the rest
 
 A `/deep-research` sweep (27 web sources → 21 verified claims) + a 3-agent codebase audit graded Restructure

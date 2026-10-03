@@ -259,7 +259,7 @@ struct DeepAnalyzeFileTypeMatrixTests {
             fileExtension: "pptx",
             documentText: "Quarterly revenue"
         )
-        #expect(video.contains("25%") && video.contains("do not infer audio"))
+        #expect(video.contains("one sampled video frame") && video.contains("do not infer audio"))
         #expect(pdf.contains("only the quoted extracted text") && pdf.contains("visual details"))
         #expect(slides.contains("presentation") && slides.contains("No presentation preview"))
         #expect(sheet.contains("spreadsheet"))

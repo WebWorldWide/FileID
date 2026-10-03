@@ -28,6 +28,7 @@ use windows::Win32::UI::Shell::{
 /// is treated as success (the file is "already not on disk").
 #[cfg(windows)]
 pub fn trash_path(path: &Path) -> Result<()> {
+    crate::util::read_only::require_source_mutation(path)?;
     use std::os::windows::ffi::OsStrExt;
 
     // Verbatim (\\?\) probe: a bare `path.exists()` misses >260-char paths the

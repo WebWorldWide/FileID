@@ -15,6 +15,9 @@ namespace FileID.IpcSchema;
 
 [JsonConverter(typeof(CommandPayloadJsonConverter))]
 public abstract record CommandPayload;
+public sealed record ChatRequestCommand(ChatRequest Request) : CommandPayload;
+public sealed record ToolRequestCommand(ToolRequest Request) : CommandPayload;
+public sealed record CatalogRequestCommand(CatalogRequest Request) : CommandPayload;
 
 public sealed record StartScanCommand(
     string RootPath,
@@ -28,6 +31,8 @@ public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
 public sealed record CancelScanCommand : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
+public sealed record HealthCheckCommand(
+    [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
@@ -177,6 +182,9 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
 
         CommandPayload payload = variant switch
         {
+            "chatRequest" => JsonSerializer.Deserialize<ChatRequestCommand>(ref reader, options) ?? throw new JsonException("chatRequest: null body"),
+            "toolRequest" => JsonSerializer.Deserialize<ToolRequestCommand>(ref reader, options) ?? throw new JsonException("toolRequest: null body"),
+            "catalogRequest" => JsonSerializer.Deserialize<CatalogRequestCommand>(ref reader, options) ?? throw new JsonException("catalogRequest: null body"),
             "startScan" => JsonSerializer.Deserialize<StartScanCommand>(ref reader, options) ?? throw new JsonException("startScan: null body"),
             "deepAnalyzeFile" => JsonSerializer.Deserialize<DeepAnalyzeFileCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFile: null body"),
             "deepAnalyzeFolder" => JsonSerializer.Deserialize<DeepAnalyzeFolderCommand>(ref reader, options) ?? throw new JsonException("deepAnalyzeFolder: null body"),
@@ -204,6 +212,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
+            "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
@@ -227,11 +236,15 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
         writer.WriteStartObject();
         switch (value)
         {
+            case ChatRequestCommand c: WriteVariant(writer, "chatRequest", c, options); break;
+            case ToolRequestCommand c: WriteVariant(writer, "toolRequest", c, options); break;
+            case CatalogRequestCommand c: WriteVariant(writer, "catalogRequest", c, options); break;
             case StartScanCommand c: WriteVariant(writer, "startScan", c, options); break;
             case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
+            case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
             case VerifyCudaPackCommand: WriteEmpty(writer, "verifyCudaPack"); break;

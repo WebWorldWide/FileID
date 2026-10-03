@@ -55,6 +55,7 @@ public func streamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
+    try ReadOnlyLocations.requireWritable(dest)
     guard TLSPinning.allowsExternalRequest(to: remote) else {
         throw StreamingDownloadError.redirectBlocked(url: remote.absoluteString)
     }
@@ -164,6 +165,7 @@ public func sweepStaleStagingEntries(
     maxAge: TimeInterval = 48 * 60 * 60,
     isProcessAlive: (Int32) -> Bool = { kill($0, 0) == 0 || errno == EPERM }
 ) {
+    guard (try? ReadOnlyLocations.requireWritable(stagingDir)) != nil else { return }
     let fm = FileManager.default
     guard let entries = try? fm.contentsOfDirectory(
         at: stagingDir,
@@ -198,6 +200,7 @@ public func parallelStreamingDownload(
     expectedSHA256: String? = nil,
     onTick: @escaping @Sendable (DownloadTick) -> Void
 ) async throws {
+    try ReadOnlyLocations.requireWritable(dest)
     guard TLSPinning.allowsExternalRequest(to: remote) else {
         throw StreamingDownloadError.redirectBlocked(url: remote.absoluteString)
     }

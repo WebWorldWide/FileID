@@ -113,10 +113,10 @@ impl ScanCoordinator {
     }
 
     /// Workers call this between batches; if paused, awaits resume. Returns
-    /// `Err(())` if cancelled — the caller drops out of its loop.
-    pub async fn check(&self) -> Result<(), ()> {
+    /// `Err(ScanCancelled)` if cancelled — the caller drops out of its loop.
+    pub async fn check(&self) -> Result<(), ScanCancelled> {
         if self.is_cancelled() {
-            return Err(());
+            return Err(ScanCancelled);
         }
         // Register the waiter BEFORE reading `paused`. tokio's
         // notify_waiters() (used by request_resume/cancel/gpu_dead) wakes only
@@ -135,7 +135,7 @@ impl ScanCoordinator {
             notified.set(self.inner.resume_notify.notified());
             notified.as_mut().enable();
             if self.is_cancelled() {
-                return Err(());
+                return Err(ScanCancelled);
             }
         }
         Ok(())
@@ -147,3 +147,6 @@ impl Default for ScanCoordinator {
         Self::new()
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScanCancelled;

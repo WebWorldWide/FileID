@@ -8,6 +8,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_health_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/windows-engine.yml'
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
+      - 'shared/scripts/check_health_roundtrip.py'
+      - 'shared/scripts/check_catalog_roundtrip.py'
       - '.github/workflows/windows-engine.yml'
   workflow_dispatch:
 
@@ -49,7 +53,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             cross: true
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && matrix.label != 'arm64-native' && fromJSON('["self-hosted","Windows","X64","fileid-adlon"]') || matrix.runner }}
 
     defaults:
       run:
@@ -58,6 +62,33 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Prepare Adlon command paths
+        if: runner.name == 'adlon-fileid-windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = & C:\Windows\py.exe -3 -c "import sys; print(sys.executable)"
+          if ($LASTEXITCODE -ne 0) { throw "Python launcher failed" }
+          $paths = @('C:\Program Files\Git\bin', (Split-Path $python.Trim()))
+          foreach ($path in $paths) {
+            if (-not (Test-Path $path -PathType Container)) { throw "Missing tool directory: $path" }
+            $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
+      - name: Prepare Adlon ARM64 Clang
+        if: runner.name == 'adlon-fileid-windows' && matrix.cross
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw 'Install the Visual Studio C++ Clang Compiler component before ARM64 cross-builds.' }
+          $candidates = @('VC\Tools\Llvm\x64\bin', 'VC\Tools\Llvm\bin') | ForEach-Object { Join-Path $installation.Trim() $_ }
+          $directory = $candidates | Where-Object { Test-Path (Join-Path $_ 'clang.exe') -PathType Leaf } | Select-Object -First 1
+          if (-not $directory) { throw 'Visual Studio Clang executable is missing.' }
+          & (Join-Path $directory 'clang.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'Clang failed to start.' }
+          $directory | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -253,6 +284,12 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Engine binary missing: $exe" }
           $size = (Get-Item $exe).Length / 1MB
           Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $size)
+
+      - name: Verify command-channel health probes
+        if: matrix.cross == false
+        shell: pwsh
+        timeout-minutes: 2
+        run: python "${{ github.workspace }}/shared/scripts/check_health_roundtrip.py" --engine "target/${{ matrix.target }}/release/FileIDEngine.exe"
 
       # Per-vendor EP smoke: launch the engine, let it emit `ready` on stdout
       # (carrying HardwareInfo + the chosen executionProvider), then send EOF

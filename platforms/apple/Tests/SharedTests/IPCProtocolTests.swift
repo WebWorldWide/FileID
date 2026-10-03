@@ -13,6 +13,7 @@ struct IPCProtocolTests {
         let commands: [IPCCommand.Payload] = [
             .startScan(rootPath: "/Users/adam/photos", rootDisplay: "/Users/adam/photos",
                        rescan: false, excludedPaths: ["/Users/adam/photos/.cache"]),
+            .toolRequest(request: ToolRequest(requestID: "video", action: "preview", fileIDs: [1], destination: "/internal", recipe: ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920))),
             .pauseScan,
             .resumeScan,
             .cancelScan,
@@ -33,6 +34,16 @@ struct IPCProtocolTests {
             let originalPayloadJSON = try IPCCoder.encoder.encode(cmd.payload)
             let decodedPayloadJSON = try IPCCoder.encoder.encode(decoded.payload)
             #expect(originalPayloadJSON == decodedPayloadJSON)
+        }
+    }
+
+    @Test("Health correlation nonce is bounded ASCII")
+    func healthRequestIDValidation() {
+        for nonce in ["probe-1", "GEN_4-probe_2", String(repeating: "a", count: 128)] {
+            #expect(HealthCheckResult.isValidRequestID(nonce))
+        }
+        for nonce in ["", " ", "../file", "line\nfeed", "é", "a\0b", String(repeating: "a", count: 129)] {
+            #expect(!HealthCheckResult.isValidRequestID(nonce))
         }
     }
 

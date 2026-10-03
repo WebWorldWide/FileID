@@ -11,6 +11,7 @@
 // app's EOF-based death detection is unaffected.
 import Foundation
 import Darwin
+import FileIDShared
 
 enum IPCTransport {
     /// The wire the IPCSink writes events to. Defaults to stderr so a
@@ -27,8 +28,10 @@ enum IPCTransport {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("FileID/logs", isDirectory: true)
+        guard (try? ReadOnlyLocations.requireWritable(base)) != nil else { close(saved); return }
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let logURL = base.appendingPathComponent("engine-stderr.log")
+        guard (try? ReadOnlyLocations.requireWritable(logURL)) != nil else { close(saved); return }
 
         // Same 32 MB single-generation rotation as JSONLog.
         if let size = try? FileManager.default.attributesOfItem(atPath: logURL.path)[.size] as? UInt64,

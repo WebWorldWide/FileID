@@ -10,6 +10,12 @@
 //!
 //! Edit this file in lockstep with `ipc.schema.json`. The two MUST agree.
 
+pub mod chat;
+pub use chat::*;
+pub mod tools;
+pub use tools::*;
+pub mod catalog;
+pub use catalog::*;
 use serde::{Deserialize, Serialize};
 
 pub mod sink;
@@ -49,6 +55,13 @@ impl IpcEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CommandPayload {
+    #[serde(rename = "toolRequest")]
+    ToolRequest(ToolRequestPayload),
+
+    #[serde(rename = "chatRequest")]
+    ChatRequest(ChatRequestPayload),
+    #[serde(rename = "catalogRequest")]
+    CatalogRequest(Box<CatalogRequestPayload>),
     #[serde(rename = "startScan")]
     StartScan(StartScanPayload),
 
@@ -60,6 +73,8 @@ pub enum CommandPayload {
     CancelScan(Empty),
     #[serde(rename = "requestStatus")]
     RequestStatus(Empty),
+    #[serde(rename = "healthCheck")]
+    HealthCheck(HealthCheckPayload),
     #[serde(rename = "shutdown")]
     Shutdown(Empty),
     #[serde(rename = "runFaceClustering")]
@@ -187,6 +202,41 @@ pub enum CommandPayload {
 /// an empty struct with no fields encodes as `{}` like Swift produces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Empty {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+}
+
+impl HealthCheckPayload {
+    pub fn is_valid(&self) -> bool {
+        (1..=128).contains(&self.request_id.len())
+            && self.request_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::HealthCheckPayload;
+
+    #[test]
+    fn correlation_nonce_is_bounded_ascii() {
+        for request_id in ["probe-1".into(), "GEN_4-probe_2".into(), "a".repeat(128)] {
+            assert!(HealthCheckPayload { request_id }.is_valid());
+        }
+        for request_id in [String::new(), " ".into(), "../file".into(), "line\nfeed".into(), "é".into(), "a\0b".into(), "a".repeat(129)] {
+            assert!(!HealthCheckPayload { request_id }.is_valid());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckResult {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub pid: i32,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -483,8 +533,17 @@ pub struct MergeSuggestions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventPayload {
+    #[serde(rename = "catalogResponse")]
+    CatalogResponse(Wrap<CatalogResponse>),
+    #[serde(rename = "toolResponse")]
+    ToolResponse(Wrap<ToolResponse>),
+
+    #[serde(rename = "chatResponse")]
+    ChatResponse(Wrap<ChatResponse>),
     #[serde(rename = "ready")]
     Ready(Wrap<EngineInfo>),
+    #[serde(rename = "healthCheckResult")]
+    HealthCheckResult(Wrap<HealthCheckResult>),
 
     #[serde(rename = "progress")]
     Progress(Wrap<ScanProgress>),
@@ -1324,3 +1383,10 @@ mod tests {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogRequestPayload { pub request: CatalogRequest }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRequestPayload { pub request: ToolRequest }

@@ -2,8 +2,8 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
-  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nGenerator targets: Swift (platforms/apple/shared/Sources/FileIDShared/IPCProtocol_Generated.swift), Rust (platforms/windows/src/engine/src/ipc/generated.rs), C# (platforms/windows/src/FileID.IpcSchema/Generated.cs).",
-  "version": "1.0.0",
+  "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
+  "version": "1.6.0",
 
   "$defs": {
     "IPCCommand": {
@@ -31,6 +31,27 @@
       "oneOf": [
         {
           "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "toolRequest"
+          ],
+          "properties": {
+            "toolRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request"
+              ],
+              "properties": {
+                "request": {
+                  "$ref": "#/$defs/ToolRequest"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
           "required": ["startScan"],
           "additionalProperties": false,
           "properties": {
@@ -49,9 +70,14 @@
         { "type": "object", "required": ["pauseScan"],          "additionalProperties": false, "properties": { "pauseScan":          { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["resumeScan"],         "additionalProperties": false, "properties": { "resumeScan":         { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["cancelScan"],         "additionalProperties": false, "properties": { "cancelScan":         { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["healthCheck"], "additionalProperties": false,
+          "properties": { "healthCheck": { "type": "object", "additionalProperties": false,
+            "description": "Lightweight command-channel probe. Echoes the opaque nonce and actual engine PID without starting work, touching the catalog or re-emitting ready. Clients correlate replies with their captured process generation; this does not establish model or storage health.",
+            "required": ["requestID"], "properties": { "requestID": { "$ref": "#/$defs/HealthRequestID" } }
+          } } },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
-        { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false } } },
+        { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false, "description": "Recluster compatible face evidence while retaining identity IDs and user corrections. Failed validation must not publish partial assignments." } } },
         { "type": "object", "required": ["verifyCudaPack"],     "additionalProperties": false, "properties": { "verifyCudaPack":     { "type": "object", "additionalProperties": false, "description": "Re-probe CUDA Toolkit + cuDNN availability without restarting the engine. Engine replies with a `hardwareReprobed` event." } } },
         {
           "type": "object",
@@ -185,7 +211,7 @@
             "properties": { "fileIDs": { "type": "array", "items": { "type": "integer" } } } } } },
 
         { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
-          "properties": { "mergeClusters": { "type": "object", "additionalProperties": false,
+          "properties": { "mergeClusters": { "type": "object", "additionalProperties": false, "description": "Explicit merge validates both identities and commits all assignments, name transfer and counts atomically. An unnamed destination inherits one source identity; a named destination keeps its name. SQL failure leaves the catalog unchanged.",
             "required": ["sourcePersonID", "destinationPersonID"],
             "properties": {
               "sourcePersonID": { "type": "integer" },
@@ -261,13 +287,80 @@
               "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
             } } } },
 
-        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } }
+        { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "catalogRequest"
+          ],
+          "properties": {
+            "catalogRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request"
+              ],
+              "properties": {
+                "request": {
+                  "$ref": "#/$defs/CatalogRequest"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "chatRequest"
+          ],
+          "properties": {
+            "chatRequest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "request"
+              ],
+              "properties": {
+                "request": {
+                  "$ref": "#/$defs/ChatRequest"
+                }
+              }
+            }
+          }
+        }
       ]
     },
 
     "EventPayload": {
       "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
       "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "toolResponse"
+          ],
+          "properties": {
+            "toolResponse": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "_0"
+              ],
+              "properties": {
+                "_0": {
+                  "$ref": "#/$defs/ToolResponse"
+                }
+              }
+            }
+          }
+        },
+        { "type": "object", "required": ["healthCheckResult"], "additionalProperties": false,
+          "properties": { "healthCheckResult": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/HealthCheckResult" } }
+          } } },
         { "type": "object", "required": ["ready"],                   "additionalProperties": false, "properties": { "ready":                   { "$ref": "#/$defs/SinglePositional/EngineInfo" } } },
         { "type": "object", "required": ["progress"],                "additionalProperties": false, "properties": { "progress":                { "$ref": "#/$defs/SinglePositional/ScanProgress" } } },
         { "type": "object", "required": ["phaseChanged"],            "additionalProperties": false, "properties": { "phaseChanged":            { "$ref": "#/$defs/SinglePositional/ScanPhase" } } },
@@ -325,10 +418,63 @@
           }
         },
         { "type": "object", "required": ["libraryWiped"], "additionalProperties": false, "properties": { "libraryWiped": { "$ref": "#/$defs/SinglePositional/LibraryWiped" } } },
-        { "type": "object", "required": ["thumbnailGenerated"],     "additionalProperties": false, "properties": { "thumbnailGenerated":     { "$ref": "#/$defs/SinglePositional/ThumbnailGenerated" } } }
+        { "type": "object", "required": ["thumbnailGenerated"],     "additionalProperties": false, "properties": { "thumbnailGenerated":     { "$ref": "#/$defs/SinglePositional/ThumbnailGenerated" } } },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "catalogResponse"
+          ],
+          "properties": {
+            "catalogResponse": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "_0"
+              ],
+              "properties": {
+                "_0": {
+                  "$ref": "#/$defs/CatalogResponse"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "chatResponse"
+          ],
+          "properties": {
+            "chatResponse": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "_0"
+              ],
+              "properties": {
+                "_0": {
+                  "$ref": "#/$defs/ChatResponse"
+                }
+              }
+            }
+          }
+        }
       ]
     },
 
+    "HealthRequestID": {
+      "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$",
+      "description": "Client-generated correlation nonce, never a file path, document text or secret. Invalid nonces receive invalid_health_request and no success reply. Use a fresh nonce for each probe."
+    },
+    "HealthCheckResult": {
+      "type": "object", "additionalProperties": false, "required": ["requestID", "pid"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }
+      }
+    },
     "SinglePositional": {
       "description": "Helpers for Swift's Codable auto-synthesis: a case with a single unnamed associated value encodes as {\"_0\": <encoded value>}. Each generator unwraps appropriately.",
 
@@ -838,6 +984,540 @@
         "category":   { "type": "string", "enum": ["scan", "faceCluster", "deepAnalyze"] },
         "title":      { "type": "string" },
         "etaSeconds": { "type": ["number", "null"] }
+      }
+    },
+    "CatalogChapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fileID",
+        "startSeconds",
+        "endSeconds",
+        "title",
+        "summary",
+        "sourceRevision",
+        "modelVersion",
+        "confidence",
+        "userEdited",
+        "stale"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "fileID": {
+          "type": "integer"
+        },
+        "startSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "summary": {
+          "type": "string"
+        },
+        "sourceRevision": {
+          "type": "string"
+        },
+        "modelVersion": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "userEdited": {
+          "type": "boolean"
+        },
+        "stale": {
+          "type": "boolean"
+        }
+      }
+    },
+    "CatalogHit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileID",
+        "path",
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "fileID": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "evidenceID": {
+          "type": "string"
+        },
+        "startSeconds": {
+          "type": "number"
+        },
+        "page": {
+          "type": "integer"
+        }
+      }
+    },
+    "CatalogJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "fileIDs",
+        "state",
+        "progress",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "fileIDs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 10000
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "paused",
+            "completed",
+            "cancelled",
+            "failed"
+          ]
+        },
+        "progress": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "number"
+        }
+      }
+    },
+    "CatalogRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "action"
+      ],
+      "properties": {
+        "resultScope": { "type": "string", "enum": ["all", "files"] },
+        "searchMode": { "type": "string", "enum": ["keyword", "semantic", "hybrid"] },
+        "queryVector": { "type": "array", "items": { "type": "number" }, "minItems": 512, "maxItems": 512 },
+        "embeddingModel": { "type": "string", "maxLength": 200 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "requestID": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "search",
+            "detail",
+            "saveChapter",
+            "deleteChapter",
+            "undoChapterEdit",
+            "jobs",
+            "enqueueTimeline",
+            "pauseJob",
+            "resumeJob",
+            "cancelJob"
+          ]
+        },
+        "query": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "fileID": {
+          "type": "integer"
+        },
+        "chapter": {
+          "$ref": "#/$defs/CatalogChapter"
+        },
+        "chapterID": {
+          "type": "string"
+        },
+        "jobID": {
+          "type": "string"
+        },
+        "fileIDs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 10000
+        }
+      }
+    },
+    "CatalogResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "status",
+        "hits",
+        "chapters",
+        "jobs"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "hits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CatalogHit"
+          }
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CatalogChapter"
+          }
+        },
+        "jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CatalogJob"
+          }
+        }
+      }
+    },
+    "ChatMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "text",
+        "createdAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "number"
+        }
+      }
+    },
+    "ChatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "conversationID",
+        "action"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "conversationID": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "action": {
+          "enum": [
+            "send",
+            "history",
+            "clear",
+            "cancel"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "useModel": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ChatResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "conversationID",
+        "status",
+        "message",
+        "messages",
+        "hits"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string"
+        },
+        "conversationID": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "retrieving",
+            "queued",
+            "streaming",
+            "completed",
+            "cancelled",
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatMessage"
+          }
+        },
+        "hits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CatalogHit"
+          }
+        }
+      }
+    },
+    "ToolRecipe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "format",
+        "maxDimension"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "photo",
+            "chapters",
+            "video"
+          ]
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "png",
+            "jpeg",
+            "tiff",
+            "json",
+            "vtt",
+            "mp4"
+          ]
+        },
+        "maxDimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        }
+      }
+    },
+    "ToolCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "available",
+        "inputFormats",
+        "outputFormats",
+        "detail"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "inputFormats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outputFormats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fileID",
+        "sourcePath",
+        "outputPath",
+        "state",
+        "message"
+      ],
+      "properties": {
+        "fileID": {
+          "type": "integer"
+        },
+        "sourcePath": {
+          "type": "string"
+        },
+        "outputPath": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "completed",
+            "undone",
+            "failed"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "action"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "capabilities",
+            "history",
+            "preview",
+            "execute",
+            "cancel",
+            "undo"
+          ]
+        },
+        "fileIDs": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          },
+          "maxItems": 100
+        },
+        "destination": {
+          "type": "string"
+        },
+        "recipe": {
+          "$ref": "#/$defs/ToolRecipe"
+        },
+        "operationID": {
+          "type": "string"
+        }
+      }
+    },
+    "ToolResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestID",
+        "status",
+        "message",
+        "outputs",
+        "capabilities"
+      ],
+      "properties": {
+        "requestID": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "operationID": {
+          "type": "string"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolOutput"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCapability"
+          }
+        }
       }
     }
   },
