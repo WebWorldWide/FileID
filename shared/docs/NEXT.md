@@ -4,7 +4,7 @@
 
 Continue the accepted next-version plan on macOS. The owner deferred new Windows/Linux feature work and physical acceptance until using the PC. The release and TestFlight acceptance are incomplete.
 
-PR #212 is merged to `main` at `6cde4a817e276b5b325fa36f9a7926e2abdf073a`, with all seven workflows green. PR #214 adds cautious macOS chapter drafts and is merged at `ba12b17b738bca1567e37daa72ed8cdcc5b985e6`; its exact-head tests pass. The post-merge macOS and repository-policy workflows `37145111901` and `37145111879` are still running; check them before relying on main validation. Adlon jobs use isolated guest disks and never mount or access the example-data corpus.
+PR #212 is merged to `main` at `6cde4a817e276b5b325fa36f9a7926e2abdf073a`, with all seven workflows green. PR #214 adds cautious macOS chapter drafts and is merged at `ba12b17b738bca1567e37daa72ed8cdcc5b985e6`; its exact-head tests pass. The post-merge macOS workflow `37145111901` and repository-policy workflow `37145111879` both pass on `ba12b17b738bca1567e37daa72ed8cdcc5b985e6`. Adlon jobs use isolated guest disks and never mount or access the example-data corpus.
 
 ## TestFlight completion gate
 
