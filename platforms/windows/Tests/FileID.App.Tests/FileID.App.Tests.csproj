@@ -54,7 +54,9 @@
 
   <Target Name="StageCodeCoverageRuntimeForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
     <PropertyGroup>
-      <CodeCoverageShim>$(NuGetPackageRoot)microsoft.codecoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
+      <CodeCoveragePackageRoot Condition="'$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)</CodeCoveragePackageRoot>
+      <CodeCoveragePackageRoot Condition="'$(CodeCoveragePackageRoot)' == ''">$(USERPROFILE)\.nuget\packages\</CodeCoveragePackageRoot>
+      <CodeCoverageShim>$(CodeCoveragePackageRoot)microsoft.codecoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
       <CodeCoverageShimTarget>$(TargetDir)Microsoft.CodeCoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShimTarget>
     </PropertyGroup>
     <Error Condition="!Exists('$(CodeCoverageShim)')" Text="CodeCoverage test-host runtime asset is missing: $(CodeCoverageShim)" />
