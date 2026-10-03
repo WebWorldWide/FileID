@@ -3556,3 +3556,8 @@ Chat identity terms are matched against user-managed People labels and first-nam
 ## 2026-10-03 — Validate App Store profile identifiers and nested code signatures
 
 Apple's macOS App Store provisioning profile uses `com.apple.application-identifier` and may store the bundle identifier with a team prefix. Accept either entitlement key and verify the suffix against the configured bundle ID. The MLX `mlx.metallib` is nested code for strict deep verification; sign it explicitly before signing and verifying the containing app. Keep these checks in the packaging script and policy fixture. Local package validation now passes; upload and sandbox runtime acceptance remain separate gates.
+
+
+## 2026-10-03 — Defer stale Windows app test-suite repair to the PC session
+
+The Windows app job's nested-path check silently skipped `FileID.App.Tests`. A hosted discovery experiment found 157 compilation diagnostics because existing tests reference missing or changed app members. Keep the current packaging/IPC gate documented as incomplete app-suite coverage. On the owner's PC, reconcile tests with current APIs and add fail-closed discovery; do not hide the mismatch by excluding tests. No Windows product or test source is changed before that session.
