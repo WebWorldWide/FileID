@@ -88,6 +88,12 @@ pub enum AnalyzeMode {
     CaptionAndTags,
 }
 
+impl AnalyzeMode {
+    fn establishes_completion(self) -> bool {
+        matches!(self, Self::Both | Self::CaptionAndTags)
+    }
+}
+
 /// Run Deep Analyze on a single file: pull image bytes (image, video
 /// keyframe, or PDF page-1 via shell helpers) → call the VLM via the
 /// subprocess wrapper → write results back to the DB. Cancellation
@@ -190,6 +196,7 @@ pub async fn analyze_file(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
@@ -306,6 +313,7 @@ fn persist_vlm_results(
     conn: &rusqlite::Connection,
     file_id: i64,
     model_kind: &str,
+    mode: AnalyzeMode,
     description: Option<&str>,
     proposed_name: Option<&str>,
     tags: &[String],
@@ -319,12 +327,36 @@ fn persist_vlm_results(
     // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
     // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                          vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
-                          vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
-        rusqlite::params![description, proposed_name, model_kind, now, file_id],
-    )?;
+    if mode.establishes_completion() {
+        tx.execute(
+            "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
+                              vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
+                              vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4 WHERE id=?5",
+            rusqlite::params![model_kind, description, proposed_name, now, file_id],
+        )?;
+    } else {
+        let completed_with_model = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_full_model=?2)",
+            rusqlite::params![file_id, model_kind],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if completed_with_model {
+            tx.execute(
+                "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name) \
+                 WHERE id=?3",
+                rusqlite::params![description, proposed_name, file_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
+                                  vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL \
+                 WHERE id=?3",
+                rusqlite::params![description, proposed_name, file_id],
+            )?;
+        }
+    }
     if !tags.is_empty() {
         tx.execute(
             "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
@@ -465,6 +497,7 @@ pub(crate) async fn analyze_file_via_server(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,

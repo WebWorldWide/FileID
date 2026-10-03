@@ -63,8 +63,14 @@ $Solution    = Join-Path $PlatformDir "FileID.sln"
 $MsiProj     = Join-Path $PlatformDir "installer/FileID.Msi/FileID.Msi.wixproj"
 $BundleProj  = Join-Path $PlatformDir "installer/FileID.Bundle/FileID.Bundle.wixproj"
 $DistDir     = Join-Path $PlatformDir "dist/installer"
+$PrereqDir   = Join-Path $PlatformDir "dist/prereqs"
 
 $AppTfm = "net8.0-windows10.0.19041.0"
+$WinAppRuntimeVersion = "1.7.250606001"
+$WinAppRuntimeX64Sha256 = "0bd5e81e5475d97bf3a2e73d7abe34dcf43a9ab9226534aba51d1757ec0b2ce1"
+$WinAppRuntimeArm64Sha256 = "d02fe67517b9c72d14ed5fdd41d8b667e40b6a8b76872d43677a20d28b6cbeab"
+$WinAppRuntimeX64Uri = "https://aka.ms/windowsappsdk/1.7/$WinAppRuntimeVersion/windowsappruntimeinstall-x64.exe"
+$WinAppRuntimeArm64Uri = "https://aka.ms/windowsappsdk/1.7/$WinAppRuntimeVersion/windowsappruntimeinstall-arm64.exe"
 
 # Telemetry strings the privacy gate refuses to ship. Anything matching
 # any of these in the final shipped binaries fails the build.
@@ -109,6 +115,42 @@ function Require-Command($name, $hint) {
         Write-Host "       $hint" -ForegroundColor Yellow
         exit 1
     }
+}
+
+function Assert-MicrosoftSignature([string]$Path) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne "Valid" -or
+        $signature.SignerCertificate.Subject -notlike "CN=Microsoft Corporation, O=Microsoft Corporation,*") {
+        throw "Windows App Runtime installer is not signed by Microsoft or its signature is invalid: $Path ($($signature.Status), $($signature.SignerCertificate.Subject))."
+    }
+}
+
+function Get-WindowsAppRuntimeInstaller([ValidateSet("x64", "arm64")][string]$Architecture) {
+    $fileName = "WindowsAppRuntimeInstall-$Architecture.exe"
+    $destination = Join-Path $PrereqDir $fileName
+    $uri = if ($Architecture -eq "x64") { $WinAppRuntimeX64Uri } else { $WinAppRuntimeArm64Uri }
+    $expectedSha256 = if ($Architecture -eq "x64") { $WinAppRuntimeX64Sha256 } else { $WinAppRuntimeArm64Sha256 }
+
+    New-Item -ItemType Directory -Force -Path $PrereqDir | Out-Null
+    if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+        Write-Host "Downloading Windows App Runtime $WinAppRuntimeVersion ($Architecture) from Microsoft..." -ForegroundColor Cyan
+        $previousProgressPreference = $ProgressPreference
+        try {
+            $ProgressPreference = "SilentlyContinue"
+            Invoke-WebRequest -Uri $uri -OutFile $destination
+        } finally {
+            $ProgressPreference = $previousProgressPreference
+        }
+    }
+
+    $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash.ToLowerInvariant()
+    if ($actualSha256 -ne $expectedSha256) {
+        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        throw "Windows App Runtime $Architecture installer SHA-256 mismatch: expected $expectedSha256, got $actualSha256."
+    }
+
+    Assert-MicrosoftSignature $destination
+    return $destination
 }
 
 Require-Command "cargo" "Install Rust via https://rustup.rs"
@@ -239,6 +281,11 @@ if (-not $SkipArm64) {
 # ─── 6. Build per-arch MSIs ────────────────────────────────────────────────
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
+$null = Get-WindowsAppRuntimeInstaller "x64"
+if (-not $SkipArm64) {
+    $null = Get-WindowsAppRuntimeInstaller "arm64"
+}
+
 Write-Host "Building FileID-x64.msi..." -ForegroundColor Cyan
 & dotnet build $MsiProj -c Release -p:Platform=x64 --nologo
 
@@ -252,13 +299,10 @@ $MsiX64   = Join-Path $DistDir "FileID-x64.msi"
 $MsiArm64 = Join-Path $DistDir "FileID-arm64.msi"
 Sign-Binary $MsiX64
 if (-not $SkipArm64) { Sign-Binary $MsiArm64 }
-if ($SkipArm64 -and -not (Test-Path $MsiArm64)) {
-    Copy-Item $MsiX64 $MsiArm64
-}
-
 # ─── 8. Build Burn bundle ──────────────────────────────────────────────────
 Write-Host "Building FileIDSetup.exe (Burn bundle)..." -ForegroundColor Cyan
-& dotnet build $BundleProj -c Release --nologo
+$includeArm64 = (-not $SkipArm64).ToString().ToLowerInvariant()
+& dotnet build $BundleProj -c Release -p:IncludeArm64=$includeArm64 --nologo
 
 $BundleExe = Join-Path $DistDir "FileIDSetup.exe"
 if (-not (Test-Path $BundleExe)) {

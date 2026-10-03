@@ -55,12 +55,16 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// static initializer (touched first from App.OnLaunched).</summary>
     private readonly DispatcherQueue? _ui;
 
-    public ModelSlot(string displayLabel, ulong approxBytes, Func<Task> installAction)
+    public ModelSlot(
+        string displayLabel,
+        ulong approxBytes,
+        Func<Task> installAction,
+        DispatcherQueue? uiDispatcher = null)
     {
         _displayLabel = displayLabel;
         _approxBytes = approxBytes;
         _installAction = installAction;
-        _ui = DispatcherQueue.GetForCurrentThread();
+        _ui = uiDispatcher;
     }
 
     private ModelInstallStatus _status;

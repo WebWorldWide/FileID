@@ -232,60 +232,111 @@ public partial class App : Application
     /// the harness can assert clean_exit=true.</summary>
     private static async Task AutoScanAsync(string folderPath, bool exitAfterScan, Window window)
     {
+        var engine = EngineClient.Instance;
         try
         {
             DebugLog.Info($"[AUTO-SCAN] requested path={PathRedactor.Redact(folderPath)} exitAfter={exitAfterScan}");
-            await EngineClient.Instance.WaitForReadyAsync(System.TimeSpan.FromSeconds(60));
-            if (EngineClient.Instance.State != ViewModels.EngineClient.LifecycleState.Ready)
+            await engine.WaitForReadyAsync(TimeSpan.FromSeconds(60));
+            if (engine.State != ViewModels.EngineClient.LifecycleState.Ready)
             {
-                DebugLog.Error($"[AUTO-SCAN] engine not Ready after 60s (state={EngineClient.Instance.State}); aborting.");
-                if (exitAfterScan) { window.DispatcherQueue.TryEnqueue(() => window.Close()); }
+                DebugLog.Error($"[AUTO-SCAN] engine not Ready after 60s (state={engine.State}); aborting.");
+                if (exitAfterScan) window.DispatcherQueue.TryEnqueue(() => window.Close());
                 return;
             }
+
             AppViewModel.Instance.FolderPath = folderPath;
             DebugLog.Info($"[AUTO-SCAN] starting scan; display={AppViewModel.Instance.FolderDisplay}");
-            await EngineClient.Instance.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);
-            if (!exitAfterScan) return;
-
-            // Wait for ScanComplete by watching Phase transition to Completed
-            // (or Failed). PropertyChanged fires on whatever thread the
-            // engine event arrived on — don't touch XAML in the handler.
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+            if (!exitAfterScan)
             {
-                if (e.PropertyName != nameof(ViewModels.EngineClient.Phase)) return;
-                var phase = EngineClient.Instance.Phase;
-                if (phase == FileID.IpcSchema.ScanPhase.Completed || phase == FileID.IpcSchema.ScanPhase.Failed)
-                {
-                    tcs.TrySetResult(phase == FileID.IpcSchema.ScanPhase.Completed);
-                }
+                await engine.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);
+                return;
             }
-            EngineClient.Instance.PropertyChanged += OnEngineChanged;
+
+            var scanGeneration = engine.SpawnGeneration;
+            var scanTerminal = new TaskCompletionSource<FileID.IpcSchema.ScanPhase>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<FileID.IpcSchema.FaceClusteringResult>? faceTerminal =
+                new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var applyDrained = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+                => DebugLog.SafeRun(nameof(OnEngineChanged), () =>
+                {
+                    if (engine.SpawnGeneration != scanGeneration)
+                    {
+                        scanTerminal.TrySetException(new InvalidOperationException(
+                            "Engine generation changed before the auto-scan finished."));
+                        return;
+                    }
+
+                    if (e.PropertyName == nameof(ViewModels.EngineClient.State)
+                        && engine.State == ViewModels.EngineClient.LifecycleState.Crashed)
+                    {
+                        scanTerminal.TrySetException(new InvalidOperationException(
+                            engine.CrashReason ?? "The engine stopped during the auto-scan."));
+                        return;
+                    }
+
+                    if (e.PropertyName == nameof(ViewModels.EngineClient.Phase)
+                        && engine.Phase is FileID.IpcSchema.ScanPhase.Completed
+                            or FileID.IpcSchema.ScanPhase.Failed
+                            or FileID.IpcSchema.ScanPhase.Cancelled)
+                    {
+                        scanTerminal.TrySetResult(engine.Phase.Value);
+                        window.DispatcherQueue.TryEnqueue(() => applyDrained.TrySetResult(true));
+                    }
+
+                    if (e.PropertyName == nameof(ViewModels.EngineClient.LastFaceClustering)
+                        && engine.LastFaceClustering is { } faceResult)
+                    {
+                        faceTerminal.TrySetResult(faceResult);
+                    }
+                });
+
+            engine.PropertyChanged += OnEngineChanged;
             try
             {
-                var ok = await tcs.Task;
-                DebugLog.Info($"[AUTO-SCAN] scan ended ok={ok}; closing window.");
+                await engine.StartScanAsync(folderPath, AppViewModel.Instance.FolderDisplay);
+                var terminalPhase = await scanTerminal.Task.WaitAsync(TimeSpan.FromHours(12));
+                await applyDrained.Task.WaitAsync(TimeSpan.FromSeconds(30));
+                FileID.IpcSchema.FaceClusteringResult? faceResult = null;
+                if (terminalPhase == FileID.IpcSchema.ScanPhase.Completed)
+                {
+                    faceResult = await faceTerminal!.Task.WaitAsync(TimeSpan.FromHours(12));
+                    DebugLog.Info("[AUTO-SCAN] face clustering completed");
+                }
+
+                DebugLog.Info(
+                    $"[AUTO-SCAN] scan ended phase={terminalPhase} processed={EngineClient.Instance.LastScanProcessedFiles} persons={faceResult?.PersonCount ?? 0}");
             }
             finally
             {
-                EngineClient.Instance.PropertyChanged -= OnEngineChanged;
+                engine.PropertyChanged -= OnEngineChanged;
             }
-            window.DispatcherQueue.TryEnqueue(() => { try { window.Close(); } catch { } });
+
+            if (exitAfterScan)
+            {
+                window.DispatcherQueue.TryEnqueue(() =>
+                {
+                    try { window.Close(); }
+                    catch { }
+                });
+            }
         }
-        catch (System.Exception ex)
+        catch (Exception ex)
         {
-            DebugLog.Error($"[AUTO-SCAN] failed: {ex.GetType().Name}: {ex.Message}");
-            if (exitAfterScan) { window.DispatcherQueue.TryEnqueue(() => { try { window.Close(); } catch { } }); }
+            DebugLog.Error($"[AUTO-SCAN] {ex.GetType().Name}: {ex.Message}");
+            if (exitAfterScan)
+            {
+                window.DispatcherQueue.TryEnqueue(() =>
+                {
+                    try { window.Close(); }
+                    catch { }
+                });
+            }
         }
     }
-
-    /// <summary>
-    /// Last-resort handler for exceptions that escape the dispatcher loop.
-    /// Logs locally; does NOT phone home (privacy guarantee).
-    ///
-    /// PRIVACY: this method must never make a network call. Reviewed every
-    /// PR that touches it.
-    /// </summary>
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
         // write a dedicated crash dump BEFORE deciding whether to

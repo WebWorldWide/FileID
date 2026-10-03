@@ -493,6 +493,38 @@ public sealed partial class RestructureView : UserControl
             : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
     }
 
+    private void OnRecommendationElementPrepared(
+        ItemsRepeater sender,
+        ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement element) return;
+        if (ResolveRepeaterItem<RestructureRecommendationVm>(sender.ItemsSource, args.Index) is not { } item) return;
+        element.DataContext = item;
+    }
+
+    private void OnFileElementPrepared(
+        ItemsRepeater sender,
+        ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement element) return;
+        if (ResolveRepeaterItem<RestructureFileRowVm>(sender.ItemsSource, args.Index) is not { } item) return;
+        element.DataContext = item;
+    }
+
+    internal static T? ResolveRepeaterItem<T>(object? itemsSource, int index) where T : class
+    {
+        if (index < 0 || itemsSource is not IEnumerable<T> items) return null;
+        if (itemsSource is IReadOnlyList<T> readOnlyList)
+        {
+            return index < readOnlyList.Count ? readOnlyList[index] : null;
+        }
+        if (itemsSource is IList<T> list)
+        {
+            return index < list.Count ? list[index] : null;
+        }
+        return items.Skip(index).FirstOrDefault();
+    }
+
     private void OnFileCheckClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnFileCheckClicked), () =>
         {

@@ -1,4 +1,18 @@
-﻿## 2026-10-02 - Adlon checkpoint on `0188da1`
+## 2026-10-02 — Windows Store preflight continued
+
+- Continued on `codex/store-msix` in `C:\Users\adamm\.codex\worktrees\store-msix\FileID`, with all pre-existing local work preserved. Latest pushed commit remains `07c0ad8`.
+- Release x64 app build passed. App suite passed 427/433; six contract failures remain. IPC suite passed 54/54. Rust engine tests passed 400/400; Clippy and rustfmt checks passed.
+- Fixed the auto-scan harness to accept a prebuilt executable and wait for terminal scan plus face clustering. Replaced the sidebar queue's repeated child-tree rebuild with incremental `ObservableCollection` updates and bounded `ItemsRepeater`; focused contracts pass. Updated the Windows workflow test invocation to restore test dependencies. Added generation-owned Deep Analyze operation completion and cleanup, but the deeper fence/presentation contract still fails and needs completion.
+- Required `publish-store-msix.ps1` rebuilt the Release app and engine, then failed in Visual Studio 18 `GenerateAppxPackageRecipe` (`APPX0002` / `MSB4018`, `MrmSupportLibrary.GetLocation` null reference). No new `.msixupload` exists. Captured log: `platforms/windows/dist/store-packages/local-preflight-current.log`.
+- Existing Adlon workflows are stale at `07c0ad8`: policy and Store succeeded; app and engine failed. No Partner Center upload/submission/publication.
+## 2026-10-02 — Store work resumed from `07c0ad8`
+
+- Worktree is `C:\Users\adamm\.codex\worktrees\store-msix\FileID` on `codex/store-msix`. Existing local Windows work is preserved and remains uncommitted; no Store package was uploaded or submitted.
+- Rebuilt the x64 app test assembly with Visual Studio 18 MSBuild and ran it with VSTest: 422 passed, 11 failed of 433. Fixed text-field ownership for Ctrl+A/Ctrl+Z and changed window accelerators to mark only routed actions handled; both focused tests pass.
+- Local x64 Release app/test assembly build succeeded. `dotnet format whitespace FileID.sln --verify-no-changes --no-restore` still reports ENDOFLINE/CHARSET/WHITESPACE diagnostics across existing changed files, so formatting remains an open gate. Rust engine tests passed (400); `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all -- --check` passed.
+- Exact-head Adlon policy run `37077024695` passed. Engine run `37077024634` failed: x64 startup smoke reused the runner service profile's stale SQLite DB (unknown migrations v19-v22), ARM64-native passed, and ARM64-cross could not find `clang`. Startup smoke steps now use per-run temporary `FILEID_DB` paths; this workflow edit still needs push and Adlon validation. Store run `37077024698` was in progress; app run `37077024831` was queued at checkpoint.
+- Remaining 11 app failures are listed in [NEXT.md](NEXT.md). The stale Store artifact from `d186218` does not validate current code. Rebuild the package only after app/lifecycle and current-head CI blockers are resolved.
+## 2026-10-02 - Adlon checkpoint on `0188da1`
 
 - Runtime-egress digest refresh is pushed. Adlon policy run `37006425289` passed; local runtime-egress suite passed 24/24 and the production source-boundary check passed.
 - Adlon Store run `37005249596` passed for `cf5a540`; the x64 `.msixupload` is downloaded and inspected at the path/hash in [WINDOWS_STORE_PREFLIGHT.md](WINDOWS_STORE_PREFLIGHT.md). It predates only policy hashes and docs from `0188da1`; app source is unchanged.

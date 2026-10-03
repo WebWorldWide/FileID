@@ -1,4 +1,4 @@
-﻿// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
+// Outbound IPC command facade + AutoPilot orchestration for EngineClient.
 // Split from EngineClient.cs as a partial class so the lifecycle code (spawn,
 // stdout loop, event router) stays separate from the per-command surface.
 
@@ -27,10 +27,60 @@ internal sealed partial class EngineClient
     // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
     // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
     private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
-    private sealed record ScanStartRequest(ScanPhase? PreviousPhase);
+    private sealed record ScanStartRequest(
+        ScanPhase? PreviousPhase,
+        TaskCompletionSource<bool> Confirmation);
+    private sealed record DeepAnalyzeOperation(
+        TaskCompletionSource<DeepAnalyzeComplete>? Completion);
     private readonly GenerationOwnedOperationSlot<ScanStartRequest> _scanStartSlot = new();
+    private readonly GenerationOwnedOperationSlot<DeepAnalyzeOperation> _deepAnalyzeSlot = new();
     private long _scanPresentationRevision;
+    private long _deepAnalyzeRevision;
+    private long _scanControlRevision;
     private Task _writeTail = Task.CompletedTask;
+
+    private GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner TryReserveDeepAnalyzeCommand(
+        TaskCompletionSource<DeepAnalyzeComplete>? completion = null)
+    {
+        if (!_deepAnalyzeSlot.TryReserve(
+            SpawnGeneration,
+            Interlocked.Increment(ref _deepAnalyzeRevision),
+            new DeepAnalyzeOperation(completion),
+            out var owner))
+        {
+            throw new InvalidOperationException("A Deep Analyze operation is already running.");
+        }
+
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+        return owner;
+    }
+
+    private void ReleaseDeepAnalyzeOwner(GenerationOwnedOperationSlot<DeepAnalyzeOperation>.Owner owner)
+    {
+        if (_deepAnalyzeSlot.Release(owner))
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+        }
+    }
+
+    private bool CompleteDeepAnalyzeCommand(int generation, DeepAnalyzeComplete result)
+    {
+        var owner = _deepAnalyzeSlot.Current;
+        if (owner is null) return true;
+        if (owner.Generation != generation || !_deepAnalyzeSlot.Release(owner)) return false;
+
+        owner.Payload.Completion?.TrySetResult(result);
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+        return true;
+    }
+
+    private void RetireDeepAnalyzeGeneration(int generation)
+    {
+        if (_deepAnalyzeSlot.ReleaseGeneration(generation) is not { } owner) return;
+        owner.Payload.Completion?.TrySetException(
+            new InvalidOperationException("The engine generation ended before Deep Analyze completed."));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
+    }
 
 
     public Task SendCommandAsync(CommandPayload payload, CancellationToken ct = default)
@@ -51,11 +101,10 @@ internal sealed partial class EngineClient
         }
 
         var generation = SpawnGeneration;
-        Task predecessor;
         Task queued;
         lock (_writeLock)
         {
-            predecessor = _writeTail;
+            var predecessor = _writeTail;
             queued = Task.Run(async () =>
             {
                 try
@@ -130,7 +179,9 @@ internal sealed partial class EngineClient
         if (!_scanStartSlot.TryReserve(
             SpawnGeneration,
             revision,
-            new ScanStartRequest(Phase),
+            new ScanStartRequest(
+                Phase,
+                new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)),
             out var owner))
         {
             throw new InvalidOperationException("A scan start is already being sent.");
@@ -252,15 +303,51 @@ internal sealed partial class EngineClient
         get => _isPaused;
         private set => Set(ref _isPaused, value);
     }
+    private async Task EnsureScanStartConfirmedAsync()
+    {
+        var owner = _scanStartSlot.Current;
+        if (owner is null)
+        {
+            if (Phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan) return;
+            throw new InvalidOperationException("No active scan has been confirmed by the engine.");
+        }
+
+        if (owner.Generation != SpawnGeneration)
+            throw new InvalidOperationException("The engine changed before the scan start was confirmed.");
+
+        await owner.Payload.Confirmation.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+    }
+
+    private async Task SendScanControlAsync(CommandPayload payload, bool paused)
+    {
+        await EnsureScanStartConfirmedAsync();
+        var generation = SpawnGeneration;
+        var revision = Interlocked.Increment(ref _scanControlRevision);
+        var previousPaused = IsPaused;
+        IsPaused = paused;
+
+        try
+        {
+            await SendCommandAsync(payload).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (generation == SpawnGeneration
+                && Interlocked.Read(ref _scanControlRevision) == revision)
+            {
+                IsPaused = previousPaused;
+            }
+            throw;
+        }
+    }
+
     public Task PauseScanAsync()
     {
-        IsPaused = true;
-        return SendCommandAsync(new PauseScanCommand());
+        return SendScanControlAsync(new PauseScanCommand(), paused: true);
     }
     public Task ResumeScanAsync()
     {
-        IsPaused = false;
-        return SendCommandAsync(new ResumeScanCommand());
+        return SendScanControlAsync(new ResumeScanCommand(), paused: false);
     }
     public Task CancelScanAsync()
     {
@@ -438,74 +525,97 @@ internal sealed partial class EngineClient
     /// if no matching reply lands. The separate UndoStack listener still captures
     /// the same result for undo independently.</summary>
     public async Task<BulkActionResult> WaitForBulkActionResultAsync(
-        string actionPrefix, Func<Task> send, TimeSpan timeout, CancellationToken ct = default)
+        string actionPrefix,
+        Func<Task> send,
+        TimeSpan timeout,
+        Func<IDisposable?>? beforeSend = null,
+        CancellationToken ct = default)
     {
-        // Serialize same-prefix waits so only one handler + one in-flight command
-        // exists per prefix at a time — otherwise two concurrent same-prefix ops
-        // cross-resolve off whichever reply lands first (see _bulkWaitGates). The
-        // gate is released in the finally below.
+        ArgumentException.ThrowIfNullOrWhiteSpace(actionPrefix);
+        ArgumentNullException.ThrowIfNull(send);
+        if (timeout < TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+
         var gate = _bulkWaitGates.GetOrAdd(actionPrefix, _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct).ConfigureAwait(false);
-        var tcs = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!await gate.WaitAsync(TimeSpan.Zero, ct).ConfigureAwait(false))
+            throw new InvalidOperationException($"A {actionPrefix} operation is already awaiting its engine result.");
+
+        var generation = SpawnGeneration;
+        var terminal = new TaskCompletionSource<BulkActionResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         PropertyChangedEventHandler? handler = null;
+        PropertyChangedEventHandler? lifecycleHandler = null;
+        IDisposable? sendRegistration = null;
+        var sendCompleted = false;
+        var releaseOnExit = true;
+        var released = 0;
+
+        void ReleaseOwnership()
+        {
+            if (Interlocked.Exchange(ref released, 1) != 0) return;
+            PropertyChanged -= handler;
+            PropertyChanged -= lifecycleHandler;
+            sendRegistration?.Dispose();
+            gate.Release();
+        }
+
         handler = (_, e) =>
         {
             if (e.PropertyName == nameof(LastBulkAction)
-                && LastBulkAction is { } r
-                && r.Action is { } a
-                && a.StartsWith(actionPrefix, StringComparison.Ordinal))
+                && LastBulkAction is { } result
+                && result.Action is { } action
+                && action.StartsWith(actionPrefix, StringComparison.Ordinal))
             {
-                PropertyChanged -= handler;
-                tcs.TrySetResult(r);
+                terminal.TrySetResult(result);
             }
         };
+
+        lifecycleHandler = (_, e) =>
+        {
+            if ((e.PropertyName == nameof(SpawnGeneration) && SpawnGeneration != generation)
+                || (e.PropertyName == nameof(State) && State == LifecycleState.Crashed))
+            {
+                terminal.TrySetException(new InvalidOperationException(
+                    "The engine generation changed before the bulk action was confirmed."));
+            }
+        };
+
         try
         {
-            // Reset first so a value-equal reply still re-fires PropertyChanged.
-            // Inside the try so the finally always releases the gate even if a
-            // PropertyChanged subscriber throws during the reset.
             LastBulkAction = null;
+            sendRegistration = beforeSend?.Invoke();
             PropertyChanged += handler;
+            PropertyChanged += lifecycleHandler;
             await send().ConfigureAwait(false);
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            // Bulk edits share the engine's single SQLite writer with the scan
-            // and face-clustering pipeline.  A scan can legitimately keep an
-            // edit queued for several minutes; timing out here made rename,
-            // tagging, and People merges appear to fail even though the engine
-            // would apply them when its current batch released the writer.
-            // Keep the request alive while work is active, but preserve the
-            // caller's short timeout when the engine is idle (dead-engine and
-            // broken-pipe failures must still surface promptly).
-            var effectiveTimeout = timeout;
-            if (Phase is not null
-                && Phase is not ScanPhase.Completed
-                and not ScanPhase.Cancelled
-                and not ScanPhase.Failed)
-            {
-                effectiveTimeout = TimeSpan.FromMinutes(30);
-            }
-            cts.CancelAfter(effectiveTimeout);
-            using var reg = cts.Token.Register(() =>
-            {
-                PropertyChanged -= handler;
-                tcs.TrySetException(new TimeoutException(
-                    $"Engine did not confirm '{actionPrefix}' within {effectiveTimeout.TotalSeconds:0}s."));
-            });
-            return await tcs.Task.ConfigureAwait(false);
+            sendCompleted = true;
+            return timeout == Timeout.InfiniteTimeSpan
+                ? await terminal.Task.WaitAsync(ct).ConfigureAwait(false)
+                : await terminal.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (sendCompleted)
+        {
+            releaseOnExit = false;
+            _ = terminal.Task.ContinueWith(
+                _ => ReleaseOwnership(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
+        }
+        catch (OperationCanceledException) when (sendCompleted)
+        {
+            releaseOnExit = false;
+            _ = terminal.Task.ContinueWith(
+                _ => ReleaseOwnership(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            throw;
         }
         finally
         {
-            PropertyChanged -= handler;
-            gate.Release();
+            if (releaseOnExit) ReleaseOwnership();
         }
     }
-
-    /// <summary>tell the engine to re-probe CUDA/cuDNN
-    /// availability. Engine replies with a <c>hardwareReprobed</c> event
-    /// which lands on <see cref="LastHardwareReprobe"/>. Used by
-    /// Settings → Performance "Verify install" so the user gets
-    /// immediate feedback after installing cuDNN, without an engine
-    /// restart.</summary>
     public Task VerifyCudaPackAsync() => SendCommandAsync(new VerifyCudaPackCommand());
     /// <summary>Send deepAnalyzeFile and await the engine's terminal
     /// <c>DeepAnalyzeComplete</c> reply (the single-file handler always emits
@@ -518,66 +628,93 @@ internal sealed partial class EngineClient
     /// may still be in flight) rather than a hard error.</summary>
     public async Task DeepAnalyzeFileAsync(long fileId, string modelKind)
     {
-        var tcs = new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(TaskCreationOptions.RunContinuationsAsynchronously);
-        PropertyChangedEventHandler? handler = null;
-        handler = (_, e) =>
-        {
-            if (e.PropertyName == nameof(DeepAnalyzeComplete) && DeepAnalyzeComplete is { } r)
-            {
-                PropertyChanged -= handler;
-                tcs.TrySetResult(r);
-            }
-        };
+        var completion = new TaskCompletionSource<FileID.IpcSchema.DeepAnalyzeComplete>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var owner = TryReserveDeepAnalyzeCommand(completion);
         DeepAnalyzeComplete = null;
-        PropertyChanged += handler;
         try
         {
-            await SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind)).ConfigureAwait(false);
-            using var cts = new CancellationTokenSource(DeepAnalyzeFileTimeout);
-            using var reg = cts.Token.Register(() =>
+            try
             {
-                PropertyChanged -= handler;
-                tcs.TrySetException(new TimeoutException(
-                    $"Engine did not confirm deepAnalyzeFile({fileId}) within {DeepAnalyzeFileTimeout.TotalSeconds:0}s."));
-            });
-            var result = await tcs.Task.ConfigureAwait(false);
+                await SendCommandAsync(new DeepAnalyzeFileCommand(fileId, modelKind)).ConfigureAwait(false);
+            }
+            catch
+            {
+                ReleaseDeepAnalyzeOwner(owner);
+                throw;
+            }
+
+            FileID.IpcSchema.DeepAnalyzeComplete result;
+            try
+            {
+                result = await completion.Task.WaitAsync(DeepAnalyzeFileTimeout).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                _ = completion.Task.ContinueWith(
+                    task => _ = task.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                _ui.TryEnqueue(() => LastWarning = new EngineError(
+                    "deep_analyze_no_confirm",
+                    $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model; check the stream and cancel or retry if it stays stuck.",
+                    null,
+                    modelKind));
+                return;
+            }
+
             if (!result.Cancelled && result.Failed > 0)
             {
-                // This runs on the ConfigureAwait(false) thread-pool continuation;
-                // marshal the observable write to the UI thread so its
-                // PropertyChanged never fires off-thread into x:Bind. (audit A12)
                 _ui.TryEnqueue(() => LastWarning = new EngineError(
                     "deep_analyze_file_failed",
-                    "Deep Analyze couldn't process this file. It may be an unsupported format, or the model isn't installed yet.",
+                    "Deep Analyze couldn't process the file. It may be an unsupported format or the model may not be installed.",
                     null,
                     modelKind));
             }
         }
-        catch (TimeoutException)
+        catch (InvalidOperationException) when (owner.Generation != SpawnGeneration)
         {
             _ui.TryEnqueue(() => LastWarning = new EngineError(
-                "deep_analyze_no_confirm",
-                $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model — check the stream, or cancel and retry if it stays stuck.",
+                "deep_analyze_engine_restarted",
+                "The engine restarted before Deep Analyze completed. Retry the operation.",
                 null,
                 modelKind));
         }
-        finally
+    }
+    private static readonly TimeSpan DeepAnalyzeFileTimeout = TimeSpan.FromMinutes(5);
+    public async Task DeepAnalyzeFolderAsync(string pathPrefix, string modelKind)
+    {
+        var owner = TryReserveDeepAnalyzeCommand();
+        try
         {
-            PropertyChanged -= handler;
+            await SendCommandAsync(new DeepAnalyzeFolderCommand(pathPrefix, modelKind)).ConfigureAwait(false);
+        }
+        catch
+        {
+            ReleaseDeepAnalyzeOwner(owner);
+            throw;
         }
     }
 
-    /// <summary>Ceiling for a single-file Deep Analyze before we surface a
-    /// "no response" warning. Generous: a 7B VLM captioning one image on CPU
-    /// can run well over a minute, and we must NOT abort a healthy slow run —
-    /// this only guards a genuinely wedged engine.</summary>
-    private static readonly TimeSpan DeepAnalyzeFileTimeout = TimeSpan.FromMinutes(5);
-    public Task DeepAnalyzeFolderAsync(string pathPrefix, string modelKind) =>
-        SendCommandAsync(new DeepAnalyzeFolderCommand(pathPrefix, modelKind));
-    // tagsOnly = the fast background auto-tag pass (one VLM call/file). The
-    // manual Deep Analyze pass leaves it false → full caption + rename + tags.
-    public Task DeepAnalyzeAllAsync(string modelKind, bool skipExisting, bool tagsOnly = false, bool proposeRenames = true) =>
-        SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames));
+    public async Task DeepAnalyzeAllAsync(
+        string modelKind,
+        bool skipExisting,
+        bool tagsOnly = false,
+        bool proposeRenames = true)
+    {
+        var owner = TryReserveDeepAnalyzeCommand();
+        try
+        {
+            await SendCommandAsync(new DeepAnalyzeAllCommand(modelKind, skipExisting, tagsOnly, proposeRenames))
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            ReleaseDeepAnalyzeOwner(owner);
+            throw;
+        }
+    }
     public Task DeepAnalyzeCancelAsync() => SendCommandAsync(new DeepAnalyzeCancelCommand());
     /// <summary>No-progress (stall) window for a prewarm/pack install. A large
     /// pack download is legitimately long, so we do NOT cap total wall time —
@@ -955,7 +1092,7 @@ internal sealed partial class EngineClient
     /// <see cref="WaitForBulkActionResultAsync"/>; the IPC wire shape is
     /// unchanged (still a single restoreFromTrash command). The UndoStack
     /// listener captures the same reply independently.</summary>
-    public async Task RestoreFromTrashAsync(string batchId)
+    public async Task<bool> RestoreFromTrashAsync(string batchId)
     {
         try
         {
@@ -972,6 +1109,7 @@ internal sealed partial class EngineClient
                     $"Restored {result.Succeeded}; {result.Failed} couldn't be brought back{detail}.",
                     null));
             }
+            return result.Failed == 0 && result.Succeeded > 0;
         }
         catch (TimeoutException)
         {

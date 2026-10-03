@@ -815,6 +815,28 @@ pub(crate) async fn emit_bulk_result(
 
 /// Save the structured-name fields (title/first/middle/last/suffix) for a
 /// person cluster through the engine's single-writer connection.
+fn update_person_name(
+    tx: &rusqlite::Transaction<'_>,
+    payload: &ipc::RenamePersonPayload,
+) -> anyhow::Result<(Option<String>, usize)> {
+    let title = payload.title.as_deref().filter(|s| !s.trim().is_empty());
+    let first = payload.first_name.as_deref().filter(|s| !s.trim().is_empty());
+    let middle = payload.middle_name.as_deref().filter(|s| !s.trim().is_empty());
+    let last = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
+    let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
+    let display = match (first, last) {
+        (Some(f), Some(l)) => Some(format!("{f} {l}")),
+        (Some(f), None) => Some(f.to_string()),
+        (None, Some(l)) => Some(l.to_string()),
+        _ => None,
+    };
+    let changed = tx.execute(
+        "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=?6, is_unknown=0 WHERE id=?7",
+        rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
+    )?;
+    Ok((display, changed))
+}
+
 pub(crate) async fn handle_rename_person(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -823,33 +845,21 @@ pub(crate) async fn handle_rename_person(
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
-        let title = payload.title.as_deref().filter(|s| !s.trim().is_empty());
-        let first = payload.first_name.as_deref().filter(|s| !s.trim().is_empty());
-        let middle = payload
-            .middle_name
-            .as_deref()
-            .filter(|s| !s.trim().is_empty());
-        let last = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
-        let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
-        let display = match (first, last) {
-            (Some(f), Some(l)) => Some(format!("{f} {l}")),
-            (Some(f), None) => Some(f.to_string()),
-            (None, Some(l)) => Some(l.to_string()),
-            _ => None,
-        };
-        tx.execute(
-            "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=COALESCE(?6, name) WHERE id=?7",
-            rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
-        )?;
+        let (display, changed) = update_person_name(&tx, &payload)?;
         tx.commit()?;
+        let (succeeded, failed, ok, message) = if changed == 1 {
+            (1, 0, true, display)
+        } else {
+            (0, 1, false, Some("Person no longer exists.".to_string()))
+        };
         Ok(BulkActionResult {
             action: "renamePerson".into(),
-            succeeded: 1,
-            failed: 0,
+            succeeded,
+            failed,
             messages: vec![BulkActionItem {
                 file_id: Some(payload.person_id),
-                ok: true,
-                message: display,
+                ok,
+                message,
             }],
         })
     })
@@ -1248,6 +1258,75 @@ pub(crate) async fn handle_find_merge_suggestions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renaming_unknown_person_marks_them_known_and_clears_stale_name_on_blank() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE persons (
+                id INTEGER PRIMARY KEY,
+                title TEXT,
+                first_name TEXT,
+                middle_name TEXT,
+                last_name TEXT,
+                suffix TEXT,
+                name TEXT,
+                is_unknown INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO persons (id, name, is_unknown) VALUES (1, NULL, 1);",
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let (display, changed) = update_person_name(
+            &tx,
+            &ipc::RenamePersonPayload {
+                person_id: 1,
+                title: None,
+                first_name: Some("Ada".into()),
+                middle_name: None,
+                last_name: Some("Lovelace".into()),
+                suffix: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(display.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(changed, 1);
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT name FROM persons WHERE id=1", [], |row| row.get::<_, Option<String>>(0))
+                .unwrap()
+                .as_deref(),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(
+            conn.query_row("SELECT is_unknown FROM persons WHERE id=1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let (display, changed) = update_person_name(
+            &tx,
+            &ipc::RenamePersonPayload {
+                person_id: 1,
+                title: None,
+                first_name: None,
+                middle_name: None,
+                last_name: None,
+                suffix: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(display, None);
+        assert_eq!(changed, 1);
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT name FROM persons WHERE id=1", [], |row| row.get::<_, Option<String>>(0))
+                .unwrap(),
+            None
+        );
+    }
 
     fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
         let pid = std::process::id();

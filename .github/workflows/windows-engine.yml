@@ -277,6 +277,8 @@ jobs:
       - name: Smoke — engine startup + EP probe
         if: matrix.cross == false
         shell: pwsh
+        env:
+          FILEID_DB: ${{ runner.temp }}\fileid-engine-startup-${{ github.run_id }}-${{ github.run_attempt }}.sqlite
         timeout-minutes: 1
         run: |
           $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"
@@ -317,6 +319,8 @@ jobs:
       - name: Smoke — verifyCudaPack reprobe
         if: matrix.cross == false
         shell: pwsh
+        env:
+          FILEID_DB: ${{ runner.temp }}\fileid-engine-cuda-probe-${{ github.run_id }}-${{ github.run_attempt }}.sqlite
         timeout-minutes: 1
         run: |
           $exe = "target/${{ matrix.target }}/release/FileIDEngine.exe"

@@ -41,7 +41,9 @@
                         <StackLayout Orientation="Vertical" Spacing="6"/>
                     </ItemsRepeater.Layout>
                 </ItemsRepeater>
-                <ItemsRepeater x:Name="SelectableRepeater" Visibility="Collapsed">
+                <ItemsRepeater x:Name="SelectableRepeater"
+                               Visibility="Collapsed"
+                               ElementPrepared="OnSelectionElementPrepared">
                     <ItemsRepeater.Layout>
                         <StackLayout Orientation="Vertical" Spacing="6"/>
                     </ItemsRepeater.Layout>

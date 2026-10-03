@@ -5,12 +5,19 @@
 
 using System;
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace FileID.Services;
 
 internal sealed class UndoStack : INotifyPropertyChanged
 {
+    private sealed class EventRegistration(Action dispose) : IDisposable
+    {
+        private Action? _dispose = dispose;
+
+        public void Dispose() => Interlocked.Exchange(ref _dispose, null)?.Invoke();
+    }
     public static UndoStack Instance { get; } = new();
 
     private UndoStack() => ChangeLog.Instance.PropertyChanged += (_, _) => OnChanged();
@@ -48,47 +55,29 @@ internal sealed class UndoStack : INotifyPropertyChanged
     /// undo entry that calls `reverse(batchId)`. Used by Library +
     /// Cleanup trash buttons + the People merge flows.
     /// </summary>
-    public static void CaptureNextBulkResult(string actionPrefix, string undoLabel,
+    public static IDisposable CaptureNextBulkResult(
+        string actionPrefix,
+        string undoLabel,
         Func<string, Task<bool>> reverse)
     {
         var ec = ViewModels.EngineClient.Instance;
-
-        // BUG-7: previous version had a race — if the timeout fired,
-        // the next BulkActionResult would match the next registered
-        // handler instead, causing cross-talk between unrelated bulk
-        // actions. Use a single guard int that is consumed atomically:
-        // either the engine reply path wins, or the timeout path wins,
-        // and the loser is a no-op.
-        int consumed = 0; // 0 = pending, 1 = consumed
-        System.ComponentModel.PropertyChangedEventHandler? once = null;
-        once = (_, ev) =>
+        var consumed = 0;
+        System.ComponentModel.PropertyChangedEventHandler? handler = null;
+        var registration = new EventRegistration(() => ec.PropertyChanged -= handler);
+        handler = (_, ev) => DebugLog.SafeRun(nameof(CaptureNextBulkResult), () =>
         {
             if (ev.PropertyName != nameof(ViewModels.EngineClient.LastBulkAction)) return;
-            var bar = ec.LastBulkAction;
-            if (bar is null) return;
-            if (!bar.Action.StartsWith(actionPrefix, StringComparison.Ordinal)) return;
+            var result = ec.LastBulkAction;
+            if (result is null || !result.Action.StartsWith(actionPrefix, StringComparison.Ordinal)) return;
+            if (Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
 
-            if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
-
-            // Action is "trashFiles:<uuid>". A missing/empty suffix (no colon,
-            // or a trailing ':' with nothing after it) yields no batch id; skip
-            // rather than push an undo entry whose reverse can never resolve.
-            // IndexOf+Substring is bounds-safe — never throws on a malformed suffix.
-            var colonIdx = bar.Action.IndexOf(':');
-            var batchId = colonIdx >= 0 ? bar.Action.Substring(colonIdx + 1) : string.Empty;
-            ec.PropertyChanged -= once;
+            var separator = result.Action.IndexOf(':');
+            var batchId = separator >= 0 ? result.Action[(separator + 1)..] : string.Empty;
+            registration.Dispose();
             if (batchId.Length == 0) return;
             Instance.Push(undoLabel, () => reverse(batchId));
-        };
-        ec.PropertyChanged += once;
-
-        _ = Task.Delay(TimeSpan.FromSeconds(30)).ContinueWith(_ =>
-        {
-            // Only detach if we haven't already consumed a reply. This
-            // prevents the timeout from racing the reply handler and
-            // erroneously detaching after a successful Push.
-            if (System.Threading.Interlocked.CompareExchange(ref consumed, 1, 0) != 0) return;
-            try { ec.PropertyChanged -= once; } catch { /* swallow */ }
         });
+        ec.PropertyChanged += handler;
+        return registration;
     }
 }

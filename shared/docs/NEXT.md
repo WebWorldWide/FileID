@@ -1,19 +1,18 @@
-﻿## 2026-10-02 - Resume after `0188da1`
+# Next priorities
 
-- Policy digest refresh is pushed; Adlon policy run `37006425289` passed.
-- Check Adlon app run `37005249671` and engine run `37005249594` for completion. Their code is from `cf5a540`; the only later changes were reviewed source digests and documentation. App Debug tests reproduce 40 failures and block readiness.
-- Triage all app-suite failures; verify persisted undo formats against Rust output. Run full Windows tests and rebuild/inspect the package from the final validated source.
-- Keep Partner Center product `9PC8HSD86887` in draft. Do not upload, start a submission, or publish.
-# NEXT — resume here
+## 2026-10-02 — Current Windows Store checkpoint
 
-## 2026-10-02 — Resume Windows Store preflight
+Continue in `C:\Users\adamm\.codex\worktrees\store-msix\FileID` on `codex/store-msix`. Latest pushed head is `07c0ad8`; preserve the substantial local Windows changes and exclude generated `TestResults` files from commits.
 
-1. Check exact-head Adlon runs on `d186218`: policy `37008367364`, Store `37008367424`, engine `37008367442`, app `37008367444`. Resolve the 38 remaining Windows app test failures across lifecycle/generation ownership, persisted undo, installer/signing policy, preview teardown, close and keyboard safety, event-handler isolation, and other UI contracts. Do not weaken meaningful safety coverage.
-2. Run the full IPC suite and changed-file formatting checks.
-3. Validate exact-head Adlon app, engine, repository-policy, and Store-package workflows. Rebuild and inspect the `.msixupload` from the validated source head; the current inspected package is from `cf5a540`.
-4. Keep Partner Center product `9PC8HSD86887` as a draft. Do not upload a package, start submission, or publish.
-5. Keep [POST_STORE_FEATURES.md](POST_STORE_FEATURES.md) for after the first Store release: best-takes search across media, file conversion/upscaling/compression, and better folder organization.
+- Latest local Release app build succeeded. Full x64 app tests: 427 passed, 6 failed of 433. Remaining failures: `ReleaseBuildEmbedsPublisherPolicyAndReleaseScriptVerifiesEveryLayer`, `SuccessfulShortcutUndoRescansForNextPersistedToken`, `DeepAnalyzeReservationAndWaiterAreGenerationOwned`, `GpuRemovalBlocksAnotherScanUntilANewEngineGenerationIsReady`, `ExcludedFolderPurgeFencesRemovalAndStaleCompletionUi`, and `EngineLifecycleCallbacksCarryAndRecheckIntentRevision`. Do not weaken the safety contracts.
+- IPC schema tests passed: 54. Rust engine tests passed: 400; `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all -- --check` passed. The app queue, auto-scan, and Windows workflow focused contracts now pass; the deep-analysis generation test still fails at a further presentation/fencing assertion.
+- Exact required command `cd platforms\windows; .\build\publish-store-msix.ps1` rebuilt the x64 Release app and engine but VS 18 packaging failed at `GenerateAppxPackageRecipe` with `APPX0002` / `MSB4018` (`MrmSupportLibrary.GetLocation` null reference). No new `.msixupload` was produced. Log: `platforms/windows/dist/store-packages/local-preflight-current.log`.
+- Adlon results still refer to pushed `07c0ad8`: policy and Store jobs passed; engine and app jobs failed. Local workflow changes isolate the smoke databases and allow test restore; ARM64 cross-build still needs a supported `clang` toolchain. Push only after reviewing the combined changes, then validate all four Adlon workflows on the exact head.
+- Microsoft security methods remain unchanged. Partner Center product `9PC8HSD86887` remains a draft: no package upload, submission, or publication. Keep the site and docs limited to verified status.
 
+Next: resolve the six app failures without weakening tests; rerun app and IPC suites, formatting, Release build, Rust tests/Clippy; fix or bypass the local VS 18 packaging defect with a verified hosted Store artifact; inspect the current `.msixupload`; then update the site/docs and continue only the authorized Partner Center steps.
+
+## Earlier checkpoints
 ## 2026-10-02 — Windows Store release blockers
 
 - The Microsoft account prerequisite is satisfied: `adammnolle@gmail.com`, two-step ON, Gmail and authenticator marked up to date. Security methods were left unchanged.

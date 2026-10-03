@@ -76,6 +76,9 @@ public sealed partial class WelcomeSheet : UserControl
     }
 
     private void OnServicePropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnServicePropertyChanged), () => OnServicePropertyChangedCore(sender, e));
+
+    private void OnServicePropertyChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(ModelInstallerService.AllInstalled) && Svc.AllInstalled)
         {

@@ -1,4 +1,4 @@
-﻿// ModelInstallerService — per-model install state for the Welcome sheet.
+// ModelInstallerService — per-model install state for the Welcome sheet.
 //
 // 1:1 port of the state shape used by macOS WelcomeSheet.swift +
 // CLIPModelInstaller.swift + ArcFaceModelInstaller.swift. Each model
@@ -147,7 +147,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 ClearCancelMarks("mobileclip_s2", "clip_text");
                 await PrewarmAsync("mobileclip_s2").ConfigureAwait(false);
                 await PrewarmAsync("clip_text").ConfigureAwait(false);
-            });
+            }, uiDispatcher: _ui);
         Arcface = new ModelSlot(
             displayLabel: "Face models (YuNet + SFace)",
             approxBytes: 39UL * 1024 * 1024,
@@ -155,7 +155,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             {
                 ClearCancelMarks("arcface_default");
                 return PrewarmAsync("arcface_default");
-            });
+            }, uiDispatcher: _ui);
         RamPlus = new ModelSlot(
             displayLabel: "RAM++ image tagger",
             // ~882 MB fp16 ONNX (bakes the frozen tag-description embeddings in).
@@ -164,7 +164,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             {
                 ClearCancelMarks("ram_plus");
                 return PrewarmAsync("ram_plus");
-            });
+            }, uiDispatcher: _ui);
         DeepVlm = new ModelSlot(
             displayLabel: "Qwen2.5-VL 7B",
             approxBytes: 6_100_000_000UL,
@@ -177,7 +177,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 PersistSelectedVlmModelKind(_deepVlmModelKind);
                 await EngineClient.Instance.PrewarmModelAsync("llama_runtime_x64").ConfigureAwait(false);
                 await PrewarmAsync(_deepVlmModelKind).ConfigureAwait(false);
-            });
+            }, uiDispatcher: _ui);
         // GPU Acceleration Pack. Display label + Message are
         // adaptive — UpdateAcceleratorForVendor() refreshes them as soon
         // as the engine reports detected hardware. Until then, the row
@@ -201,7 +201,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 ClearCancelMarks("cudnn_runtime_x64", "ort_cuda_x64");
                 await PrewarmAsync("cudnn_runtime_x64").ConfigureAwait(false);
                 await PrewarmAsync("ort_cuda_x64").ConfigureAwait(false);
-            });
+            }, uiDispatcher: _ui);
         Accelerator.Message = "Detecting GPU…";
 
         Clip.PropertyChanged += OnSlotPropertyChanged;
@@ -592,6 +592,9 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     }
 
     private void OnSlotPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnSlotPropertyChanged), () => OnSlotPropertyChangedCore(sender, e));
+
+    private void OnSlotPropertyChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(ModelSlot.Status)) return;
         RecomputeAggregates();

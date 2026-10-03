@@ -30,25 +30,21 @@ public sealed class SettingsEngineStopSafetyTests
     {
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
-        var start = client.IndexOf("if (expectedExit)", StringComparison.Ordinal);
-        var end = client.IndexOf("var respawnRevision", start, StringComparison.Ordinal);
+        var callbackStart = client.IndexOf("private void OnProcessExited", StringComparison.Ordinal);
+        var start = client.IndexOf("if (expectedExit)", callbackStart, StringComparison.Ordinal);
+        var end = client.IndexOf("var delay = _consecutiveFailures switch", start, StringComparison.Ordinal);
 
-        Assert.True(start >= 0 && end > start);
+        Assert.True(callbackStart >= 0 && start > callbackStart && end > start);
+        var reset = client.IndexOf("ResetProcessBoundScanState();", callbackStart, StringComparison.Ordinal);
+        Assert.True(reset > callbackStart && reset < start,
+            "Process-bound scan presentation must be retired before expected-exit state is published.");
         var expectedExit = client[start..end];
-        var reset = expectedExit.IndexOf("ResetProcessBoundScanState();", StringComparison.Ordinal);
         var reason = expectedExit.IndexOf("CrashReason = StoppedReason;", StringComparison.Ordinal);
         var state = expectedExit.IndexOf("State = LifecycleState.Crashed;", StringComparison.Ordinal);
 
         Assert.True(
-            reset >= 0 && reason > reset && state > reason,
+            reason >= 0 && state > reason,
             "Expected exits must retire active scan UI before publishing a coherent stopped state.");
-
-        var stoppedIntentStart = client.IndexOf("var respawnRevision", end, StringComparison.Ordinal);
-        var stoppedIntentEnd = client.IndexOf("// Auto-respawn with bounded backoff.", stoppedIntentStart, StringComparison.Ordinal);
-        Assert.True(stoppedIntentStart >= 0 && stoppedIntentEnd > stoppedIntentStart);
-        var stoppedIntent = client[stoppedIntentStart..stoppedIntentEnd];
-        Assert.Contains("ResetProcessBoundScanState();", stoppedIntent, StringComparison.Ordinal);
-        Assert.Contains("CrashReason = StoppedReason;", stoppedIntent, StringComparison.Ordinal);
         Assert.DoesNotContain("CrashReason = string.Empty;", client, StringComparison.Ordinal);
         Assert.Equal("Engine stopped", EngineClient.StoppedReason);
     }

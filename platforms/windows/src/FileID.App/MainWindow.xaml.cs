@@ -45,6 +45,8 @@ public sealed partial class MainWindow : Window
     private SystemBackdropConfiguration? _backdropConfig;
     private MicaController? _micaController;
     private DesktopAcrylicController? _acrylicController;
+    private bool _closeSequenceRunning;
+    private bool _closeFinalized;
 
     // Per-monitor DPI re-scale. The WinUI framework auto-updates XamlRoot
     // RasterizationScale + re-layouts content on a DPI change, but the
@@ -123,6 +125,7 @@ public sealed partial class MainWindow : Window
 
         Activated += OnActivated;
         Closed += OnClosed;
+        AppWindow.Closing += OnAppWindowClosing;
         Step("ThemeChanged subscribe", () => ((FrameworkElement)Content).ActualThemeChanged += OnThemeChanged);
 
         Step("AppViewModel subscribe", () => AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged);
@@ -455,7 +458,7 @@ public sealed partial class MainWindow : Window
     private void WireKeyboardShortcuts()
     {
         // Ctrl+O — pick folder
-        AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, _) =>
+        AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, args) =>
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
             var result = await FolderPickerService.PickFolderAsync(hwnd);
@@ -463,6 +466,7 @@ public sealed partial class MainWindow : Window
             {
                 AppViewModel.Instance.FolderPath = result.Path;
             }
+            args.Handled = true;
         });
 
         // Ctrl+R — start scan. Awaited so engine-not-ready exceptions
@@ -470,8 +474,9 @@ public sealed partial class MainWindow : Window
         // fire-and-forget Task. The visible symptom of the swallow was
         // "press Ctrl+R, nothing happens" when the engine had failed
         // to load models.
-        AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, async (_, _) =>
+        AddAccelerator(VirtualKey.R, VirtualKeyModifiers.Control, async (_, args) =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
             var vm = AppViewModel.Instance;
             if (!vm.HasFolder) return;
             try
@@ -482,16 +487,25 @@ public sealed partial class MainWindow : Window
             {
                 Services.DebugLog.Error($"Ctrl+R scan failed: {ex.Message}");
             }
+            args.Handled = true;
         });
 
         // Ctrl+Shift+S — toggle sidebar
         AddAccelerator(VirtualKey.S, VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift,
-            (_, _) => AppViewModel.Instance.ToggleSidebar());
+            (_, args) =>
+            {
+                if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
+                AppViewModel.Instance.ToggleSidebar();
+                args.Handled = true;
+            });
 
         // Ctrl+Z — undo last destructive action.
-        AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, _) =>
+        AddAccelerator(VirtualKey.Z, VirtualKeyModifiers.Control, async (_, args) =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
+            if (!Services.UndoStack.Instance.CanUndo) return;
             var label = await Services.UndoStack.Instance.UndoAsync();
+            args.Handled = true;
             if (!string.IsNullOrEmpty(label))
             {
                 Services.DebugLog.Info($"Undid: {label}");
@@ -504,13 +518,24 @@ public sealed partial class MainWindow : Window
         // ONLY the OEM comma. (Previous version also registered Decimal,
         // which made numpad-period jump to Settings — surprise.)
         AddAccelerator((VirtualKey)0xBC, VirtualKeyModifiers.Control,
-            (_, _) => AppViewModel.Instance.ActiveTab = SidebarTab.Settings);
+            (_, args) =>
+            {
+                if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
+                AppViewModel.Instance.ActiveTab = SidebarTab.Settings;
+                args.Handled = true;
+            });
 
         // Ctrl+F — focus search. The accelerator is reserved here so the
         // LibraryView wiring is a one-liner (raise an event the LibraryView
         // subscribes to).
         AddAccelerator(VirtualKey.F, VirtualKeyModifiers.Control,
-            (_, _) => SearchFocusRequested?.Invoke(this, EventArgs.Empty));
+            (_, args) =>
+            {
+                if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
+                if (SearchFocusRequested is null) return;
+                SearchFocusRequested.Invoke(this, EventArgs.Empty);
+                args.Handled = true;
+            });
 
         // Alt+1..6 — jump to tab. Windows-native QoL addition (per
         // shared/docs/DECISIONS.md 2026-05-02 entry).
@@ -518,9 +543,11 @@ public sealed partial class MainWindow : Window
         {
             int idx = i;
             var key = (VirtualKey)((int)VirtualKey.Number1 + i);
-            AddAccelerator(key, VirtualKeyModifiers.Menu, (_, _) =>
+            AddAccelerator(key, VirtualKeyModifiers.Menu, (_, args) =>
             {
+                if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
                 AppViewModel.Instance.ActiveTab = SidebarTab.All[idx];
+                args.Handled = true;
             });
         }
 
@@ -538,11 +565,7 @@ public sealed partial class MainWindow : Window
             // Window-scoped: fires regardless of focused element.
             ScopeOwner = null,
         };
-        accel.Invoked += (s, e) =>
-        {
-            handler(s, e);
-            e.Handled = true;
-        };
+        accel.Invoked += handler;
         ((FrameworkElement)Content).KeyboardAccelerators.Add(accel);
     }
 
@@ -559,8 +582,154 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_closeFinalized) return;
+        args.Cancel = true;
+        if (_closeSequenceRunning) return;
+        _closeSequenceRunning = true;
+        _ = RunCloseSequenceAsync();
+    }
+
+    private async Task RunCloseSequenceAsync()
+    {
+        CloseStopLease? closeStop = null;
+        try
+        {
+            var proceed = Services.ChangeLog.Instance.PendingCount == 0;
+            if (!proceed)
+            {
+                try
+                {
+                    var dialog = new ContentDialog
+                    {
+                        XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                        Title = "FileID changes are still pending",
+                        Content = "Wait for pending undo and restore actions to finish before closing FileID.",
+                        PrimaryButtonText = "Check again",
+                        CloseButtonText = "Keep FileID open",
+                        DefaultButton = ContentDialogButton.Close,
+                    };
+                    proceed = await dialog.ShowAsync() == ContentDialogResult.Primary;
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Warn("Close-confirm dialog failed: " + ex.Message);
+                    proceed = false;
+                }
+            }
+
+            if (!proceed) return;
+
+            closeStop = await StopForApplicationCloseAsync();
+            await DrainCloseDispatcherAsync();
+            while (Services.ChangeLog.Instance.PendingCount > 0)
+            {
+                await closeStop.AbortAsync();
+                closeStop = null;
+                await ShowCloseBlockedAsync();
+                return;
+            }
+
+            if (!closeStop.TryCommit())
+            {
+                await closeStop.AbortAsync();
+                closeStop = null;
+                await ShowCloseBlockedAsync();
+                return;
+            }
+
+            _closeFinalized = true;
+            Close();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Application close sequence failed: " + ex.Message);
+            if (closeStop is not null)
+            {
+                try { await closeStop.AbortAsync(); }
+                catch (Exception restartError) { DebugLog.Warn("Engine restart after cancelled close failed: " + restartError.Message); }
+                closeStop = null;
+            }
+            await ShowCloseBlockedAsync();
+        }
+        finally
+        {
+            if (closeStop is not null)
+            {
+                try { await closeStop.AbortAsync(); }
+                catch (Exception restartError) { DebugLog.Warn("Engine restart after close failure failed: " + restartError.Message); }
+            }
+            _closeSequenceRunning = false;
+        }
+    }
+
+    private async Task<CloseStopLease> StopForApplicationCloseAsync()
+    {
+        var engine = EngineClient.Instance;
+        var stopped = await engine.StopAndWaitForExitAsync(TimeSpan.FromSeconds(10));
+        return new CloseStopLease(engine, stopped);
+    }
+
+    private async Task DrainCloseDispatcherAsync()
+    {
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            await Task.Yield();
+            return;
+        }
+
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!DispatcherQueue.TryEnqueue(() => completion.TrySetResult()))
+        {
+            throw new InvalidOperationException("The UI dispatcher stopped before close could be confirmed.");
+        }
+        await completion.Task;
+    }
+
+    private async Task ShowCloseBlockedAsync()
+    {
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = ((FrameworkElement)Content).XamlRoot,
+                Title = "FileID is still working",
+                Content = "FileID could not prove that pending actions and the engine had stopped cleanly. The window will stay open.",
+                CloseButtonText = "OK",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            await dialog.ShowAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Close-blocked dialog failed: " + ex.Message);
+        }
+    }
+
+    private sealed class CloseStopLease(EngineClient engine, bool stopped)
+    {
+        private bool _committed;
+        private bool _abortAttempted;
+
+        public bool TryCommit()
+        {
+            _committed = stopped;
+            return _committed;
+        }
+
+        public async Task AbortAsync()
+        {
+            if (_committed || !stopped || _abortAttempted) return;
+            _abortAttempted = true;
+            await engine.StartAsync();
+        }
+    }
+
+    /// <summary>Returns true when the close should proceed after this sequence.</summary>
     private void OnClosed(object sender, WindowEventArgs e)
     {
+        AppWindow.Closing -= OnAppWindowClosing;
         if (_micaController is not null) { _micaController.Dispose(); _micaController = null; }
         if (_acrylicController is not null) { _acrylicController.Dispose(); _acrylicController = null; }
         _backdropConfig = null;
