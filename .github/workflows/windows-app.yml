@@ -235,9 +235,9 @@ jobs:
               }
             }
           }
-          $testRuntimeConfig = Join-Path $testOutputRoot 'FileID.App.Tests.runtimeconfig.json'
-          if (-not (Test-Path $testRuntimeConfig -PathType Leaf)) { throw "App test runtime config is missing: $testRuntimeConfig" }
-          Copy-Item -LiteralPath $testRuntimeConfig -Destination (Join-Path $testOutputRoot 'testhost.runtimeconfig.json') -Force
+          $appRuntimeConfig = Join-Path $appOutputRoot 'FileID.runtimeconfig.json'
+          if (-not (Test-Path $appRuntimeConfig -PathType Leaf)) { throw "App runtime config is missing: $appRuntimeConfig" }
+          Copy-Item -LiteralPath $appRuntimeConfig -Destination (Join-Path $testOutputRoot 'testhost.runtimeconfig.json') -Force
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
