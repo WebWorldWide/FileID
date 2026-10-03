@@ -90,7 +90,10 @@ import FileIDShared
             try sql.execute(sql: "INSERT INTO catalog_observations(id,file_id,person_id,start_seconds,end_seconds,source_revision,model_version,confidence,stale) VALUES('grandma-in-video',1,7,12,13,'1:1','test',1,0)")
 
             let hits = try CatalogStore.search(sql, query: "opening presents", kinds: ["video"], personIDs: [7])
-            #expect(hits.map(\.fileID) == [1])
+            #expect(Set(hits.map(\.fileID)) == [1])
+            #expect(hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 })
+            let personOnly = try CatalogStore.search(sql, query: "", kinds: ["video"], personIDs: [7])
+            #expect(personOnly.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 })
         }
         let capture = WireCapture()
         await ChatService().handle(
@@ -106,7 +109,8 @@ import FileIDShared
             if case .chatResponse(let value) = event.payload { return value }
             return nil
         }.last
-        #expect(response?.hits.map(\.fileID) == [1])
+        #expect(Set(response?.hits.map(\.fileID) ?? []) == [1])
+        #expect(response?.hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 } == true)
         #expect(response?.message.contains("people: Grandma") == true)
     }
 }

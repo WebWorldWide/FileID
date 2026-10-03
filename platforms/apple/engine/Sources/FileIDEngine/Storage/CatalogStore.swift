@@ -90,7 +90,7 @@ public enum CatalogStore {
         let meaningful = query.split(whereSeparator: \.isWhitespace).filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }.joined(separator: " ")
         guard !meaningful.isEmpty else {
             guard filter != nil || peopleFilter != nil else { return [] }
-            return try Row.fetchAll(db, sql: """
+            var hits = try Row.fetchAll(db, sql: """
                 SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files f
                 WHERE (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
                   AND (? IS NULL OR f.id IN (
@@ -102,6 +102,8 @@ public enum CatalogStore {
                 """, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter]).map { row in
                 CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"])
             }
+            hits.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter))
+            return hits
         }
         let match = FTSQuery.quoted(meaningful)
         var results: [CatalogHit] = []
@@ -137,7 +139,44 @@ public enum CatalogStore {
             let chapterTime: Double? = row["chapter_time"]
             results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["text"], evidenceID: row["evidence_id"], startSeconds: chapterTime ?? row["passage_time"], page: row["page"]))
         }
+        results.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter))
         return results
+    }
+
+    private static func personObservationHits(_ db: GRDB.Database, peopleFilter: String?) throws -> [CatalogHit] {
+        guard let peopleFilter else { return [] }
+        return try Row.fetchAll(db, sql: """
+            SELECT o.id AS observation_id,o.start_seconds,p.name,p.title,p.first_name,p.middle_name,p.last_name,p.suffix,
+                   f.id,f.path_text,f.kind
+            FROM catalog_observations o
+            JOIN persons p ON p.id=o.person_id
+            JOIN files f ON f.id=o.file_id
+            WHERE o.person_id IN (SELECT value FROM json_each(?)) AND o.stale=0
+              AND o.start_seconds IS NOT NULL AND f.failed=0 AND f.kind='video'
+            ORDER BY f.id,o.start_seconds,o.id LIMIT 100
+            """, arguments: [peopleFilter]).map { row in
+            let structuredName = [
+                row["title"] as String?,
+                row["first_name"] as String?,
+                row["middle_name"] as String?,
+                row["last_name"] as String?,
+                row["suffix"] as String?
+            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            let legacyName: String? = row["name"]
+            let personName = structuredName.isEmpty ? legacyName ?? "Person" : structuredName
+            let observationID: String = row["observation_id"]
+            let startSeconds: Double = row["start_seconds"]
+            return CatalogHit(
+                fileID: row["id"],
+                path: row["path_text"],
+                kind: row["kind"],
+                text: "Person: \(personName)",
+                evidenceID: "person:" + observationID,
+                startSeconds: startSeconds
+            )
+        }
     }
 
     static func chapters(_ db: GRDB.Database, fileID: Int64) throws -> [CatalogChapter] {
