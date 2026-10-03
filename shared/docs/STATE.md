@@ -1,8 +1,12 @@
 # FileID — State
 
-## 2026-10-03 — Confirmed-person chat retrieval
+## 2026-10-03 — Confirmed-person chat retrieval merged; main CI green
 
-macOS chat now resolves exact saved People labels and first-name aliases to existing face-print and non-stale video-observation evidence. It applies the identity filter before result limits to file and timestamp/page matches, returns timestamped person observations that seek directly into matching videos and labels unedited model matches unverified, retains action words for keyword retrieval, and carries selected identities through follow-up filters. Unknown clusters are excluded; ambiguous exact first names include all matching confirmed identities. Four focused chat-search tests and the full Swift suite (480 tests in 96 suites) pass, including an end-to-end request against an internal temporary catalog. Current-document, catalog-schema, runtime-egress, and diff checks pass. Both Release products rebuild locally. The instrumentation-only PR head passed macOS Release/tests/privacy and action-policy checks; updated-head checks must include this chat increment before landing. No schema, IPC, dependency, model, or network changes. Adlon remains read-only.
+PR #208 merged to `main` as `244bc7b5a1d873ce8fc7020bd828d7e0f4acc80b`. macOS chat resolves exact saved People labels and first-name aliases, applies identity filters before limits, returns timestamped appearance evidence, labels user-confirmed and unverified model-linked observations distinctly, and carries identity filters through refinements. Four focused tests and the complete native suite (480 tests in 96 suites) passed. Current-document, catalog-schema, runtime-egress, and diff checks passed; both Release products rebuilt locally. No IPC, schema, dependency, model, or network changes.
+
+All five GitHub Actions workflows passed against the exact merge SHA: macOS `37121130979`; repository policy `37121130970`; Linux `37121199441`; Windows engine `37121199224`; Windows app `37121917095`. Linux workflow jobs ran on `adlon-fileid-linux`. Windows x64 and ARM64 cross-builds ran on `adlon-fileid-windows`; native Windows ARM64 engine execution used hosted ARM hardware. Adlon data volume was not mounted or accessed; no example data was modified. `origin` contains only `main`; the feature branch was deleted. An unrelated existing local `codex/store-msix` worktree is intentionally preserved.
+
+Next Mac slice: event/temporal retrieval over existing chapter, observation, event, and take evidence. The full next-version goal remains active. New Windows/Linux product work and physical acceptance are deferred until the owner is on that PC. See `AGENT_HANDOFF.md` for next-agent instructions.
 
 ## 2026-10-03 — Scan admission timing instrumentation
 
