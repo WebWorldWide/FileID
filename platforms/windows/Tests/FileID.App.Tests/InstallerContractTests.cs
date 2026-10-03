@@ -189,11 +189,11 @@ public sealed class InstallerContractTests
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
-            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64",
+            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
-            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build -c Debug -p:Platform=x64",
+            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
             workflow,
             StringComparison.Ordinal);
         Assert.DoesNotContain("vstest.console.exe", workflow, StringComparison.Ordinal);

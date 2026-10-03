@@ -198,6 +198,8 @@ jobs:
           if (-not (Test-Path $testOutputRootShim -PathType Leaf)) {
             Copy-Item -LiteralPath $shimSource -Destination $testOutputRootShim
           }
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $sqlitePackage = $deps.libraries.PSObject.Properties.Name | Where-Object { $_ -like 'Microsoft.Data.Sqlite.Core/*' } | Select-Object -First 1
           if (-not $sqlitePackage) { throw 'Microsoft.Data.Sqlite.Core is missing from the app test dependency manifest' }
           $sqliteVersion = $sqlitePackage.Split('/', 2)[1]
@@ -206,15 +208,11 @@ jobs:
           if (-not (Test-Path $sqliteSource -PathType Leaf)) { throw "SQLite app output assembly is missing: $sqliteSource" }
           foreach ($packageFolder in $packageFolders) {
             $packageSqlite = Join-Path $packageFolder $relativeSqlite
-            if (-not (Test-Path $packageSqlite -PathType Leaf)) {
-              Write-Host "Staging SQLite runtime asset in test-host package folder: $packageFolder"
-              New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageSqlite) | Out-Null
-              Copy-Item -LiteralPath $sqliteSource -Destination $packageSqlite
-            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageSqlite) | Out-Null
+            Copy-Item -LiteralPath $sqliteSource -Destination $packageSqlite -Force
+            Write-Host "Staged SQLite runtime asset in test-host package folder: $packageSqlite"
           }
-          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 
