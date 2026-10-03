@@ -3479,3 +3479,8 @@ The main.rs source-boundary digest update covers only the reviewed health dispat
 The native image worker actually loads OpenCLIP ViT-B/32 while its writer labeled every vector `mobileclip_s2`. Dimension alone cannot establish compatibility. Use one space identity derived from all four pinned artifacts and the existing RGB stretch/BPE/L2 preprocessing contract; verify local files before loading image/text sessions. Refresh legacy derived caches through fresh inference while preserving user evidence. Reject invalid vectors at insertion and retrieval. Keep SQLite authoritative; a future persistent index must use the same identity and remain rebuildable. This adds no dependency and promotes no new model.
 
 The owner deferred new Windows/Linux implementation and physical validation until working on the PC. Continue the full Mac plan and retain narrowly recoverable port work in verified remote tags.
+
+
+## 2026-10-02 — Reuse native HNSW for persistent-index groundwork
+
+Keep the existing Accelerate-backed Swift graph and add a versioned binary storage API, avoiding a new package. Preserve graph IDs, tombstones and RNG state across restart so incremental insertion does not silently change identities or approximate results. Bind snapshots to both model identity and a caller-supplied source revision; verify checksums and graph structure before accepting them. Bound disk reads, dimensions, graph size, neighbour counts and layer depth, and enforce read-only output guards. Catalog integration must supply durable SQLite invalidation and external entity mapping before any automatic reuse; this API alone does not satisfy persistent retrieval acceptance.

@@ -1,5 +1,7 @@
 import Foundation
 import Accelerate
+import CryptoKit
+import FileIDShared
 
 // MARK: - HNSWIndex
 //
@@ -471,5 +473,170 @@ final class HNSWIndex {
         var sumSq: Float = 0
         vDSP_distancesq(a, 1, b, 1, &sumSq, vDSP_Length(dim))
         return sumSq.squareRoot()
+    }
+}
+
+
+extension HNSWIndex {
+    enum SnapshotError: Error {
+        case invalidFormat, incompatibleSpace, staleRevision
+    }
+
+    func writeSnapshot(to url: URL, modelID: String, sourceRevision: String) throws {
+        guard url.isFileURL else { throw SnapshotError.invalidFormat }
+        try ReadOnlyLocations.requireWritable(url)
+        try snapshot(modelID: modelID, sourceRevision: sourceRevision).write(to: url, options: .atomic)
+    }
+
+    static func readSnapshot(from url: URL, modelID: String, sourceRevision: String) throws -> HNSWIndex {
+        guard url.isFileURL,
+              let properties = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              properties.isRegularFile == true, let size = properties.fileSize,
+              size > 32, size <= 512 * 1024 * 1024 else { throw SnapshotError.invalidFormat }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        guard let data = try handle.read(upToCount: size + 1),
+              data.count <= 512 * 1024 * 1024 else { throw SnapshotError.invalidFormat }
+        guard try handle.read(upToCount: 1)?.isEmpty != false else { throw SnapshotError.invalidFormat }
+        return try restoreSnapshot(data, modelID: modelID, sourceRevision: sourceRevision)
+    }
+
+    func snapshot(modelID: String, sourceRevision: String) throws -> Data {
+        guard (1...200).contains(modelID.utf8.count), (1...200).contains(sourceRevision.utf8.count),
+              (1...4096).contains(dim), (4...64).contains(M),
+              (1...4096).contains(efConstruction), (1...4096).contains(efSearch),
+              nodes.count <= 250_000 else { throw SnapshotError.invalidFormat }
+        var result = Data("FileID-HNSW-1".utf8)
+        func append<T: FixedWidthInteger>(_ value: T) {
+            var littleEndian = value.littleEndian
+            withUnsafeBytes(of: &littleEndian) { result.append(contentsOf: $0) }
+        }
+        func appendString(_ value: String) {
+            let bytes = Data(value.utf8)
+            append(UInt32(bytes.count))
+            result.append(bytes)
+        }
+        appendString(modelID)
+        appendString(sourceRevision)
+        append(UInt32(dim))
+        append(UInt32(M))
+        append(UInt32(efConstruction))
+        append(UInt32(efSearch))
+        append(rngState)
+        append(entryPoint)
+        append(UInt32(entryLevel))
+        append(UInt32(nodes.count))
+        for node in nodes {
+            guard node.vec.count == dim, node.vec.allSatisfy(\.isFinite),
+                  (1...33).contains(node.levels.count) else { throw SnapshotError.invalidFormat }
+            append(UInt8(node.deleted ? 1 : 0))
+            append(UInt8(node.levels.count))
+            for value in node.vec { append(value.bitPattern) }
+            for (level, neighbours) in node.levels.enumerated() {
+                guard neighbours.count <= (level == 0 ? Mmax0 : M) else { throw SnapshotError.invalidFormat }
+                append(UInt32(neighbours.count))
+                for neighbour in neighbours { append(neighbour) }
+            }
+            guard result.count <= 512 * 1024 * 1024 - 32 else { throw SnapshotError.invalidFormat }
+        }
+        result.append(contentsOf: SHA256.hash(data: result))
+        return result
+    }
+
+    static func restoreSnapshot(_ data: Data, modelID: String, sourceRevision: String) throws -> HNSWIndex {
+        guard data.count > 32, data.count <= 512 * 1024 * 1024 else { throw SnapshotError.invalidFormat }
+        let payload = Data(data.dropLast(32))
+        guard Data(SHA256.hash(data: payload)) == Data(data.suffix(32)) else { throw SnapshotError.invalidFormat }
+        var reader = SnapshotReader(data: payload)
+        guard try reader.bytes(13) == Data("FileID-HNSW-1".utf8) else { throw SnapshotError.invalidFormat }
+        guard try reader.string() == modelID else { throw SnapshotError.incompatibleSpace }
+        guard try reader.string() == sourceRevision else { throw SnapshotError.staleRevision }
+        let dim = Int(try reader.integer(UInt32.self))
+        let m = Int(try reader.integer(UInt32.self))
+        let construction = Int(try reader.integer(UInt32.self))
+        let search = Int(try reader.integer(UInt32.self))
+        let rng = try reader.integer(UInt64.self)
+        let entry = try reader.integer(Int32.self)
+        let entryLevel = Int(try reader.integer(UInt32.self))
+        let count = Int(try reader.integer(UInt32.self))
+        guard (1...4096).contains(dim), (4...64).contains(m),
+              (1...4096).contains(construction), (1...4096).contains(search),
+              entryLevel <= 32, count <= 250_000, rng != 0,
+              count <= reader.remaining / (dim * 4 + 6) else { throw SnapshotError.invalidFormat }
+        let index = HNSWIndex(dim: dim, M: m, efConstruction: construction, efSearch: search)
+        index.nodes.reserveCapacity(count)
+        for _ in 0..<count {
+            let deleted = try reader.integer(UInt8.self)
+            let levelCount = Int(try reader.integer(UInt8.self))
+            guard deleted <= 1, (1...33).contains(levelCount) else { throw SnapshotError.invalidFormat }
+            var vector: [Float] = []
+            vector.reserveCapacity(dim)
+            for _ in 0..<dim {
+                let value = Float(bitPattern: try reader.integer(UInt32.self))
+                guard value.isFinite else { throw SnapshotError.invalidFormat }
+                vector.append(value)
+            }
+            var levels: [[Int32]] = []
+            for level in 0..<levelCount {
+                let neighboursCount = Int(try reader.integer(UInt32.self))
+                guard neighboursCount <= (level == 0 ? m * 2 : m) else { throw SnapshotError.invalidFormat }
+                var neighbours: [Int32] = []
+                for _ in 0..<neighboursCount {
+                    let neighbour = try reader.integer(Int32.self)
+                    guard neighbour >= 0, Int(neighbour) < count else { throw SnapshotError.invalidFormat }
+                    neighbours.append(neighbour)
+                }
+                guard Set(neighbours).count == neighbours.count else { throw SnapshotError.invalidFormat }
+                levels.append(neighbours)
+            }
+            index.nodes.append(Node(vec: vector, levels: levels, deleted: deleted == 1))
+        }
+        guard reader.remaining == 0 else { throw SnapshotError.invalidFormat }
+        if count == 0 {
+            guard entry == -1, entryLevel == 0 else { throw SnapshotError.invalidFormat }
+        } else {
+            guard entry >= 0, Int(entry) < count,
+                  index.nodes[Int(entry)].levels.count == entryLevel + 1,
+                  index.nodes.allSatisfy({ $0.levels.count <= entryLevel + 1 }) else { throw SnapshotError.invalidFormat }
+        }
+        for (id, node) in index.nodes.enumerated() {
+            for (level, neighbours) in node.levels.enumerated() {
+                guard neighbours.allSatisfy({ Int($0) != id && index.nodes[Int($0)].levels.count > level }) else {
+                    throw SnapshotError.invalidFormat
+                }
+            }
+        }
+        index.rngState = rng
+        index.entryPoint = entry
+        index.entryLevel = entryLevel
+        index.deletedCount = index.nodes.filter(\.deleted).count
+        return index
+    }
+
+    private struct SnapshotReader {
+        let data: Data
+        var offset = 0
+        var remaining: Int { data.count - offset }
+
+        mutating func bytes(_ count: Int) throws -> Data {
+            guard count >= 0, count <= remaining else { throw SnapshotError.invalidFormat }
+            defer { offset += count }
+            return data.subdata(in: offset..<(offset + count))
+        }
+
+        mutating func integer<T: FixedWidthInteger>(_ type: T.Type) throws -> T {
+            let count = MemoryLayout<T>.size
+            guard count <= remaining else { throw SnapshotError.invalidFormat }
+            defer { offset += count }
+            return data.withUnsafeBytes { T(littleEndian: $0.loadUnaligned(fromByteOffset: offset, as: T.self)) }
+        }
+
+        mutating func string() throws -> String {
+            let count = Int(try integer(UInt32.self))
+            guard (1...200).contains(count), let value = String(data: try bytes(count), encoding: .utf8) else {
+                throw SnapshotError.invalidFormat
+            }
+            return value
+        }
     }
 }

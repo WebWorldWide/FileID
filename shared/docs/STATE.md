@@ -1,5 +1,12 @@
 # FileID — State
 
+
+## 2026-10-02 — native nearest-neighbor snapshot groundwork
+
+The existing Swift HNSW graph now has bounded, checksummed binary snapshots tied to an exact model identity and caller-supplied source revision. Restoration preserves node IDs, tombstones, graph topology and RNG state, so subsequent inserts retain deterministic behavior. Atomic disk writes use the shared read-only-location guard; invalid files, graphs, model identities and source revisions are rejected. Four new tests cover restored search/insertion equality, empty indexes, incompatible/stale snapshots, corrupted/truncated/bounded malformed input and protected output rejection.
+
+This is a storage API, not yet a catalog-integrated persistent index. Automatic cache reuse, SQLite change tracking, entity mapping, rebuild recovery, hybrid engine retrieval and latency acceptance remain unfinished. All 449 native tests across 92 suites pass on the final code with the actual worker path configured. No dependency, IPC or database schema changed.
+
 ## 2026-10-02 — macOS verified CLIP embedding compatibility
 
 Mac search and restructure now use a shared CLIP space identity derived from the pinned image encoder, text encoder, tokenizer artifacts and preprocessing version. Local model loading verifies those artifact hashes. Newly inferred vectors must be finite, 512-dimensional and normalized; legacy `mobileclip_s2`, malformed and failed-file candidates are excluded rather than relabeled. Rescans refresh legacy image/video caches without replacing accepted names, user tags or face assignments. An unrenderable legacy OBJ clears only its incompatible derived embedding and records the completed attempt.

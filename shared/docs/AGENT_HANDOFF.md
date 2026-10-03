@@ -14,7 +14,7 @@ Foundation PR #186, runner bootstrap #188, stable People identities #189, and tr
 
 ## macOS continuation
 
-The verified CLIP-space change is the active milestone. Run native Swift tests with `FILEID_TEST_ENGINE_PATH` pointing at the freshly built worker, and serialize native builds on this 16 GB Mac. New cache rows use the pinned artifact/preprocessing identity; old rows are refreshed through inference during rescans, never relabeled by dimension. Persistent indexing, engine-owned hybrid retrieval, the scheduler and the rest of `NEXT_VERSION.md` remain unfinished. Do not equate passing synthetic fixtures with model accuracy or hardware acceptance.
+The verified CLIP-space change is the active milestone. Run native Swift tests with `FILEID_TEST_ENGINE_PATH` pointing at the freshly built worker, and serialize native builds on this 16 GB Mac. New cache rows use the pinned artifact/preprocessing identity; old rows are refreshed through inference during rescans, never relabeled by dimension. Persistent indexing, engine-owned hybrid retrieval, the scheduler and the rest of `NEXT_VERSION.md` remain unfinished. The native HNSW snapshot API is not connected to retrieval yet; its source-revision argument must come from validated SQLite change tracking, and external entity IDs still need a persistent mapping. Do not reuse it by checking only file timestamps. Do not equate passing synthetic fixtures with model accuracy or hardware acceptance.
 
 ## Health contract follow-up (merged)
 
