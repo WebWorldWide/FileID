@@ -1754,7 +1754,27 @@ public enum FaceClustering {
                         current: ScanCoordinator.isCancelledSync(),
                         shuttingDown: ScanCoordinator.isShuttingDownSync()
                     ) { return [] }
-                    return await Self.extractOneFile(path: path, rows: rows)
+                    do {
+                        return try await ResourceScheduler.shared.withReservation(
+                            ResourceScheduler.Demand(cpuUnits: 1),
+                            priority: .background,
+                            waitForCapacity: true,
+                            isCancelled: {
+                                Self.clusterShouldCancel(
+                                    baseline: cancelBaseline,
+                                    current: ScanCoordinator.isCancelledSync(),
+                                    shuttingDown: ScanCoordinator.isShuttingDownSync()
+                                )
+                            }
+                        ) {
+                            await Self.extractOneFile(path: path, rows: rows)
+                        }
+                    } catch is CancellationError {
+                        return []
+                    } catch {
+                        JSONLog.shared.warn(ev: "face_print_scheduler_failed", error: "\(error)")
+                        return []
+                    }
                 }
             }
             var out: [PendingExtract] = []

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import FileIDEngine
 
@@ -123,6 +124,89 @@ struct ResourceSchedulerTests {
         let next = try await scheduler.reserveMemory(8_000, priority: .background)
         #expect(await scheduler.snapshot().reservedMemoryMB == 8_000)
         await scheduler.release(next)
+    }
+
+    @Test("scheduled work waits for foreground capacity and releases its lease")
+    func scheduledWorkWaitsAndReleasesLease() async throws {
+        let scheduler = ResourceScheduler(memory: { (16_384, 16_384) }, cpuCapacity: 1)
+        let foreground = try await scheduler.reserve(
+            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
+        )
+        let background = Task {
+            try await scheduler.withReservation(
+                ResourceScheduler.Demand(cpuUnits: 1),
+                priority: .background,
+                waitForCapacity: true
+            ) { 42 }
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await scheduler.snapshot().reservedCPUUnits == 1)
+        await scheduler.release(foreground)
+
+        #expect(try await background.value == 42)
+        #expect(await scheduler.snapshot().reservedCPUUnits == 0)
+        #expect(await scheduler.snapshot().activeReservations == 0)
+    }
+
+    @Test("scheduled work releases its lease when the operation fails")
+    func scheduledWorkReleasesLeaseAfterFailure() async throws {
+        let scheduler = ResourceScheduler(memory: { (16_384, 16_384) }, cpuCapacity: 1)
+
+        await #expect(throws: CancellationError.self) {
+            try await scheduler.withReservation(
+                ResourceScheduler.Demand(cpuUnits: 1),
+                priority: .background
+            ) { throw CancellationError() }
+        }
+
+        #expect(await scheduler.snapshot().reservedCPUUnits == 0)
+        #expect(await scheduler.snapshot().activeReservations == 0)
+    }
+
+    @Test("cancelling scheduled work releases its lease")
+    func cancellingScheduledWorkReleasesLease() async throws {
+        let scheduler = ResourceScheduler(memory: { (16_384, 16_384) }, cpuCapacity: 1)
+        let foreground = try await scheduler.reserve(
+            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
+        )
+        let background = Task {
+            try await scheduler.withReservation(
+                ResourceScheduler.Demand(cpuUnits: 1),
+                priority: .background,
+                waitForCapacity: true
+            ) { 42 }
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        background.cancel()
+        await #expect(throws: CancellationError.self) { try await background.value }
+        await scheduler.release(foreground)
+
+        #expect(await scheduler.snapshot().reservedCPUUnits == 0)
+        #expect(await scheduler.snapshot().waitingCount == 0)
+    }
+
+    @Test("scheduled work observes cancellation while retrying capacity")
+    func scheduledWorkObservesExternalCancellation() async throws {
+        let scheduler = ResourceScheduler(memory: { (16_384, 16_384) }, cpuCapacity: 1)
+        let foreground = try await scheduler.reserve(
+            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
+        )
+        let cancelAt = Date().addingTimeInterval(0.02)
+
+        await #expect(throws: CancellationError.self) {
+            try await scheduler.withReservation(
+                ResourceScheduler.Demand(cpuUnits: 1),
+                priority: .background,
+                waitForCapacity: true,
+                isCancelled: { Date() >= cancelAt }
+            ) { 42 }
+        }
+
+        await scheduler.release(foreground)
+        #expect(await scheduler.snapshot().reservedCPUUnits == 0)
+        #expect(await scheduler.snapshot().waitingCount == 0)
     }
 
     @Test("background indexing defers when resident interactive work owns the available budget")

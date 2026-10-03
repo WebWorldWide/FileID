@@ -131,6 +131,43 @@ actor ResourceScheduler {
         return lease
     }
 
+    func withReservation<T: Sendable>(
+        _ demand: Demand,
+        priority: Priority,
+        waitForCapacity: Bool = false,
+        isCancelled: @Sendable () -> Bool = { Task.isCancelled },
+        operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        let lease: MemoryLease
+        while true {
+            try Task.checkCancellation()
+            if isCancelled() { throw CancellationError() }
+            do {
+                if waitForCapacity {
+                    lease = try reserveImmediately(demand, priority: priority)
+                } else {
+                    lease = try await reserve(demand, priority: priority)
+                }
+                break
+            } catch AdmissionError.insufficientResources where waitForCapacity {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+
+        defer { release(lease) }
+        try Task.checkCancellation()
+        if isCancelled() { throw CancellationError() }
+        return try await operation()
+    }
+
+    private func reserveImmediately(_ demand: Demand, priority: Priority) throws -> MemoryLease {
+        try validate(demand)
+        guard waiters.isEmpty, canGrant(demand) else { throw admissionError(demand) }
+        let lease = MemoryLease(id: UUID())
+        reservations[lease] = ActiveReservation(demand: demand, priority: priority)
+        return lease
+    }
+
     func release(_ lease: MemoryLease) {
         guard reservations.removeValue(forKey: lease) != nil else { return }
         drainWaiters()

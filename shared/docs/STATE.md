@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-03 — Schedule face embedding work
+
+FaceClustering now obtains a background CPU reservation for each source image before running the bounded ArcFace face-print extraction pass. If interactive work temporarily fills CPU capacity, the worker retries every 100 ms and checks both task cancellation and the scan/shutdown mirrors; every acquired reservation is released on all exit paths. The existing four-image extraction cap remains in force. Discovery and scan-time Vision/tagging/CLIP work, conversions, and other heavy jobs are still outside shared scheduler admission.
+
+The scheduler suite passes all 10 tests. Full native Swift validation passes 477 tests across 95 suites (162 Shared, 20 App, 295 Engine), using an external scratch directory to avoid code-signing failures caused by Finder metadata in the project-local dependency cache. The Release engine and app build, and the final `bash run.sh --no-wipe` launch kept the existing library state and started both app and engine processes. This change does not establish face accuracy, interactive latency, or complete scheduler coverage. Adlon remains example-only; fixtures ran on internal temporary storage.
+
 
 ## 2026-10-03 — Shared Mac resource admission
 
