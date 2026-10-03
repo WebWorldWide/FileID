@@ -39,7 +39,7 @@
     <ProjectReference Include="..\..\src\FileID.App\FileID.App.csproj" />
   </ItemGroup>
 
-  <Target Name="CopyWindowsSdkRuntimeAssemblyForTestHost" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT' and '$(RuntimeIdentifier)' != ''">
+  <Target Name="CopyWindowsSdkRuntimeAssemblyForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
     <PropertyGroup>
       <WindowsSdkRuntimeAssembly>$(MSBuildProjectDirectory)\..\..\src\FileID.App\bin\$(Platform)\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\Microsoft.Windows.SDK.NET.dll</WindowsSdkRuntimeAssembly>
     </PropertyGroup>
@@ -52,7 +52,7 @@
     <Copy SourceFiles="$(WinRtRuntimeAssembly)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
   </Target>
 
-  <Target Name="StageCodeCoverageRuntimeForTestHost" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT' and '$(RuntimeIdentifier)' != ''">
+  <Target Name="StageCodeCoverageRuntimeForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
     <PropertyGroup>
       <CodeCoveragePackageVersion>$([System.IO.Path]::GetFileName('$(PkgMicrosoft_CodeCoverage)'))</CodeCoveragePackageVersion>
       <CodeCoverageShim>$(PkgMicrosoft_CodeCoverage)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
