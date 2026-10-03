@@ -9,6 +9,7 @@ actor TimelineAnalysis {
     private var scheduled: Set<String> = []
     private var runningID: String?
     private var samplerTask: Task<VideoFrameWorker.Sample, Error>?
+    private var speechTask: Task<[TimelineSpeechTranscription.Passage]?, Never>?
     private struct Recipe: Codable, Sendable { let modelKind: String; let modelVersion: String; let intervalSeconds: Double }
 
     func enqueue(_ request: CatalogRequest, database: Database, sink: IPCSink) async -> CatalogResponse {
@@ -29,7 +30,7 @@ actor TimelineAnalysis {
                 try db.execute(sql: "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,created_at,updated_at) VALUES(?,'timelineSample',?,?,'queued',?,?)", arguments: [id,encodedIDs,recipe,now,now])
             }
             await schedule(id, database: database, sink: sink)
-            return CatalogResponse(requestID: request.requestID, status: "ok", message: "Visual sampling checks one frame every ten seconds. It can miss fast events; coverage will remain incomplete.", jobs: try await CatalogStore.jobs(database))
+            return CatalogResponse(requestID: request.requestID, status: "ok", message: "Visual sampling checks one frame every ten seconds. When a video has audio and on-device speech recognition is available, timestamped transcript passages are added. Sparse visual coverage can miss fast events.", jobs: try await CatalogStore.jobs(database))
         } catch {
             return CatalogResponse(requestID: request.requestID, status: "error", message: error.localizedDescription)
         }
@@ -37,6 +38,7 @@ actor TimelineAnalysis {
 
     func recover(database: Database) async {
         VideoFrameWorker.sweepAbandonedFrames()
+        TimelineSpeechTranscription.sweepAbandonedAudio()
         try? await database.pool.write { db in
             try db.execute(sql: "UPDATE catalog_jobs SET state='paused',error='Interrupted. Load the visual model and resume.',updated_at=? WHERE state IN ('running','queued') AND kind='timelineSample'", arguments: [Date().timeIntervalSince1970])
         }
@@ -49,7 +51,11 @@ actor TimelineAnalysis {
         let result = await CatalogStore.handle(request, database: database)
         if result.status == "ok", let id = request.jobID {
             if request.action == "resumeJob" { await schedule(id, database: database, sink: sink) }
-            else if id == runningID { samplerTask?.cancel(); await DeepAnalyze.shared.requestCancel() }
+            else if id == runningID {
+                samplerTask?.cancel()
+                speechTask?.cancel()
+                await DeepAnalyze.shared.requestCancel()
+            }
         }
         return result
     }
@@ -118,6 +124,17 @@ actor TimelineAnalysis {
                     }
                     seconds += 10
                 }
+                try await transcribeSpeech(
+                    fileID: fileID,
+                    sourceURL: url,
+                    sourceRevision: source.1,
+                    duration: duration,
+                    fileIndex: index,
+                    totalFiles: job.ids.count,
+                    jobID: id,
+                    database: database,
+                    sink: sink
+                )
                 try await requireRunning(id, database: database)
                 try await persistChapterSuggestions(
                     fileID: fileID,
@@ -152,6 +169,124 @@ actor TimelineAnalysis {
     private func requireRunning(_ id: String, database: Database) async throws {
         let state = try await database.pool.read { db in try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=?", arguments: [id]) }
         guard state == "running" else { throw Interrupted() }
+    }
+
+    private func transcribeSpeech(
+        fileID: Int64,
+        sourceURL: URL,
+        sourceRevision: String,
+        duration: Double,
+        fileIndex: Int,
+        totalFiles: Int,
+        jobID: String,
+        database: Database,
+        sink: IPCSink
+    ) async throws {
+        guard duration.isFinite, duration > 0,
+              await TimelineSpeechTranscription.hasAudioTrack(url: sourceURL) else { return }
+
+        let modelVersion = TimelineSpeechTranscription.modelVersion
+        let chunks = TimelineSpeechTranscription.chunks(duration: duration)
+        guard !chunks.isEmpty else { return }
+        TimelineSpeechTranscription.sweepAbandonedAudio()
+        let coverageID = "speech-coverage:\(fileID):\(sourceRevision):\(modelVersion)"
+        try await database.pool.write { db in
+            guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+            try db.execute(sql: "INSERT OR IGNORE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,0,?,'incomplete',?,?)", arguments: [coverageID,fileID,duration,sourceRevision,modelVersion])
+        }
+        guard await TimelineSpeechTranscription.isAvailableOnDevice() else { return }
+
+        var fullyProcessed = true
+        for (index, chunk) in chunks.enumerated() {
+            try await requireRunning(jobID, database: database)
+            let chunkID = "\(coverageID):chunk:\(index)"
+            let alreadyVerified = try await database.pool.read { db in
+                try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=? AND status='verified' AND source_revision=? AND model_version=?)", arguments: [chunkID,sourceRevision,modelVersion]) ?? false
+            }
+            if alreadyVerified {
+                try await publishSpeechProgress(
+                    jobID: jobID,
+                    fileIndex: fileIndex,
+                    totalFiles: totalFiles,
+                    chunkIndex: index,
+                    chunkCount: chunks.count,
+                    database: database,
+                    sink: sink
+                )
+                continue
+            }
+            let task = Task {
+                await TimelineSpeechTranscription.transcribe(videoURL: sourceURL, chunk: chunk, mediaDuration: duration)
+            }
+            speechTask = task
+            let passages = await task.value
+            speechTask = nil
+            try await requireRunning(jobID, database: database)
+
+            try await persistSpeechChunk(
+                fileID: fileID,
+                sourceRevision: sourceRevision,
+                modelVersion: modelVersion,
+                chunkID: chunkID,
+                chunk: chunk,
+                passages: passages,
+                database: database
+            )
+            fullyProcessed = fullyProcessed && passages != nil
+            try await publishSpeechProgress(
+                jobID: jobID,
+                fileIndex: fileIndex,
+                totalFiles: totalFiles,
+                chunkIndex: index,
+                chunkCount: chunks.count,
+                database: database,
+                sink: sink
+            )
+        }
+
+        let coverageStatus = fullyProcessed ? "verified" : "incomplete"
+        try await database.pool.write { db in
+            guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+            try db.execute(sql: "UPDATE catalog_coverage SET status=? WHERE id=?", arguments: [coverageStatus,coverageID])
+        }
+    }
+
+    private func publishSpeechProgress(
+        jobID: String,
+        fileIndex: Int,
+        totalFiles: Int,
+        chunkIndex: Int,
+        chunkCount: Int,
+        database: Database,
+        sink: IPCSink
+    ) async throws {
+        let progress = min(1, (Double(fileIndex) + Double(chunkIndex + 1) / Double(chunkCount)) / Double(totalFiles))
+        try await database.pool.write { db in
+            try db.execute(sql: "UPDATE catalog_jobs SET progress=?,updated_at=? WHERE id=? AND state='running'", arguments: [progress,Date().timeIntervalSince1970,jobID])
+        }
+        await publish(jobID, database: database, sink: sink)
+    }
+
+    func persistSpeechChunk(
+        fileID: Int64,
+        sourceRevision: String,
+        modelVersion: String,
+        chunkID: String,
+        chunk: TimelineSpeechTranscription.Chunk,
+        passages: [TimelineSpeechTranscription.Passage]?,
+        database: Database
+    ) async throws {
+        let status = passages == nil ? "incomplete" : "verified"
+        try await database.pool.write { db in
+            guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+            try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,?,?,?)", arguments: [chunkID,fileID,chunk.extractStart,chunk.extractEnd,status,sourceRevision,modelVersion])
+            guard let passages else { return }
+            for (passageIndex, passage) in passages.enumerated() {
+                let startMillis = Int((passage.startSeconds * 1000).rounded())
+                let passageID = "speech:\(fileID):\(sourceRevision):\(modelVersion):\(startMillis):\(passageIndex)"
+                try db.execute(sql: "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?,?,?,?,?,?,?,?)", arguments: [passageID,fileID,passage.startSeconds,passage.endSeconds,passage.text,sourceRevision,modelVersion,passage.confidence])
+            }
+        }
     }
 
     func persistChapterSuggestions(

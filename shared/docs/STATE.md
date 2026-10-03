@@ -1,3 +1,7 @@
+## 2026-10-03 — Timestamped on-device video speech in progress
+
+Branch `codex/mac-video-transcripts` adds cancellable macOS video transcription to existing timeline jobs. Apple Speech runs only with authorization and on-device support; AVFoundation exports guarded temporary audio chunks, overlapping 45-second windows avoid boundary word loss, and midpoint ownership prevents duplicate passage evidence. Timestamped passages and per-chunk coverage retain source revision/model provenance; unsupported or failed speech leaves coverage incomplete. No schema, IPC, package, or platform-port changes. Six focused tests and the full native suite (497 tests / 100 suites) pass; standard Release engine/app and Store-sandbox Release engine/app build. Exact-head GitHub checks and merge are pending. The new path has not yet been exercised with an authorized TestFlight build or measured on the 16 GB M1 Pro. Adlon remains example data only and was not used.
+
 # FileID — State
 
 ## 2026-10-03 — Sparse timeline chapter drafts merged (PR #214)
