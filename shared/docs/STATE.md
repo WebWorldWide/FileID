@@ -37,6 +37,13 @@
 - Windows app tests remain a release blocker; do not call FileID bug-free or Store-ready. Partner Center product `9PC8HSD86887` remains draft; no upload, submission, or publication.
 # FileID — session log
 
+## 2026-10-03 — Store-readiness continuation
+
+- Continued on `codex/windows-store-readiness`, PR #213. `origin/main` remains `759a6ab1`, already included. Removed the Linux-only unused `trash_path` wrapper; Rust formatting, Clippy, and tests pass locally. Committed and pushed the fix, which starts a fresh exact-head CI run.
+- The latest hosted run still flagged intentionally unsupported Linux shell stubs (`thumbnail` and `trash`) as dead code, so scoped allowances were added. Windows app CI failed when testhost could not resolve `Microsoft.Windows.SDK.NET.dll`; the workflow now stages the DLL emitted by the app build beside the app-test assembly. Locally staging it and running the app test project passed 432/432. Push these follow-ups and verify both fixes on a new exact-head run.
+- Opened the Partner Center age-rating page in the Codex browser as requested. Existing FileID product `9PC8HSD86887` is signed in. Properties, Packages, and Pricing are Complete; free worldwide public pricing is saved. Listing text and publisher name are saved; screenshots remain required. Existing MSIX upload validated with SHA-256 `6bde5a99232f216ccc4b721711fdee3d427420e16aeac8acacf67476d896e11c`.
+- The publisher confirmed legal age and authorized IARC terms acceptance. Accepted the declaration and saved the generated 12+ / ESRB Teen rating in Partner Center; Current Rating ID now displays Pending. The Store product itself remains an unsubmitted draft. Remaining gates: exact-head CI, screenshots, Windows App Certification Kit, fresh-profile install/launch/upgrade, and physical GPU/model validation.
+
 ## 2026-10-02 — Windows preflight continuation
 
 - Signed-in Microsoft account verified as `adammnolle@gmail.com`; two-step verification is ON. Gmail and Google Authenticator are up to date. No security methods changed. Partner Center app `9PC8HSD86887` shows FileID's application overview with “Start submission”; it remains a draft. No Partner Center upload, submission, or publication occurred.

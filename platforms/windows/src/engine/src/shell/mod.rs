@@ -52,6 +52,7 @@ pub mod tags {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub mod thumbnail {
     use anyhow::{Context, Result};
     use std::path::Path;
@@ -114,6 +115,7 @@ pub mod thumbnail {
 
 #[cfg(not(windows))]
 #[path = "trash_linux.rs"]
+#[allow(dead_code)]
 pub mod trash;
 
 #[cfg(not(windows))]

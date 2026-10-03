@@ -162,9 +162,15 @@ jobs:
         run: |
           msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
+        msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # The Windows SDK reference pack is emitted in the app output, but
+        # testhost requires its runtime assembly beside the test assembly.
+        $testOutput = Join-Path $PWD 'FileID.App.Tests/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64'
+        $appSdkAssembly = Join-Path $PWD 'src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/Microsoft.Windows.SDK.NET.dll'
+        if (-not (Test-Path $appSdkAssembly -PathType Leaf)) { throw "Windows SDK runtime assembly is missing from app output: $appSdkAssembly" }
+        Copy-Item $appSdkAssembly (Join-Path $testOutput 'Microsoft.Windows.SDK.NET.dll') -Force
+        dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
