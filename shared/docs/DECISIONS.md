@@ -1,3 +1,7 @@
+## 2026-10-03 — On-device speech evidence for video timelines
+
+Use Apple Speech for macOS video transcription only when the active recognizer reports on-device support and the user grants Speech authorization; set `requiresOnDeviceRecognition` on every request. Extract audio into protected internal temporary files, process recordings in 45-second cores with 1.5-second overlap, and assign each recognized segment to one core by its midpoint so overlap does not duplicate evidence. Persist grouped timestamped passages and explicit coverage under the source revision and an OS/locale model label. Cancellation interrupts export or recognition; unavailable speech leaves coverage incomplete. This reuses system frameworks and adds no package or model download. The 16 GB and supported-language latency/quality still require on-device measurement.
+
 # Architecture Decisions Log
 
 > Append-only. One entry per non-obvious decision. Future sessions read this to understand *why* the code looks the way it does — not just *what* it does.
