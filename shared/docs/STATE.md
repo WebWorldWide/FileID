@@ -1,8 +1,14 @@
 # FileID — State
 
+## 2026-10-03 — Schedule per-file scan tagging
+
+Each macOS scan worker now reserves one background CPU unit while `Tagging.processFile` runs. The permit yields to interactive inference, retries temporary capacity conflicts with cancellation checks, and releases after the file completes. `Hardware.workerCap` remains the outer worker bound. Per-file scan I/O and memory are not estimated yet; throughput under contention still needs measurement before changing either bound.
+
+The 10 scheduler tests and full native suite pass: 477 tests across 95 suites (162 Shared, 20 App, 295 Engine). The Release no-wipe launcher rebuilt and started FileID plus FileIDEngine without resetting the local library. This branch has not yet passed hosted or main-branch CI. No Adlon example-data paths were used for outputs.
+
 ## 2026-10-03 — Schedule face embedding work
 
-FaceClustering now obtains a background CPU reservation for each source image before running the bounded ArcFace face-print extraction pass. If interactive work temporarily fills CPU capacity, the worker retries every 100 ms and checks both task cancellation and the scan/shutdown mirrors; every acquired reservation is released on all exit paths. The existing four-image extraction cap remains in force. Discovery and scan-time Vision/tagging/CLIP work, conversions, and other heavy jobs are still outside shared scheduler admission.
+At that increment, FaceClustering obtained a background CPU reservation for each source image before running the bounded ArcFace face-print extraction pass. The existing four-image extraction cap remains in force. PR #206 subsequently added a CPU reservation around per-file scan tagging; discovery, separate Vision/CLIP stages, conversions, and other heavy jobs remain outside shared scheduler admission.
 
 The scheduler suite passes all 10 tests. Full native Swift validation passes 477 tests across 95 suites (162 Shared, 20 App, 295 Engine), using an external scratch directory to avoid code-signing failures caused by Finder metadata in the project-local dependency cache. The Release engine and app build, and the final `bash run.sh --no-wipe` launch kept the existing library state and started both app and engine processes. This change does not establish face accuracy, interactive latency, or complete scheduler coverage. Adlon remains example-only; fixtures ran on internal temporary storage.
 

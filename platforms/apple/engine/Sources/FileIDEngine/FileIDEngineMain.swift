@@ -1389,11 +1389,18 @@ struct FileIDEngineMain {
                             try? await Task.sleep(nanoseconds: 200_000_000)
                         }
                         if ScanCoordinator.isCancelledSync() { break }
-                        // nil only when this task was cancelled while waiting for
-                        // a Vision worker — stop pulling files in that case.
-                        guard let tagged = await pool.with({ worker in
-                            await Tagging.processFile(discovered: disc, worker: worker)
-                        }) else { break }
+                        // Cancellation while waiting for a resource or Vision
+                        // worker stops this loop before another file is pulled.
+                        let tagged: TaggedFile?
+                        do {
+                            tagged = try await Self.processScanFile(disc, pool: pool)
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            JSONLog.shared.warn(ev: "scan_worker_scheduler_failed", error: "\(error)")
+                            break
+                        }
+                        guard let tagged else { break }
                         await taggedChan.send(tagged)
                     }
                 }
@@ -1430,6 +1437,24 @@ struct FileIDEngineMain {
         await markSessionFinal(database: database, session: session,
                                 coordinator: coordinator, sink: sink,
                                 totalSeconds: totalDur)
+    }
+
+    private static func processScanFile(
+        _ discovered: DiscoveredFile,
+        pool: VisionWorkerPool
+    ) async throws -> TaggedFile? {
+        try await ResourceScheduler.shared.withReservation(
+            ResourceScheduler.Demand(cpuUnits: 1),
+            priority: .background,
+            waitForCapacity: true,
+            isCancelled: {
+                ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync()
+            }
+        ) {
+            await pool.with { worker in
+                await Tagging.processFile(discovered: discovered, worker: worker)
+            }
+        }
     }
 
     /// Post-scan orphan sweep: delete rows under `scanRootPath` whose file
