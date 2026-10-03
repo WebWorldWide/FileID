@@ -176,9 +176,7 @@ private struct ModelOptionRow: View {
 // while gigabytes of safetensors are still streaming in.
 enum ModelInstallStatus {
     static func isInstalled(kind: AIModelKind) -> Bool {
-        guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return false }
-        let url = base
-            .appendingPathComponent("huggingface/models", isDirectory: true)
+        let url = ModelCachePaths.huggingFaceModels
             .appendingPathComponent(kind.sourceRepo, isDirectory: true)
             .appendingPathComponent(".fileid-installed")
         return FileManager.default.fileExists(atPath: url.path)

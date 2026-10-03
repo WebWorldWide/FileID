@@ -6,6 +6,12 @@ Continue the full next-version plan on Mac. The owner has deferred new Windows/L
 
 PR #208 improved confirmed-person retrieval and scan admission diagnostics. PR #210 added exact user-edited event-title filters and explicit time search over existing timestamped evidence. Both are merged; PR #210's main SHA is `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. All five main workflows passed on that exact commit. Run IDs and Adlon runner placement are recorded at the top of `shared/docs/STATE.md` and `shared/docs/AGENT_HANDOFF.md`. The feature branch was deleted; `origin` has only `main`.
 
+## TestFlight completion gate
+
+The Mac App Store build path now has sandbox-aware bookmarks for user-selected source/output folders, a sandbox-inheriting engine helper, container-local model weights, and a signed package/upload script. App ID `com.fileid.app`, App Store Connect record `6818813859`, and an empty internal group (`FileID Internal Testers`) exist. The record currently has no uploaded build or testers; no App Store submission/release was made.
+
+Do not claim TestFlight-ready until an App Store provisioning profile, Mac Installer Distribution signing identity, and App Store Connect API key are installed/configured locally, `scripts/testflight.sh` produces and uploads a signed package, Apple finishes processing, and the sandboxed build passes a real library/export/model-download test. Never put the `.p8` key or certificates into Git or Adlon. The package script checks the profile bundle ID before building; expected invocation is `platforms/apple/scripts/testflight.sh` after local signing setup. Keep account credentials user-managed.
+
 ## Next Mac increment — populate timeline evidence
 
 Build on the existing timeline/catalog foundation with bounded, cancellable production of timestamped speech, shots, tracks, and coverage. Preserve chapter ranges and person moments for direct playback. Treat uncovered intervals as unknown; sparse samples do not establish that an event was absent. Add fixtures for long recordings, overlaps, scene boundaries, and events crossing chunks.

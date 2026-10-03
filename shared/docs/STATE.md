@@ -1,5 +1,15 @@
 # FileID — State
 
+## 2026-10-03 — TestFlight sandbox and App Store Connect setup (CI pending)
+
+The Mac App Store variant now has dedicated app/helper sandbox entitlements, security-scoped bookmarks for scanned roots and export destinations, helper-side bookmark validation/retention, and an app-container model cache. Developer builds retain their existing Documents cache behavior. IPC v1.7 carries the bookmark fields and folder-grant command; Swift, Rust, and C# DTOs and examples mirror the contract. `platforms/apple/scripts/testflight.sh` builds, signs, packages, and uploads a TestFlight package when the account assets are supplied.
+
+Registered App ID `com.fileid.app`, created macOS App Store Connect record `6818813859`, and created internal group `FileID Internal Testers`. Automatic build distribution is off; the group has zero testers and zero builds. The actual TestFlight upload is not complete. This Mac has an Apple Distribution identity but no Mac App Store provisioning profile, Mac Installer Distribution identity, or App Store Connect API key. `testflight.sh --package-only` correctly stops at its missing profile check. Keep all private signing material outside Git and Adlon.
+
+Validation: native Debug tests pass (485 tests across 97 suites); App Store-flagged Release Engine and app builds pass; normal Release Engine build, Rust engine tests/format, 23 runtime-egress policy tests, catalog schema check, IPC JSON parse, entitlement plist checks, and diff checks pass. `dotnet` is unavailable locally; Windows app CI must cover the C# mirror. Mac App Store signing, package verification, upload processing, and runtime sandbox acceptance remain open. Adlon's example-data volume was not read or modified.
+
+Next: after the distribution profile, installer identity, and upload API key are configured locally, run `platforms/apple/scripts/testflight.sh`, wait for Apple build processing, then attach a build to the internal group and add intended testers. Do not commit the API key. Once TestFlight credentials are complete, resume bounded timeline population, which remains the next Mac product milestone. See `AGENT_HANDOFF.md`.
+
 ## 2026-10-03 — Event and timestamp chat retrieval merged; main CI green
 
 PR #210 merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. macOS chat now resolves exact titles of explicitly user-edited event groups, parses `MM:SS` and `HH:MM:SS`, and searches timestamped chapter/passage/person evidence within the selected event. Chapter and passage intervals must contain the requested time; point observations may be within 15 seconds. Stale chapter/passage evidence is excluded, and event/time filters survive conversational refinements. This retrieves existing evidence; it does not generate chapters, fill coverage gaps, or claim complete event detection. No schema, IPC, model, dependency, or network changes.

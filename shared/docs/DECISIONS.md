@@ -7,6 +7,10 @@
 
 ---
 
+## 2026-10-03 — Isolate Mac App Store sandbox behavior behind a build flag
+
+Keep Developer builds unchanged and compile `FILEID_APP_STORE` only for the Mac App Store package. The Store app and inherited CLI helper require bookmark grants for selected source/output folders, while model weights live in the app container. This avoids weakening the Store sandbox or breaking the existing Developer ID workflow. IPC v1.7 mirrors the bookmark contract across Swift, Rust, and C#; Windows treats the grant as a no-op. Signing and API credentials remain owner-managed and are not stored in the repository.
+
 ## 2026-10-03 — Chat event/time search stays grounded in edited catalog evidence
 
 Resolve event names only from user-edited event rows until generated event confidence and provenance are available. Accept explicit `MM:SS` and `HH:MM:SS`; chapter and passage intervals qualify only when they contain the requested time, while point observations can match within 15 seconds. Exclude stale evidence. This keeps retrieval deterministic and avoids treating missing timeline analysis as a negative event result; the change needs no IPC or catalog migration.

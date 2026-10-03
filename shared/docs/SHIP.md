@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Mac TestFlight scaffold (2026-10-03)
+
+`com.fileid.app` and macOS App Store Connect app record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, bookmark-based folder access, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. Native tests and Store-flagged release builds pass. This is not a TestFlight release: profile, Mac Installer Distribution identity, API key, signed-package validation, upload processing, tester installation, and sandbox runtime acceptance remain blocked/open. See `NEXT.md` and `AGENT_HANDOFF.md` for owner-managed setup and exact continuation.
+
 ## Native persistent search checkpoint (2026-10-02)
 
 Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas use catalog v23 provenance, SQLite epochs, restart/divergence checks, durable index jobs. PR #201 added progress, pause/cancel/retry and interruption recovery; its eleven checks, 466 native tests and actual-process recovery fixtures passed on merged head. PR #203 adds process-local memory/CPU/I/O admission to Mac catalog indexing and DeepAnalyze work, including resident-model memory claims. Exact-head and merged-main macOS/policy checks passed, as did Adlon Linux and Windows app/engine runs; see STATE.md for runner identities and run IDs. The scheduler still does not cover every heavy file pipeline, separate Apple GPU/ANE budgets, multiple resident models, or full release acceptance. Real 100,000-file latency, text/catalog indexes, person/event filtering, calibrated accuracy, hardware tests, offline network capture, six existing runtime-egress blockers, broader Windows app service-test discovery remain open.

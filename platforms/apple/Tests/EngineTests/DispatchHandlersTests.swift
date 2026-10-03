@@ -39,7 +39,7 @@ struct DispatchHandlersTests {
         let cap = WireCapture()
         let sink = cap.sink
         let cmd = IPCCommand(payload: .startScan(
-            rootPath: "/tmp/does-not-matter", rootDisplay: nil,
+            rootPath: "/tmp/does-not-matter", rootBookmark: nil, rootDisplay: nil,
             rescan: false, excludedPaths: nil))
 
         await FileIDEngineMain.dispatch(cmd, coordinator: ScanCoordinator(),

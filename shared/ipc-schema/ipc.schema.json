@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.6.0",
+  "version": "1.7.0",
 
   "$defs": {
     "IPCCommand": {
@@ -52,6 +52,22 @@
         },
         {
           "type": "object",
+          "required": ["grantFolderAccess"],
+          "additionalProperties": false,
+          "properties": {
+            "grantFolderAccess": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rootPath", "rootBookmark"],
+              "properties": {
+                "rootPath": { "type": "string", "description": "Absolute filesystem path granted to the macOS engine." },
+                "rootBookmark": { "type": "string", "description": "Base64-encoded app-scoped security bookmark for rootPath." }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
           "required": ["startScan"],
           "additionalProperties": false,
           "properties": {
@@ -61,8 +77,10 @@
               "required": ["rootPath"],
               "properties": {
                 "rootPath":    { "type": "string", "description": "Absolute filesystem path to the folder root to scan." },
+                "rootBookmark": { "type": ["string", "null"], "description": "Optional base64-encoded macOS app-scoped security bookmark granting the engine access to rootPath. Required by sandboxed Mac App Store builds; ignored by other platforms." },
                 "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." },
-                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." }
+                "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." },
+                "excludedPaths": { "type": ["array", "null"], "items": { "type": "string" }, "default": [], "description": "Optional folder paths pruned during discovery." }
               }
             }
           }
@@ -1471,6 +1489,10 @@
         },
         "destination": {
           "type": "string"
+        },
+        "destinationBookmark": {
+          "type": ["string", "null"],
+          "description": "Optional base64-encoded macOS app-scoped bookmark granting write access to destination."
         },
         "recipe": {
           "$ref": "#/$defs/ToolRecipe"

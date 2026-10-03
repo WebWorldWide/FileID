@@ -253,7 +253,16 @@ struct FileIDEngineMain {
                 response = await CatalogStore.handle(request, database: database)
             }
             await sink.emit(.catalogResponse(response))
-        case .startScan(let rootPath, let rootDisplay, let rescan, let excludedPaths):
+        case .grantFolderAccess(let rootPath, let rootBookmark):
+            do {
+                _ = try SecurityScopedAccessRegistry.shared.acquire(path: rootPath, bookmark: rootBookmark)
+            } catch {
+                await sink.emit(.error(EngineError(
+                    kind: "folder_access_denied",
+                    message: "FileID couldn't restore access to the selected folder. Choose it again."
+                )))
+            }
+        case .startScan(let rootPath, let rootBookmark, let rootDisplay, let rescan, let excludedPaths):
             guard let database else {
                 await sink.emit(.error(EngineError(
                     kind: "db_unavailable",
@@ -279,10 +288,25 @@ struct FileIDEngineMain {
                 )))
                 return
             }
-            // The app resolves the security-scoped bookmark to a filesystem
-            // path before sending, so the engine receives a ready-to-walk
-            // path. `rootDisplay` defaults to `rootPath` when omitted.
-            let displayPath = rootDisplay ?? rootPath
+            // Retain selected-root access for follow-on catalog jobs.
+            let authorizedRoot: String
+            do {
+                authorizedRoot = try SecurityScopedAccessRegistry.shared.acquire(
+                    path: rootPath,
+                    bookmark: rootBookmark
+                )
+            } catch {
+                await sink.emit(.error(EngineError(
+                    kind: "folder_access_denied",
+                    message: "FileID couldn't access that folder. Choose it again."
+                )))
+                await sink.emit(.scanComplete(ScanComplete(
+                    sessionID: "", totalFiles: 0, processedFiles: 0,
+                    failedFiles: 0, totalSeconds: 0
+                )))
+                return
+            }
+            let displayPath = rootDisplay ?? authorizedRoot
             // R4-11: allocate the scan epoch synchronously here (the command loop
             // is serial), BEFORE the next command is read, so a quick cancelScan is
             // attributed to this scan and survives startSession.
@@ -296,7 +320,7 @@ struct FileIDEngineMain {
                 etaSeconds: nil  // unknown until discovery completes
             ) {
                 let task = Task.detached(priority: .userInitiated) {
-                    await runScan(rootPath: rootPath, displayPath: displayPath,
+                    await runScan(rootPath: authorizedRoot, displayPath: displayPath,
                                   rescan: rescan ?? false, epoch: epoch,
                                   excludedPaths: excludedPaths,
                                   coordinator: coordinator, sink: sink,
@@ -1227,15 +1251,6 @@ struct FileIDEngineMain {
         database: Database
     ) async {
         let url = URL(fileURLWithPath: rootPath)
-        // The path arrives already resolved from the app side. Re-establish
-        // security-scoped access in case the app handed off scope (no-op /
-        // false outside a sandbox, which is fine for CLI dev runs + tests).
-        let hasScope = url.startAccessingSecurityScopedResource()
-        defer { if hasScope { url.stopAccessingSecurityScopedResource() } }
-        if !hasScope {
-            JSONLog.shared.info(ev: "no_security_scope", path: redactPathForLog(url.path),
-                                extra: ["reason": AnyCodable("ok in unsandboxed contexts")])
-        }
 
         // Hold a no-sleep assertion for the duration of the scan so the
         // system doesn't suspend mid-tag overnight. Released in defer.

@@ -11,9 +11,11 @@ struct IPCProtocolTests {
     @Test("Command: every payload variant survives JSON round-trip")
     func commandRoundTrip() throws {
         let commands: [IPCCommand.Payload] = [
-            .startScan(rootPath: "/Users/adam/photos", rootDisplay: "/Users/adam/photos",
-                       rescan: false, excludedPaths: ["/Users/adam/photos/.cache"]),
-            .toolRequest(request: ToolRequest(requestID: "video", action: "preview", fileIDs: [1], destination: "/internal", recipe: ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920))),
+            .grantFolderAccess(rootPath: "/Users/adam/photos", rootBookmark: Data([7, 8, 9])),
+            .startScan(rootPath: "/Users/adam/photos", rootBookmark: Data([1, 2, 3]),
+                       rootDisplay: "/Users/adam/photos", rescan: false,
+                       excludedPaths: ["/Users/adam/photos/.cache"]),
+            .toolRequest(request: ToolRequest(requestID: "video", action: "preview", fileIDs: [1], destination: "/internal", recipe: ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920), destinationBookmark: Data([4, 5]))),
             .pauseScan,
             .resumeScan,
             .cancelScan,

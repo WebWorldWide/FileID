@@ -157,7 +157,7 @@ Current `AIModels.swift` exposes seven model kinds; repositories/revisions are p
 ## VLM storage
 
 VLMs cache to:
-- macOS: `~/Documents/huggingface/models/<repo>/` (MLX / swift-transformers convention)
+- macOS Developer ID: `~/Documents/huggingface/models/<repo>/`; Mac App Store builds: `FileID/Models/huggingface/models/<repo>/` inside the sandbox container.
 - Windows: `%LOCALAPPDATA%\FileID\Models\HuggingFace\<repo>\` (FileID's own download path; outside Documents to avoid surprising users with several GB in there)
 
 ## Performance Packs (Windows GPU runtimes)

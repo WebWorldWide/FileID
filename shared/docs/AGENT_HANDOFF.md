@@ -1,5 +1,21 @@
 # FileID next-version handoff — 2026-10-03
 
+## Current checkpoint — TestFlight sandbox scaffold and account records
+
+The current feature branch adds a Mac App Store-only sandbox build path. It carries security-scoped bookmarks from SwiftUI folder pickers through IPC v1.7; the engine validates and retains folder scopes, and the inherited helper uses the same scope. Model weights move into the app's Application Support container only under `FILEID_APP_STORE`; Developer builds keep their current cache path. The TestFlight script assembles, signs, verifies, and uploads a `.pkg` when account assets exist. Swift/Rust/C# IPC mirrors include the optional bookmark DTOs and `grantFolderAccess`.
+
+Apple portal setup is done: App ID `com.fileid.app`, macOS App Store Connect record [6818813859](https://appstoreconnect.apple.com/apps/6818813859/distribution), and internal TestFlight group `FileID Internal Testers` (0 testers, 0 builds, automatic distribution off). Nothing has been uploaded. Local Apple Distribution signing exists, but the Mac App Store provisioning profile, Mac Installer Distribution certificate, and App Store Connect API key are missing. The `--package-only` preflight reports the missing profile before building. Keep the `.p8` key and certificates local; do not place them in Git or on Adlon.
+
+Native Debug suite: 485 tests / 97 suites passed. Store-flagged Release Engine and app compile; normal Release Engine/app compile, Rust engine tests/format, egress tests (23), catalog schema, entitlements, shell syntax, and `git diff --check` pass. `dotnet` is not installed locally, so require the Windows app CI test and format gates. Still verify package signing, upload/processing, internal TestFlight installation, and runtime sandboxed scanning/export/model download after credentials are configured.
+
+## Instructions for the next agent
+
+Finish the TestFlight handoff once the owner has created/installed the Mac App Store provisioning profile, Mac Installer Distribution identity, and App Store Connect API key. Expected local variables and checks are documented by `platforms/apple/scripts/testflight.sh`. Build and upload using that script, wait for processing in record `6818813859`, then add the processed build to `FileID Internal Testers`; invite only testers explicitly requested by the owner. Preserve the disabled auto-distribution setting. Do not sign or upload until the required owner-managed secrets are present. Do not request or commit the `.p8` contents.
+
+After TestFlight is unblocked, resume the next Mac feature milestone: bounded, cancellable timeline population with timestamped speech, shots/tracks, and explicit coverage. Keep uncovered intervals unknown, measure scheduler contention with internal-drive fixtures, then continue face calibration, best-take ranking, and media tools. Windows/Linux product work and physical acceptance remain deferred until the owner is on that PC. Adlon is read-only example data; CI may use only the established isolated runner guest disks.
+
+The current source branch/PR and CI state must be refreshed here after main integration. The accepted next-version goal remains active.
+
 ## Current checkpoint — Mac event/time retrieval merged and CI green
 
 PR #210 is merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. Chat search resolves exact titles from user-edited event groups and explicit `MM:SS` or `HH:MM:SS` requests. It filters files by event membership and returns existing chapter/passage intervals that contain the requested time plus person observations within 15 seconds. Stale chapter/passage evidence is excluded, and refinements retain event/time filters. This is retrieval over catalog evidence; automatic timeline population and open-ended event detection remain unimplemented. No schema, IPC, model, dependency, or network changes.
