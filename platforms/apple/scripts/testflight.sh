@@ -59,9 +59,12 @@ if [ "$PACKAGE_ONLY" -eq 0 ] && { [ -z "$API_KEY_ID" ] || [ -z "$API_ISSUER_ID" 
 fi
 
 security cms -D -i "$PROFILE" > "$PROFILE_PLIST"
-PROFILE_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST")"
+PROFILE_APP_ID="$(
+    /usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$PROFILE_PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$PROFILE_PLIST"
+)"
 case "$PROFILE_APP_ID" in
-    *:"$APP_ID") ;;
+    "$APP_ID"|*."$APP_ID") ;;
     *) echo "Provisioning profile application identifier does not match $APP_ID." >&2; exit 1 ;;
 esac
 
@@ -80,6 +83,7 @@ FILEID_BUILD_CONFIGURATION=release bash scripts/assemble_app.sh "$APP" "$VERSION
 }
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 
+codesign --force --sign "$APP_IDENTITY" --timestamp "$APP/Contents/MacOS/mlx.metallib"
 codesign --force --sign "$APP_IDENTITY" --timestamp --options runtime \
     --entitlements Resources/FileIDEngineAppStore.entitlements \
     "$APP/Contents/MacOS/FileIDEngine"
