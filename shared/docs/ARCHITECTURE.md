@@ -190,3 +190,6 @@ Face comparison rejects unknown or mixed model/processing namespaces, stale revi
 `healthCheck(requestID:)` replies as `healthCheckResult._0` with the unchanged nonce and actual engine PID. It acknowledges command-loop responsiveness only, with no catalog access, queue admission, model loading or ready-state refresh. Request IDs contain 1–128 ASCII letters/digits/underscores/hyphens; invalid values produce `invalid_health_request` without a success reply or input echo.
 
 Clients must install a waiter before flushing the command, then correlate nonce/PID against the captured process generation and retire old waiters on cleanup. Canonical DTOs and both engines now support the wire operation; the Windows lifecycle integration remains unfinished. A health reply does not prove storage, model readiness or full engine health.
+
+
+Native `CatalogVectorIndex` preparation uses a persistent `catalogIndex` job alongside the existing snapshot/revision protocol. Job controls dispatch by kind; resumable/retry states do not require a visual model. Checkpoints report progress, while only verified snapshots plus authoritative SQLite history establish index state. One coalesced worker owns graph mutation; general resource reservations and concurrent model routing remain unfinished. See SCHEDULER.md.

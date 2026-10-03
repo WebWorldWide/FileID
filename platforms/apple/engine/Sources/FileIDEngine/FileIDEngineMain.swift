@@ -98,6 +98,7 @@ struct FileIDEngineMain {
             await detectCrashedSessions(database: database)
             await TimelineAnalysis.shared.recover(database: database)
             await MediaTools.shared.recover(database: database)
+            try? await database.vectorIndex.recover()
         }
 
         // Engine ready handshake. App waits for this before sending the first
@@ -240,7 +241,14 @@ struct FileIDEngineMain {
             if request.action == "enqueueTimeline" {
                 response = await TimelineAnalysis.shared.enqueue(request, database: database, sink: sink)
             } else if ["pauseJob", "resumeJob", "cancelJob"].contains(request.action) {
-                response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
+                let kind = try? await database.pool.read { db in try String.fetchOne(db, sql: "SELECT kind FROM catalog_jobs WHERE id=?", arguments: [request.jobID ?? ""]) }
+                if kind == "timelineSample" {
+                    response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
+                } else if kind == CatalogIndexJob.kind {
+                    response = await CatalogStore.handle(request, database: database)
+                } else {
+                    response = CatalogResponse(requestID: request.requestID, status: "error", message: "This job has no supported worker in this engine.")
+                }
             } else {
                 response = await CatalogStore.handle(request, database: database)
             }

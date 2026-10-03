@@ -93,4 +93,31 @@ struct HNSWSnapshotTests {
             try HNSWIndex.readSnapshot(from: root, modelID: "m", sourceRevision: "r")
         }
     }
+    @Test("compaction and snapshot processing honor cancellation")
+    func cancellation() async throws {
+        let graph = HNSWIndex(dim: 16)
+        for seed in 0..<200 { graph.insert(vector(seed)) }
+        var visits = 0
+        #expect(throws: CancellationError.self) {
+            try graph.compact(checkpoint: {
+                visits += 1
+                if visits == 220 { throw CancellationError() }
+            })
+        }
+        #expect(visits == 220)
+        let snapshotWorker = Task {
+            let local = HNSWIndex(dim: 16)
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try local.snapshot(modelID: "fixture", sourceRevision: "1")
+        }
+        await #expect(throws: CancellationError.self) { try await snapshotWorker.value }
+        let empty = HNSWIndex(dim: 16)
+        let data = try empty.snapshot(modelID: "fixture", sourceRevision: "1")
+        let restoreWorker = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            _ = try HNSWIndex.restoreSnapshot(data, modelID: "fixture", sourceRevision: "1")
+        }
+        await #expect(throws: CancellationError.self) { try await restoreWorker.value }
+    }
+
 }
