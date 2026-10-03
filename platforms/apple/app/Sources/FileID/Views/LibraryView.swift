@@ -39,6 +39,7 @@ struct LibraryView: View {
     /// When set, the grid shows photos most-similar to this seed
     /// (CLIP image-embedding cosine).
     @State private var similarSeed: FileRow? = nil
+    @State private var visualSearchPending = false
     /// Persisted across launches. Empty string means "no filter" since
     /// AppStorage doesn't support optional bindings cleanly.
     @AppStorage("library.kindFilter") private var kindFilterRaw: String = ""
@@ -228,6 +229,7 @@ struct LibraryView: View {
     /// the ORT session is still compiling after launch / install (the
     /// grid re-runs the search automatically once it's ready).
     private var clipSearchHint: CLIPSearchHint? {
+        if visualSearchPending { return .preparing }
         let trimmed = searchText.trimmingCharacters(in: .whitespaces)
         guard trimmed.count >= 3, similarSeed == nil,
               !CLIPModelInstaller.shared.textEncoderReady,
@@ -244,7 +246,7 @@ struct LibraryView: View {
             Image(systemName: "sparkle.magnifyingglass")
                 .foregroundStyle(Theme.ai)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Showing keyword matches.")
+                Text(similarSeed == nil ? "Showing keyword matches." : "Finding similar files.")
                     .font(.callout.bold())
                 Text(hint == .preparing
                      ? "Preparing semantic search… results will refresh automatically."
@@ -774,20 +776,25 @@ struct LibraryView: View {
         let kind = kindFilter
         let encoderReady = CLIPTextEncoder.shared.isReady
         reloadTask?.cancel()
+        visualSearchPending = false
         reloadTask = Task { @MainActor in
-            let newRows: [FileRow]
+            defer { if !Task.isCancelled { visualSearchPending = false } }
+            var newRows: [FileRow]
             if let seed {
-                newRows = await store.similarFilesAsync(toFileID: seed.id, limit: 60)
+                visualSearchPending = true
+                if let response = await engine.searchCatalog(seedID: seed.id), response.status == "ok" {
+                    newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                } else { newRows = [] }
             } else {
-                // CLIP text→image semantic search when the encoder is installed
-                // and the query is non-trivial; otherwise keyword search.
-                let trimmed = query.trimmingCharacters(in: .whitespaces)
-                if trimmed.count >= 3, encoderReady,
-                   let semantic = await store.semanticSearchAsync(query: trimmed, limit: 60),
-                   !semantic.isEmpty {
-                    newRows = semantic
-                } else {
-                    newRows = await store.filesAsync(search: query, kindFilter: kind)
+                newRows = await store.filesAsync(search: query, kindFilter: kind)
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.count >= 3, encoderReady, let vector = await store.semanticVectorAsync(query: trimmed) {
+                    guard !Task.isCancelled else { return }
+                    rows = newRows
+                    visualSearchPending = true
+                    if let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
+                        newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                    }
                 }
             }
             guard !Task.isCancelled else { return }

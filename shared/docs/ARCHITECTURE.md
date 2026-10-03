@@ -1,8 +1,12 @@
 # Architecture — cross-platform overview
 
-## Native vector-index storage groundwork (2026-10-02)
+## Native persistent retrieval (catalog v23 / IPC v1.6)
 
-The existing engine-owned Swift HNSW implementation can serialize and restore bounded binary graph snapshots. Each contains a model identity, source-revision token, graph/RNG state and checksum. Atomic cache writes enforce read-only-location protection. Corrupt or incompatible snapshots throw rather than producing partial indexes. These APIs are not yet connected to catalog retrieval; SQLite remains the source of truth and durable change tracking must establish the revision token before reuse.
+The macOS engine owns a model-specific CLIP HNSW index and a bounded file-ID/fingerprint manifest next to its internal catalog. SQLite v23 records per-namespace instance IDs, generations, random checkpoint nonces, and bounded change logs for CLIP, text, and catalog embeddings. Transactions roll these back together. Missing history, database divergence/reset, incompatible models, corrupt snapshots, or mismatched graph/manifest hashes cause a rebuild from SQLite. Source size/mtime changes discard derived CLIP/text vectors; failed-file changes update index eligibility without discarding accepted names, tags, people, or Undo.
+
+Library semantic search and image similarity now use engine catalog requests rather than UI full-table cosine scans. Hybrid search fuses FTS file/evidence rankings and CLIP rankings; chapters/passages keep their timestamps/pages. Optional file scope deduplicates moments before the result limit for Library grids; all scope retains detailed hits. Refreshed matching retains actor ownership of the graph across coalesced workers, avoiding false empty results during concurrent requests. Before publication, the engine checks current embedding fingerprints and excludes failed files. Cold preparation returns an explicit `indexing` response; Library displays keyword results while waiting. Graph work runs off the command loop, and UI searches cancel their own obsolete waits. Snapshot files enforce Adlon write protection.
+
+Only the pinned 512-dimensional CLIP namespace is indexed in this milestone. Text/catalog streams are tracked for later indexes. Limits are 200,000 active files and bounded graph/manifest reads. Full rebuilds are not yet budgeted, durably scheduled, or cancellable; keyword fallback remains available after failure. The synthetic graph benchmark is not an end-to-end search, real accuracy, or hardware release result. Rust/C# mirror optional v1.6 search fields; PC vector execution returns an explicit unsupported response until the owner resumes port work.
 
 ## macOS semantic-cache compatibility (2026-10-02)
 
@@ -35,7 +39,7 @@ When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16
 
 ## Storage
 
-SQLite via WAL journaling. Schema versioned through v22 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned through v23 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`

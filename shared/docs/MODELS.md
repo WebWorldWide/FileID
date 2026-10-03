@@ -49,7 +49,7 @@ Files live under each platform's models directory. Downloads triggered by the we
 
 | Aspect | Value |
 |---|---|
-| Source (macOS) | OpenAI/OpenCLIP ViT-B/32 CoreML `.mlpackage` *(lockstep pending — WS-MAC)* |
+| Source (macOS) | Pinned ViT-B/32 ONNX through ONNX Runtime; CoreML execution provider is attempted with CPU fallback (see `MobileCLIPService.swift`) |
 | Source (Windows) | [`Xenova/clip-vit-base-patch32`](https://huggingface.co/Xenova/clip-vit-base-patch32) — `onnx/vision_model.onnx` (community ONNX export of OpenAI's MIT CLIP) |
 | License | **MIT** (OpenAI CLIP) |
 | macOS layout | `~/Library/Application Support/FileID/Models/mobileclip_image/clip_vitb32_image.onnx` |
@@ -62,7 +62,7 @@ Files live under each platform's models directory. Downloads triggered by the we
 
 | Aspect | Value |
 |---|---|
-| Source (macOS) | [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32) (ONNX export) |
+| Source (macOS) | [`Xenova/clip-vit-base-patch32`](https://huggingface.co/Xenova/clip-vit-base-patch32) — pinned `onnx/text_model.onnx`; tokenizer artifacts from the OpenAI model |
 | Source (Windows) | [`Xenova/clip-vit-base-patch32`](https://huggingface.co/Xenova/clip-vit-base-patch32) — `onnx/text_model.onnx`. BPE vocab + merges from [`openai/clip-vit-base-patch32`](https://huggingface.co/openai/clip-vit-base-patch32) (ViT-B/32's own tokenizer). |
 | License | **MIT** (OpenAI CLIP + tokenizer) |
 | macOS layout | `~/Library/Application Support/FileID/Models/clip_text/clip_text.onnx` + `vocab.json` + `merges.txt` |
@@ -220,3 +220,8 @@ Loaded SFace sessions now record an actual SHA-256 fingerprint of their selected
 Native MP4 transcodes use AVFoundation operating-system codecs and no AI model. Conversion is not enhancement or best-take understanding; no model comparison/promotion follows from generated video fixtures.
 
 Face comparison now rejects unknown or mixed model/processing namespaces, stale revisions and invalid 128-d vectors before persistence. Legacy person centroids lack provenance and cannot drive inheritance. See FACE_CACHE.md for whole-pass refresh limitations and remaining incremental/stable-ID/calibration gates.
+
+
+### Native retrieval cache compatibility (2026-10-02)
+
+The v23 native index accepts only `CLIPEmbeddingSpace.modelID`, which identifies the verified artifact hashes and preprocessing descriptor, and finite normalized 512-dimensional vectors. Cache namespaces include that identity and dimensionality. CLIP's model weights and runtime have not changed in this milestone; no new model is promoted. Text and other catalog embedding namespaces have independent transactional tracking and await separate index adapters. The Library now queries the engine-owned persistent index; legacy ambiguous labels remain excluded.

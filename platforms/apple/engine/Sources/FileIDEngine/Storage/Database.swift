@@ -32,6 +32,7 @@ public enum DatabaseOpenError: Error, CustomStringConvertible {
 /// read-only DatabaseQueue (M4) — never via this writer.
 public final class Database: @unchecked Sendable {
     public let pool: DatabasePool
+    let vectorIndex: CatalogVectorIndex
 
     public init(at url: URL) throws {
         try ReadOnlyLocations.requireWritable(url)
@@ -65,6 +66,7 @@ public final class Database: @unchecked Sendable {
             try db.execute(sql: "PRAGMA cache_spill = 0")
         }
         self.pool = try DatabasePool(path: url.path, configuration: config)
+        self.vectorIndex = CatalogVectorIndex(pool: pool, directory: url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent + ".vector-indexes", isDirectory: true))
         let migrator = Self.migrator
         let unknown = try pool.read { db in
             try migrator.appliedIdentifiers(db).subtracting(migrator.migrations)
@@ -520,6 +522,9 @@ public final class Database: @unchecked Sendable {
         }
         m.registerMigration("v22_face_cache_provenance") { db in
             try db.execute(sql: CatalogSchema.v22)
+        }
+        m.registerMigration("v23_vector_change_tracking") { db in
+            try db.execute(sql: CatalogSchema.v23)
         }
         return m
     }

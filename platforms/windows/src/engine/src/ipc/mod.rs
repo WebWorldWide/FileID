@@ -61,7 +61,7 @@ pub enum CommandPayload {
     #[serde(rename = "chatRequest")]
     ChatRequest(ChatRequestPayload),
     #[serde(rename = "catalogRequest")]
-    CatalogRequest(CatalogRequestPayload),
+    CatalogRequest(Box<CatalogRequestPayload>),
     #[serde(rename = "startScan")]
     StartScan(StartScanPayload),
 

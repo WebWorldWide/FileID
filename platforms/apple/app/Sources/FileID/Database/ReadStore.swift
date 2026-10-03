@@ -377,6 +377,26 @@ public final class ReadStore: @unchecked Sendable {
     /// scan is O(N·512) and froze the UI for seconds on a 50k library when
     /// run inline on the MainActor. The text embed + ranking happen on a
     /// background task; the caller awaits and publishes results on main.
+    public func semanticVectorAsync(query: String) async -> [Float]? {
+        await Task.detached(priority: .userInitiated) { CLIPTextEncoder.shared.embedText(query) }.value
+    }
+
+    public func catalogFilesAsync(ids: [Int64], kindFilter: String? = nil) async -> [FileRow] {
+        guard !ids.isEmpty, ids.count <= 100, let q = queue else { return [] }
+        return await Task.detached(priority: .userInitiated) {
+            (try? q.read { db in
+                let encoded = String(decoding: try JSONEncoder().encode(ids), as: UTF8.self)
+                let rows = try Row.fetchAll(db, sql: "SELECT * FROM files WHERE failed=0 AND id IN (SELECT value FROM json_each(?))", arguments: [encoded])
+                let byID = Dictionary(uniqueKeysWithValues: rows.map { (($0["id"] as Int64), Self.toFileRow($0)) })
+                var seen = Set<Int64>()
+                return ids.compactMap { id -> FileRow? in
+                    guard seen.insert(id).inserted, let row = byID[id], kindFilter == nil || row.kind == kindFilter else { return nil }
+                    return row
+                }
+            }) ?? []
+        }.value
+    }
+
     public func semanticSearchAsync(query: String, limit: Int = 60) async -> [FileRow]? {
         await Task.detached(priority: .userInitiated) { [self] in
             semanticSearch(query: query, limit: limit)

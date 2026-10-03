@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Native persistent search checkpoint (2026-10-02)
+
+Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas are implemented with catalog v23 provenance and restart/divergence checks. Local 461-test Swift validation passed. This closes the previous unwired-index groundwork item only for the pinned native CLIP space; real 100,000-file end-to-end latency, durable cancellation/resource admission, text/catalog indexes, person/event filters and port behavior remain open. Exact-head/main CI, physical accuracy/hardware, offline capture, the existing six runtime-egress blockers and the skipped broader Windows app-service suites remain separate acceptance requirements.
+
 ## Latest Mac checkpoint and runner acceptance (2026-10-02)
 
 PRs #195/#196 integrate verified CLIP compatibility and native graph/snapshot groundwork; all 450 native tests pass. Both PRs passed their exact-head checks and fresh merged-main Mac/policy validation. All nineteen health merged-main checks passed, including Adlon Linux/Windows and the genuine zero-skip 48-test IPC gate. Full legacy Windows service tests, physical hardware and the remaining `NEXT_VERSION.md` gates remain open. No release was published.

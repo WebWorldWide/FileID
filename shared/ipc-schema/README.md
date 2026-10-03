@@ -48,3 +48,8 @@ Every payload field carrying user-content data (file paths, OCR text, EXIF) is l
 ### v1.3 local chat
 
 `chatRequest` carries typed send/history/clear/cancel actions. `chatResponse` streams retrieval/queue/progress/completion with local messages and evidence hits. Model summaries are capability-specific; schema support does not imply that a platform has a generation runtime or native panel. See shared/docs/CHAT.md.
+
+
+### v1.6 native catalog retrieval
+
+Optional `searchMode` (`keyword`, `semantic`, `hybrid`), `queryVector` (512 finite normalized values), `embeddingModel` `limit` (1–100), and `resultScope` (`all`/`files`) extend existing catalog search requests. Native CLIP semantic requests use either a compatible vector/model pair or a file-ID seed; hybrid requests also need a nonempty query. Existing keyword requests remain valid. File scope deduplicates ranked moments before applying the result limit so a single video cannot crowd out the Library grid. Responses can return `indexing` while a local cache is prepared, `ok` with timestamp/page evidence, or an explicit `error`; callers must handle unavailable modes. Rust/C# mirror the fields, but PC visual execution is deferred and returns an explicit error rather than silently treating vectors as keywords. See ARCHITECTURE.md for snapshot/change-log behavior.

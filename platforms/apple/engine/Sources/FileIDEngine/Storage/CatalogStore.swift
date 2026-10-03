@@ -8,9 +8,7 @@ public enum CatalogStore {
             guard !request.requestID.isEmpty, request.requestID.count <= 200 else { throw InvalidRequest() }
             switch request.action {
             case "search":
-                guard let query = request.query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, query.count <= 2000 else { throw InvalidRequest() }
-                let hits = try await database.pool.read { db in try search(db, query: query) }
-                return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
+                return try await CatalogSearch.handle(request, database: database)
             case "detail":
                 guard let fileID = request.fileID else { throw InvalidRequest() }
                 let chapters = try await database.pool.read { db in try Self.chapters(db, fileID: fileID) }
@@ -97,7 +95,7 @@ public enum CatalogStore {
         let files = try Row.fetchAll(db, sql: """
             SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description
             FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid
-            WHERE catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?))) ORDER BY bm25(catalog_file_fts) LIMIT 100
+            WHERE f.failed=0 AND catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?))) ORDER BY bm25(catalog_file_fts) LIMIT 100
             """, arguments: [match, filter, filter])
         for row in files {
             results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
@@ -107,7 +105,7 @@ public enum CatalogStore {
             FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER)
             LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter'
             LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage'
-            WHERE catalog_evidence_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?))) AND (c.stale=0 OR p.stale=0)
+            WHERE f.failed=0 AND catalog_evidence_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?))) AND (c.stale=0 OR p.stale=0)
             ORDER BY bm25(catalog_evidence_fts) LIMIT 100
             """, arguments: [match, filter, filter])
         for row in evidence {
