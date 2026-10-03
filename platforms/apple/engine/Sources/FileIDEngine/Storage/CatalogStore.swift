@@ -82,13 +82,24 @@ public enum CatalogStore {
         }
     }
 
-    static func search(_ db: GRDB.Database, query: String, kinds: [String] = []) throws -> [CatalogHit] {
+    static func search(_ db: GRDB.Database, query: String, kinds: [String] = [], personIDs: [Int64] = []) throws -> [CatalogHit] {
         guard kinds.allSatisfy({ ["image", "video", "pdf", "doc", "audio", "other", "model"].contains($0) }) else { throw InvalidRequest() }
+        guard personIDs.allSatisfy({ $0 > 0 }) else { throw InvalidRequest() }
         let filter = kinds.isEmpty ? nil : String(decoding: try JSONEncoder().encode(kinds), as: UTF8.self)
+        let peopleFilter = personIDs.isEmpty ? nil : String(decoding: try JSONEncoder().encode(Array(Set(personIDs)).sorted()), as: UTF8.self)
         let meaningful = query.split(whereSeparator: \.isWhitespace).filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }.joined(separator: " ")
         guard !meaningful.isEmpty else {
-            guard let filter else { return [] }
-            return try Row.fetchAll(db, sql: "SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files WHERE kind IN (SELECT value FROM json_each(?)) ORDER BY id DESC LIMIT 100", arguments: [filter]).map { row in
+            guard filter != nil || peopleFilter != nil else { return [] }
+            return try Row.fetchAll(db, sql: """
+                SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files f
+                WHERE (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+                  AND (? IS NULL OR f.id IN (
+                    SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                    UNION SELECT file_id FROM catalog_observations
+                      WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+                  ))
+                ORDER BY id DESC LIMIT 100
+                """, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter]).map { row in
                 CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"])
             }
         }
@@ -97,8 +108,14 @@ public enum CatalogStore {
         let files = try Row.fetchAll(db, sql: """
             SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description
             FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid
-            WHERE f.failed=0 AND catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?))) ORDER BY bm25(catalog_file_fts) LIMIT 100
-            """, arguments: [match, filter, filter])
+            WHERE f.failed=0 AND catalog_file_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                UNION SELECT file_id FROM catalog_observations
+                  WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+              ))
+            ORDER BY bm25(catalog_file_fts) LIMIT 100
+            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter])
         for row in files {
             results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
         }
@@ -107,9 +124,15 @@ public enum CatalogStore {
             FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER)
             LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter'
             LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage'
-            WHERE f.failed=0 AND catalog_evidence_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?))) AND (c.stale=0 OR p.stale=0)
+            WHERE f.failed=0 AND catalog_evidence_fts MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                UNION SELECT file_id FROM catalog_observations
+                  WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+              ))
+              AND (c.stale=0 OR p.stale=0)
             ORDER BY bm25(catalog_evidence_fts) LIMIT 100
-            """, arguments: [match, filter, filter])
+            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter])
         for row in evidence {
             let chapterTime: Double? = row["chapter_time"]
             results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["text"], evidenceID: row["evidence_id"], startSeconds: chapterTime ?? row["passage_time"], page: row["page"]))

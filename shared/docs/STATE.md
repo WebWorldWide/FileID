@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-03 — Confirmed-person chat retrieval
+
+macOS chat now resolves exact saved People labels and first-name aliases to existing face-print and non-stale video-observation evidence. It applies the identity filter before result limits to both file and timestamp/page matches, retains action words for keyword retrieval, and carries the selected identities through follow-up filters. Unknown clusters are excluded; ambiguous exact first names include all matching confirmed identities. Four focused chat-search tests and the full Swift suite (480 tests in 96 suites) pass, including an end-to-end request against an internal temporary catalog. Current-document, catalog-schema, runtime-egress, and diff checks pass. Both Release products rebuild locally. The instrumentation-only PR head passed macOS Release/tests/privacy and action-policy checks; updated-head checks must include this chat increment before landing. No schema, IPC, dependency, model, or network changes. Adlon remains read-only.
+
 ## 2026-10-03 — Scan admission timing instrumentation
 
 Scan workers now measure time spent waiting for their background CPU reservation. `TaggedFile.admissionWaitMs` stays engine-internal and ephemeral; the existing local JSONL `batch` event reports admission-wait P50/P95/max and count delayed over 1 ms, separately from `perFileTotalMs`. No file paths, database fields, IPC fields, dependencies, or network behavior were added.
