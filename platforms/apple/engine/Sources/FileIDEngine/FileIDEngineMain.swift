@@ -98,6 +98,7 @@ struct FileIDEngineMain {
             await detectCrashedSessions(database: database)
             await TimelineAnalysis.shared.recover(database: database)
             await MediaTools.shared.recover(database: database)
+            try? await database.vectorIndex.recover()
         }
 
         // Engine ready handshake. App waits for this before sending the first
@@ -240,7 +241,14 @@ struct FileIDEngineMain {
             if request.action == "enqueueTimeline" {
                 response = await TimelineAnalysis.shared.enqueue(request, database: database, sink: sink)
             } else if ["pauseJob", "resumeJob", "cancelJob"].contains(request.action) {
-                response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
+                let kind = try? await database.pool.read { db in try String.fetchOne(db, sql: "SELECT kind FROM catalog_jobs WHERE id=?", arguments: [request.jobID ?? ""]) }
+                if kind == "timelineSample" {
+                    response = await TimelineAnalysis.shared.control(request, database: database, sink: sink)
+                } else if kind == CatalogIndexJob.kind {
+                    response = await CatalogStore.handle(request, database: database)
+                } else {
+                    response = CatalogResponse(requestID: request.requestID, status: "error", message: "This job has no supported worker in this engine.")
+                }
             } else {
                 response = await CatalogStore.handle(request, database: database)
             }
@@ -1381,11 +1389,18 @@ struct FileIDEngineMain {
                             try? await Task.sleep(nanoseconds: 200_000_000)
                         }
                         if ScanCoordinator.isCancelledSync() { break }
-                        // nil only when this task was cancelled while waiting for
-                        // a Vision worker — stop pulling files in that case.
-                        guard let tagged = await pool.with({ worker in
-                            await Tagging.processFile(discovered: disc, worker: worker)
-                        }) else { break }
+                        // Cancellation while waiting for a resource or Vision
+                        // worker stops this loop before another file is pulled.
+                        let tagged: TaggedFile?
+                        do {
+                            tagged = try await Self.processScanFile(disc, pool: pool)
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            JSONLog.shared.warn(ev: "scan_worker_scheduler_failed", error: "\(error)")
+                            break
+                        }
+                        guard let tagged else { break }
                         await taggedChan.send(tagged)
                     }
                 }
@@ -1422,6 +1437,23 @@ struct FileIDEngineMain {
         await markSessionFinal(database: database, session: session,
                                 coordinator: coordinator, sink: sink,
                                 totalSeconds: totalDur)
+    }
+
+    private static func processScanFile(
+        _ discovered: DiscoveredFile,
+        pool: VisionWorkerPool
+    ) async throws -> TaggedFile? {
+        try await ScanTaggingAdmission.withBackgroundCPU(
+            isCancelled: {
+                ScanCoordinator.isCancelledSync() || ScanCoordinator.isShuttingDownSync()
+            }
+        ) { admissionWaitMs in
+            guard var tagged = await pool.with({ worker in
+                await Tagging.processFile(discovered: discovered, worker: worker)
+            }) else { return nil }
+            tagged.admissionWaitMs = admissionWaitMs
+            return tagged
+        }
     }
 
     /// Post-scan orphan sweep: delete rows under `scanRootPath` whose file

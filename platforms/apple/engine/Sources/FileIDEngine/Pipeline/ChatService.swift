@@ -34,17 +34,26 @@ actor ChatService {
                 active[request.conversationID] = request.requestID
                 latestRequest[request.conversationID] = request.requestID
                 let plan = try await database.pool.write { db in
+                    let knownPeople = try Self.knownPeople(db)
+                    let knownEvents = try Self.knownEvents(db)
                     let previous = try String.fetchAll(db, sql: "SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=? AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid", arguments: [request.conversationID])
-                        .reduce(nil as ChatSearchPlan?) { ChatSearchPlan.resolve($1, previous: $0) }
-                    let plan = ChatSearchPlan.resolve(text, previous: previous)
+                        .reduce(nil as ChatSearchPlan?) { ChatSearchPlan.resolve($1, previous: $0, knownPeople: knownPeople, knownEvents: knownEvents) }
+                    let plan = ChatSearchPlan.resolve(text, previous: previous, knownPeople: knownPeople, knownEvents: knownEvents)
                     try db.execute(sql: "INSERT INTO catalog_chat(id,conversation_id,role,text,created_at) VALUES(?,?,'user',?,?)", arguments: [UUID().uuidString, request.conversationID, text, Date().timeIntervalSince1970])
                     return plan
                 }
-                let hits = try await database.pool.read { db in try CatalogStore.search(db, query: plan.query, kinds: plan.kinds) }
+                let hits = try await database.pool.read { db in try CatalogStore.search(db, query: plan.query, kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds) }
                 guard active[request.conversationID] == request.requestID else { return }
                 let scope = plan.query.isEmpty ? "all catalog files" : "“\(plan.query)”"
                 let filter = plan.kinds.isEmpty ? "" : " (\(plan.kinds.joined(separator: ", ")))"
-                let explanation = plan.query.isEmpty && plan.kinds.isEmpty ? "Add a subject or a media type such as videos or photos. No search was run." : hits.isEmpty ? "No keyword matches for \(scope)\(filter). Try names or a few descriptive terms. Unanalyzed files may still contain the requested event." : "Found \(hits.count) file or evidence matches for \(scope)\(filter). Sampled-frame descriptions remain unverified."
+                let people = plan.personNames.isEmpty ? "" : " (people: \(plan.personNames.joined(separator: ", ")))"
+                let events = plan.eventNames.isEmpty ? "" : " (event: \(plan.eventNames.joined(separator: ", ")))"
+                let time = plan.timeSeconds.map { " (near \(Self.timeLabel($0)))" } ?? ""
+                let explanation = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.timeSeconds == nil
+                    ? "Add a subject, event, time, or media type such as videos or photos. No search was run."
+                    : hits.isEmpty
+                        ? "No catalog evidence matches \(scope)\(filter)\(people)\(events)\(time). Try names or a few descriptive terms. Unanalyzed files may still contain the requested event."
+                        : "Found \(hits.count) file or evidence matches \(scope)\(filter)\(people)\(events)\(time). Sampled-frame descriptions remain unverified."
                 await emit(request, status: "retrieving", message: explanation, hits: hits, database: database, sink: sink)
                 guard active[request.conversationID] == request.requestID else { return }
                 if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState {
@@ -71,6 +80,37 @@ actor ChatService {
 
     static func query(_ text: String) -> String {
         ChatSearchPlan.resolve(text).query
+    }
+
+    private static func knownPeople(_ db: GRDB.Database) throws -> [ChatSearchPlan.KnownPerson] {
+        try Row.fetchAll(db, sql: "SELECT id,name,title,first_name,middle_name,last_name,suffix FROM persons WHERE COALESCE(is_unknown,0)=0")
+            .map { row in
+                let structuredName = [
+                    row["title"] as String?,
+                    row["first_name"] as String?,
+                    row["middle_name"] as String?,
+                    row["last_name"] as String?,
+                    row["suffix"] as String?
+                ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                let legacyName: String? = row["name"]
+                let firstName: String? = row["first_name"]
+                let names = [structuredName, legacyName ?? "", firstName ?? ""]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                return ChatSearchPlan.KnownPerson(id: row["id"], names: Array(Set(names)))
+            }
+    }
+
+    private static func knownEvents(_ db: GRDB.Database) throws -> [ChatSearchPlan.KnownEvent] {
+        try Row.fetchAll(db, sql: "SELECT id,title FROM catalog_events WHERE user_edited=1 AND length(trim(title))>0 ORDER BY title LIMIT 200")
+            .map { row in ChatSearchPlan.KnownEvent(id: row["id"], names: [row["title"]]) }
+    }
+
+    private static func timeLabel(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     private func summarize(_ request: ChatRequest, hits: [CatalogHit], model: AIModelKind, fallback: String, database: Database, sink: IPCSink) async {

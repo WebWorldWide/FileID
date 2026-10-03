@@ -232,11 +232,17 @@ final class HNSWIndex {
     /// old IDs to new IDs (`nil` for removed nodes) so callers can update
     /// external references. O(N log N) — call infrequently.
     func compact() -> [Int32: Int32] {
+        compact(checkpoint: {})
+    }
+
+    // A cancelled compaction leaves a partial graph that its worker must discard.
+    func compact(checkpoint: () throws -> Void) rethrows -> [Int32: Int32] {
         let oldNodes = nodes
         var idMap: [Int32: Int32] = [:]
         var liveVectors: [[Float]] = []
         liveVectors.reserveCapacity(oldNodes.count - deletedCount)
         for (oldIdx, node) in oldNodes.enumerated() where !node.deleted {
+            try checkpoint()
             idMap[Int32(oldIdx)] = Int32(liveVectors.count)
             liveVectors.append(node.vec)
         }
@@ -252,6 +258,7 @@ final class HNSWIndex {
         deletedCount = 0
         rngState = HNSWIndex.levelSeed
         for vec in liveVectors {
+            try checkpoint()
             insert(vec)
         }
         return idMap
@@ -514,6 +521,7 @@ extension HNSWIndex {
     }
 
     func snapshot(modelID: String, sourceRevision: String) throws -> Data {
+        try Task.checkCancellation()
         guard (1...200).contains(modelID.utf8.count), (1...200).contains(sourceRevision.utf8.count),
               (1...4096).contains(dim), (4...64).contains(M),
               (1...4096).contains(efConstruction), (1...4096).contains(efSearch),
@@ -539,6 +547,7 @@ extension HNSWIndex {
         append(UInt32(entryLevel))
         append(UInt32(nodes.count))
         for node in nodes {
+            try Task.checkCancellation()
             guard node.vec.count == dim, node.vec.allSatisfy(\.isFinite),
                   (1...33).contains(node.levels.count) else { throw SnapshotError.invalidFormat }
             append(UInt8(node.deleted ? 1 : 0))
@@ -556,6 +565,7 @@ extension HNSWIndex {
     }
 
     static func restoreSnapshot(_ data: Data, modelID: String, sourceRevision: String) throws -> HNSWIndex {
+        try Task.checkCancellation()
         guard data.count > 32, data.count <= 512 * 1024 * 1024 else { throw SnapshotError.invalidFormat }
         let payload = Data(data.dropLast(32))
         guard Data(SHA256.hash(data: payload)) == Data(data.suffix(32)) else { throw SnapshotError.invalidFormat }
@@ -578,6 +588,7 @@ extension HNSWIndex {
         let index = HNSWIndex(dim: dim, M: m, efConstruction: construction, efSearch: search)
         index.nodes.reserveCapacity(count)
         for _ in 0..<count {
+            try Task.checkCancellation()
             let deleted = try reader.integer(UInt8.self)
             let levelCount = Int(try reader.integer(UInt8.self))
             guard deleted <= 1, (1...33).contains(levelCount) else { throw SnapshotError.invalidFormat }
@@ -612,6 +623,7 @@ extension HNSWIndex {
                   index.nodes.allSatisfy({ $0.levels.count <= entryLevel + 1 }) else { throw SnapshotError.invalidFormat }
         }
         for (id, node) in index.nodes.enumerated() {
+            try Task.checkCancellation()
             for (level, neighbours) in node.levels.enumerated() {
                 guard neighbours.allSatisfy({ Int($0) != id && index.nodes[Int($0)].levels.count > level }) else {
                     throw SnapshotError.invalidFormat

@@ -1109,7 +1109,8 @@
           "type": "string"
         },
         "kind": {
-          "type": "string"
+          "type": "string",
+          "description": "Worker kind, including timelineSample and catalogIndex. Resume requires a supported worker; catalogIndex permits explicit retry after failure or cancellation."
         },
         "fileIDs": {
           "type": "array",

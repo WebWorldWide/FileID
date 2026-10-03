@@ -2,7 +2,7 @@
 
 ## Native persistent search checkpoint (2026-10-02)
 
-Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas are implemented with catalog v23 provenance and restart/divergence checks. Local 461-test Swift validation passed. This closes the previous unwired-index groundwork item only for the pinned native CLIP space; real 100,000-file end-to-end latency, durable cancellation/resource admission, text/catalog indexes, person/event filters and port behavior remain open. Exact-head/main CI, physical accuracy/hardware, offline capture, the existing six runtime-egress blockers and the skipped broader Windows app-service suites remain separate acceptance requirements.
+Native Library hybrid/similarity IPC and persistent CLIP snapshots/deltas use catalog v23 provenance, SQLite epochs, restart/divergence checks, durable index jobs. PR #201 added progress, pause/cancel/retry and interruption recovery; its eleven checks, 466 native tests and actual-process recovery fixtures passed on merged head. PR #203 adds process-local memory/CPU/I/O admission to Mac catalog indexing and DeepAnalyze work, including resident-model memory claims. Exact-head and merged-main macOS/policy checks passed, as did Adlon Linux and Windows app/engine runs; see STATE.md for runner identities and run IDs. The scheduler still does not cover every heavy file pipeline, separate Apple GPU/ANE budgets, multiple resident models, or full release acceptance. Real 100,000-file latency, text/catalog indexes, person/event filtering, calibrated accuracy, hardware tests, offline network capture, six existing runtime-egress blockers, broader Windows app service-test discovery remain open.
 
 ## Latest Mac checkpoint and runner acceptance (2026-10-02)
 
@@ -235,3 +235,6 @@ Face comparison rejects unknown or mixed model/processing namespaces, stale revi
 ### Health-contract follow-up (under review, 2026-10-02)
 
 A dedicated Windows IPC schema suite/report/format gate replaces the prior absence of IPC test execution. The isolated Adlon Windows VM passes 48 IPC tests and nine report-guard fixtures; new exact-head CI is still pending. The legacy app-service test discovery is still broken, so the full Windows safety/test repair and app-suite release gate remain open. Actual-process nonce/PID and invalid-probe checks are now required in macOS, Linux and native Windows engine CI. No server runner or corpus configuration changed in this follow-up.
+
+
+October 2026 native index-job follow-up: persistent state, interruption recovery, pause/cancel/retry and conservative memory admission now have synthetic regression coverage. Complete exact-head/main CI and actual allocation/latency measurements before calling admission or end-to-end retrieval accepted. General atomic resource budgets, dense analysis/best takes, enhancement/broad converters, port UI/hardware, accuracy/fidelity, strict privacy and distribution gates remain open.

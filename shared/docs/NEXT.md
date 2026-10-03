@@ -1,41 +1,18 @@
-# Next priorities
-
-## 2026-10-02 — Current Windows Store checkpoint
-
-Continue in `C:\Users\adamm\.codex\worktrees\store-msix\FileID` on `codex/store-msix`. Latest pushed head is `07c0ad8`; preserve the substantial local Windows changes and exclude generated `TestResults` files from commits.
-
-- Latest local Release app build succeeded. Full x64 app tests: 427 passed, 6 failed of 433. Remaining failures: `ReleaseBuildEmbedsPublisherPolicyAndReleaseScriptVerifiesEveryLayer`, `SuccessfulShortcutUndoRescansForNextPersistedToken`, `DeepAnalyzeReservationAndWaiterAreGenerationOwned`, `GpuRemovalBlocksAnotherScanUntilANewEngineGenerationIsReady`, `ExcludedFolderPurgeFencesRemovalAndStaleCompletionUi`, and `EngineLifecycleCallbacksCarryAndRecheckIntentRevision`. Do not weaken the safety contracts.
-- IPC schema tests passed: 54. Rust engine tests passed: 400; `cargo clippy --all-targets --locked -- -D warnings` and `cargo fmt --all -- --check` passed. The app queue, auto-scan, and Windows workflow focused contracts now pass; the deep-analysis generation test still fails at a further presentation/fencing assertion.
-- Exact required command `cd platforms\windows; .\build\publish-store-msix.ps1` rebuilt the x64 Release app and engine but VS 18 packaging failed at `GenerateAppxPackageRecipe` with `APPX0002` / `MSB4018` (`MrmSupportLibrary.GetLocation` null reference). No new `.msixupload` was produced. Log: `platforms/windows/dist/store-packages/local-preflight-current.log`.
-- Adlon results still refer to pushed `07c0ad8`: policy and Store jobs passed; engine and app jobs failed. Local workflow changes isolate the smoke databases and allow test restore; ARM64 cross-build still needs a supported `clang` toolchain. Push only after reviewing the combined changes, then validate all four Adlon workflows on the exact head.
-- Microsoft security methods remain unchanged. Partner Center product `9PC8HSD86887` remains a draft: no package upload, submission, or publication. Keep the site and docs limited to verified status.
-
-Next: resolve the six app failures without weakening tests; rerun app and IPC suites, formatting, Release build, Rust tests/Clippy; fix or bypass the local VS 18 packaging defect with a verified hosted Store artifact; inspect the current `.msixupload`; then update the site/docs and continue only the authorized Partner Center steps.
-
-## Earlier checkpoints
-## 2026-10-02 — Windows Store release blockers
-
 # NEXT — resume here
 
-## 2026-09-24 — Current priorities after isolated benchmarking and Linux Library/People/Settings smoke
+## Active priority — macOS first (2026-10-03)
 
-1. Install both required Linux scan bundles with genuine pinned weights and verify the installed-bundle UI and an inference-backed scan; the fake-engine Settings smoke (queued/42% progress, cancellation, error/retry, rejection of unpinned fake completion) did not exercise a live download or prove model availability.
-2. Wire and verify the remaining three Linux tabs (Cleanup, Deep Analyze, Restructure) and complete Settings parity; the current Settings surface covers only `mobileclip_s2` and `arcface`.
-3. Establish a native Linux VLM runtime and packaging, rather than treating pinned Windows Qwen3 model resolution or selectable UI IDs as proof of Linux inference.
-4. Exercise on-hardware inference, rerun isolated IPC benchmarks under comparable conditions, and calibrate model quality and performance against labeled data; the Adlon H: 231-entry metadata-only sample is not an engine scan or speed/accuracy measurement.
-5. Restore WinUI NuGet packages and recheck build and actual UI interactions/rendering, including Qwen3 selection and the overlapping Welcome InstallAll / optional-model Cancel and retry flows. Package-free C# and .NET 10 harness checks do not replace WinUI verification.
+Continue the full next-version plan on Mac. The owner has deferred new Windows/Linux feature implementation and physical acceptance until they are on that PC. The Mac version is not complete or release-ready.
 
-## Owner priority — macOS first (2026-10-02)
+PR #208 is merged to `main` at `244bc7b5a1d873ce8fc7020bd828d7e0f4acc80b`. It improves confirmed-person chat retrieval and scan admission diagnostics. All five main workflows passed on that exact commit; exact run IDs and Adlon runner placement are recorded at the top of `shared/docs/STATE.md` and `shared/docs/AGENT_HANDOFF.md`. The feature branch is deleted; `origin` has only `main`.
 
-Continue the full next-version plan on the Mac. The owner has a Windows/Linux PC and explicitly deferred new port implementation and physical validation until working there. Preserve the archived Windows safety restoration; do not discard tests or claim port acceptance. Shared contracts must remain coherent, and already-running CI still requires inspection. On macOS, finish verified embedding provenance and persistent hybrid retrieval, then the remaining scheduler, chat, rename, face, timeline, best-take and Tools milestones from NEXT_VERSION.md. The Mac version is not complete or perfect yet.
+## Next Mac increment — event and temporal retrieval
 
-## Current continuation — Mac persistent hybrid retrieval
+Extend the just-landed person-filtered chat/catalog path to events and time-based evidence already represented by chapters, observations, events, and take groups. Return direct file/timestamp results, distinguish user-confirmed from model-generated evidence, honor staleness and coverage, and add focused engine tests. Keep this a retrieval milestone; do not claim complete timeline analysis, automatic best-take detection, or release readiness from catalog schema support alone.
 
-Catalog v23 and IPC v1.6 connect the native Library to the persistent CLIP index, with incremental SQLite epochs, restart recovery, eligibility checks, and timestamp-preserving hybrid retrieval. Validate the current checkpoint before extending it. Then integrate rebuilding into durable jobs with CPU/I/O/memory admission, cancellation and progress; add text/catalog embedding indexes and person/event/exact filters; measure real 100,000-file end-to-end latency. Existing flat ReadStore helpers remain only as legacy/internal APIs and test coverage, not the Library execution path.
+Then continue `shared/docs/NEXT_VERSION.md`: timeline population and chapters, scheduler pressure measurements, face accuracy/speed, best-take ranking, conversion/enhancement/reframing, and the remaining native tools. Preserve macOS-first validation, update the persistence docs with every merged increment, and keep all example data read-only. For Adlon CI, use the guest disks only and do not mount or access the example-data volume. Run Windows engine and app workflows serially on the single Windows VM.
 
-Continue the complete NEXT_VERSION.md plan: model routing, reversible chat operations, naming preferences/companions, face exemplars/corrections/calibration, dense temporal analysis, automatic chapters, best takes, conversion/enhancement/reframing and broader toolbox. No milestone or green CI proves the complete Mac product is finished. Windows/Linux new features and physical acceptance remain deferred to the owner's PC; shared contracts, migration parity and existing CI stay coherent.
-
-## Day-end continuation — 2026-10-02
+## Historical day-end continuation — superseded by Mac-first priority
 
 The full accepted goal remains active after the owner resumed sustained work; this is a recovery checkpoint, not a pause or release completion. Read AGENT_HANDOFF.md and ARCHIVED_BRANCHES.md first. Resume the unfinished Windows safety/test-parity checkpoint from archive/2026-10-02/windows-test-parity-wip; do not merge the recovery snapshot wholesale. Restore real behavior, canonical IPC fields and genuine test execution, then require both test suites, x64/ARM64 builds and format checks. Main app packaging success currently omits the suites because of a path bug.
 

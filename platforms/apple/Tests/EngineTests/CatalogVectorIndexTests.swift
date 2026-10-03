@@ -251,4 +251,137 @@ struct CatalogVectorIndexTests {
         #expect(results.count == 40)
         #expect(results.allSatisfy { $0.map(\.fileID) == [1] && $0.first?.cosine == 1 })
     }
+    @Test("background indexing defers to a resident model and resumes after it unloads")
+    func indexDefersToResidentModel() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await seed(database, id: 1, vector: blob(0))
+        let scheduler = ResourceScheduler(memory: { (16_384, 16_384) })
+        let model = try await scheduler.reserveMemory(12_250, priority: .interactive)
+        let index = CatalogVectorIndex(pool: database.pool, directory: root.appendingPathComponent("indexes"),
+                                       resourceScheduler: scheduler)
+
+        await #expect(throws: CatalogIndexJob.AdmissionDeferred.self) { try await index.synchronize() }
+        #expect(try await CatalogStore.jobs(database).first?.state == "paused")
+
+        await scheduler.release(model)
+        let resumed = await index.control(CatalogRequest(requestID: "resume", action: "resumeJob", jobID: CatalogIndexJob.id))
+        #expect(resumed.status == "ok")
+        _ = try await index.synchronize()
+        #expect(try await CatalogStore.jobs(database).first?.state == "completed")
+    }
+
+    @Test("memory deferral and restart recovery keep an explicit resumable job")
+    func jobRecoveryAndMemory() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await seed(database, id: 1, vector: blob(0))
+        let directory = root.appendingPathComponent("indexes")
+        let constrained = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 32) }))
+        await #expect(throws: CatalogIndexJob.AdmissionDeferred.self) { try await constrained.synchronize() }
+        let deferred = try #require(try await CatalogStore.jobs(database).first)
+        #expect(deferred.kind == "catalogIndex" && deferred.state == "paused" && deferred.progress == 0)
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        try await database.pool.write { db in
+            try db.execute(sql: "UPDATE catalog_jobs SET state='running',checkpoint_json='{}',progress=0.4 WHERE id=?", arguments: [CatalogIndexJob.id])
+        }
+        let restarted = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 8_192) }))
+        try await restarted.recover()
+        #expect(try await CatalogStore.jobs(database).first?.state == "paused")
+        #expect(try await CatalogStore.jobs(database).first?.progress == 0.4)
+        await #expect(throws: CatalogIndexJob.Stopped.self) { try await restarted.synchronize() }
+        let resumed = await restarted.control(CatalogRequest(requestID: "resume", action: "resumeJob", jobID: CatalogIndexJob.id))
+        #expect(resumed.status == "ok")
+        _ = try await restarted.synchronize()
+        let finished = try #require(try await CatalogStore.jobs(database).first)
+        #expect(finished.state == "completed" && finished.progress == 1)
+        let query = try #require(CLIPEmbeddingSpace.vector(from: blob(0)))
+        #expect(try await restarted.matches(query, limit: 1).first?.fileID == 1)
+        let invalid = await restarted.control(CatalogRequest(requestID: "wrong", action: "resumeJob", jobID: "unknown"))
+        #expect(invalid.status == "error")
+    }
+
+    @Test("cancelling a partial update preserves the verified snapshot and permits explicit retry")
+    func jobCancellation() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await seed(database, id: 1, vector: blob(0))
+        let directory = root.appendingPathComponent("indexes")
+        let index = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 8_192) }))
+        _ = try await index.synchronize()
+        let paths = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let snapshots = try paths.map { try Data(contentsOf: $0) }
+        try await database.pool.write { db in
+            for id in 2...1000 {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,kind,extension,size_bytes,modified_at,scanned_at) VALUES(?,?,?,'image','jpg',10,100,100)", arguments: [id,"fixture-\(id).jpg",id])
+                try db.execute(sql: "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?,?,?)", arguments: [id,blob(id % 512),CLIPEmbeddingSpace.modelID])
+            }
+        }
+        let task = Task { try await index.synchronize() }
+        var partial = false
+        for _ in 0..<2000 {
+            let job = try await CatalogStore.jobs(database).first
+            if job?.state == "running", (job?.progress ?? 0) > 0 { partial = true; break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(partial)
+        let cancelled = await index.control(CatalogRequest(requestID: "cancel", action: "cancelJob", jobID: CatalogIndexJob.id))
+        #expect(cancelled.status == "ok")
+        do { _ = try await task.value; Issue.record("Cancelled index update finished unexpectedly") } catch {}
+        #expect(try await CatalogStore.jobs(database).first?.state == "cancelled")
+        #expect(try paths.map { try Data(contentsOf: $0) } == snapshots)
+        #expect(await index.currentRevision() == nil)
+        let resumed = await index.control(CatalogRequest(requestID: "retry", action: "resumeJob", jobID: CatalogIndexJob.id))
+        #expect(resumed.status == "ok")
+        _ = try await index.synchronize()
+        #expect(try await CatalogStore.jobs(database).count == 1)
+        #expect(try await CatalogStore.jobs(database).first?.state == "completed")
+        let query = try #require(CLIPEmbeddingSpace.vector(from: blob(400)))
+        #expect(try await index.matches(query, limit: 10).contains { $0.fileID > 1 })
+    }
+
+    @Test("failed index jobs retry without a visual model and keyword search survives")
+    func jobFailureRetry() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await seed(database, id: 1, vector: blob(0))
+        try await seed(database, id: 2, vector: blob(1))
+        let index = CatalogVectorIndex(pool: database.pool, directory: root.appendingPathComponent("limited"), maximumFiles: 1, resourceScheduler: ResourceScheduler(memory: { (16_384, 8_192) }))
+        await #expect(throws: CatalogVectorIndex.IndexError.self) { try await index.synchronize() }
+        #expect(try await CatalogStore.jobs(database).first?.state == "failed")
+        let keywords = await CatalogStore.handle(CatalogRequest(requestID: "search", action: "search", query: "fixture"), database: database)
+        #expect(keywords.status == "ok" && keywords.hits.count == 2)
+        try await database.pool.write { db in try db.execute(sql: "DELETE FROM files WHERE id=2") }
+        let resumed = await index.control(CatalogRequest(requestID: "retry", action: "resumeJob", jobID: CatalogIndexJob.id))
+        #expect(resumed.status == "ok")
+        _ = try await index.synchronize()
+        #expect(try await CatalogStore.jobs(database).first?.state == "completed")
+        let paused = await index.control(CatalogRequest(requestID: "pause", action: "pauseJob", jobID: CatalogIndexJob.id))
+        #expect(paused.status == "error")
+    }
+
+    @Test("memory admission includes an oversized historical cache even when live rows are few")
+    func historicalCacheMemory() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await seed(database, id: 1, vector: blob(0))
+        let directory = root.appendingPathComponent("indexes")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let key = CatalogVectorIndex.digest(Data((CLIPEmbeddingSpace.modelID + ":512:clip").utf8))
+        let path = directory.appendingPathComponent(key + ".graph")
+        #expect(FileManager.default.createFile(atPath: path.path, contents: Data()))
+        let handle = try FileHandle(forWritingTo: path)
+        try handle.truncate(atOffset: 64 * 1024 * 1024)
+        try handle.close()
+        let index = CatalogVectorIndex(pool: database.pool, directory: directory, resourceScheduler: ResourceScheduler(memory: { (16_384, 1_200) }))
+        await #expect(throws: CatalogIndexJob.AdmissionDeferred.self) { try await index.synchronize() }
+        #expect(try await CatalogStore.jobs(database).first?.state == "paused")
+        #expect(try path.resourceValues(forKeys: [.fileSizeKey]).fileSize == 64 * 1024 * 1024)
+    }
+
 }

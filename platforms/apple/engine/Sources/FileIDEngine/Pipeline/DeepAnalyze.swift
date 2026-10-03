@@ -47,6 +47,7 @@ public actor DeepAnalyze {
     /// cancellation is wired explicitly, not inherited.
     private var loadTask: Task<Void, Error>?
     private let residencyGate = ExclusiveResourceGate()
+    private var modelMemoryLease: ResourceScheduler.MemoryLease?
     private var loadTaskKind: AIModelKind?
     /// Waiter ref-count for the shared single-flight load (R-11). The shared
     /// loadTask is cancelled only when its LAST joined waiter bails, so a
@@ -114,6 +115,10 @@ public actor DeepAnalyze {
     func answerCatalog(prompt: String, onToken: @escaping @Sendable (String) async -> Void) async throws -> String {
         let lease = try await residencyGate.acquire()
         defer { Task { await residencyGate.release(lease) } }
+        let computeLease = try await ResourceScheduler.shared.reserve(
+            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
+        )
+        defer { Task { await ResourceScheduler.shared.release(computeLease) } }
         guard let container else { throw CancellationError() }
         let collector = TokenCollector()
         let parameters = MLXLMCommon.GenerateParameters(maxTokens: 192, temperature: 0, topP: 1)
@@ -281,6 +286,10 @@ public actor DeepAnalyze {
             container = nil
             loadedKind = nil
             MLX.GPU.clearCache()
+            if let modelMemoryLease {
+                self.modelMemoryLease = nil
+                await ResourceScheduler.shared.release(modelMemoryLease)
+            }
         }
         loadState = .loading(progress: 0, message: "Preparing \(kind.displayName)…")
         // Avoid MLX.GPU.set(cacheLimit:) — calling it from the engine's
@@ -290,9 +299,10 @@ public actor DeepAnalyze {
                                     "repo": AnyCodable(kind.sourceRepo)])
         JSONLog.shared.flush()
 
+        var pendingMemoryLease: ResourceScheduler.MemoryLease?
         do {
-            let availableMB = UInt64(max(0, Hardware.availableMemoryMB()))
-            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: availableMB, requestedMB: requestedMB) {
+            let initialAvailableMB = UInt64(max(0, Hardware.availableMemoryMB()))
+            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: initialAvailableMB, requestedMB: requestedMB) {
                 throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
             }
             let config = Self.vlmConfig(for: kind)
@@ -341,6 +351,17 @@ public actor DeepAnalyze {
             // 4. Files are local; HubApi.useOfflineMode = true skips
             //    swift-transformers' slow single-stream fetcher.
             let hub = HubApi(downloadBase: documentsHF, useOfflineMode: true)
+            let waitingMessage = "Waiting for memory and processing capacity…"
+            loadState = .loading(progress: 0.99, message: waitingMessage)
+            progress?(0.99, waitingMessage, 0, 0)
+            pendingMemoryLease = try await ResourceScheduler.shared.reserve(
+                ResourceScheduler.Demand(memoryMB: requestedMB, cpuUnits: 1, ioUnits: 1),
+                priority: .interactive
+            )
+            let availableMB = UInt64(max(0, Hardware.availableMemoryMB()))
+            if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: availableMB, requestedMB: requestedMB) {
+                throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
+            }
             let loaded = try await VLMModelFactory.shared.loadContainer(
                 hub: hub,
                 configuration: config
@@ -350,13 +371,22 @@ public actor DeepAnalyze {
             JSONLog.shared.info(ev: "deep_loadcontainer_returned",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             JSONLog.shared.flush()
+            if let pendingMemoryLease {
+                await ResourceScheduler.shared.retainMemory(pendingMemoryLease)
+            }
             container = loaded
+            modelMemoryLease = pendingMemoryLease
+            pendingMemoryLease = nil
             loadedKind = kind
             loadState = .ready(kind)
             JSONLog.shared.info(ev: "deep_model_loaded",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             JSONLog.shared.flush()
         } catch {
+            MLX.GPU.clearCache()
+            if let pendingMemoryLease {
+                await ResourceScheduler.shared.release(pendingMemoryLease)
+            }
             // NSError text embeds the full weights path — log domain+code only.
             let ns = error as NSError
             JSONLog.shared.error(ev: "deep_loadcontainer_threw",
@@ -376,6 +406,10 @@ public actor DeepAnalyze {
         loadedKind = nil
         loadState = .notLoaded
         MLX.GPU.clearCache()
+        if let modelMemoryLease {
+            self.modelMemoryLease = nil
+            await ResourceScheduler.shared.release(modelMemoryLease)
+        }
     }
 
     /// Mark a model dir "fully installed" by writing a sentinel file.
@@ -461,6 +495,10 @@ public actor DeepAnalyze {
     public func compareFaces(cropA: URL, cropB: URL) async -> FaceComparison {
         guard let lease = try? await residencyGate.acquire() else { return FaceComparison(sameClass: false, confidence: 0) }
         defer { Task { await residencyGate.release(lease) } }
+        guard let computeLease = try? await ResourceScheduler.shared.reserve(
+            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
+        ) else { return FaceComparison(sameClass: false, confidence: 0) }
+        defer { Task { await ResourceScheduler.shared.release(computeLease) } }
         guard let container else {
             return FaceComparison(sameClass: false, confidence: 0)
         }
@@ -606,6 +644,13 @@ public actor DeepAnalyze {
     ) async -> AnalysisResult {
         guard let lease = try? await residencyGate.acquire() else { return AnalysisResult(description: "Inference failed: Cancelled.", proposedName: nil) }
         defer { Task { await residencyGate.release(lease) } }
+        guard let computeLease = try? await ResourceScheduler.shared.reserve(
+            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
+        ) else {
+            let reason = Task.isCancelled ? "Cancelled." : "processing capacity is unavailable."
+            return AnalysisResult(description: "Inference failed: \(reason)", proposedName: nil)
+        }
+        defer { Task { await ResourceScheduler.shared.release(computeLease) } }
         guard let container else {
             return AnalysisResult(description: "Model not loaded.", proposedName: nil)
         }

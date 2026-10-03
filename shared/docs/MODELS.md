@@ -11,7 +11,7 @@ The native shared manifest pins OpenCLIP ViT-B/32 image/text ONNX and BPE vocabu
 
 As of the 2026-05 commercial-clean pass, **every weight FileID downloads by default is permissively licensed (Apache-2.0 / MIT)** — no non-commercial weights in the core feature set. This keeps the project (Apache-2.0, see root `LICENSE`) free to be open-sourced *and* commercialized later without a weight-licensing blocker. The non-commercial InsightFace face stack (ArcFace + SCRFD) and the research-only Apple MobileCLIP-S2 / Qwen2.5-VL-3B were replaced. The one conditional model, Gemma-3-4B, is commercially usable under Google's Gemma Terms and stays an opt-in, user-initiated download (its terms surface in the install flow).
 
-> **Windows is live on the commercial-clean stack now.** The macOS app mirror (RAM++ tagger, ViT-B/32, SFace) lands in **WS-MAC** — rows below mark macOS cells *(lockstep pending)* where the Swift swap hasn't been applied yet. Cross-platform DB round-trips (esp. 128-d face prints) require both platforms on the new models; until WS-MAC ships, treat face DBs as platform-local.
+Both engines now implement RAM++, ViT-B/32 and SFace. Cross-platform face round trips validate provenance and compatible processing spaces; dimensions alone do not establish compatibility. Hardware accuracy and complete port UI acceptance remain separate gates.
 
 ## ML stack per platform
 
@@ -55,7 +55,7 @@ Files live under each platform's models directory. Downloads triggered by the we
 | Windows layout | `%LOCALAPPDATA%\FileID\Models\mobileclip\mobileclip_s2_image.onnx` (dir/filename kept as a stable key through the swap; contents are ViT-B/32) |
 | Input | 224×224 RGB, CLIP mean/std normalized |
 | Output | 512-d float32, L2-normalized |
-| Tag | `mobileclip_s2` (stored in `clip_embeddings.model`; kept as a stable key, no schema churn) |
+| Cache identity | macOS uses `CLIPEmbeddingSpace.modelID`, tied to pinned artifacts and preprocessing. Legacy `mobileclip_s2` rows need fresh inference; Windows retains its existing registry key pending PC implementation. |
 
 ### CLIP text encoder
 
@@ -184,7 +184,7 @@ Each pack has its own canonical URL + SHA256 list. Performance Packs do not cont
 
 ## Next-version research candidates — not installed or promoted
 
-Primary-source research checked October 1, 2026. These candidates are not new shipping registry entries. Exact converted artifacts, immutable revisions/hashes, processor compatibility, runtime support, commercial distribution policy, and FileID benchmarks are still required. Weight-only size is not a memory budget: reserve OS/UI memory, KV/context caches, vision buffers, decoder buffers, and other resident models.
+Primary-source research checked October 1, 2026, with the runtime follow-up below verified October 2. These candidates are not new shipping registry entries. Exact converted artifacts, immutable revisions/hashes, processor compatibility, runtime support, commercial distribution policy, and FileID benchmarks are still required. Weight-only size is not a memory budget: reserve OS/UI memory, KV/context caches, vision buffers, decoder buffers, and other resident models.
 
 | Role | Initial candidate | Comparisons | Source/license review |
 |---|---|---|---|
@@ -228,3 +228,13 @@ Face comparison now rejects unknown or mixed model/processing namespaces, stale 
 ### Native retrieval cache compatibility (2026-10-02)
 
 The v23 native index accepts only `CLIPEmbeddingSpace.modelID`, which identifies the verified artifact hashes and preprocessing descriptor, and finite normalized 512-dimensional vectors. Cache namespaces include that identity and dimensionality. CLIP's model weights and runtime have not changed in this milestone; no new model is promoted. Text and other catalog embedding namespaces have independent transactional tracking and await separate index adapters. The Library now queries the engine-owned persistent index; legacy ambiguous labels remain excluded.
+
+
+## Runtime follow-up — October 2, 2026
+
+[MLX Swift LM 3.32.3](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.32.3) includes Qwen3.5 state/sanitization, Gemma 4 loading and image processing, cancellation and guided-generation fixes. FileID still resolves `mlx-swift-examples` 2.29.1, revision `9bff95ca5f0b9e8c021acc4d71a2bbe4a7441631`. A dependency transition must verify API/model-factory compatibility, OS/SDK requirements, offline behavior including automatic MTP downloads, licenses and identical-fixture regressions. No dependency or model was promoted by this research.
+
+[Gemma 4's card](https://ai.google.dev/gemma/docs/core/model_card_4) lists Apache-2.0 and substantial separate embedding storage for its E-series. Effective parameter counts do not determine resident memory. Budget actual converted tensors, context/recurrent states and visual buffers. [llama.cpp's router](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) supports `--models-max` (default four; zero unlimited), but that is a model-count cap, not FileID memory admission. Measure loading concurrency, resident models and parallel requests separately; keep interactive work responsive on the 16 GB Mac before changing defaults.
+
+
+Native search-index admission now estimates live/raw vector storage and graph/manifest decoding/snapshot buffers, including historical cache files. It uses existing system/headroom checks before rebuilding or loading. This is not shared multi-model allocation accounting or a measured replacement-model benefit. Task routing, simultaneous residency and pressure benchmarks remain required.

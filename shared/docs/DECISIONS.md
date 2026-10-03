@@ -3504,3 +3504,34 @@ The worker result carries an immutable revision receipt alongside its transferre
 
 
 Re-reviewed the EngineClient egress inventory after adding only local catalog IPC polling/cancellation. No URL, HTTP request, download path or transport behavior changed; update only its reviewed-source digest and retain all runtime-egress mutation tests and six existing Windows release blockers.
+
+
+## 2026-10-02 — main-only runner cleanup and proposal recovery
+
+The republished Store workflows occupied the persistent Adlon Windows runner from an extensively divergent unreviewed branch. Preserve the exact source in a verified annotated archive tag, cancel its obsolete engine/package runs through GitHub, and remove its remote head with a lease. Keep the protected local checkout unchanged. Persistent main-only policy and actual main-job results remain the acceptance boundary. Dependency PR #199 is also preserved before main-only cleanup; passing pip audit/resolution is not real RAM++ export compatibility. Review its pins and targeted security lock updates independently before integration.
+
+
+## 2026-10-02 — durable native index preparation
+
+Reuse catalog_jobs priority/checkpoint/state fields for pinned-model `catalogIndex` preparation rather than adding a migration. Existing string worker-kind DTOs and pause/resume/cancel actions cover the wire shape; the canonical kind description specifies explicit index retries. Dispatch controls by worker kind so index resume does not depend on an MLX visual model. Resume of failed/cancelled index jobs is explicit. Recovery pauses interrupted jobs and replays from verified snapshot/SQLite revisions; cursor counts do not certify a graph. Keep actor ownership and coalesced awaiter receipts intact. Admit against both live/raw counts and bounded on-disk cache sizes; a large historical cache can consume memory even after its live rows disappear. General atomic resource/model reservations remain separate work.
+
+
+Hosted Swift release compilation exceeded its type-check budget for the detached index-worker closure despite local Debug validation. Extract the body into a typed static helper and split nested arithmetic, retaining ownership, admission, job state and cancellation behavior. Verify Release products/probes as well as native tests; a Debug build alone is insufficient for this gate.
+
+## 2026-10-03 — Share resource admission across native analysis work
+
+The macOS engine now uses one process-wide actor for estimated memory, CPU concurrency, and I/O concurrency claims. Keep the current system/app RAM reserve and free-memory floor; do not add a second independent estimator for index and VLM paths. The resident VLM keeps its memory lease after load, while load-time CPU/I/O claims are returned. Catalog indexing is background priority and persists a paused catalog job when it cannot fit beside interactive resident work; interactive requests precede waiting background work, but admitted jobs are not preempted. On Apple Silicon GPU/ANE allocations share unified memory, so the scheduler charges process memory and exposes no separate accelerator-memory budget. The actor is process-local; durable catalog job state remains in SQLite. Its measured coverage is currently the native index and DeepAnalyze paths, not every file worker or a multi-model runtime.
+
+## 2026-10-03 — Reuse the verified Metal library builder
+
+The standard macOS launcher now delegates MLX kernel compilation to `scripts/ensure_mlx_metallib.sh`. That helper applies the pinned MLX/Xcode 27 compatibility adjustments to the generated SwiftPM checkout and builds the library in a temporary directory. Keep the reviewed bootstrap digest and its equality test synchronized whenever the launcher changes.
+
+
+## 2026-10-03 — Keep scan admission timing local and aggregate
+
+Scan queue delay is an ephemeral per-file value and is reported only as aggregate fields in the existing local JSONL `batch` event. Keep it out of the catalog and IPC because it is diagnostic timing, not user evidence or a client contract. Do not tune scan worker or scheduler limits from synthetic database-writer rates; require a model-backed internal-drive scan under foreground load and inspect stage times, admission wait, throughput, and memory first. No dependency or network behavior changes.
+
+
+## 2026-10-03 — Resolve only confirmed People names in chat
+
+Chat identity terms are matched against user-managed People labels and first-name aliases, then constrained to existing face prints and non-stale video observations before result limits. Unknown clusters are excluded; ambiguous exact first names return all matching confirmed identities. Return stored non-stale video appearances as timestamped person evidence so chat can seek to the observation; label unedited model links unverified until corrected. Keep keyword action terms in the query and preserve selected identity through refinements. This uses existing catalog records and response DTOs, so no schema or IPC migration is needed. Semantic/event-group retrieval remains separate work.
