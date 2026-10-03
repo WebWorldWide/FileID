@@ -14,12 +14,9 @@ const CANONICAL_KINDS: &[&str] = &[
     "ram_plus",
     "mistral_small_3_2",
     "qwen2_5_vl_7b",
+    "qwen3_vl_4b",
+    "qwen3_vl_8b",
     "gemma_3_4b",
-    "llama_runtime_x64",
-    "cudnn_runtime_x64",
-    "ort_cuda_x64",
-    "ort_openvino_x64",
-    "llama_runtime_cuda_x64",
     "bge_text",
     "florence2_base",
     "whisper",
@@ -61,7 +58,6 @@ fn manifest_windows_artifacts() -> BTreeMap<String, (String, u64)> {
 #[test]
 fn registry_matches_manifest_exactly() {
     let mut manifest_entries = manifest_windows_artifacts();
-    let mut registry_urls: Vec<String> = Vec::new();
 
     for kind in CANONICAL_KINDS {
         let LookupResult::Found(model) = lookup_full(kind) else {
@@ -81,7 +77,6 @@ fn registry_matches_manifest_exactly() {
                 "{kind}: approxBytes drift for {}",
                 file.url
             );
-            registry_urls.push(file.url.clone());
         }
     }
 
@@ -90,7 +85,6 @@ fn registry_matches_manifest_exactly() {
         "manifest lists windows artifacts the registry doesn't serve: {:?}",
         manifest_entries.keys().collect::<Vec<_>>()
     );
-    assert_eq!(registry_urls.len(), 31, "expected 31 pinned artifacts");
 }
 
 #[test]

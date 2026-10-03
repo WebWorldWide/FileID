@@ -41,6 +41,9 @@ public sealed partial class OnboardingSplash : UserControl
     }
 
     private void OnReducedMotionChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnReducedMotionChanged), () => OnReducedMotionChangedCore(sender, e));
+
+    private void OnReducedMotionChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         DispatcherQueue.TryEnqueue(UpdateShimmer);
     }

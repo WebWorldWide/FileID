@@ -13,6 +13,7 @@
 // springs) checks `ReducedMotion.IsReduced` before kicking off animation.
 
 using System.ComponentModel;
+using System.Diagnostics;
 using Windows.UI.ViewManagement;
 
 namespace FileID.Theme.Motion;
@@ -49,11 +50,30 @@ public sealed class ReducedMotion : INotifyPropertyChanged
                 return;
             }
             _isReduced = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsReduced)));
+            RaisePropertyChangedIsolated(nameof(IsReduced));
         }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void RaisePropertyChangedIsolated(string propertyName)
+    {
+        var handlers = PropertyChanged;
+        if (handlers is null) return;
+
+        var args = new PropertyChangedEventArgs(propertyName);
+        foreach (PropertyChangedEventHandler handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler(this, args);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceError($"ReducedMotion.PropertyChanged subscriber failed: {ex}");
+            }
+        }
+    }
 
     private void OnAnimationsEnabledChanged(UISettings sender, UISettingsAnimationsEnabledChangedEventArgs args)
     {

@@ -74,13 +74,23 @@ public sealed partial class SidebarEngineStatus : UserControl
                 break;
             case EngineClient.LifecycleState.Crashed:
                 ApplyStatus(StatusAccent.Red,
-                    ec.CrashReason ?? "Engine crashed",
-                    ec.CrashReason ?? "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log.");
+                    ResolveCrashedStatusText(ec.CrashReason),
+                    ResolveCrashedStatusTip(ec.CrashReason));
                 break;
         }
     }
 
     private enum StatusAccent { Gold, Red }
+
+    internal static string ResolveCrashedStatusText(string? reason) =>
+        string.IsNullOrWhiteSpace(reason) ? "Engine crashed" : reason;
+
+    internal static string ResolveCrashedStatusTip(string? reason) =>
+        string.IsNullOrWhiteSpace(reason)
+            ? "Engine crashed. Check %LOCALAPPDATA%\\FileID\\logs\\app.log."
+            : reason == "Engine stopped"
+                ? "Engine stopped. Restart it from Settings."
+                : reason;
 
     /// <summary>
     /// Sets the dot, glow ring, label, and tooltip in one shot. Glow ring

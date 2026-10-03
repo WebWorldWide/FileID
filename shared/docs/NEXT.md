@@ -1,6 +1,14 @@
 # NEXT — resume here
 
-## Active priority — macOS first (2026-10-03)
+## Current owner request - Windows Store readiness (2026-10-03)
+Continue on `codex/windows-store-readiness`, PR #213. Latest `origin/main` (`b3978769`, including PRs #214–216 and the dependency patch) is merged at `bbae4aac`. The hosted Windows app, Store package, macOS app, and Linux/macOS/Windows ARM64 native-tools checks passed. Only the Windows engine x64 test job remains in progress.
+The Windows app test-host fix at `13142642` stages manifest-declared runtime DLLs and writes a framework-dependent .NET 8 runtime config. Windows app CI passed x64 and ARM64 in [run 37153295516](https://github.com/WebWorldWide/FileID/actions/runs/37153295516). Store packaging passed in [run 37153295543](https://github.com/WebWorldWide/FileID/actions/runs/37153295543).
+The CI-produced package is `platforms/windows/dist/store/ci-37153295543/FileID-0.1.0-x64.msix`; `verify-store-package.ps1` passes for `AdamNolle.FileID` v0.1.0.0. SHA-256: `7bfe659e06113d16759f738a63663845a59016181a5415538856ffd37245cf2a`. The existing Partner Center draft still contains the older package. Listing text and pricing are saved; IARC 12+ / ESRB Teen answers and terms were approved, while Current Rating ID remains Pending.
+Partner Center currently reports Pricing/availability Not started, Age ratings In Progress with Current Rating ID Pending, Packages Complete with the older package, and Store listings Incomplete because screenshots are absent. The pricing page shows public visibility and a $0 USD base price selected, but the overview does not count it complete. The publisher wants the product live; package upload and submission are within scope after required checks. Computer-use policy still requires action-time user confirmation before installing/running the unsigned app; that confirmation is pending. WACK is not installed and this session is not elevated. Genuine screenshots, WACK, fresh-profile install/launch/upgrade, and hardware GPU/model validation remain gates. `G:\TrueNAS` is unavailable; RTX 5080 is present.
+
+Local Windows app tests pass 432/432 and the downloaded CI Store package passes the local identity/hash verifier. Remaining gates: exact-head GitHub CI; app install/run confirmation; genuine screenshots; WACK availability/elevation; fresh-profile install/launch/upgrade; completion of Partner Center sections; and physical GPU/model validation.
+
+## Secondary priority — macOS first (2026-10-03)
 
 Continue the accepted next-version plan on macOS. The owner deferred new Windows/Linux feature work and physical acceptance until using the PC. Recent merged milestones are PR #216 (timestamped on-device video speech) and PR #217 (TestFlight package verification fixes); current `main` was `81d0f6ea8f269b824f262dbee43d72b97e7f47e3` before this docs checkpoint. See the newest `STATE.md` and `AGENT_HANDOFF.md` entries for current CI and exact continuation.
 

@@ -34,7 +34,9 @@ use gtk::glib;
 
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent};
-use fileid_engine::ipc::{CommandPayload, ExactTrashIdentity, TrashFilesPayload};
+use fileid_engine::ipc::{
+    CommandPayload, ExactTrashIdentity, RestoreFromTrashPayload, TrashFilesPayload,
+};
 
 /// Default "visually similar" Hamming threshold (8 of 64 bits). `FILEID_NEARDUP_HAMMING`
 /// overrides, clamped to 0..20. (mirrors macOS `defaultNearDupHamming`.)
@@ -48,7 +50,6 @@ const MAX_VISIBLE_MEMBERS: usize = 5_000;
 const MAX_VISIBLE_MEMBERS_PER_GROUP: usize = 500;
 const EXACT_READ_BUDGET_BYTES: i64 = 64 * 1024 * 1024 * 1024;
 const TILE_THUMB_PX: i32 = 256;
-const BYTES_PER_MB: f64 = 1_048_576.0;
 
 // ─── Data model (app-side mirror of DuplicateGroup / DuplicateMember) ─────────
 
@@ -137,6 +138,8 @@ struct Cleanup {
     trash_generation: Cell<u64>,
     pending_trash: RefCell<Option<PendingTrash>>,
     last_candidates: Cell<usize>,
+    last_batch: RefCell<Option<String>>,
+    restoring: Cell<bool>,
     last_warning: RefCell<Option<String>>,
     last_refresh_error: RefCell<Option<String>>,
     reload_throttle: Cell<Instant>,
@@ -148,6 +151,7 @@ struct Cleanup {
     delete_btn: gtk::Button,
     status_bar: gtk::Box,
     status_label: gtk::Label,
+    restore_button: gtk::Button,
     content_stack: gtk::Stack,
     empty_page: adw::StatusPage,
     list_box: gtk::Box,
@@ -170,7 +174,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .spacing(2)
         .build();
     title_col.append(&title);
-    title_col.append(&subtitle);
 
     let pill_exact = gtk::Button::builder()
         .label("Exact")
@@ -200,7 +203,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .sensitive(false)
         .build();
     let delete_btn = gtk::Button::builder()
-        .label("Delete 0 selected (0.0 MB)")
+        .label("Delete 0 selected (0 B)")
         .css_classes(["destructive-action"])
         .sensitive(false)
         .build();
@@ -227,6 +230,15 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let status_icon = gtk::Image::from_icon_name("user-trash-symbolic");
     let status_label = gtk::Label::builder().xalign(0.0).wrap(true).build();
     let status_filler = gtk::Box::builder().hexpand(true).build();
+    let restore_button = gtk::Button::builder()
+        .label("Restore last batch")
+        .css_classes(["pill"])
+        .visible(false)
+        .build();
+    let open_trash = gtk::Button::builder()
+        .label("Open Trash")
+        .css_classes(["flat"])
+        .build();
     let status_dismiss = gtk::Button::builder()
         .label("Dismiss")
         .css_classes(["flat"])
@@ -240,6 +252,8 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     status_bar.append(&status_icon);
     status_bar.append(&status_label);
     status_bar.append(&status_filler);
+    status_bar.append(&restore_button);
+    status_bar.append(&open_trash);
     status_bar.append(&status_dismiss);
 
     // ── Content (empty state ↔ group list) ──────────────────────────────────
@@ -277,6 +291,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["fileid-tab"])
         .build();
     root.append(&header_row);
+    root.append(&subtitle);
     root.append(&status_bar);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&content_stack);
@@ -297,6 +312,8 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         pending_trash: RefCell::new(None),
         last_candidates: Cell::new(0),
         last_warning: RefCell::new(None),
+        last_batch: RefCell::new(None),
+        restoring: Cell::new(false),
         last_refresh_error: RefCell::new(None),
         reload_throttle: Cell::new(Instant::now() - Duration::from_secs(10)),
         subtitle,
@@ -306,6 +323,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         delete_btn: delete_btn.clone(),
         status_bar: status_bar.clone(),
         status_label,
+        restore_button: restore_button.clone(),
         content_stack,
         empty_page,
         list_box,
@@ -362,6 +380,20 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let bar = status_bar.clone();
         move |_| bar.set_visible(false)
     });
+    {
+        let this = this.clone();
+        restore_button.connect_clicked(move |_| this.restore_last_batch());
+    }
+    {
+        let status_label = this.status_label.clone();
+        open_trash.connect_clicked(move |_| {
+            if let Err(error) = gio::AppInfo::launch_default_for_uri(
+                "trash:///", None::<&gio::AppLaunchContext>
+            ) {
+                status_label.set_text(&format!("Could not open Trash: {error}"));
+            }
+        });
+    }
 
     // ── Live-scan reloads: throttle on batches, final reload on completion. ──
     let ev_rx = this.engine.borrow_mut().subscribe();
@@ -376,13 +408,23 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                             this.reload();
                         }
                     }
-                    EngineEvent::ScanComplete(_) => this.reload(),
-                    EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
-                        this.finish_trash(result);
-                    }
-                    EngineEvent::Exited if this.deleting.get() => {
-                        this.fail_trash("The engine exited before confirming the Trash operation.");
-                    }
+                EngineEvent::Ready | EngineEvent::ScanComplete(_) => this.reload(),
+                EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
+                    this.finish_trash(result);
+                }
+                EngineEvent::BulkActionResult(result) if result.action == "restoreFromTrash" => {
+                    this.finish_restore(result);
+                }
+                EngineEvent::Exited if this.deleting.get() => {
+                    this.fail_trash("The engine exited before confirming the Trash operation.");
+                }
+                EngineEvent::Exited if this.restoring.get() => {
+                    this.restoring.set(false);
+                    this.restore_button.set_sensitive(true);
+                    this.update_global_summary();
+                    this.status_label.set_text("The engine exited before confirming the restore.");
+                    this.reveal_status();
+                }
                     _ => {}
                 }
             }
@@ -426,7 +468,6 @@ impl Cleanup {
         self.groups.borrow_mut().clear();
         self.last_warning.borrow_mut().take();
         self.last_refresh_error.borrow_mut().take();
-        self.status_bar.set_visible(false);
         self.reload();
         self.update_global_summary();
     }
@@ -445,6 +486,15 @@ impl Cleanup {
         }
         self.load_inflight.set(true);
         self.reload_pending.set(false);
+        if self.groups.borrow().is_empty() {
+            self.empty_page.set_title("Checking for duplicates…");
+            self.empty_page.set_description(Some("Reading the library and verifying files."));
+            self.empty_page.set_icon_name(Some("view-refresh-symbolic"));
+            let spinner = gtk::Spinner::new();
+            spinner.start();
+            self.empty_page.set_child(Some(&spinner));
+            self.content_stack.set_visible_child_name("empty");
+        }
         let mode_similar = self.mode.borrow().as_str() == "similar";
         let cancel = Arc::new(AtomicBool::new(false));
         self.load_cancel.replace(Some(cancel.clone()));
@@ -652,9 +702,9 @@ impl Cleanup {
             );
         }
         let size_text = format!(
-            "{:.1} MB total · {:.1} MB if you keep 1",
-            group.total_bytes as f64 / BYTES_PER_MB,
-            group.reclaimable() as f64 / BYTES_PER_MB,
+            "{} total · {} if you keep 1",
+            format_bytes(group.total_bytes),
+            format_bytes(group.reclaimable()),
         );
         head.append(
             &gtk::Label::builder()
@@ -891,7 +941,7 @@ impl Cleanup {
                     return;
                 };
                 if let Some(p) = pic_weak.upgrade() {
-                    p.set_paintable(Some(&texture_from_decoded(&decoded)));
+                    p.set_paintable(Some(&texture_from_decoded(decoded)));
                 }
             });
         } else {
@@ -981,9 +1031,9 @@ impl Cleanup {
             }
         } else {
             format!(
-                "{n_groups} duplicate group{} · {:.1} MB reclaimable if you keep 1 per group",
+                "{n_groups} duplicate group{} · {} reclaimable if you keep 1 per group",
                 plural(n_groups),
-                reclaimable as f64 / BYTES_PER_MB,
+                format_bytes(reclaimable),
             )
         };
         if n_skipped > 0 {
@@ -995,10 +1045,10 @@ impl Cleanup {
         self.subtitle.set_text(&subtitle);
 
         self.delete_btn.set_label(&format!(
-            "Delete {total_sel} selected ({:.1} MB)",
-            total_sel_bytes as f64 / BYTES_PER_MB
+            "Delete {total_sel} selected ({})",
+            format_bytes(total_sel_bytes)
         ));
-        self.delete_btn.set_sensitive(total_sel > 0);
+        self.delete_btn.set_sensitive(total_sel > 0 && !self.deleting.get() && !self.restoring.get());
         self.clear_btn.set_sensitive(total_sel > 0);
 
         let has_groups = !visible.is_empty();
@@ -1028,17 +1078,17 @@ impl Cleanup {
     }
 
     fn confirm_trash(self: &Rc<Self>, ids: Vec<i64>, anchor: &gtk::Button) {
-        if ids.is_empty() {
+        if ids.is_empty() || self.deleting.get() || self.restoring.get() {
             return;
         }
         let bytes = self.selected_bytes(&ids);
         let n = ids.len();
         let heading = format!("Move {n} file{} to Trash?", plural(n));
         let body = format!(
-            "Moves the selected cop{} to Trash. Frees about {:.1} MB. You can restore them \
+            "Moves the selected cop{} to Trash. Frees about {}. You can restore them \
              from Trash if you change your mind.",
             if n == 1 { "y" } else { "ies" },
-            bytes as f64 / BYTES_PER_MB,
+            format_bytes(bytes),
         );
         let dialog = adw::AlertDialog::new(Some(heading.as_str()), Some(body.as_str()));
         dialog.add_responses(&[("cancel", "Cancel"), ("trash", "Move to Trash")]);
@@ -1066,10 +1116,11 @@ impl Cleanup {
     }
 
     fn trash(self: &Rc<Self>, ids: Vec<i64>) {
-        if ids.is_empty() || self.deleting.get() {
+        if ids.is_empty() || self.deleting.get() || self.restoring.get() {
             return;
         }
         self.deleting.set(true);
+        self.update_global_summary();
         let operation = self.trash_generation.get().wrapping_add(1);
         self.trash_generation.set(operation);
         self.reveal_status();
@@ -1111,26 +1162,45 @@ impl Cleanup {
             if selected.is_empty() {
                 continue;
             }
-            let keeper = group
-                .members
-                .iter()
+            let keeper = group.members.iter()
                 .find(|member| !requested.contains(&member.id))
-                .and_then(|member| {
-                    Some(ExactTrashCandidate {
-                        id: member.id,
-                        path: std::path::PathBuf::from(&member.path),
-                        size: u64::try_from(member.size).ok()?,
-                    })
-                });
+                .or_else(|| group.members.first())
+                .and_then(|member| Some(ExactTrashCandidate {
+                    id: member.id,
+                    path: std::path::PathBuf::from(&member.path),
+                    size: u64::try_from(member.size).ok()?,
+                }));
             let Some(keeper) = keeper else {
                 rejected_without_keeper += selected.len();
                 continue;
             };
-            checks.push(ExactTrashGroup {
-                expected_hash,
-                keeper,
-                selected,
-            });
+            let mut selected = selected;
+            if let Some(index) = selected.iter().position(|member| member.id == keeper.id) {
+                let selected_keeper = selected.swap_remove(index);
+                if let Some(witness) = group.members.iter()
+                    .find(|member| member.id != keeper.id)
+                    .and_then(|member| Some(ExactTrashCandidate {
+                        id: member.id,
+                        path: std::path::PathBuf::from(&member.path),
+                        size: u64::try_from(member.size).ok()?,
+                    }))
+                {
+                    checks.push(ExactTrashGroup {
+                        expected_hash,
+                        keeper: witness,
+                        selected: vec![selected_keeper],
+                    });
+                } else {
+                    rejected_without_keeper += 1;
+                }
+            }
+            if !selected.is_empty() {
+                checks.push(ExactTrashGroup {
+                    expected_hash,
+                    keeper,
+                    selected,
+                });
+            }
         }
         let unrepresented = requested
             .len()
@@ -1237,6 +1307,7 @@ impl Cleanup {
             self.status_label
                 .set_text(&format!("Trash operation failed: {message}"));
             self.reveal_status();
+            self.reload();
             return;
         }
         let succeeded: Vec<i64> = result
@@ -1256,13 +1327,18 @@ impl Cleanup {
         self.trash_generation
             .set(self.trash_generation.get().wrapping_add(1));
         self.deleting.set(false);
+        if result.succeeded > 0 {
+            *self.last_batch.borrow_mut() = result.action.split_once(':')
+                .map(|(_, batch)| batch.to_owned());
+            self.restore_button.set_visible(self.last_batch.borrow().is_some());
+        }
         let total_failed = result.failed as usize + pending.preflight_rejected;
         if total_failed == 0 {
             self.status_label.set_text(&format!(
-                "Trashed {} file{} · freed {:.1} MB · restore from Trash to undo",
+                "Trashed {} file{} · freed {} · restore from Trash to undo",
                 result.succeeded,
                 plural(result.succeeded as usize),
-                freed as f64 / BYTES_PER_MB,
+                format_bytes(freed),
             ));
         } else {
             let details = result
@@ -1303,11 +1379,57 @@ impl Cleanup {
         self.reload();
     }
 
-    fn fail_trash(&self, message: &str) {
+    fn restore_last_batch(self: &Rc<Self>) {
+        if self.restoring.get() || self.deleting.get() {
+            return;
+        }
+        let Some(batch_id) = self.last_batch.borrow().clone() else { return };
+        self.restoring.set(true);
+        self.update_global_summary();
+        self.restore_button.set_sensitive(false);
+        self.status_label.set_text("Restoring files from Trash…");
+        self.reveal_status();
+        if let Err(error) = self.engine.borrow_mut().send(
+            CommandPayload::RestoreFromTrash(RestoreFromTrashPayload { batch_id })
+        ) {
+            self.restoring.set(false);
+            self.restore_button.set_sensitive(true);
+            self.update_global_summary();
+            self.status_label.set_text(&format!("Could not send restore command: {error}"));
+        }
+    }
+
+    fn finish_restore(self: &Rc<Self>, result: fileid_engine::ipc::BulkActionResult) {
+        if !self.restoring.replace(false) { return; }
+        self.restore_button.set_sensitive(true);
+        self.update_global_summary();
+        if result.failed == 0 {
+            self.last_batch.borrow_mut().take();
+            self.restore_button.set_visible(false);
+            self.status_label.set_text(&format!(
+                "Restored {} file{} to the library.", result.succeeded,
+                plural(result.succeeded as usize)
+            ));
+        } else {
+            let details = result.messages.iter()
+                .filter(|message| !message.ok)
+                .filter_map(|message| message.message.as_deref())
+                .take(2).collect::<Vec<_>>().join(" · ");
+            self.status_label.set_text(&format!(
+                "Restored {}; {} could not be restored. {details}",
+                result.succeeded, result.failed
+            ));
+        }
+        self.reveal_status();
+        self.reload();
+    }
+
+    fn fail_trash(self: &Rc<Self>, message: &str) {
         self.pending_trash.borrow_mut().take();
         self.trash_generation
             .set(self.trash_generation.get().wrapping_add(1));
         self.deleting.set(false);
+        self.update_global_summary();
         self.status_label.set_text(message);
         self.reveal_status();
     }
@@ -1435,8 +1557,8 @@ fn update_group_selection_widgets(
         }
     });
     sel_lbl.set_text(&format!(
-        "{cnt} selected · {:.1} MB",
-        bytes as f64 / BYTES_PER_MB
+        "{cnt} selected · {}",
+        format_bytes(bytes)
     ));
     sel_lbl.set_visible(cnt > 0);
     del_btn.set_label(&format!("Delete {cnt} from this group"));
@@ -1789,6 +1911,9 @@ fn load_similar_until(
         if indices.len() < 2 {
             continue;
         }
+        if pure_exact_group(&raw, &indices) {
+            continue;
+        }
         rank_indices(&raw, &mut indices);
         // Stable identity: smallest member id, independent of keeper re-ranks.
         let gid = indices.iter().map(|&i| raw[i].id).min().unwrap_or(0);
@@ -1826,6 +1951,24 @@ fn load_similar_until(
                  {MAX_VISIBLE_MEMBERS}-visible-member or {MAX_GROUPS}-group display limits."
             )
         }),
+    })
+}
+
+fn pure_exact_group(raw: &[RawRow], indices: &[usize]) -> bool {
+    let Some(first) = indices.first().map(|index| &raw[*index]) else { return false };
+    let Ok(size) = u64::try_from(first.size) else { return false };
+    if size.saturating_mul(indices.len() as u64) > EXACT_READ_BUDGET_BYTES as u64
+        || indices.iter().any(|index| raw[*index].size != first.size)
+    {
+        return false;
+    }
+    let Ok(digest) = fileid_engine::util::content_hash::exact_file_sha256(
+        std::path::Path::new(&first.path), size
+    ) else { return false };
+    indices.iter().skip(1).all(|index| {
+        fileid_engine::util::content_hash::exact_file_sha256(
+            std::path::Path::new(&raw[*index].path), size
+        ).is_ok_and(|other| other == digest)
     })
 }
 
@@ -2259,6 +2402,30 @@ mod tests {
         let loaded = load_similar(&conn);
         assert_eq!(loaded.groups.len(), 1);
         assert_eq!(loaded.groups[0].total_members, 2);
+    }
+
+    #[test]
+    fn similar_review_omits_pure_exact_cluster_but_keeps_mixed_visual_cluster() {
+        let conn = database();
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-linux-similar-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (id, bytes) in [(1, b"same"), (2, b"same"), (3, b"diff")] {
+            let path = dir.join(format!("{id}.jpg"));
+            std::fs::write(&path, bytes).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,phash) \
+                 VALUES (?1,?2,?1,4,1,'image','jpg',0,7)",
+                rusqlite::params![id, path.to_string_lossy().as_ref()],
+            ).unwrap();
+        }
+        assert_eq!(load_similar(&conn).groups[0].total_members, 3);
+        std::fs::write(dir.join("3.jpg"), b"same").unwrap();
+        assert!(load_similar(&conn).groups.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

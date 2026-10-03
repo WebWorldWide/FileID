@@ -7,6 +7,8 @@
 // engine subprocess, and presents the main window.
 
 mod engine_client;
+mod spring;
+mod tabs;
 mod window;
 
 use adw::prelude::*;
@@ -55,6 +57,9 @@ fn load_brand_css() {
         @define-color fileid_pink     #F2A6C0;
         @define-color fileid_panel    alpha(white, 0.04);
         @define-color fileid_stroke   alpha(white, 0.10);
+        @define-color accent_bg_color  @fileid_gold;
+        @define-color accent_fg_color  #1c1c1c;
+        @define-color accent_color     @fileid_gold;
 
         .fileid-glass {
             background-color: @fileid_panel;

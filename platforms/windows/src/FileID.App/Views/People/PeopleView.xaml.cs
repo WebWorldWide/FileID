@@ -3,7 +3,9 @@
 // (A's face_prints reassigned to B's person_id, A's person row deleted).
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,8 +14,11 @@ using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.Data.Sqlite;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.System;
 
 namespace FileID.Views.People;
 
@@ -242,6 +247,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         });
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnViewModelPropertyChanged), () => OnViewModelPropertyChangedCore(sender, e));
+
+    private void OnViewModelPropertyChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
@@ -357,6 +365,30 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     {
         if (ViewModel.IsSelectMode) return;
         OnSuggestedMergesClicked(sender, e);
+    }
+
+    private async void OnClusterEditNameClicked(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.IsSelectMode) return;
+        if (sender is not FrameworkElement element || element.DataContext is not PersonCluster cluster) return;
+        await OpenDetailSheetAsync(cluster);
+    }
+
+    private void OnClusterKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        var shift = Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(VirtualKey.Shift)
+            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        if (e.Key != VirtualKey.Application && !(e.Key == VirtualKey.F10 && shift)) return;
+        if (sender is not FrameworkElement target) return;
+
+        for (var parent = target.Parent as FrameworkElement; parent is not null; parent = parent.Parent as FrameworkElement)
+        {
+            if (parent.ContextFlyout is not { } flyout) continue;
+            flyout.ShowAt(target);
+            e.Handled = true;
+            return;
+        }
     }
 
     private async Task OpenDetailSheetAsync(PersonCluster pc)
@@ -610,6 +642,23 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             var choice = await confirm.ShowAsync();
             if (choice != ContentDialogResult.Primary) return;
 
+            long[] sourceFaceIds;
+            try
+            {
+                sourceFaceIds = await ReadPersonFaceIdsAsync(sourceId);
+                if (sourceFaceIds.Length == 0)
+                {
+                    await ShowAlertAsync("Merge unavailable", "The source person has no faces to move. Refresh People and try again.");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("Could not prepare merge undo: " + ex.Message);
+                await ShowAlertAsync("Merge unavailable", "FileID couldn't prepare a reliable undo record. Refresh People and try again.");
+                return;
+            }
+
             var r = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "mergeClusters",
                 () => ViewModels.EngineClient.Instance.MergeClustersAsync(sourceId, destId),
@@ -620,6 +669,10 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                              ?? (r.Messages.Count > 0 ? r.Messages[0] : null)?.Message
                              ?? "The engine did not confirm the merge.";
                 await ShowAlertAsync("Merge failed", detail);
+            }
+            else
+            {
+                PushMergeUndo(sourceId, destId, sourceFaceIds);
             }
             await ViewModel.RefreshAsync(System.Threading.CancellationToken.None);
         }
@@ -636,6 +689,52 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     }
 
     // ─── FEAT-CRIT-1: People multi-select bulk merge / mark-as-unknown ──
+
+    internal static void PushMergeUndo(long sourcePersonId, long destinationPersonId, IReadOnlyList<long> faceIdsToRevert)
+    {
+        var faceIds = faceIdsToRevert.ToArray();
+        UndoStack.Instance.Push("Merge people", async () =>
+        {
+            var engine = EngineClient.Instance;
+            try
+            {
+                await engine.WaitForReadyAsync(TimeSpan.FromSeconds(30));
+                var r = await engine.WaitForBulkActionResultAsync(
+                    "revertMerge",
+                    () => engine.RevertMergeAsync(sourcePersonId, destinationPersonId, faceIds),
+                    TimeSpan.FromSeconds(30));
+                var restored = r.Failed == 0 && r.Succeeded > 0;
+                if (restored)
+                {
+                    await engine.RunFaceClusteringAsync();
+                }
+                return restored;
+            }
+            catch (Exception ex)
+            {
+                DebugLog.Warn("People merge undo failed: " + ex.Message);
+                return false;
+            }
+        });
+    }
+
+    private static Task<long[]> ReadPersonFaceIdsAsync(long personId) => Task.Run(() =>
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = AppPaths.DbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+        }.ToString();
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT id FROM face_prints WHERE person_id = @personId ORDER BY id";
+        command.Parameters.AddWithValue("@personId", personId);
+        using var reader = command.ExecuteReader();
+        var faceIds = new List<long>();
+        while (reader.Read()) faceIds.Add(reader.GetInt64(0));
+        return faceIds.ToArray();
+    });
 
     private void OnToggleSelectMode(object sender, RoutedEventArgs e)
     {
@@ -668,6 +767,9 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
     }
 
     private void OnClusterIsSelectedChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnClusterIsSelectedChanged), () => OnClusterIsSelectedChangedCore(sender, e));
+
+    private void OnClusterIsSelectedChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(PersonCluster.IsSelected)) return;
         // Keep the id-keyed selection set in sync as the user toggles cards, so a
@@ -804,6 +906,13 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 var srcId = sourcesToMerge[i];
                 try
                 {
+                    var sourceFaceIds = await ReadPersonFaceIdsAsync(srcId);
+                    if (sourceFaceIds.Length == 0)
+                    {
+                        failed++;
+                        firstFailure ??= $"Person #{srcId} has no faces to move.";
+                        continue;
+                    }
                     var r = await EngineClient.Instance.WaitForBulkActionResultAsync(
                         "mergeClusters",
                         () => EngineClient.Instance.MergeClustersAsync(srcId, dest),
@@ -818,6 +927,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                     else
                     {
                         merged++;
+                        PushMergeUndo(srcId, dest, sourceFaceIds);
                     }
                 }
                 catch (Exception ex)

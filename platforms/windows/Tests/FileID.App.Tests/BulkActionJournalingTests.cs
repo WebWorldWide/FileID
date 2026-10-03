@@ -1,4 +1,5 @@
-﻿using System;
+﻿#pragma warning disable CA1861 // Fresh fixture arrays keep each test isolated.
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -60,7 +61,7 @@ public sealed class BulkActionJournalingTests
     [Fact]
     public void RenameInverseContainsOnlyTerminalConfirmedSuccesses()
     {
-        BulkRenameSheet.RenamePlan[] plans =
+        RenamePlan[] plans =
         [
             new()
             {

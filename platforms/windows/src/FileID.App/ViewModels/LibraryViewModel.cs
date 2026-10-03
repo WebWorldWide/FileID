@@ -65,6 +65,9 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnServiceErrorChanged(object? sender, PropertyChangedEventArgs e)
+        => FileID.Services.DebugLog.SafeRun(nameof(OnServiceErrorChanged), () => OnServiceErrorChangedCore(sender, e));
+
+    private void OnServiceErrorChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is not (nameof(ReadStore.LastOpenError) or nameof(ClipSearchService.LastSearchError)))
             return;
@@ -183,6 +186,9 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     }
 
     private void OnTilePropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => FileID.Services.DebugLog.SafeRun(nameof(OnTilePropertyChanged), () => OnTilePropertyChangedCore(sender, e));
+
+    private void OnTilePropertyChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(FileTile.IsSelected)) return;
         if (sender is not FileTile t) return;

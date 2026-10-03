@@ -31,7 +31,7 @@ public sealed partial class FilePreviewSheet : UserControl
 
     private IReadOnlyList<FileID.ViewModels.FileTile>? _siblings;
     private int _siblingIndex;
-    private bool _unloaded;
+    private bool _isClosed;
 
     /// <summary>Raised by the toolbar X button + Esc. Host (LibraryView)
     /// subscribes and calls <c>ContentDialog.Hide()</c>.</summary>
@@ -45,22 +45,20 @@ public sealed partial class FilePreviewSheet : UserControl
         // tag TextBox is focused so typing still moves the cursor.
         PreviewKeyDown += OnPreviewKeyDown;
         Loaded += OnSheetLoaded;
-        Unloaded += (_, _) =>
-        {
-            _unloaded = true;
-            // Stop the deferred loading-ring timer so a queued tick can't touch
-            // the torn-down content tree.
-            try { _loadingDelayTimer?.Stop(); } catch { /* swallow */ }
-            // Stop playback + fully dispose the MediaPlayer so audio can't keep
-            // playing and the file handle is released after the dialog dismisses.
-            StopAndClearMedia();
-            DisposeMediaPlayer();
-            // Clear the cross-tab "currently previewed" hint so the Deep
-            // Analyze tab's "Analyze current" button disables when the
-            // user closes the sheet.
-            FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
-        };
         IsTabStop = true;
+    }
+
+    /// <summary>Only ShowAsync completion is a terminal close signal. WinUI
+    /// may unload and reload dialog content while it is still open.</summary>
+    internal void CloseFromHost()
+    {
+        if (_isClosed) return;
+        _isClosed = true;
+        try { _loadingDelayTimer?.Stop(); } catch { /* swallow */ }
+        StopAndClearMedia();
+        DisposeMediaPlayer();
+        _previewCache.Clear();
+        FileID.Services.SelectionRegistry.Instance.PreviewedFileId = null;
     }
 
     private void OnSheetLoaded(object sender, RoutedEventArgs e)
@@ -224,13 +222,13 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             // The sheet may have unloaded while SetFileCoreAsync awaited; a
             // post-continuation ShowPlaceholder would touch a torn-down tree.
-            if (_unloaded) return;
+            if (_isClosed) return;
             Services.DebugLog.Warn("FilePreviewSheet.SetFile threw: " + ex);
             ShowPlaceholder(kind, "Preview failed: " + ex.Message);
         }
         finally
         {
-            if (!_unloaded) HideLoadingChrome();
+            if (!_isClosed) HideLoadingChrome();
         }
     }
 
@@ -249,7 +247,7 @@ public sealed partial class FilePreviewSheet : UserControl
             _loadingDelayTimer.Tick += (_, _) =>
             {
                 _loadingDelayTimer?.Stop();
-                if (_unloaded) return;
+                if (_isClosed) return;
                 // If a fast decode already bound a surface before this 120ms delay
                 // elapsed (the Tick can be queued just after the bind continuation
                 // but before HideLoadingChrome stops the timer), do NOT blank it —
@@ -326,6 +324,7 @@ public sealed partial class FilePreviewSheet : UserControl
     /// access is UI-thread-affine: BitmapImage is a DispatcherObject, so this is
     /// only ever read/written from the dispatcher-marshaled paths below.</summary>
     private const int PreviewCacheCap = 4;
+    private const uint MaxDirectPreviewEncodedBytes = 32 * 1024 * 1024;
     private readonly LinkedList<KeyValuePair<string, BitmapImage>> _previewCache = new();
 
     private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt, int navGen)
@@ -360,7 +359,7 @@ public sealed partial class FilePreviewSheet : UserControl
                     try
                     {
                         // Stale navigation — don't overwrite a newer file's preview. (audit A9)
-                        if (_unloaded || _navGen != navGen) { tcs.TrySetResult(false); return; }
+                        if (_isClosed || _navGen != navGen) { tcs.TrySetResult(false); return; }
                         // Cap the decoded surface at the displayed 1024 px edge
                         // regardless of what the shell hands back, so the 4-entry
                         // preview cache stays within its ~16 MB budget instead of
@@ -402,11 +401,17 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             try { thumb?.Dispose(); } catch { }
         }
+        if (kind == "image" && dispatcher is not null
+            && await TryLoadDirectImageAsync(path, cacheKey, dispatcher, navGen))
+        {
+            return;
+        }
+
         // Don't show the failure placeholder if we navigated away (or the stale
         // guard above set tcs=false for a superseded nav) — otherwise the prior
         // file's load clobbers the CURRENT sibling's preview with a placeholder.
         // A genuine decode failure on the still-current file falls through. (audit A9 re-audit)
-        if (_unloaded || _navGen != navGen) return;
+        if (_isClosed || _navGen != navGen) return;
         ShowPlaceholder(kind, kind switch
         {
             "image" => "Image couldn't be decoded by any installed provider.",
@@ -419,6 +424,80 @@ public sealed partial class FilePreviewSheet : UserControl
     /// <summary>UI-thread-only. On a cache hit, marshal the cached BitmapImage
     /// onto PreviewImage and bump it to most-recently-used. Returns true when a
     /// cached preview was shown (caller skips the shell extract + decode).</summary>
+    private async Task<bool> TryLoadDirectImageAsync(
+        string path,
+        string cacheKey,
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
+        int navGen)
+    {
+        Windows.Storage.Streams.IRandomAccessStream? stream = null;
+        try
+        {
+            var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
+            stream = await file.OpenReadAsync();
+            if (stream.Size == 0 || stream.Size > (ulong)MaxDirectPreviewEncodedBytes)
+            {
+                return false;
+            }
+
+            var size = (uint)stream.Size;
+            using var reader = new Windows.Storage.Streams.DataReader(stream.GetInputStreamAt(0));
+            var loaded = await reader.LoadAsync(size);
+            if (loaded != size)
+            {
+                return false;
+            }
+
+            var buffer = reader.ReadBuffer(loaded);
+            using var memory = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            await memory.WriteAsync(buffer);
+            memory.Seek(0);
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!dispatcher.TryEnqueue(async () =>
+            {
+                try
+                {
+                    if (_isClosed || _navGen != navGen)
+                    {
+                        completion.TrySetResult(false);
+                        return;
+                    }
+                    var image = new BitmapImage { DecodePixelWidth = 1024 };
+                    await image.SetSourceAsync(memory);
+                    if (_isClosed || _navGen != navGen)
+                    {
+                        completion.TrySetResult(false);
+                        return;
+                    }
+                    PreviewImage.Source = image;
+                    PreviewImage.Visibility = Visibility.Visible;
+                    StorePreview(cacheKey, image);
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    Services.DebugLog.Warn($"FilePreviewSheet direct image preview failed: {ex.Message}");
+                    completion.TrySetResult(false);
+                }
+            }))
+            {
+                return false;
+            }
+
+            return await completion.Task;
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn($"FilePreviewSheet direct image read failed: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            try { stream?.Dispose(); } catch { }
+        }
+    }
+
     private bool TryShowCachedPreview(string cacheKey, Microsoft.UI.Dispatching.DispatcherQueue dispatcher, int navGen)
     {
         for (var node = _previewCache.First; node != null; node = node.Next)
@@ -429,7 +508,7 @@ public sealed partial class FilePreviewSheet : UserControl
             _previewCache.AddFirst(node);
             dispatcher.TryEnqueue(() =>
             {
-                if (_unloaded || _navGen != navGen) return; // stale navigation (audit A9)
+                if (_isClosed || _navGen != navGen) return; // stale navigation (audit A9)
                 PreviewImage.Source = bmp;
                 PreviewImage.Visibility = Visibility.Visible;
             });
@@ -524,7 +603,7 @@ public sealed partial class FilePreviewSheet : UserControl
         var gen = _mediaGen;
         DispatcherQueue.TryEnqueue(() =>
         {
-            if (_unloaded || gen != _mediaGen) return; // superseded media failure
+            if (_isClosed || gen != _mediaGen) return; // superseded media failure
             Services.DebugLog.Warn($"FilePreviewSheet media failed ({kind}): {err}");
             ShowPlaceholder(kind, kind switch
             {
@@ -696,7 +775,7 @@ public sealed partial class FilePreviewSheet : UserControl
         // Defensive: sheet may have closed during the async query. Bail before
         // touching XAML, then wrap the UI mutation so a torn-down dialog
         // content tree doesn't fast-fail the dispatcher.
-        if (_unloaded || _navGen != navGen) return; // navigated away during the await (audit A9)
+        if (_isClosed || _navGen != navGen) return; // navigated away during the await (audit A9)
         try
         {
             ProposedRenameText.Text = name;
@@ -806,7 +885,7 @@ public sealed partial class FilePreviewSheet : UserControl
         if (tags.Count == 0) return;
         // UI mutation in a try/catch — sheet may have closed during the
         // async DB read; the XAML element references could be disposed.
-        if (_unloaded || _navGen != navGen) return; // navigated away during the await (audit A9)
+        if (_isClosed || _navGen != navGen) return; // navigated away during the await (audit A9)
         try
         {
             // Build a wrapping chip layout via runtime row construction:

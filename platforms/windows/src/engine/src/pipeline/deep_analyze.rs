@@ -1,63 +1,12 @@
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
 // Pipeline:
-//   1. Pick a model (Qwen2.5-VL 7B / Gemma 3 4B / Mistral-Small 3.2).
+//   1. Resolve selected registry model (Qwen3-VL, Qwen2.5-VL, Gemma 3, Mistral-Small).
 //   2. Load via llama.cpp (Vulkan / CUDA / DirectML / CPU backend by EP).
 //   3. Per file: render the image / extract a video keyframe / pdfium
 //      first-page render → resize to model context → caption + smart name.
 //   4. Persist to `deep_analyze_results` (migration v3).
 //   5. Emit `deepAnalyzeProgress` IPC events on every N files.
-
-/// Enumerates the VLM model kinds the Deep Analyze pipeline can run.
-/// Kept around (even though the registry is the source of truth for
-/// download metadata) so unit tests can sanity-check id uniqueness +
-/// size-tier ordering without exercising the full registry surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum VlmModelKind {
-    QwenVl7B,
-    Gemma3_4B,
-    MistralSmall3_2,
-}
-
-#[allow(dead_code)]
-impl VlmModelKind {
-    pub fn id(self) -> &'static str {
-        match self {
-            VlmModelKind::QwenVl7B => "qwen2.5-vl-7b",
-            VlmModelKind::Gemma3_4B => "gemma-3-4b",
-            VlmModelKind::MistralSmall3_2 => "mistral-small-3.2",
-        }
-    }
-
-    pub fn human_name(self) -> &'static str {
-        match self {
-            VlmModelKind::QwenVl7B => "Qwen2.5-VL 7B (recommended)",
-            VlmModelKind::Gemma3_4B => "Gemma 3 4B",
-            VlmModelKind::MistralSmall3_2 => "Mistral-Small 3.2",
-        }
-    }
-
-    /// Approximate disk size, in MB, for the Q4_K_M quant + mmproj.
-    /// Drives the install-disk-budget warning in the model picker UI.
-    pub fn approx_size_mb(self) -> u32 {
-        match self {
-            VlmModelKind::QwenVl7B => 4500,
-            VlmModelKind::Gemma3_4B => 2500,
-            // Mistral-Small-3.2-24B Q4_K_M (~14.3 GB) + mmproj (~878 MB).
-            VlmModelKind::MistralSmall3_2 => 15178,
-        }
-    }
-
-    /// Approximate runtime VRAM/RAM ceiling in MB at Q4_K_M.
-    pub fn approx_ram_mb(self) -> u32 {
-        match self {
-            VlmModelKind::QwenVl7B => 7500,
-            VlmModelKind::Gemma3_4B => 4500,
-            VlmModelKind::MistralSmall3_2 => 16000,
-        }
-    }
-}
 
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
@@ -86,6 +35,12 @@ pub enum AnalyzeMode {
     /// "Propose renames" checkbox unticked. Same VLM calls as Both minus the
     /// rename call; the proposed-name column is left untouched.
     CaptionAndTags,
+}
+
+impl AnalyzeMode {
+    fn establishes_completion(self) -> bool {
+        matches!(self, Self::Both | Self::CaptionAndTags)
+    }
 }
 
 /// Run Deep Analyze on a single file: pull image bytes (image, video
@@ -191,6 +146,7 @@ pub async fn analyze_file(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
@@ -307,6 +263,7 @@ fn persist_vlm_results(
     conn: &rusqlite::Connection,
     file_id: i64,
     model_kind: &str,
+    mode: AnalyzeMode,
     description: Option<&str>,
     proposed_name: Option<&str>,
     tags: &[String],
@@ -320,12 +277,36 @@ fn persist_vlm_results(
     // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
     // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                          vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
-                          vlm_model=?3, vlm_analyzed_at=?4 WHERE id=?5",
-        rusqlite::params![description, proposed_name, model_kind, now, file_id],
-    )?;
+    if mode.establishes_completion() {
+        tx.execute(
+            "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
+                              vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
+                              vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4 WHERE id=?5",
+            rusqlite::params![model_kind, description, proposed_name, now, file_id],
+        )?;
+    } else {
+        let completed_with_model = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM files WHERE id=?1 AND vlm_full_model=?2)",
+            rusqlite::params![file_id, model_kind],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if completed_with_model {
+            tx.execute(
+                "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name) \
+                 WHERE id=?3",
+                rusqlite::params![description, proposed_name, file_id],
+            )?;
+        } else {
+            tx.execute(
+                "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
+                                  vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL \
+                 WHERE id=?3",
+                rusqlite::params![description, proposed_name, file_id],
+            )?;
+        }
+    }
     if !tags.is_empty() {
         tx.execute(
             "DELETE FROM tags WHERE file_id=?1 AND source='vlm'",
@@ -467,6 +448,7 @@ pub(crate) async fn analyze_file_via_server(
             &conn,
             file_id,
             model_kind,
+            mode,
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
@@ -765,25 +747,6 @@ mod tests {
             parse_vlm_tags("photo, golden retriever, object"),
             vec!["golden retriever"]
         );
-    }
-
-    #[test]
-    fn model_kinds_have_unique_ids() {
-        let kinds = [
-            VlmModelKind::QwenVl7B,
-            VlmModelKind::Gemma3_4B,
-            VlmModelKind::MistralSmall3_2,
-        ];
-        let mut seen = std::collections::HashSet::new();
-        for k in kinds {
-            assert!(seen.insert(k.id()), "duplicate id for {:?}", k);
-        }
-    }
-
-    #[test]
-    fn size_estimates_increase_with_capability() {
-        assert!(VlmModelKind::Gemma3_4B.approx_size_mb() < VlmModelKind::QwenVl7B.approx_size_mb());
-        assert!(VlmModelKind::MistralSmall3_2.approx_size_mb() > VlmModelKind::QwenVl7B.approx_size_mb());
     }
 
     #[cfg(feature = "pdf-analyze")]

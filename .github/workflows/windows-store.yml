@@ -1,0 +1,55 @@
+name: Windows Store package
+
+on:
+  pull_request:
+    paths:
+      - 'platforms/windows/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - '.github/workflows/windows-store.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'platforms/windows/**'
+      - 'shared/scripts/check_binary_privacy.py'
+      - '.github/workflows/windows-store.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: MSIX — x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    defaults:
+      run:
+        working-directory: platforms/windows
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: '1.90'
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '8.0.x'
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
+      - name: Build and validate reserved Store package
+        run: ./build/publish-store.ps1
+      - name: Preserve unsigned upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: FileID-Store-x64
+          path: |
+            platforms/windows/dist/store/*.msix
+            platforms/windows/dist/store/*.sha256
+          if-no-files-found: error
+          retention-days: 14

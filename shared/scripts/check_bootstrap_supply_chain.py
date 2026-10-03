@@ -27,7 +27,7 @@ SKIP_PARTS = {".git", ".ralph", "target", "node_modules", ".venv", ".venv-ramplu
 DIRECT_PIN_RE = re.compile(r"^[A-Za-z0-9_.-]+==[^\s]+$")
 DOWNLOAD_EXEC_ALLOWLIST = {"packaging/appimage/build-appimage.sh"}
 REVIEWED_SHELL_SCRIPT_SHA256 = {
-    "build.sh": "07f636a7a6a10a3d39ee636d4dc63dce1af9aa7c101221987b9e88539deaa68c",
+    "build.sh": "aff5ad0d97076413c8ec88dafb81965dfd07e67ce435f05f4a70045d1310cf46",
     "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
     "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",
     "platforms/apple/run.sh": "8bcb4be432d5e3c1ad7adc1fb9474dee574e14bcaf8ddd5eede0ab51fac87455",
@@ -40,7 +40,7 @@ REVIEWED_SHELL_SCRIPT_SHA256 = {
     "platforms/apple/scripts/testflight.sh": "1224468878bb69112081f2b9d2b91965e6254d7f39cfbeec52c5ba7ca4225d1e",
     "platforms/apple/scripts/release.sh": "ca05a6205cc6f39954a919dcf420ad1c8a6e4691e1e12f6c980a4e39cf2054f2",
     "platforms/apple/scripts/wipe_local_state.sh": "3f522f095384110849c618f10f62f75025eb6cabe4f6e66488aaea21a716df69",
-    "platforms/linux/build/build.sh": "fe77ede541804cd2f9d5bb9c410d0549e3c39a7fbe041d90eef496f7dbe6b8a3",
+    "platforms/linux/build/build.sh": "988954ea1cde7499bc4bcf9b32f5c9752d0b367b15cf9672deee1106bf29b736",
     "scripts/build-tools.sh": "44846aea1eadbe97166bacc47486701894542681114effddcb895762e7c81bf6",
     "shared/scripts/check_tls_pins.sh": "3096b3be8c3e93030cb5c69c1157c76413e51a333c785e70392feaf46c527024",
     "shared/scripts/compare_face_clustering.sh": "79af61febba1cfbe7eae6fcd4e4450b149ab32d35ef73aa13a4dfb5c6abd7d9f",

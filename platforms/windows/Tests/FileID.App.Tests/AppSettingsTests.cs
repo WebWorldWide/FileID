@@ -38,6 +38,17 @@ public class AppSettingsTests
         Assert.Equal(5, s.SchemaVersion);
     }
 
+    [Theory]
+    [InlineData("qwen3_vl_4b")]
+    [InlineData("qwen3_vl_8b")]
+    public void OptionalQwen3Choice_IsAcceptedAndSurvivesSettingsJson(string kind)
+    {
+        Assert.True(AppSettings.IsAllowedVlmKind(kind));
+        var json = JsonSerializer.Serialize(new AppSettings { SelectedVlmModelKind = kind }, s_options);
+        var reloaded = JsonSerializer.Deserialize<AppSettings>(json, s_options);
+        Assert.Equal(kind, reloaded!.SelectedVlmModelKind);
+    }
+
     [Fact]
     public void JsonRoundTrip_PreservesEveryField()
     {

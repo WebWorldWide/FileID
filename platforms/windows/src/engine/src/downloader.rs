@@ -55,8 +55,8 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
     SEMA.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HTTP_REQUESTS)))
 }
 
-/// Hosts FileID is permitted to download from — HF + its CDN, GitHub + its
-/// objects CDN, NVIDIA. Suffix-match with a leading dot for subdomains so
+/// Hosts FileID permits user-initiated model downloads from HF and its CDN only.
+/// Suffix-match with a leading dot for subdomains so
 /// "evilhuggingface.co" never matches ".huggingface.co". Used BOTH to gate the
 /// INITIAL request URL (`download_url_allowed`, enforced in `download_simple` /
 /// `download_parallel`) and to constrain redirect hops (the reqwest redirect
@@ -65,10 +65,6 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
 const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
     "huggingface.co",
     "hf.co",
-    "github.com",
-    "githubusercontent.com",
-    "download.nvidia.com",
-    "developer.nvidia.com",
 ];
 
 /// True iff `url` parses, is https, and its host is on (or a subdomain of) the
@@ -147,8 +143,7 @@ pub fn fail_closed_client() -> Arc<reqwest::Client> {
 }
 
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
-    // Restrict redirects to the host families we actually download from (HF +
-    // its CDN, GitHub + its objects CDN, NVIDIA). reqwest's default follows up to
+    // Restrict redirects to Hugging Face and its CDN. reqwest's default follows up to
     // 10 redirects to ANY host — an on-path attacker could bounce a 302 chain to
     // an off-allowlist host, dodging the source-URL allowlist that only checks
     // the ORIGINAL URL. Suffix-match with a leading dot for subdomains so
@@ -1236,10 +1231,10 @@ async fn download_range_with_retry(
 // links the engine as a library and has no async runtime of its own. Mirrors
 // `commands::prewarm::handle_prewarm_model` minus the IPC plumbing: download
 // every file in the bundle (SHA256-verified parallel range-GET), extract any
-// `.zip` artifact in place (llama.cpp / EP runtime packs), then drop the
+// extract any model archives, then drop the
 // revision-keyed install sentinel so `scan --models` (and the desktop apps)
-// see the model installed. Network egress is HuggingFace + the pinned
-// GitHub/NVIDIA release URLs only — exactly the manifest, user-initiated.
+// see the model installed. Network egress is restricted to user-initiated
+// Hugging Face model downloads.
 // ─────────────────────────────────────────────────────────────────────
 
 /// Per-file progress for [`install_model_blocking`]'s callback. Consumed by the
@@ -1389,7 +1384,7 @@ pub fn install_model_blocking(
 /// This is the provisioning path for the macOS ONNX Runtime dylib
 /// (`fileid runtime install`). The download routes through the SAME audited,
 /// CA-pinned client as model downloads, so the egress host must be on the
-/// downloader's redirect allow-list (huggingface.co / github.com / …) — there is
+/// downloader's Hugging Face-only redirect allow-list — there is
 /// no second, unaudited network code path. Driven by the cross-platform `fileid`
 /// CLI (external lib consumer); the engine binary never calls it — hence
 /// `allow(dead_code)`.
@@ -1453,14 +1448,17 @@ mod tests {
             "huggingface.co",
             "cdn-lfs.huggingface.co",
             "hf.co",
-            "github.com",
-            "objects.githubusercontent.com",
-            "developer.nvidia.com",
         ] {
             assert!(download_url_allowed(&https(host)), "{host} should pass");
         }
         // Off-allowlist + look-alike hosts are refused.
-        for host in ["evilhuggingface.co", "example.com"] {
+        for host in [
+            "evilhuggingface.co",
+            "example.com",
+            "github.com",
+            "objects.githubusercontent.com",
+            "developer.nvidia.com",
+        ] {
             assert!(!download_url_allowed(&https(host)), "{host} should be refused");
         }
         // Plain http on an otherwise-allowlisted host is refused (scheme gate),

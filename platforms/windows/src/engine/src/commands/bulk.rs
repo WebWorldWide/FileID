@@ -411,6 +411,36 @@ pub(crate) async fn handle_rename_files(
     emit_bulk_result(&sink, "renameFiles", result).await;
 }
 
+fn exact_trash_identity_valid(
+    identity: &ipc::ExactTrashIdentity,
+    file_id: i64,
+    indexed_path: &std::path::Path,
+    indexed_size: i64,
+    mut digest: impl FnMut(&std::path::Path, u64) -> Option<[u8; 32]>,
+) -> bool {
+    if identity.file_id != file_id
+        || indexed_path != std::path::Path::new(&identity.path)
+        || indexed_size < 0
+        || indexed_size != identity.size_bytes
+        || identity.keeper_path == identity.path
+    {
+        return false;
+    }
+    let (Ok(expected), Ok(keeper_expected), Ok(size), Ok(keeper_size)) = (
+        hex::decode(&identity.sha256_hex),
+        hex::decode(&identity.keeper_sha256_hex),
+        u64::try_from(identity.size_bytes),
+        u64::try_from(identity.keeper_size_bytes),
+    ) else {
+        return false;
+    };
+    expected.len() == 32
+        && expected == keeper_expected
+        && digest(indexed_path, size).is_some_and(|actual| actual.as_slice() == expected)
+        && digest(std::path::Path::new(&identity.keeper_path), keeper_size)
+            .is_some_and(|actual| actual.as_slice() == expected)
+}
+
 /// Trash a set of files. Looks up paths from the DB, hands a Vec<PathBuf>
 /// to shell::trash::trash, removes the rows on success.
 pub(crate) async fn handle_trash_files(
@@ -428,39 +458,79 @@ pub(crate) async fn handle_trash_files(
         // here as a successful trash: it would pollute the undo/trash log with an
         // entry restoreFromTrash can never honor. A file missing before the op is
         // skipped (failed), not trashed.
-        let mut path_for_id: Vec<(i64, PathBuf, bool)> = Vec::with_capacity(payload.file_ids.len());
+        let mut path_for_id: Vec<(i64, PathBuf, bool, i64)> = Vec::with_capacity(payload.file_ids.len());
 
         {
             let conn = db.lock();
             for fid in &payload.file_ids {
-                if let Ok(p) = conn.query_row(
-                    "SELECT path_text FROM files WHERE id = ?1",
+                match conn.query_row(
+                    "SELECT path_text, size_bytes FROM files WHERE id = ?1",
                     rusqlite::params![fid],
-                    |r| r.get::<_, String>(0),
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
                 ) {
-                    let path = PathBuf::from(p);
-                    // Verbatim (\\?\) probe so a >260-char file is classified as
-                    // present (and trashed) instead of "already missing" (#28).
-                    let existed = std::fs::symlink_metadata(
-                        crate::util::path_safety::to_extended_length(&path),
-                    )
-                    .is_ok();
-                    path_for_id.push((*fid, path, existed));
+                    Ok((p, size)) => {
+                        let path = PathBuf::from(p);
+                        let existed = std::fs::symlink_metadata(
+                            crate::util::path_safety::to_extended_length(&path),
+                        ).is_ok();
+                        path_for_id.push((*fid, path, existed, size));
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(*fid),
+                            ok: false,
+                            message: Some(format!("File is no longer indexed or could not be read: {error}")),
+                        });
+                    }
                 }
             }
         }
 
-        let outcomes = crate::shell::trash::trash(
-            &path_for_id
-                .iter()
-                .map(|(_, p, _)| p.clone())
-                .collect::<Vec<_>>(),
-        );
+        let identity_by_id = payload.exact_identities.as_ref().map(|identities| {
+            identities.iter().map(|identity| (identity.file_id, identity))
+                .collect::<std::collections::HashMap<_, _>>()
+        });
+        let mut digest_cache: std::collections::HashMap<PathBuf, (u64, Option<[u8; 32]>)> =
+            std::collections::HashMap::new();
+        let valid: Vec<bool> = path_for_id.iter().map(|(fid, path, existed, size)| {
+            *existed && identity_by_id.as_ref().is_none_or(|identities| {
+                identities.get(fid).is_some_and(|identity| exact_trash_identity_valid(
+                    identity, *fid, path, *size, |candidate, expected_size| {
+                        if let Some((cached_size, hash)) = digest_cache.get(candidate) {
+                            if *cached_size == expected_size { return *hash; }
+                        }
+                        let hash = crate::util::content_hash::exact_file_sha256(candidate, expected_size).ok();
+                        digest_cache.insert(candidate.to_path_buf(), (expected_size, hash));
+                        hash
+                    }
+                ))
+            })
+        }).collect();
+        #[cfg(windows)]
+        let outcomes: Vec<(bool, Option<String>)> = {
+            let paths: Vec<PathBuf> = path_for_id.iter().zip(&valid)
+                .filter(|(_, valid)| **valid).map(|((_, path, _, _), _)| path.clone()).collect();
+            let mut results = crate::shell::trash::trash(&paths).into_iter();
+            valid.iter().map(|valid| (if *valid { results.next().unwrap_or(false) } else { false }, None)).collect()
+        };
+        #[cfg(not(windows))]
+        let outcomes: Vec<(bool, Option<String>)> = path_for_id.iter().zip(&valid)
+            .map(|((_, path, _, _), valid)| {
+                if !valid { return (false, None); }
+                match crate::shell::trash::trash_path_with_receipt(path) {
+                    Ok(receipt) => (true, Some(receipt.to_string_lossy().into_owned())),
+                    Err(error) => {
+                        tracing::warn!(path = %crate::platform::redact_path_for_log(path), %error, "trash failed");
+                        (false, None)
+                    }
+                }
+            }).collect();
 
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
         let mut log_items: Vec<TrashLogItem> = Vec::new();
-        for ((fid, path, existed), trashed_ok) in path_for_id.iter().zip(outcomes) {
+        for (((fid, path, existed, _), accepted), (trashed_ok, receipt)) in path_for_id.iter().zip(&valid).zip(outcomes) {
             if !existed {
                 tracing::warn!(
                     path = %crate::platform::redact_path_for_log(path),
@@ -485,14 +555,18 @@ pub(crate) async fn handle_trash_files(
                 log_items.push(TrashLogItem {
                     file_id: *fid,
                     original_path: path.to_string_lossy().to_string(),
-                    recycle_bin_id: None,
+                    recycle_bin_id: receipt,
                 });
             } else {
                 failed += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(*fid),
                     ok: false,
-                    message: Some(format!("trash failed: {}", path.display())),
+                    message: Some(if *accepted {
+                        format!("trash failed: {}", path.display())
+                    } else {
+                        "Exact duplicate changed, keeper missing, or selected file no longer matches its indexed identity.".into()
+                    }),
                 });
             }
         }
@@ -666,47 +740,78 @@ pub(crate) async fn emit_bulk_result(
 
 /// Save the structured-name fields (title/first/middle/last/suffix) for a
 /// person cluster through the engine's single-writer connection.
+#[cfg(test)]
+fn update_person_name(
+    tx: &rusqlite::Transaction<'_>,
+    payload: &ipc::RenamePersonPayload,
+) -> anyhow::Result<(Option<String>, usize)> {
+    let title = payload.title.as_deref().filter(|s| !s.trim().is_empty());
+    let first = payload.first_name.as_deref().filter(|s| !s.trim().is_empty());
+    let middle = payload.middle_name.as_deref().filter(|s| !s.trim().is_empty());
+    let last = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
+    let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
+    let display = match (first, last) {
+        (Some(f), Some(l)) => Some(format!("{f} {l}")),
+        (Some(f), None) => Some(f.to_string()),
+        (None, Some(l)) => Some(l.to_string()),
+        _ => None,
+    };
+    let changed = tx.execute(
+        "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=?6, is_unknown=0 WHERE id=?7",
+        rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
+    )?;
+    Ok((display, changed))
+}
+
 pub(crate) async fn handle_rename_person(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::RenamePersonPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+    let result = tokio::task::spawn_blocking(move || {
         let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
-        let title = payload.title.as_deref().filter(|s| !s.trim().is_empty());
-        let first = payload.first_name.as_deref().filter(|s| !s.trim().is_empty());
-        let middle = payload
-            .middle_name
-            .as_deref()
-            .filter(|s| !s.trim().is_empty());
-        let last = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
-        let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
-        let display = match (first, last) {
-            (Some(f), Some(l)) => Some(format!("{f} {l}")),
-            (Some(f), None) => Some(f.to_string()),
-            (None, Some(l)) => Some(l.to_string()),
-            _ => None,
-        };
-        tx.execute(
-            "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=COALESCE(?6, name) WHERE id=?7",
-            rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
-        )?;
-        tx.commit()?;
-        Ok(BulkActionResult {
-            action: "renamePerson".into(),
-            succeeded: 1,
-            failed: 0,
-            messages: vec![BulkActionItem {
-                file_id: Some(payload.person_id),
-                ok: true,
-                message: display,
-            }],
-        })
+        save_person_name(&conn, &payload)
     })
     .await;
 
     emit_bulk_result(&sink, "renamePerson", result).await;
+}
+
+fn save_person_name(
+    conn: &rusqlite::Connection,
+    payload: &ipc::RenamePersonPayload,
+) -> anyhow::Result<BulkActionResult> {
+    let tx = conn.unchecked_transaction()?;
+    let title = payload.title.as_deref().filter(|s| !s.trim().is_empty());
+    let first = payload.first_name.as_deref().filter(|s| !s.trim().is_empty());
+    let middle = payload.middle_name.as_deref().filter(|s| !s.trim().is_empty());
+    let last = payload.last_name.as_deref().filter(|s| !s.trim().is_empty());
+    let suffix = payload.suffix.as_deref().filter(|s| !s.trim().is_empty());
+    let display = match (first, last) {
+        (Some(f), Some(l)) => Some(format!("{f} {l}")),
+        (Some(f), None) => Some(f.to_string()),
+        (None, Some(l)) => Some(l.to_string()),
+        _ => None,
+    };
+    let affected = tx.execute(
+        "UPDATE persons SET title=?1, first_name=?2, middle_name=?3, last_name=?4, suffix=?5, name=COALESCE(?6, name), is_unknown=0 WHERE id=?7",
+        rusqlite::params![title, first, middle, last, suffix, display, payload.person_id],
+    )?;
+    tx.commit()?;
+    Ok(BulkActionResult {
+        action: "renamePerson".into(),
+        succeeded: u32::from(affected != 0),
+        failed: u32::from(affected == 0),
+        messages: vec![BulkActionItem {
+            file_id: Some(payload.person_id),
+            ok: affected != 0,
+            message: if affected == 0 {
+                Some("Person no longer exists.".into())
+            } else {
+                display
+            },
+        }],
+    })
 }
 
 /// FEAT-CRIT-1: bulk "Mark as unknown" for multi-select people view. Sets
@@ -718,50 +823,65 @@ pub(crate) async fn handle_mark_persons_as_unknown(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     payload: ipc::MarkPersonsAsUnknownPayload,
 ) {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<BulkActionResult> {
+    let result = tokio::task::spawn_blocking(move || {
         let conn = db.lock();
-        let tx = conn.unchecked_transaction()?;
-        let mut succeeded = 0u32;
-        let mut failed = 0u32;
-        let mut messages = Vec::new();
-        for id in &payload.person_ids {
-            match tx.execute(
-                // R4-05: clear EVERY name-bearing column (name + all five
-                // structured fields), not just name/first/last — otherwise a
-                // title/middle_name/suffix survives, the re-cluster snapshot
-                // carries a stale partial identity, and the editor pre-fills it.
-                "UPDATE persons SET is_unknown = 1, name = NULL, title = NULL, first_name = NULL, middle_name = NULL, last_name = NULL, suffix = NULL WHERE id = ?1",
-                rusqlite::params![id],
-            ) {
-                Ok(_) => {
-                    succeeded += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(*id),
-                        ok: true,
-                        message: None,
-                    });
-                }
-                Err(e) => {
-                    failed += 1;
-                    messages.push(BulkActionItem {
-                        file_id: Some(*id),
-                        ok: false,
-                        message: Some(e.to_string()),
-                    });
-                }
-            }
-        }
-        tx.commit()?;
-        Ok(BulkActionResult {
-            action: "markPersonsAsUnknown".into(),
-            succeeded,
-            failed,
-            messages,
-        })
+        mark_persons_unknown(&conn, &payload)
     })
     .await;
 
     emit_bulk_result(&sink, "markPersonsAsUnknown", result).await;
+}
+
+fn mark_persons_unknown(
+    conn: &rusqlite::Connection,
+    payload: &ipc::MarkPersonsAsUnknownPayload,
+) -> anyhow::Result<BulkActionResult> {
+    let tx = conn.unchecked_transaction()?;
+    let mut succeeded = 0u32;
+    let mut failed = 0u32;
+    let mut messages = Vec::new();
+    for id in &payload.person_ids {
+        match tx.execute(
+            // R4-05: clear EVERY name-bearing column (name + all five
+            // structured fields), not just name/first/last — otherwise a
+            // title/middle_name/suffix survives, the re-cluster snapshot
+            // carries a stale partial identity, and the editor pre-fills it.
+            "UPDATE persons SET is_unknown = 1, name = NULL, title = NULL, first_name = NULL, middle_name = NULL, last_name = NULL, suffix = NULL WHERE id = ?1",
+            rusqlite::params![id],
+        ) {
+            Ok(0) => {
+                failed += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(*id),
+                    ok: false,
+                    message: Some("Person no longer exists.".into()),
+                });
+            }
+            Ok(_) => {
+                succeeded += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(*id),
+                    ok: true,
+                    message: None,
+                });
+            }
+            Err(e) => {
+                failed += 1;
+                messages.push(BulkActionItem {
+                    file_id: Some(*id),
+                    ok: false,
+                    message: Some(e.to_string()),
+                });
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(BulkActionResult {
+        action: "markPersonsAsUnknown".into(),
+        succeeded,
+        failed,
+        messages,
+    })
 }
 
 /// Record a user "different people" verdict for a suggested pair. Persists into
@@ -1100,6 +1220,75 @@ pub(crate) async fn handle_find_merge_suggestions(
 mod tests {
     use super::*;
 
+    #[test]
+    fn renaming_unknown_person_marks_them_known_and_clears_stale_name_on_blank() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE persons (
+                id INTEGER PRIMARY KEY,
+                title TEXT,
+                first_name TEXT,
+                middle_name TEXT,
+                last_name TEXT,
+                suffix TEXT,
+                name TEXT,
+                is_unknown INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO persons (id, name, is_unknown) VALUES (1, NULL, 1);",
+        )
+        .unwrap();
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let (display, changed) = update_person_name(
+            &tx,
+            &ipc::RenamePersonPayload {
+                person_id: 1,
+                title: None,
+                first_name: Some("Ada".into()),
+                middle_name: None,
+                last_name: Some("Lovelace".into()),
+                suffix: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(display.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(changed, 1);
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT name FROM persons WHERE id=1", [], |row| row.get::<_, Option<String>>(0))
+                .unwrap()
+                .as_deref(),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(
+            conn.query_row("SELECT is_unknown FROM persons WHERE id=1", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
+        let tx = conn.unchecked_transaction().unwrap();
+        let (display, changed) = update_person_name(
+            &tx,
+            &ipc::RenamePersonPayload {
+                person_id: 1,
+                title: None,
+                first_name: None,
+                middle_name: None,
+                last_name: None,
+                suffix: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(display, None);
+        assert_eq!(changed, 1);
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT name FROM persons WHERE id=1", [], |row| row.get::<_, Option<String>>(0))
+                .unwrap(),
+            None
+        );
+    }
+
     fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
@@ -1109,6 +1298,81 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fileid-bulk-{tag}-{pid}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+    #[test]
+    fn naming_unknown_person_restores_known_cluster() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO persons (id, created_at, is_unknown) VALUES (42, 1, 1)",
+            [],
+        ).unwrap();
+        let result = save_person_name(&conn, &ipc::RenamePersonPayload {
+            person_id: 42,
+            title: None,
+            first_name: Some("Kira".into()),
+            middle_name: None,
+            last_name: Some("Park".into()),
+            suffix: None,
+        }).unwrap();
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        let (name, is_unknown): (String, i64) = conn
+            .query_row("SELECT name,is_unknown FROM persons WHERE id=42", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(name, "Kira Park");
+        assert_eq!(is_unknown, 0);
+    }
+
+    #[test]
+    fn removed_person_rename_reports_failure() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute("INSERT INTO persons (id, created_at) VALUES (42, 1)", []).unwrap();
+        conn.execute("DELETE FROM persons WHERE id=42", []).unwrap();
+        let result = save_person_name(&conn, &ipc::RenamePersonPayload {
+            person_id: 42,
+            title: None,
+            first_name: Some("Kira".into()),
+            middle_name: None,
+            last_name: None,
+            suffix: None,
+        }).unwrap();
+        assert_eq!((result.succeeded, result.failed), (0, 1));
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].file_id, Some(42));
+        assert!(!result.messages[0].ok);
+        assert!(result.messages[0].message.as_deref().unwrap().contains("no longer exists"));
+    }
+
+    #[test]
+    fn removed_person_unknown_batch_reports_failures_and_saves_survivors() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO persons (id, name, first_name, created_at) VALUES
+             (1, 'Kira', 'Kira', 1), (2, 'Maya', 'Maya', 1);
+             DELETE FROM persons WHERE id=2;"
+        ).unwrap();
+        let result = mark_persons_unknown(
+            &conn,
+            &ipc::MarkPersonsAsUnknownPayload { person_ids: vec![1, 2, 999] },
+        ).unwrap();
+        assert_eq!((result.succeeded, result.failed), (1, 2));
+        assert_eq!(result.messages.len(), 3);
+        assert_eq!(result.messages[0].file_id, Some(1));
+        assert!(result.messages[0].ok);
+        for (item, id) in result.messages[1..].iter().zip([2, 999]) {
+            assert_eq!(item.file_id, Some(id));
+            assert!(!item.ok);
+            assert!(item.message.as_deref().unwrap().contains("no longer exists"));
+        }
+        let survivor: (i64, Option<String>, Option<String>) = conn
+            .query_row("SELECT is_unknown, name, first_name FROM persons WHERE id=1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            }).unwrap();
+        assert_eq!(survivor, (1, None, None));
     }
 
     #[tokio::test]
@@ -1201,4 +1465,32 @@ mod tests {
         assert_eq!(contents.lines().filter(|l| !l.is_empty()).count(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
+    #[test]
+    fn exact_trash_rejects_changed_bytes_and_missing_keeper() {
+        let dir = unique_temp_dir("exact-trash");
+        let keeper = dir.join("keeper.bin");
+        let victim = dir.join("victim.bin");
+        std::fs::write(&keeper, b"same").unwrap();
+        std::fs::write(&victim, b"same").unwrap();
+        let digest = hex::encode(crate::util::content_hash::exact_file_sha256(&keeper, 4).unwrap());
+        let identity = ipc::ExactTrashIdentity {
+            file_id: 2,
+            path: victim.to_string_lossy().into_owned(),
+            size_bytes: 4,
+            sha256_hex: digest.clone(),
+            keeper_path: keeper.to_string_lossy().into_owned(),
+            keeper_size_bytes: 4,
+            keeper_sha256_hex: digest,
+        };
+        let check = || exact_trash_identity_valid(&identity, 2, &victim, 4,
+            |path, size| crate::util::content_hash::exact_file_sha256(path, size).ok());
+        assert!(check());
+        std::fs::write(&victim, b"diff").unwrap();
+        assert!(!check());
+        std::fs::write(&victim, b"same").unwrap();
+        std::fs::remove_file(&keeper).unwrap();
+        assert!(!check());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

@@ -71,7 +71,8 @@ internal static class SentinelProbe
             "ram_plus" => FilePresent(Path.Combine("ram_plus", "ram_plus.onnx"), 1_000_000)
                 && FilePresent(Path.Combine("ram_plus", "ram_plus_tags.txt"), 1_000)
                 && FilePresent(Path.Combine("ram_plus", "ram_plus_thresholds.txt"), 1_000),
-            "mistral_small_3_2" or "qwen2_5_vl_7b" or "gemma_3_4b" => Vlm(modelId),
+            "mistral_small_3_2" or "qwen2_5_vl_7b" or "qwen3_vl_4b"
+                or "qwen3_vl_8b" or "gemma_3_4b" => Vlm(modelId),
             "llama_runtime_x64" => TreeContains("llama.cpp", 20_000, "llama-server.exe")
                 && TreeContains("llama.cpp", 20_000, "llama-mtmd-cli.exe")
                 && TreeContains("llama.cpp", 20_000, "mtmd.dll"),

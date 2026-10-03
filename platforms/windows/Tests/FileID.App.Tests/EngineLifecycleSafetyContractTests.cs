@@ -17,7 +17,7 @@ public sealed class EngineLifecycleSafetyContractTests
         try
         {
             File.WriteAllText(path, $"{{\"version\":{version},\"library_root\":{System.Text.Json.JsonSerializer.Serialize(root)}}}\n");
-            Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Null(PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
 
             var identity = version == 3
                 ? ",\"source_identity\":{\"volume\":1,\"file\":2}"
@@ -25,7 +25,7 @@ public sealed class EngineLifecycleSafetyContractTests
             File.AppendAllText(
                 path,
                 $"{{\"file_id\":1,\"from\":\"a\",\"to\":\"b\"{identity}}}\n");
-            Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Equal(root, PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
         }
         finally
         {
@@ -58,15 +58,15 @@ public sealed class EngineLifecycleSafetyContractTests
             var priorUpdated = new DateTime(2026, 7, 29, 10, 30, 0, DateTimeKind.Utc);
             File.SetLastWriteTimeUtc(prior, priorUpdated);
 
-            Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Equal(root, PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
             Assert.Equal(
                 priorUpdated,
-                EngineClient.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
+                PersistedUndoReader.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
 
             File.Delete(path);
             Assert.Equal(
                 priorUpdated,
-                EngineClient.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
+                PersistedUndoReader.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
 
             File.WriteAllText(
                 Path.Combine(
@@ -75,7 +75,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 header
                 + "{\"file_id\":2,\"from\":\"c\",\"to\":\"d\","
                 + "\"source_identity\":{\"volume\":1,\"file\":3}}\n");
-            Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Null(PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
         }
         finally
         {
@@ -95,7 +95,7 @@ public sealed class EngineLifecycleSafetyContractTests
         {
             WriteShortcutManifest(directory, root, token, version);
 
-            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+            var persisted = PersistedUndoReader.ReadPersistedShortcutUndo(directory);
 
             Assert.True(persisted.HasValue);
             Assert.Equal(root, persisted.Value.LibraryRoot);
@@ -120,26 +120,26 @@ public sealed class EngineLifecycleSafetyContractTests
             File.AppendAllText(path, validEntry + "\n");
             Assert.Equal(
                 token,
-                EngineClient.ReadPersistedShortcutUndo(directory)?.Token);
+                PersistedUndoReader.ReadPersistedShortcutUndo(directory)?.Token);
 
             WriteShortcutManifest(directory, root, token, version: 3);
             File.AppendAllText(path, "{\"file_id\":2}\n");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(directory, root, token, version: 3);
             File.AppendAllText(path, new string('x', 64 * 1024 + 1) + "\n");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(directory, root, token, version: 3);
             using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write))
             {
                 stream.Write(new byte[] { 0xff, (byte)'\n' });
             }
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(directory, root, token, version: 3);
             File.AppendAllText(path, "{\"file_id\":");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -161,7 +161,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 token,
                 version: 3,
                 stagingLinkName: "not-a-guid.link");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(
                 directory,
@@ -171,7 +171,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 stagingLinkName: Path.Combine(
                     "nested",
                     Guid.NewGuid().ToString("D") + ".link"));
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -195,7 +195,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 headerOnly: true,
                 writeIntent: true);
 
-            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+            var persisted = PersistedUndoReader.ReadPersistedShortcutUndo(directory);
 
             Assert.True(persisted.HasValue);
             Assert.Equal(token, persisted.Value.Token);
@@ -235,7 +235,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 truncatedPath,
                 File.ReadAllText(truncatedPath).TrimEnd('\n'));
 
-            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+            var persisted = PersistedUndoReader.ReadPersistedShortcutUndo(directory);
 
             Assert.True(persisted.HasValue);
             Assert.Equal(validToken, persisted.Value.Token);
@@ -264,13 +264,13 @@ public sealed class EngineLifecycleSafetyContractTests
 
             Assert.Equal(
                 newerToken,
-                EngineClient.ReadPersistedShortcutUndo(directory)?.Token);
+                PersistedUndoReader.ReadPersistedShortcutUndo(directory)?.Token);
             Assert.Equal(
                 olderToken,
-                EngineClient.ReadPersistedShortcutUndo(directory, newerToken)?.Token);
+                PersistedUndoReader.ReadPersistedShortcutUndo(directory, newerToken)?.Token);
 
             File.SetLastWriteTimeUtc(newerPath, olderTime);
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -293,8 +293,8 @@ public sealed class EngineLifecycleSafetyContractTests
                 version: 3,
                 includeSourceIdentity: false);
 
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
-            Assert.False(EngineClient.IsRegularPersistedUndoFileAttributes(
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
+            Assert.False(PersistedUndoReader.IsRegularPersistedUndoFileAttributes(
                 FileAttributes.ReparsePoint));
         }
         finally
@@ -316,7 +316,7 @@ public sealed class EngineLifecycleSafetyContractTests
                     "");
             }
 
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -380,16 +380,18 @@ public sealed class EngineLifecycleSafetyContractTests
 
         Assert.Contains("public async Task<bool> StopAndWaitForExitAsync", commands, StringComparison.Ordinal);
         Assert.Contains("return false;", commands, StringComparison.Ordinal);
-        Assert.Contains("if (!await StopAndWaitForExitCoreAsync", commands, StringComparison.Ordinal);
-        Assert.Contains("restart was aborted", commands, StringComparison.Ordinal);
-        Assert.Contains("shouldRun: restartAfterLateExit", commands, StringComparison.Ordinal);
-        Assert.Contains("ArmExpectedExitRestart(intent.Revision)", commands, StringComparison.Ordinal);
-        Assert.Contains("Volatile.Read(ref _isStarting) == 0", commands, StringComparison.Ordinal);
+        var restart = commands.IndexOf("public async Task RestartAsync", StringComparison.Ordinal);
+        var stop = commands.IndexOf("if (!await StopAndWaitForExitAsync", restart, StringComparison.Ordinal);
+        var abort = commands.IndexOf("throw new TimeoutException(", stop, StringComparison.Ordinal);
+        var start = commands.IndexOf("await StartAsync()", abort, StringComparison.Ordinal);
+        var ready = commands.IndexOf("await WaitForReadyAsync(", start, StringComparison.Ordinal);
+        Assert.True(restart >= 0 && stop > restart && abort > stop && start > abort && ready > start,
+            "Restart must fail closed on a stop timeout and wait for the replacement engine to be ready.");
 
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
-        Assert.Contains("ResolveCurrentExpectedExitRestartRevision()", client, StringComparison.Ordinal);
-        Assert.Contains("StartAfterLateExpectedExitAsync", client, StringComparison.Ordinal);
+        Assert.Contains("if (!ReferenceEquals(sender, _process))", client, StringComparison.Ordinal);
+        Assert.Contains("if (_process is { HasExited: true } exitedProcess", client, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -428,7 +430,10 @@ public sealed class EngineLifecycleSafetyContractTests
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
         var start = client.IndexOf("private async Task StartCoreAsync(", StringComparison.Ordinal);
-        var end = client.IndexOf("private void TerminateSupersededStart", start, StringComparison.Ordinal);
+        var end = client.IndexOf(
+            "internal static async Task<string?> ReadBoundedFrameAsync",
+            start,
+            StringComparison.Ordinal);
 
         Assert.True(start >= 0 && end > start, "StartCoreAsync source region must remain discoverable.");
         Assert.DoesNotContain("new RequestStatusCommand()", client[start..end], StringComparison.Ordinal);
@@ -441,10 +446,13 @@ public sealed class EngineLifecycleSafetyContractTests
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
 
-        Assert.Contains("startedProcess.StandardOutput", client, StringComparison.Ordinal);
+        Assert.Contains("p.StandardOutput", client, StringComparison.Ordinal);
         Assert.Contains("generation,", client, StringComparison.Ordinal);
         var start = client.IndexOf("public async Task StartAsync()", StringComparison.Ordinal);
-        var exitedCleanup = client.IndexOf("if (_process is { HasExited: true })", start, StringComparison.Ordinal);
+        var exitedCleanup = client.IndexOf(
+            "if (_process is { HasExited: true } exitedProcess",
+            start,
+            StringComparison.Ordinal);
         var resetScanState = client.IndexOf("ResetProcessBoundScanState();", exitedCleanup, StringComparison.Ordinal);
         var startingState = client.IndexOf("State = LifecycleState.Starting;", start, StringComparison.Ordinal);
         Assert.True(exitedCleanup > start && resetScanState > exitedCleanup && startingState > resetScanState,
@@ -509,17 +517,16 @@ public sealed class EngineLifecycleSafetyContractTests
         var presentation = client.IndexOf("DeepAnalyzeComplete = dac.Result;", complete, StringComparison.Ordinal);
         Assert.True(terminalClaim > complete && presentation > terminalClaim,
             "A fenced terminal must be claimed before it can mutate observable presentation.");
-        Assert.Contains("_deepAnalyzePresentationGeneration) != retiringGeneration", client, StringComparison.Ordinal);
-        Assert.Contains("FenceRejectedDeepAnalyzeCommand(generation", client, StringComparison.Ordinal);
-        Assert.Contains("onWriteStarted?.Invoke();", commands, StringComparison.Ordinal);
-        Assert.Contains("Volatile.Read(ref owner.Payload.SendBegan) == 0", commands, StringComparison.Ordinal);
-        Assert.Contains("RestartAfterDeepAnalyzeFenceAsync(owner", commands, StringComparison.Ordinal);
-        Assert.Contains("Interlocked.CompareExchange(ref owner.Payload.TerminalState, 1, 0)", commands, StringComparison.Ordinal);
-        Assert.Contains("Interlocked.CompareExchange(ref owner.Payload.TerminalState, 2, 0)", commands, StringComparison.Ordinal);
-        var publish = commands.IndexOf("publishPresentation();", StringComparison.Ordinal);
-        var releaseAfterPublish = commands.IndexOf("_deepAnalyzeCommandSlot.Release(owner);", publish, StringComparison.Ordinal);
-        Assert.True(publish >= 0 && releaseAfterPublish > publish,
-            "The owner must stay installed until its terminal presentation is published.");
+        var completion = commands.IndexOf("private bool CompleteDeepAnalyzeCommand(", StringComparison.Ordinal);
+        var completionOwnerCheck = commands.IndexOf("owner.Generation != generation", completion, StringComparison.Ordinal);
+        Assert.True(completion >= 0 && completionOwnerCheck > completion,
+            "A terminal event may complete only the operation owned by its engine generation.");
+        Assert.Contains(
+            "if (owner.Generation != generation || !_deepAnalyzeSlot.Release(owner)) return false;",
+            commands,
+            StringComparison.Ordinal);
+        Assert.Contains("ReleaseDeepAnalyzeOwner(owner);", commands, StringComparison.Ordinal);
+        Assert.Contains("owner.Payload.Completion?.TrySetResult(result);", commands, StringComparison.Ordinal);
 
         var view = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "Views", "DeepAnalyze", "DeepAnalyzeView.xaml.cs"));
@@ -605,7 +612,10 @@ public sealed class EngineLifecycleSafetyContractTests
         var client = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.cs"));
         var errorCase = client.IndexOf("case ErrorEvent e:", StringComparison.Ordinal);
-        var undoKind = client.IndexOf("e.Error.Kind == \"undo_restructure\"", errorCase, StringComparison.Ordinal);
+        var undoKind = client.IndexOf(
+            "e.Error.Kind is \"apply_restructure\" or \"undo_restructure\"",
+            errorCase,
+            StringComparison.Ordinal);
         var clearUndo = client.IndexOf("UndoRestructureInFlight = false;", undoKind, StringComparison.Ordinal);
         var nextCase = client.IndexOf("case LogEvent:", errorCase, StringComparison.Ordinal);
         Assert.True(undoKind > errorCase && clearUndo > undoKind && clearUndo < nextCase,

@@ -33,6 +33,45 @@
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
         </Grid>
 
-        <ItemsRepeater x:Name="JobsRepeater" />
+        <ScrollViewer MaxHeight="280"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+            <ItemsRepeater x:Name="JobsRepeater">
+                <ItemsRepeater.Layout>
+                    <StackLayout Spacing="4" />
+                </ItemsRepeater.Layout>
+                <ItemsRepeater.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Padding="8,6"
+                              CornerRadius="8"
+                              Background="{Binding RowBackground}"
+                              AutomationProperties.Name="{Binding AutomationName}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Grid.Column="0"
+                                      FontFamily="Segoe Fluent Icons"
+                                      Glyph="{Binding Glyph}"
+                                      FontSize="11"
+                                      Opacity="{Binding IconOpacity}"
+                                      Margin="0,0,8,0" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding Title}"
+                                       FontSize="11"
+                                       FontWeight="{Binding TitleWeight}"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="2"
+                                       Text="{Binding Eta}"
+                                       FontSize="10"
+                                       Opacity="0.5"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                    </DataTemplate>
+                </ItemsRepeater.ItemTemplate>
+            </ItemsRepeater>
+        </ScrollViewer>
     </StackPanel>
 </UserControl>

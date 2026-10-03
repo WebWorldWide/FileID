@@ -7,6 +7,7 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Tests/FileID.App.Tests/**'
       - 'platforms/windows/Tests/FileID.IpcSchema.Tests/**'
       - 'platforms/windows/build/assert-test-report.ps1'
       - 'platforms/windows/build/test-assert-test-report.ps1'
@@ -23,6 +24,7 @@ on:
       - 'platforms/windows/src/FileID.App/**'
       - 'platforms/windows/src/FileID.Theme/**'
       - 'platforms/windows/src/FileID.IpcSchema/**'
+      - 'platforms/windows/Tests/FileID.App.Tests/**'
       - 'platforms/windows/Tests/FileID.IpcSchema.Tests/**'
       - 'platforms/windows/build/assert-test-report.ps1'
       - 'platforms/windows/build/test-assert-test-report.ps1'
@@ -94,13 +96,19 @@ jobs:
       - name: Setup MSBuild (VS WinUI tooling)
         uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
 
+      - name: Set NuGet package path
+        shell: pwsh
+        run: |
+          $nugetPackages = Join-Path $env:USERPROFILE '.nuget/packages'
+          "NUGET_PACKAGES=$nugetPackages" >> $env:GITHUB_ENV
+
       - name: Cache NuGet
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.nuget/packages
-          key: nuget-${{ matrix.arch }}-${{ hashFiles('platforms/windows/Directory.Packages.props') }}
+          key: nuget-v2-${{ matrix.arch }}-${{ hashFiles('platforms/windows/Directory.Packages.props', 'platforms/windows/**/*.csproj') }}
           restore-keys: |
-            nuget-${{ matrix.arch }}-
+            nuget-v2-${{ matrix.arch }}-
 
       - name: Restore
         # Restore with the matrix's RuntimeIdentifier so assets/lock files
@@ -160,14 +168,78 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          if (Test-Path Tests) {
-            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "No Tests/ directory; skipping."
+          msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$packageProps = Get-Content ../Directory.Packages.props
+          $coverageVersion = $packageProps.Project.PropertyGroup.MicrosoftCodeCoverageVersion
+          $relativeShim = "microsoft.codecoverage/$coverageVersion/lib/netcoreapp3.1/Microsoft.VisualStudio.CodeCoverage.Shim.dll"
+          $depsFile = 'FileID.App.Tests/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/FileID.App.Tests.deps.json'
+          $deps = Get-Content $depsFile -Raw | ConvertFrom-Json
+          $stagedShim = Join-Path (Split-Path -Parent $depsFile) "Microsoft.CodeCoverage/$coverageVersion/lib/netcoreapp3.1/Microsoft.VisualStudio.CodeCoverage.Shim.dll"
+          $shimSource = Join-Path $env:NUGET_PACKAGES $relativeShim
+          if (-not (Test-Path $shimSource -PathType Leaf)) { $shimSource = $stagedShim }
+          if (-not (Test-Path $shimSource -PathType Leaf)) { throw "CodeCoverage shim missing from NuGet and test output: $relativeShim" }
+          $packageFolders = @()
+          if ($deps.packageFolders) { $packageFolders = @($deps.packageFolders.PSObject.Properties.Name | Where-Object { $_ }) }
+          if ($packageFolders.Count -eq 0 -and $env:NUGET_PACKAGES) { $packageFolders = @($env:NUGET_PACKAGES) }
+          if ($packageFolders.Count -eq 0) { $packageFolders = @((Join-Path $env:USERPROFILE '.nuget/packages')) }
+          foreach ($packageFolder in $packageFolders) {
+            $packageShim = Join-Path $packageFolder $relativeShim
+            Write-Host "CodeCoverage package folder: $packageFolder; shim file present: $(Test-Path $packageShim -PathType Leaf)"
+            if (-not (Test-Path $packageShim -PathType Leaf)) {
+              Write-Host "Staging CodeCoverage shim in test-host package folder: $packageFolder"
+              New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageShim) | Out-Null
+              Copy-Item -LiteralPath $shimSource -Destination $packageShim
+            }
           }
+          $testOutputRootShim = Join-Path (Split-Path -Parent $depsFile) 'Microsoft.VisualStudio.CodeCoverage.Shim.dll'
+          if (-not (Test-Path $testOutputRootShim -PathType Leaf)) {
+            Copy-Item -LiteralPath $shimSource -Destination $testOutputRootShim
+          }
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testOutputRoot = Split-Path -Parent $depsFile
+          $appOutputRoot = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64'
+          $runtimeTarget = $deps.targets.PSObject.Properties[$deps.runtimeTarget.name].Value
+          foreach ($library in $deps.libraries.PSObject.Properties) {
+            if ($library.Value.type -ne 'package') { continue }
+            $libraryParts = $library.Name.Split('/', 2)
+            if ($libraryParts.Count -ne 2) { continue }
+            $targetLibraryProperty = $runtimeTarget.PSObject.Properties[$library.Name]
+            if (-not $targetLibraryProperty) { continue }
+            foreach ($assetKind in @('runtime', 'runtimeTargets')) {
+              $assets = $targetLibraryProperty.Value.$assetKind
+              if (-not $assets) { continue }
+              foreach ($asset in $assets.PSObject.Properties) {
+                if ([IO.Path]::GetExtension($asset.Name) -ne '.dll') { continue }
+                if ($assetKind -eq 'runtimeTargets' -and $asset.Value.assetType -notin @('runtime', 'native')) { continue }
+                $relativeAsset = "$($libraryParts[0].ToLowerInvariant())/$($libraryParts[1])/$($asset.Name)"
+                $assetName = [IO.Path]::GetFileName($asset.Name)
+                $packageAssets = @($packageFolders | ForEach-Object { Join-Path $_ $relativeAsset })
+                $assetCandidates = @($packageAssets) + @((Join-Path $testOutputRoot $assetName), (Join-Path $appOutputRoot $assetName))
+                $assetSource = $assetCandidates | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
+                if (-not $assetSource) { throw "Runtime asset source is missing: $relativeAsset" }
+                foreach ($packageFolder in $packageFolders) {
+                  $packageAsset = Join-Path $packageFolder $relativeAsset
+                  if (-not (Test-Path $packageAsset -PathType Leaf)) {
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageAsset) | Out-Null
+                    Copy-Item -LiteralPath $assetSource -Destination $packageAsset -Force
+                  }
+                }
+                $testOutputAsset = Join-Path $testOutputRoot $assetName
+                if (-not (Test-Path $testOutputAsset -PathType Leaf)) {
+                  Copy-Item -LiteralPath $assetSource -Destination $testOutputAsset
+                }
+              }
+            }
+          }
+          $testHostRuntimeConfig = Join-Path $testOutputRoot 'testhost.runtimeconfig.json'
+          $runtimeConfig = @{ runtimeOptions = @{ tfm = 'net8.0'; frameworks = @(@{ name = 'Microsoft.NETCore.App'; version = '8.0.0' }, @{ name = 'Microsoft.WindowsDesktop.App'; version = '8.0.0' }) } } | ConvertTo-Json -Depth 4
+          Set-Content -LiteralPath $testHostRuntimeConfig -Value $runtimeConfig -Encoding utf8
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
@@ -178,7 +250,19 @@ jobs:
       # they can't interfere with restore state.
       - name: Format check (x64 only)
         if: matrix.arch == 'x64'
-        run: dotnet format FileID.sln --verify-no-changes
+        shell: pwsh
+        run: |
+          $formatOutput = & dotnet format FileID.sln --verify-no-changes 2>&1
+          $formatExit = $LASTEXITCODE
+          $formatText = $formatOutput | Out-String
+          $formatOutput | ForEach-Object { Write-Host $_ }
+          if ($formatExit -eq 4 -and $formatText -match 'Unable (to )?locate dotnet CLI') {
+            Write-Host 'Retrying dotnet format after its one-time CLI discovery race.'
+            $formatOutput = & dotnet format FileID.sln --verify-no-changes 2>&1
+            $formatExit = $LASTEXITCODE
+            $formatOutput | ForEach-Object { Write-Host $_ }
+          }
+          if ($formatExit -ne 0) { exit $formatExit }
 
       - name: Charset — UTF-8 BOM on .cs/.xaml (x64 only)
         if: matrix.arch == 'x64'

@@ -3,14 +3,14 @@
 </p>
 
 <p align="center">
-  <strong>On-device AI file organization. macOS and Windows live, Linux soon.</strong><br>
+  <strong>On-device AI file organization. macOS and Windows live, Linux Library + People + required-model Settings preview.</strong><br>
   <em>Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own.</em>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-15%2B-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Windows-10%2F11%20%2B%20WoA-0078d4?style=flat-square">
-  <img src="https://img.shields.io/badge/Linux-Phase%205-orange?style=flat-square">
+  <img src="https://img.shields.io/badge/Linux-Library%20%2B%20People%20%2B%20Settings%20preview-orange?style=flat-square">
   <img src="https://img.shields.io/badge/100%25-on--device-green?style=flat-square">
 </p>
 
@@ -34,9 +34,10 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 - [Install](#install) — Windows + macOS download instructions
 
 **For developers**
-- [Build from source](#build-from-source) — Windows + macOS
+- [Build from source](#build-from-source) — Windows, macOS, and Linux
   - [Windows](#build--windows) — engine + WinUI 3 app
   - [macOS](#build--macos) — engine + SwiftUI app
+  - [Linux](#build--linux) — shared engine + GTK Library/People/required-model Settings preview
 - [Repository layout](#repository-layout) — where things live
 - [Architecture](#architecture) — two-binary IPC design, GPU acceleration, ML stack
 - [Continuous integration](#continuous-integration) — Windows + macOS workflows + privacy gate
@@ -47,15 +48,15 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 
 ## Quickstart
 
-**One command, every platform.** From the repo root, in any bash shell (Git Bash on Windows, Terminal on macOS, anything on Linux):
+**Build from the repo root.** Use the platform command for your system (Git Bash on Windows, Terminal on macOS, or a Linux shell):
 
 ```bash
 ./build.sh -windows         # Windows: full fresh-install build + run
 ./build.sh -mac             # macOS:   build + launch
-./build.sh -linux           # Linux:   Phase 5 (deferred — engine builds standalone today)
+./build.sh -linux           # Linux: build/stage GTK Library + People + required-model Settings preview; launch with display
 ```
 
-That's the only command you need to remember. Defaults pick a sensible "I want to see this run" path: it wipes any prior install, builds Release, drops a runnable copy at `~/Desktop/FileID/`, and launches the app.
+Windows defaults to a fresh-install Release build copied to `~/Desktop/FileID/` and launched; Linux builds/stages both binaries under `platforms/linux/dist/fileid/` and runs a privacy gate without wiping user data. On Linux, the app launches when a graphical display is available; without one, it remains staged. Use `./build.sh -linux --no-run` to build/stage without launching.
 
 **On Windows without a bash shell?** `build.sh` is just a dispatcher — it shells out to a PowerShell script. Call that script directly from PowerShell (works in the built-in Windows PowerShell 5.1 *and* PowerShell 7):
 
@@ -106,7 +107,7 @@ FileID writes **real Finder tags** — the system-wide `tagNamesKey` xattrs, not
 
 ### Platform status
 
-macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux is deferred to Phase 5 — the Rust engine builds standalone today, but the UI port (Avalonia or GTK4) hasn't started. See `shared/docs/SHIP.md` for the per-phase breakdown.
+macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux builds the shared Rust engine and a GTK4/libadwaita Library + People + required-model Settings preview; Cleanup, Deep Analyze, and Restructure are not wired. People controls were exercised on WSL/Xvfb against an isolated SQLite fixture; model-backed suggested merges were unavailable without weights. See [Build — Linux](#build--linux) for build steps and current limitations.
 
 ### First launch
 
@@ -265,17 +266,16 @@ Either builds the engine + app and launches. See `platforms/apple/CLAUDE.md` for
 
 ### Build — Linux
 
-```bash
-./build.sh -linux
-```
-
-Linux is **deferred to Phase 5** — see [`shared/docs/SHIP.md`](shared/docs/SHIP.md). The Rust engine is cross-platform-clean and will build on Linux today; the blocker is the UI (WinUI 3 is Windows-only). Engine-only standalone build:
+From the repository root on Linux, with Rust, Python 3, and GTK4/libadwaita development packages installed:
 
 ```bash
-cd platforms/windows/src/engine && cargo build --release
+./build.sh -linux --no-run
+./platforms/linux/dist/fileid/fileid-linux
 ```
 
-The engine binary at `target/release/fileid-engine` is fully functional headless.
+`./build.sh -linux` delegates to `platforms/linux/build/build.sh`, building and staging the shared Rust engine and GTK app without wiping user data; it launches the staged app when `DISPLAY` or `WAYLAND_DISPLAY` is set. In a headless shell it stages without launching. Use `--no-run` to skip launching even with a display, or `--debug` for a debug build (release by default). Other build flags, including `--tests` and wipe-related flags, are unsupported on Linux. Library, People, and the two required scan-model Settings bundles are wired; Cleanup, Deep Analyze, and Restructure are not. Real model downloads, inference-backed Linux scans, and native VLM support have not been verified. See [`platforms/linux/README.md`](platforms/linux/README.md) for status and requirements.
+
+To stage without replacing an existing build, set `FILEID_LINUX_DIST_DIR` to a new absolute directory when invoking `./build.sh -linux`.
 
 ---
 
@@ -299,7 +299,7 @@ FileID/
 │   │   │   ├── publish-bundle.ps1  # Release build (sign + MSI + bundle)
 │   │   │   └── build.ps1           # Engine-only Phase 0 build
 │   │   └── Tests/                  # xUnit tests for the IPC schema
-│   └── linux/                  # Phase 5 placeholder
+│   └── linux/                 # GTK Library + People + required-model Settings preview; shared Rust engine
 ├── shared/
 │   ├── ipc-schema/             # Canonical IPC contract (JSON Schema)
 │   ├── docs/                   # Architecture, decisions, models, privacy

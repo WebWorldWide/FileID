@@ -7,6 +7,13 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 ## [Unreleased]
 
 ### Added
+#### 2026-09-24 — Isolated scan benchmarking, Windows VLM choices, Linux Library, People, and Settings
+
+- Added an isolated Windows/Linux Python IPC scan benchmark with synthetic image/document/OCR/kind truth and bounded, metadata-only volume-root sampling. An Adlon H: exFAT sample observed 231 entries (10 files, 221 directories) within 25 visited directories in 0.009 s; it neither wrote to nor scanned H: with the engine. The benchmark does not infer model speed or accuracy when required models are absent.
+- Windows Deep Analyze now offers pinned Apache-2.0 Qwen3-VL 4B and 8B as optional installed, persisted selections; Qwen2.5-VL remains the default. Engine resolver tests and fake-weight smoke ran, but real Qwen3 inference and WinUI rendering were not verified.
+- The Linux GTK app now exposes a native Library backed by typed engine IPC (folder picker, scan status, filename/tag/text search, kind filters, image thumbnails, and preview) and Settings for **only** the two required scan bundles, `mobileclip_s2` and `arcface`. Library↔Settings navigation and the missing-model scan redirect work; installation requires an explicit click, with typed prewarm/cancel, queued/progress and error/retry states. “Installed” requires SHA256-verified bundles; fake completion without genuine pins is rejected. WSL build/stage, Xvfb fake-engine interaction, and the privacy gate passed, but real downloads, verified installed-bundle UI, and inference-backed scans have not run. Cleanup, Deep Analyze, and Restructure remain unwired; full Settings parity is pending.
+- Linux People now runs with the staged engine: an isolated WSL/Xvfb SQLite fixture exercised rename, unknown/hide/show, restore, and merge. Suggested merges remained empty without installed model weights; the remaining three tabs are still unwired.
+
 
 #### 2026-06-13 — Restructure parity + safer moves (stability campaign)
 
@@ -38,6 +45,15 @@ Per `shared/docs/PRIVACY.md` and `CLAUDE.md`: this project ships no telemetry, n
 - **Broken-image placeholder on Library cards.** When the thumbnail service exhausts its fallback chain and returns null, the card now shows a muted procedural image-glyph placeholder instead of shimmering forever. Distinguishes "preview failed" from "still loading." Rendered in XAML (no asset binary).
 
 ### Fixed
+#### 2026-09-24 — Model installation and Windows shared VLM race
+
+- Prevented an optional Qwen3 install from overlapping Welcome InstallAll and targeting the wrong or missing download on Cancel; the UI blocks overlapping requests and InstallAll skips slots already Downloading. A package-free .NET 10 harness exercised both click orders, Cancel, and retry against production slot and service/UI methods; real WinUI rendering remains unverified.
+- Fixed shared-engine runtime ZIP installation writing a bare model-id sentinel that the registry could not attest: extracted runtimes now use canonical installation attestation, so valid pinned installations can remain Installed. Regression coverage rejects legacy markers and tampered or missing runtime files while accepting verified extracted runtimes and synthetic pinned ONNX bundles.
+- Fixed the root `./build.sh -linux` dispatcher: it stages the Linux app and shared engine without wiping user data, supports `--debug`/`--no-run`, launches only when a display is available, and rejects unsupported flags before staging. WSL headless builds and privacy checks passed.
+- Shared-engine People actions now report missing rename/unknown person IDs as failed items rather than silently succeeding; focused regressions failed before and passed after the fix, and real WSL IPC confirmed failed stale IDs alongside successfully committed valid IDs.
+- Linux People now shows stale-rename failures inside the dialog instead of hiding them: Discard closes the dialog and refreshes a stale ghost card to an empty state; retry succeeds after the person is restored. Exercised under Xvfb with the staged engine.
+- Linux People now shows singular `1 person` and `1 face` counts. Both labels were screenshot-verified under Xvfb; the debug build and privacy gate passed.
+
 
 #### 2026-06-13 — Cross-platform stability campaign (audit-2026-06-10)
 

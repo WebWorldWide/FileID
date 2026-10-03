@@ -27,9 +27,11 @@ internal static class VlmRecommendation
 {
     internal const string Gemma = "gemma_3_4b";
     internal const string Qwen = "qwen2_5_vl_7b";
+    internal const string Qwen3Four = "qwen3_vl_4b";
+    internal const string Qwen3Eight = "qwen3_vl_8b";
     internal const string Mistral = "mistral_small_3_2";
 
-    internal static readonly string[] SupportedKinds = [Mistral, Qwen, Gemma];
+    internal static readonly string[] SupportedKinds = [Mistral, Qwen, Gemma, Qwen3Four, Qwen3Eight];
 
     internal static VlmHardwareProfile CurrentProfile()
     {
@@ -76,6 +78,10 @@ internal static class VlmRecommendation
 
     internal static bool CanRun(string kind, VlmHardwareProfile profile)
     {
+        // No measured Qwen3 working set yet; these are explicit opt-in models,
+        // never chosen by PreferredOrder. Let the runtime report memory errors
+        // rather than fabricate a hardware exclusion threshold.
+        if (kind is Qwen3Four or Qwen3Eight) return true;
         if (profile.Architecture == Architecture.Arm64 && kind != Gemma)
         {
             return false;
@@ -127,6 +133,8 @@ internal static class VlmRecommendation
     {
         Mistral => 15_178_000_000UL,
         Qwen => 6_100_000_000UL,
+        Qwen3Four => 3_333_461_920UL,
+        Qwen3Eight => 6_186_814_624UL,
         Gemma => 3_351_251_104UL,
         _ => 0,
     };
@@ -143,12 +151,14 @@ internal static class VlmRecommendation
     {
         Mistral => "Mistral-Small 3.2 24B",
         Qwen => "Qwen2.5-VL 7B",
+        Qwen3Four => "Qwen3-VL 4B",
+        Qwen3Eight => "Qwen3-VL 8B",
         Gemma => "Gemma 3 4B",
         _ => kind,
     };
 
-    internal static bool IsSupported(string? kind)
-        => kind is Gemma or Qwen or Mistral;
+    internal static bool IsSupported(string? kind) =>
+        kind is Gemma or Qwen or Qwen3Four or Qwen3Eight or Mistral;
 
     internal static string? ResolveInstalledSelection(
         string? persistedKind,
@@ -156,7 +166,7 @@ internal static class VlmRecommendation
         VlmHardwareProfile profile,
         Func<string, bool> isInstalled)
     {
-        var candidates = new List<string>(5);
+        var candidates = new List<string>(SupportedKinds.Length + 2);
         if (IsSupported(persistedKind)) candidates.Add(persistedKind!);
         if (IsSupported(recommendedKind)) candidates.Add(recommendedKind);
         candidates.AddRange(SupportedKinds);

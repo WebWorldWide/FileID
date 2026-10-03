@@ -5,16 +5,17 @@ namespace FileID.App.Tests;
 public sealed class ReleaseLinkContractTests
 {
     [Fact]
-    public void SettingsPrivacyFallbackUsesCanonicalRepository()
+    public void PrivacyDocumentIsPackagedWithoutAnExternalFallback()
     {
-        var source = File.ReadAllText(PathInRepo(
+        var settings = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "Views", "Settings", "SettingsView.xaml.cs"));
+        var publishScript = File.ReadAllText(PathInRepo(
+            "platforms", "windows", "build", "publish-store.ps1"));
 
-        Assert.Contains(
-            "https://github.com/WebWorldWide/FileID/blob/main/shared/docs/PRIVACY.md",
-            source,
-            StringComparison.Ordinal);
-        Assert.DoesNotContain("github.com/anolle/FileID", source, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("AppContext.BaseDirectory, \"Docs\", \"PRIVACY.md\"", settings, StringComparison.Ordinal);
+        Assert.Contains("shared/docs/PRIVACY.md", publishScript, StringComparison.Ordinal);
+        Assert.DoesNotContain("github.com/WebWorldWide/FileID/blob/main/shared/docs/PRIVACY.md", settings, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("developer.nvidia.com/cudnn-downloads", settings, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string PathInRepo(params string[] parts)

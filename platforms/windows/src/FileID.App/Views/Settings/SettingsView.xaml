@@ -242,7 +242,7 @@
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"
-                               Text="Optional Deep Analyze VLMs (Qwen 2.5-VL · Gemma 3 · Mistral-Small 3.2) live on the Deep Analyze tab."/>
+                               Text="Optional Deep Analyze VLMs (Qwen 2.5-VL · Qwen3-VL 4B/8B · Gemma 3 · Mistral-Small 3.2) live on the Deep Analyze tab."/>
                 </StackPanel>
             </Border>
 
@@ -452,9 +452,6 @@
                                         Content="Verify install"
                                         Click="OnVerifyCudnnClicked"
                                         ToolTipService.ToolTip="Re-probe cuDNN after manually installing it from NVIDIA's site." />
-                                <Button Content="Get cuDNN"
-                                        Click="OnOpenCudnnDownloadsClicked"
-                                        ToolTipService.ToolTip="Opens developer.nvidia.com/cudnn-downloads in your default browser. Use this if you want CUDA Toolkit + cuDNN system-wide." />
                             </StackPanel>
                         </Grid>
 

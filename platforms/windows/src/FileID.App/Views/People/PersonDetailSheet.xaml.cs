@@ -60,6 +60,7 @@ public sealed partial class PersonDetailSheet : UserControl
         public string Last = "";
         public string Suffix = "";
         public int MemberCount;
+        public bool IsUnknown;
         public bool Found;
         public List<FaceTile> Faces = new();
         public string? Error;
@@ -99,7 +100,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 // Pull structured name fields.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id) " +
+                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COALESCE(p.is_unknown, 0) " +
                                       "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
                                       "WHERE p.id = @id GROUP BY p.id";
                     cmd.Parameters.AddWithValue("@id", personId);
@@ -113,6 +114,7 @@ public sealed partial class PersonDetailSheet : UserControl
                         res.Last = r.IsDBNull(3) ? "" : r.GetString(3);
                         res.Suffix = r.IsDBNull(4) ? "" : r.GetString(4);
                         res.MemberCount = r.GetInt32(5);
+                        res.IsUnknown = r.GetInt32(6) != 0;
                     }
                 }
 
@@ -158,6 +160,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 MiddleBox.Text = result.Middle;
                 LastBox.Text = result.Last;
                 SuffixBox.Text = result.Suffix;
+                IsUnknownCheckBox.IsChecked = result.IsUnknown;
                 MemberCountText.Text = $"{result.MemberCount} face{(result.MemberCount == 1 ? "" : "s")} clustered.";
             }
             else
@@ -232,6 +235,21 @@ public sealed partial class PersonDetailSheet : UserControl
             {
                 StatusText.Text = "This person no longer exists — it may have been merged. Reopen People and try again.";
                 return false;
+            }
+
+            if (IsUnknownCheckBox.IsChecked == true)
+            {
+                var unknownResult = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "markPersonsAsUnknown",
+                    () => ViewModels.EngineClient.Instance.MarkPersonsAsUnknownAsync(new[] { personId }),
+                    TimeSpan.FromSeconds(30));
+                if (unknownResult.Failed > 0 || unknownResult.Succeeded == 0)
+                {
+                    var first = unknownResult.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                    StatusText.Text = string.IsNullOrWhiteSpace(first) ? "Save failed." : $"Save failed: {first}";
+                    return false;
+                }
+                return true;
             }
 
             // Await the engine's BulkActionResult instead of fire-and-forget:

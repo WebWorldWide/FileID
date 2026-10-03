@@ -8,7 +8,7 @@ Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE
 
 - **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp).
 - **App** — WinUI 3 (Windows App SDK 1.6+, .NET 8, C#/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
-- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed.
+- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed. The reserved Store product uses the separate x64 MSIX path in `build/publish-store.ps1`; see `shared/docs/WINDOWS_STORE.md` for identity and release gates.
 
 ## Layout
 
@@ -47,11 +47,11 @@ Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo cli
 
 ## Current status
 
-Engine and app are both feature-complete across the six tabs. The commercial-clean / Apache-2.0 model stack is merged to `main` and CI-green, on-hardware verified (RTX 2060, DirectML):
+Engine and app cover all six tabs. The existing commercial-clean model stack was on-hardware verified (RTX 2060, DirectML); optional Qwen3-VL inference remains unverified without installed weights:
 - **Tagging:** RAM++ (Swin-L @384, 4585-tag ONNX) primary, per-class thresholds + generic-tag suppress-list; CLIP zero-shot scene tags are the fallback.
 - **Search:** CLIP ViT-B/32 (512-d image + text).
 - **Faces:** YuNet detect + SFace embed (128-d) + 5-point alignment; density clustering.
-- **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (default) / Gemma 3 / Mistral-Small-3.2.
+- **Deep Analyze (opt-in):** llama.cpp VLMs — Qwen2.5-VL 7B (unchanged default) / Gemma 3 / Mistral-Small-3.2, plus optional pinned official Qwen3-VL 4B and 8B GGUF + mmproj bundles (Apache-2.0). Select and install them on the Deep Analyze tab; they are not auto-recommended.
 - EP auto-select (CUDA / TensorRT / DirectML / OpenVINO / QNN / CPU); NVIDIA without the CUDA pack runs DirectML. Windows.Media.Ocr; pdfium; Media Foundation. Parent-PID watchdog; WAL checkpoint; local-only tracing.
 
 In progress / not done: butler restructure P2–P4 (VLM group naming, confidence tiers, Win2D Sankey upgrade — see `shared/docs/RESTRUCTURE.md`); Authenticode EV signing; per-vendor (AMD/Intel/Snapdragon NPU) on-hardware verification; ORT CUDA Performance Pack hosting.
@@ -69,7 +69,7 @@ In progress / not done: butler restructure P2–P4 (VLM group naming, confidence
 
 ## Conventions — WinUI 3 app
 
-- **Unpackaged desktop app.** No MSIX / Store / `Package.appxmanifest`. Self-contained .NET publish (runtime bundled).
+- **Native desktop app.** MSI/dev builds are unpackaged. Store builds wrap the same WinUI app and engine in MSIX using `store/AppxManifest.xml` and `FileIDStoreBuild=true`; Store framework dependencies replace the unpackaged bootstrapper. Self-contained .NET publish.
 - **Forced dark mode** (`RequestedTheme = Dark` + `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`). **Mica window backdrop** (`MicaController`, falling back to `DesktopAcrylicController` when Mica is unsupported); GlassCard surfaces render a XAML `AcrylicBrush` in their template — real DWM materials, not a fake.
 - **Springs via `SpringScalarNaturalMotionAnimation`** — map SwiftUI `.spring(response:dampingFraction:)` 1:1 (`Period = response`, `DampingRatio = dampingFraction`).
 - **Custom rendering**: LavaLampBackground via `Microsoft.UI.Composition`, the Restructure Sankey via pure-XAML `Path`/Bézier geometry, IridescentBorder via Win2D (`CanvasSweepGradient`); pause when occluded. **No third-party UI libraries** beyond Windows App SDK + Win2D.

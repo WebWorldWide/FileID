@@ -27,6 +27,8 @@ internal static class ModelDisplaySize
             // The spec uses decimal MB (1e6); registry numbers are decimal too,
             // so divide by 1_000_000 for the displayed value.
             ["qwen2_5_vl_7b"] = (4_700 + 1_400),       // = 6100
+            ["qwen3_vl_4b"] = 3_334,
+            ["qwen3_vl_8b"] = 6_187,
             ["gemma_3_4b"] = (2_500 + 851),          // = 3351
             // Mistral-Small-3.2-24B Q4_K_M (~14.3 GB) + mmproj (~878 MB).
             ["mistral_small_3_2"] = (14_300 + 878),    // = 15178

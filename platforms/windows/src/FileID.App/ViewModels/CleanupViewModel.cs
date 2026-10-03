@@ -1,13 +1,4 @@
-﻿// CleanupViewModel — backs the Cleanup tab duplicate groups list.
-//
-// Groups files by exact `content_hash` (BLAKE3 for files <=16 MB, else a
-// head+tail+size composite; migration v8) so each group is byte-for-byte
-// identical, not merely visually similar. An identical size_bytes is required
-// too as a cheap guard. Each group lets the user mark one keeper and trash the
-// others (engine `trashFiles` IPC command, parallel IFileOperation::DeleteItem
-// with FOF_ALLOWUNDO).
-
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
@@ -81,7 +72,7 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
             // caught below as a clean teardown no-op instead of escaping to the caller.
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposalCts.Token);
             var token = linked.Token;
-            OnUi(() => { IsLoading = true; ErrorMessage = null; });
+            OnUi(() => { if (Interlocked.Read(ref _refreshGen) == myGen) { IsLoading = true; ErrorMessage = null; } });
             var groups = await Task.Run(() => Load(token), token).ConfigureAwait(false);
             if (_disposed || token.IsCancellationRequested) return;
             ApplyOnUi(groups, myGen);
@@ -95,15 +86,23 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
         // drives x:Bind XAML writes (ProgressRing.IsActive, StatusText), so marshal
         // them to the captured UI thread — else a native fast-fail
         // (RPC_E_WRONG_THREAD). Mirrors LibraryViewModel.
-        catch (SqliteException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
-        catch (IOException ex) { OnUi(() => { if (!_disposed) ErrorMessage = SqliteErrorTranslator.Humanize(ex); }); }
-        catch (Exception ex) { OnUi(() => { if (!_disposed) ErrorMessage = ex.Message; }); }
+        catch (SqliteException ex) { ReportLoadError(SqliteErrorTranslator.Humanize(ex), myGen); }
+        catch (IOException ex) { ReportLoadError(SqliteErrorTranslator.Humanize(ex), myGen); }
+        catch (Exception ex) { ReportLoadError(ex.Message, myGen); }
         finally
         {
             Interlocked.Decrement(ref _activeLoads);
             OnUi(() => { if (!_disposed) IsLoading = Volatile.Read(ref _activeLoads) > 0; });
         }
     }
+
+    private void ReportLoadError(string message, long generation)
+        => OnUi(() =>
+        {
+            if (_disposed || Interlocked.Read(ref _refreshGen) != generation) return;
+            MergeByContentHash(Groups, Array.Empty<DuplicateGroup>());
+            ErrorMessage = message;
+        });
 
     /// Marshal a UI-affined mutation onto the captured dispatcher. RefreshAsync's
     /// catch/finally run on a thread-pool thread (Task.Run + ConfigureAwait(false)),
@@ -122,106 +121,90 @@ internal sealed class CleanupViewModel : INotifyPropertyChanged, IDisposable
     private const long FullHashMaxBytes = 16L * 1024 * 1024;
 
     private List<DuplicateGroup> Load(CancellationToken ct)
+        => LoadExactFromPath(_dbPath, ct);
+
+    internal static List<DuplicateGroup> LoadExactFromPath(string dbPath, CancellationToken ct)
     {
-        // First-launch guard: the engine creates the DB on first scan.
-        if (!File.Exists(_dbPath))
-        {
-            return new List<DuplicateGroup>();
-        }
+        ct.ThrowIfCancellationRequested();
+        if (!File.Exists(dbPath)) return new List<DuplicateGroup>();
+
         var connString = new SqliteConnectionStringBuilder
         {
-            DataSource = _dbPath,
+            DataSource = dbPath,
             Mode = SqliteOpenMode.ReadOnly,
         }.ToString();
+
         using var conn = new SqliteConnection(connString);
         conn.Open();
-        // Pull every file with a content hash and group by EXACT equality —
-        // identical content_hash AND size_bytes is byte-for-byte identical (1:1
-        // duplicates), not just visually similar. content_hash is a BLOB
-        // (BLAKE3 / composite, migration v8); read it as bytes and hex-encode
-        // for a stable dictionary key. Grouping is O(n) via a dictionary, so
-        // there's no per-pair scan and no candidate cap.
         using var cmd = conn.CreateCommand();
-        // modified_at rides along so the per-member thumbnail request can use the
-        // same path|mtime cache key LibraryView uses (ReadStore reads the same
-        // column) — a file shown in both tabs then shares one L1/L2 cache entry
-        // instead of being decoded + cached twice under divergent keys.
         cmd.CommandText = """
-            SELECT id, path_text, size_bytes, content_hash, modified_at
-            FROM files
-            WHERE content_hash IS NOT NULL AND failed = 0
+            WITH duplicate_keys AS (
+                SELECT content_hash, size_bytes, COUNT(*) AS member_count
+                FROM files
+                WHERE content_hash IS NOT NULL AND length(content_hash) > 0 AND failed = 0
+                GROUP BY content_hash, size_bytes
+                HAVING COUNT(*) > 1
+                ORDER BY member_count DESC, hex(content_hash), size_bytes
+                LIMIT 200
+            )
+            SELECT f.id, f.path_text, f.size_bytes, f.content_hash, f.modified_at
+            FROM duplicate_keys k
+            JOIN files f ON f.content_hash = k.content_hash
+                        AND f.size_bytes = k.size_bytes
+            WHERE f.failed = 0
+            ORDER BY k.member_count DESC, hex(k.content_hash), k.size_bytes,
+                     COALESCE(f.aesthetic, -1) DESC,
+                     COALESCE(f.created_at, 1e100) ASC,
+                     f.path_text COLLATE BINARY
             """;
-        var rawMembers = new List<(long Id, string Path, long Size, string Hash, double? ModifiedAt)>(2048);
-        using (var reader = cmd.ExecuteReader())
-        {
-            while (reader.Read())
-            {
-                ct.ThrowIfCancellationRequested();
-                var hashBytes = (byte[])reader[3];
-                if (hashBytes is null || hashBytes.Length == 0) continue;
-                var hashHex = Convert.ToHexString(hashBytes);
-                var modifiedAt = reader.IsDBNull(4) ? (double?)null : reader.GetDouble(4);
-                rawMembers.Add((reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), hashHex, modifiedAt));
-            }
-        }
 
-        // Group by composite key (content_hash + size): identical content AND
-        // size means byte-for-byte identical. O(n) via a dictionary.
-        var byHash = new Dictionary<string, List<int>>(rawMembers.Count);
-        for (int i = 0; i < rawMembers.Count; i++)
+        var byKey = new Dictionary<string, List<DuplicateMember>>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
         {
             ct.ThrowIfCancellationRequested();
-            var key = rawMembers[i].Hash + ":" + rawMembers[i].Size.ToString();
-            if (!byHash.TryGetValue(key, out var list)) { list = new List<int>(); byHash[key] = list; }
-            list.Add(i);
-        }
-
-        var groups = new List<DuplicateGroup>();
-        foreach (var (_, indices) in byHash)
-        {
-            if (indices.Count < 2) continue;
-            // All members share identical bytes (and size); order by path for a
-            // stable display and keep the first as the default keeper. The user
-            // can re-pick in the UI.
-            indices.Sort((a, b) => string.CompareOrdinal(rawMembers[a].Path, rawMembers[b].Path));
-            var hash = rawMembers[indices[0]].Hash;
-            // shared GroupName for the keeper RadioButton so mutual exclusion
-            // within a duplicate group works. The content hash uniquely
-            // identifies the group across the whole tab.
-            var groupKey = $"dup-{hash}";
-            var members = new List<DuplicateMember>(indices.Count);
-            for (int k = 0; k < indices.Count; k++)
+            var hashBytes = (byte[])reader[3];
+            if (hashBytes.Length == 0) continue;
+            var hash = Convert.ToHexString(hashBytes);
+            var size = reader.GetInt64(2);
+            var key = $"{hash}:{size}";
+            if (!byKey.TryGetValue(key, out var members))
             {
-                var m = rawMembers[indices[k]];
-                members.Add(new DuplicateMember
-                {
-                    Id = m.Id,
-                    Path = m.Path,
-                    FileName = System.IO.Path.GetFileName(m.Path),
-                    SizeBytes = m.Size,
-                    ModifiedAt = m.ModifiedAt,
-                    GroupKey = groupKey,
-                    IsKeeper = k == 0,
-                });
+                members = new List<DuplicateMember>();
+                byKey.Add(key, members);
             }
-            groups.Add(new DuplicateGroup
+            var path = reader.GetString(1);
+            members.Add(new DuplicateMember
             {
-                ContentHash = hash,
-                Members = members,
-                // For files > 16 MB the engine's content_hash is a head+tail+size
-                // COMPOSITE, not a full BLAKE3 — matching composites are "likely
-                // duplicates", not byte-for-byte verified. Mark the group so the
-                // caption drops the false "identical" guarantee that drives the
-                // unsafe one-click delete (#3).
-                IsApproximate = rawMembers[indices[0]].Size > FullHashMaxBytes,
+                Id = reader.GetInt64(0),
+                Path = path,
+                FileName = System.IO.Path.GetFileName(path),
+                SizeBytes = size,
+                ModifiedAt = reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                GroupKey = $"dup-{key}",
+                IsKeeper = members.Count == 0,
             });
         }
 
-        groups.Sort((a, b) => b.MemberCount.CompareTo(a.MemberCount));
-        if (groups.Count > 200) groups.RemoveRange(200, groups.Count - 200);
+        var groups = new List<DuplicateGroup>(byKey.Count);
+        foreach (var (key, members) in byKey)
+        {
+            groups.Add(new DuplicateGroup
+            {
+                ContentHash = key,
+                Members = members,
+                IsApproximate = members[0].SizeBytes > FullHashMaxBytes,
+            });
+        }
+        groups.Sort((a, b) =>
+        {
+            var countOrder = b.MemberCount.CompareTo(a.MemberCount);
+            return countOrder != 0
+                ? countOrder
+                : string.CompareOrdinal(a.ContentHash, b.ContentHash);
+        });
         return groups;
     }
-
     private void ApplyOnUi(IReadOnlyList<DuplicateGroup> rows, long gen)
     {
         // Drop results from a refresh a newer one has already superseded — checked
@@ -343,6 +326,8 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
     public required string ContentHash { get; init; }
     public required IReadOnlyList<DuplicateMember> Members { get; init; }
     public int MemberCount => Members.Count;
+    public int TotalMemberCount => Members.Count;
+    public bool IsSimilar { get; init; }
 
     /// <summary>True when members exceed the engine's full-hash threshold, so
     /// the shared content_hash is a head+tail+size composite — "likely", not
@@ -403,6 +388,19 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
     /// mutual exclusion impossible (each member had its own group). Set
     /// to the parent group's content hash at construction.</summary>
     public required string GroupKey { get; init; }
+    public bool IsSimilar { get; init; }
+
+    private bool _isSelectedForTrash;
+    public bool IsSelectedForTrash
+    {
+        get => _isSelectedForTrash;
+        set
+        {
+            if (_isSelectedForTrash == value) return;
+            _isSelectedForTrash = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelectedForTrash)));
+        }
+    }
 
     public string SizeDisplay
     {

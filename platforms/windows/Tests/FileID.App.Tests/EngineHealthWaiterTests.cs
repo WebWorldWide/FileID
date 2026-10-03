@@ -123,10 +123,10 @@ public sealed class EngineHealthWaiterTests
             "EngineClient.cs"));
 
         var probe = client.IndexOf(
-            "private async Task ProbeCommandChannelAsync",
+            "public async Task ProbeCommandChannelAsync",
             StringComparison.Ordinal);
         var register = client.IndexOf(
-            "_healthWaiters.Register(requestId, generation, pid)",
+            "_healthWaiters.Register(requestId, generation, captured.Id)",
             probe,
             StringComparison.Ordinal);
         var send = client.IndexOf(

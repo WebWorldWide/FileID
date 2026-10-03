@@ -15,12 +15,15 @@
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <UseWinUI>true</UseWinUI>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
+    <NoWarn>$(NoWarn);CA2255</NoWarn>
     <Platforms>x64</Platforms>
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="Microsoft.CodeCoverage" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -35,4 +38,31 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FileID.App\FileID.App.csproj" />
   </ItemGroup>
+
+  <Target Name="CopyWindowsSdkRuntimeAssemblyForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
+    <PropertyGroup>
+      <WindowsSdkRuntimeAssembly>$(MSBuildProjectDirectory)\..\..\src\FileID.App\bin\$(Platform)\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\Microsoft.Windows.SDK.NET.dll</WindowsSdkRuntimeAssembly>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(WindowsSdkRuntimeAssembly)')" Text="Windows SDK runtime assembly is missing from app output: $(WindowsSdkRuntimeAssembly)" />
+    <Copy SourceFiles="$(WindowsSdkRuntimeAssembly)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+    <PropertyGroup>
+      <WinRtRuntimeAssembly>$(MSBuildProjectDirectory)\..\..\src\FileID.App\bin\$(Platform)\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\WinRT.Runtime.dll</WinRtRuntimeAssembly>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(WinRtRuntimeAssembly)')" Text="WinRT runtime assembly is missing from app output: $(WinRtRuntimeAssembly)" />
+    <Copy SourceFiles="$(WinRtRuntimeAssembly)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="StageCodeCoverageRuntimeForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
+    <PropertyGroup>
+      <CodeCoveragePackageRoot Condition="'$(NUGET_PACKAGES)' != ''">$(NUGET_PACKAGES)\</CodeCoveragePackageRoot>
+      <CodeCoveragePackageRoot Condition="'$(CodeCoveragePackageRoot)' == '' and '$(NuGetPackageRoot)' != ''">$(NuGetPackageRoot)</CodeCoveragePackageRoot>
+      <CodeCoveragePackageRoot Condition="'$(CodeCoveragePackageRoot)' == ''">$(USERPROFILE)\.nuget\packages\</CodeCoveragePackageRoot>
+      <CodeCoverageShim>$(CodeCoveragePackageRoot)microsoft.codecoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
+      <CodeCoverageShimTarget>$(TargetDir)Microsoft.CodeCoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShimTarget>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(CodeCoverageShim)')" Text="CodeCoverage test-host runtime asset is missing: $(CodeCoverageShim)" />
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(CodeCoverageShimTarget)'))" />
+    <Copy SourceFiles="$(CodeCoverageShim)" DestinationFiles="$(CodeCoverageShimTarget)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(CodeCoverageShim)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

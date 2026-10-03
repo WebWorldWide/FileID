@@ -1,5 +1,5 @@
-// Library tab — DB-backed thumbnail grid + FTS search + preview, the 1:1 port
-// of macOS `LibraryView.swift`.
+// Library tab — read-only DB-backed thumbnail grid, filename/tag/text
+// search, and file preview.
 //
 //   * `gtk::SearchEntry` (debounced) → engine query → grid reload,
 //   * gold segmented kind pills (All / Images / Videos / Docs / PDFs / Audio),
@@ -188,7 +188,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
                 match ev {
-                    EngineEvent::BatchLanded(_) => {
+                    EngineEvent::Ready | EngineEvent::BatchLanded(_) => {
                         if last.elapsed() >= Duration::from_millis(900) {
                             last = Instant::now();
                             reload();
@@ -250,11 +250,22 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
     let rx = ctx.engine.borrow().query_files(spec);
     let ctx = ctx.clone();
     glib::MainContext::default().spawn_local(async move {
-        let (rows, total) = rx.recv().await.unwrap_or_default();
-        // Latest-wins: a slower earlier query can't clobber a newer one.
+        let result = rx.recv().await;
         if ctx.query_gen.get() != g {
             return;
         }
+        let (rows, total) = match result {
+            Ok(Ok(data)) => data,
+            Ok(Err(error)) => {
+                ctx.model.remove_all();
+                ctx.count_label.set_text("Library unavailable");
+                ctx.empty_page.set_title("Could not read library");
+                ctx.empty_page.set_description(Some(&error.to_string()));
+                ctx.content_stack.set_visible_child_name("empty");
+                return;
+            }
+            Err(_) => return,
+        };
         ctx.model.remove_all();
         for row in &rows {
             ctx.model.append(&BoxedAnyObject::new(row.clone()));
@@ -279,8 +290,7 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
                 ctx.empty_page.set_icon_name(Some("view-grid-symbolic"));
                 ctx.empty_page.set_title("No files yet");
                 ctx.empty_page.set_description(Some(
-                    "Pick a folder in the sidebar and click Start Scan — your files appear \
-                     here as they're found, searchable by name, tags, and text.",
+                    "Choose a folder above and select Start scan. First install the two required scan models in Settings; downloads begin only when you press Install. Already indexed files can be searched here by name, tags, and text.",
                 ));
             }
             ctx.content_stack.set_visible_child_name("empty");
@@ -481,7 +491,7 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             play.set_visible(is_video);
             return;
         }
-        pic.set_paintable(None::<&gtk::gdk::Texture>);
+        pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
         let want = key.clone();
         let rx = if is_video {
             engine
@@ -499,7 +509,7 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             let Ok(Some(decoded)) = rx.recv().await else {
                 return;
             };
-            let tex: gtk::gdk::Texture = texture_from_decoded(&decoded).upcast();
+            let tex = texture_from_decoded(decoded);
             thumb_cache_put(want.clone(), tex.clone());
             // Re-check: the tile may have been recycled while we were decoding.
             if !tile_still_wants(&li_weak, &want) {
@@ -758,7 +768,7 @@ fn load_preview_image(
                 return;
             };
             match decoded {
-                Some(decoded) => pic.set_paintable(Some(&texture_from_decoded(&decoded))),
+                Some(decoded) => pic.set_paintable(Some(&texture_from_decoded(decoded))),
                 // A video with no extractable keyframe (ffmpeg absent) still
                 // deserves its kind icon rather than an empty pane.
                 None => pic.set_paintable(icon_paintable(icon_for_kind(&kind), 128).as_ref()),

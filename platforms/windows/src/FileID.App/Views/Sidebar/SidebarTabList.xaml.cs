@@ -84,6 +84,9 @@ public sealed partial class SidebarTabList : UserControl
     }
 
     private void OnAppViewModelChanged(object? sender, PropertyChangedEventArgs e)
+        => FileID.Services.DebugLog.SafeRun(nameof(OnAppViewModelChanged), () => OnAppViewModelChangedCore(sender, e));
+
+    private void OnAppViewModelChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(AppViewModel.ActiveTab) or nameof(AppViewModel.HasFolder))
         {

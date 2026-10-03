@@ -188,11 +188,20 @@ public sealed class InstallerContractTests
             "dotnet test FileID.App.Tests/FileID.App.Tests.csproj",
             workflow,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("vstest.console.exe", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
         Assert.Contains("-p:Platform=x64", workflow, StringComparison.Ordinal);
-        Assert.Contains("-p:RuntimeIdentifier=win-x64", workflow, StringComparison.Ordinal);
+        Assert.Contains("-p:RuntimeIdentifier=win-${{ matrix.arch }}", workflow, StringComparison.Ordinal);
         Assert.Contains("$formatExit -eq 4", workflow, StringComparison.Ordinal);
-        Assert.Contains("*Unable to locate dotnet CLI*", workflow, StringComparison.Ordinal);
+        Assert.Contains("Unable (to )?locate dotnet CLI", workflow, StringComparison.Ordinal);
         Assert.Contains("exit $formatExit", workflow, StringComparison.Ordinal);
     }
 

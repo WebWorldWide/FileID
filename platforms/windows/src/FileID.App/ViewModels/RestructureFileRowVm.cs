@@ -17,7 +17,7 @@ internal sealed class RestructureFileRowVm : INotifyPropertyChanged
 
     /// <summary>Raised whenever IsSelected flips so the owning view recomputes
     /// the apply count + button state. Set once at construction.</summary>
-    public Action? SelectionChanged { get; init; }
+    public Action<RestructureFileRowVm>? SelectionChanged { get; init; }
 
     public long FileId => Move.FileId;
     public string FileName => Path.GetFileName(Move.Source);
@@ -44,7 +44,7 @@ internal sealed class RestructureFileRowVm : INotifyPropertyChanged
             if (_isSelected == value) return;
             _isSelected = value;
             OnChanged(nameof(IsSelected));
-            SelectionChanged?.Invoke();
+            SelectionChanged?.Invoke(this);
         }
     }
 

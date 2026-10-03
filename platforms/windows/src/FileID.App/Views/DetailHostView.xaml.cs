@@ -39,6 +39,9 @@ public sealed partial class DetailHostView : UserControl
     }
 
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnAppChanged), () => OnAppChangedCore(sender, e));
+
+    private void OnAppChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(AppViewModel.ActiveTab) or nameof(AppViewModel.HasFolder))
         {

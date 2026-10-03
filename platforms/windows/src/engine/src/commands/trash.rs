@@ -144,7 +144,9 @@ pub(crate) async fn handle_restore_from_trash(
             }
         }
 
-        // Single bin enumeration for the whole batch (C1-007).
+        // Windows shell restores an entire batch; Linux uses the journal's exact
+        // XDG Trash receipt for each file instead of guessing by basename.
+        #[cfg(windows)]
         restore_batch_from_recycle_bin(&to_restore);
 
         for item in &entry.items {
@@ -153,18 +155,36 @@ pub(crate) async fn handle_restore_from_trash(
             if !attempted {
                 continue;
             }
-            // C1-003: after the batch restore, success means the file is now
-            // present at a path that was NOT pre-occupied — i.e. the bytes we
-            // restored, not a stale occupant. (Pre-occupied paths were already
-            // filtered into the conflict branch above.)
+            #[cfg(windows)]
             let restored = std::path::Path::new(&item.original_path)
                 .symlink_metadata()
                 .is_ok();
+            #[cfg(not(windows))]
+            let restore_result = item.recycle_bin_id.as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Trash entry has no Linux recovery receipt"))
+                .and_then(|receipt| crate::shell::trash::restore_path(
+                    std::path::Path::new(&item.original_path),
+                    std::path::Path::new(receipt),
+                ));
+            #[cfg(not(windows))]
+            let restored = restore_result.is_ok();
             if restored {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs_f64())
                     .unwrap_or(0.0);
+                let file_size = match std::fs::metadata(&item.original_path) {
+                    Ok(metadata) => metadata.len() as i64,
+                    Err(error) => {
+                        failed += 1;
+                        messages.push(BulkActionItem {
+                            file_id: Some(item.file_id),
+                            ok: false,
+                            message: Some(format!("Restored on disk, but could not index file: {error}")),
+                        });
+                        continue;
+                    }
+                };
                 let path_obj = std::path::Path::new(&item.original_path);
                 let extension = path_obj
                     .extension()
@@ -172,22 +192,33 @@ pub(crate) async fn handle_restore_from_trash(
                     .unwrap_or("")
                     .to_ascii_lowercase();
                 let kind = crate::pipeline::discovery::FileKind::from_extension(&extension);
-                let _ = tx.execute(
-                    "INSERT OR IGNORE INTO files \
+                let indexed = tx.execute(
+                    "INSERT INTO files \
                      (path_text, path_hash, path_search, size_bytes, scanned_at, kind, extension, \
                       has_faces, has_text, failed) \
-                     VALUES (?1, ?2, ?6, 0, ?3, ?4, ?5, 0, 0, 0)",
+                     VALUES (?1, ?2, ?6, ?7, ?3, ?4, ?5, 0, 0, 0) \
+                     ON CONFLICT(path_text) DO UPDATE SET \
+                       size_bytes=excluded.size_bytes, scanned_at=excluded.scanned_at, \
+                       path_search=excluded.path_search",
                     rusqlite::params![
                         item.original_path,
                         crate::util::path_safety::stable_path_hash(&item.original_path),
                         now,
                         kind.as_str(),
                         extension,
-                        // path_search NFC-normalized (not verbatim ?1) so a restored
-                        // NFD-accented file stays findable by name. (audit parity)
                         crate::pipeline::dbwriter::nfc_path_search(&item.original_path),
+                        file_size,
                     ],
-                );
+                ).is_ok();
+                if !indexed {
+                    failed += 1;
+                    messages.push(BulkActionItem {
+                        file_id: Some(item.file_id),
+                        ok: false,
+                        message: Some("Restored on disk, but could not update the library catalog.".into()),
+                    });
+                    continue;
+                }
                 succeeded += 1;
                 messages.push(BulkActionItem {
                     file_id: Some(item.file_id),
@@ -199,10 +230,12 @@ pub(crate) async fn handle_restore_from_trash(
                 messages.push(BulkActionItem {
                     file_id: Some(item.file_id),
                     ok: false,
-                    message: Some(format!(
-                        "could not restore from Recycle Bin: {}",
-                        item.original_path
-                    )),
+                    message: Some({
+                        #[cfg(windows)]
+                        { format!("could not restore from Recycle Bin: {}", item.original_path) }
+                        #[cfg(not(windows))]
+                        { format!("could not restore from Trash: {}", restore_result.err().unwrap()) }
+                    }),
                 });
             }
         }
@@ -287,8 +320,6 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     }
 }
 
-#[cfg(not(windows))]
-fn restore_batch_from_recycle_bin(_wanted_paths: &[&str]) {}
 
 pub(crate) async fn handle_revert_merge(
     sink: Sink,

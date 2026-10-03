@@ -11,11 +11,9 @@
 // Sleep-prevention (SetThreadExecutionState) lives in `crate::platform`
 // because it's cross-cutting, not shell-specific.
 //
-// On non-Windows targets each module is replaced by a stub with matching
-// public surface; stubs return Err("…not implemented on this platform")
-// so call sites compile. TODO(linux): real implementations
-// (gdk-pixbuf thumbnails, gio trash, tesseract OCR, ffmpeg frames,
-// xdg-open reveal, xattr tags).
+// On non-Windows targets thumbnail rendering supports image-rs formats.
+// The remaining shell integrations return errors until native Linux
+// implementations are available.
 
 #[cfg(windows)] pub mod reveal;
 #[cfg(windows)] pub mod tags;
@@ -54,42 +52,71 @@ pub mod tags {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub mod thumbnail {
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use std::path::Path;
-    #[allow(dead_code)]
+
     pub const THUMB_DIM: i32 = 512;
+
     #[derive(Debug, Clone)]
-    #[allow(dead_code)]
     pub struct Thumbnail {
         pub width: u32,
         pub height: u32,
         pub rgba: Vec<u8>,
     }
-    #[allow(dead_code)]
-    pub fn render(_path: &Path) -> Result<Thumbnail> {
-        anyhow::bail!("shell::thumbnail::render not implemented on this platform")
+
+    pub fn render(path: &Path) -> Result<Thumbnail> {
+        render_at(path, THUMB_DIM)
     }
-    #[allow(dead_code)]
-    pub fn render_at(_path: &Path, _dim: i32) -> Result<Thumbnail> {
-        anyhow::bail!("shell::thumbnail::render_at not implemented on this platform")
+
+    pub fn render_at(path: &Path, dim: i32) -> Result<Thumbnail> {
+        let dim = u32::try_from(dim).ok().filter(|dim| *dim > 0)
+            .context("thumbnail dimension must be positive")?;
+        let image = image::ImageReader::open(path)
+            .context("opening thumbnail source")?
+            .with_guessed_format()
+            .context("detecting image format")?
+            .decode()
+            .context("decoding thumbnail source")?
+            .thumbnail(dim, dim)
+            .into_rgba8();
+        Ok(Thumbnail {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw(),
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn linux_thumbnail_scales_generated_image_and_rejects_invalid_size() {
+            let fixture = std::env::temp_dir().join(format!(
+                "fileid-thumbnail-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            ));
+            std::fs::create_dir_all(&fixture).unwrap();
+            let path = fixture.join("generated.png");
+            image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 40, 60, 255]))
+                .save(&path).unwrap();
+            let thumb = render_at(&path, 8).unwrap();
+            assert_eq!((thumb.width, thumb.height), (8, 4));
+            assert_eq!(thumb.rgba.len(), 8 * 4 * 4);
+            assert_eq!(&thumb.rgba[0..4], &[200, 40, 60, 255]);
+            assert!(render_at(&path, 0).is_err());
+            std::fs::remove_dir_all(fixture).unwrap();
+        }
     }
 }
 
 #[cfg(not(windows))]
-pub mod trash {
-    use std::path::{Path, PathBuf};
-    /// Linux stub: returns all-false so the caller logs failure cleanly
-    /// rather than silently claiming a successful trash. Real Linux
-    /// implementation will route through `gio trash` or the GIO C API.
-    pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
-        vec![false; paths.len()]
-    }
-    #[allow(dead_code)]
-    pub fn trash_path(_path: &Path) -> anyhow::Result<()> {
-        anyhow::bail!("shell::trash::trash_path not implemented on this platform")
-    }
-}
+#[path = "trash_linux.rs"]
+#[allow(dead_code)]
+pub mod trash;
 
 #[cfg(not(windows))]
 pub mod ocr {

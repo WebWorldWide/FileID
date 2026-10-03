@@ -30,6 +30,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Corpus,
     [int]$TimeoutMinutes = 60,
     [string]$Configuration = "Debug",
+    [string]$AppExecutable,
     [switch]$SkipBuild,
     [switch]$SkipWipe
 )
@@ -70,6 +71,10 @@ OK "corpus: $Corpus ($corpusFileCount files)"
 
 # --- 2. Build ---------------------------------------------------------
 $AppExe = Join-Path $AppDir "bin\$Configuration\$AppTfm\FileID.exe"
+if (-not [string]::IsNullOrWhiteSpace($AppExecutable)) {
+    if (-not $SkipBuild) { throw "-AppExecutable requires -SkipBuild." }
+    $AppExe = (Resolve-Path -LiteralPath $AppExecutable).Path
+}
 if (-not $SkipBuild) {
     Step "Building app ($Configuration)"
     Push-Location $PlatformDir
@@ -125,13 +130,17 @@ while ((Get-Date) -lt $deadline) {
             $scanStarted = $true
             Step "scan started"
         }
-        $endLine = $tail | Where-Object { $_ -match '\[AUTO-SCAN\] scan ended ok=(\w+)' } | Select-Object -Last 1
+        $endLine = $tail | Where-Object { $_ -match '\[AUTO-SCAN\] scan ended phase=' } | Select-Object -Last 1
         if ($endLine) {
             $scanEnded = $true
-            $scanOk = ($endLine -match 'ok=True')
+            $scanOk = ($endLine -match 'phase=Completed')
+            if (-not $scanOk) { break }
+        }
+        if ($scanOk -and ($tail | Where-Object { $_ -match '\[AUTO-SCAN\] face clustering completed' })) {
+            Step "face clustering completed"
             break
         }
-        if ($tail | Where-Object { $_ -match '\[AUTO-SCAN\] failed:' }) {
+        if ($tail | Where-Object { $_ -match '\[AUTO-SCAN\].*(failed|aborting)' }) {
             $scanEnded = $true
             $scanOk = $false
             break

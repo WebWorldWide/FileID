@@ -14,10 +14,10 @@ internal static class AppPaths
     /// <summary>%LOCALAPPDATA%\FileID\</summary>
     public static string Root { get; } = ResolveRoot();
 
-    public static string DbPath => Path.Combine(Root, "fileid.sqlite");
+    public static string DbPath => ResolveDbPath(Root, Environment.GetEnvironmentVariable("FILEID_DB"));
     public static string LogsDir => Path.Combine(Root, "logs");
-    public static string ModelsDir => Path.Combine(Root, "Models");
-    public static string HuggingFaceDir => Path.Combine(Root, "Models", "HuggingFace");
+    public static string ModelsDir => ResolveModelsDir(Root, Environment.GetEnvironmentVariable("FILEID_MODELS_DIR"));
+    public static string HuggingFaceDir => ResolveHuggingFaceDir(ModelsDir);
     public static string ThumbsDir => Path.Combine(Root, "thumbs.cache");
     public static string FacesDir => Path.Combine(Root, "face_crops");
     public static string SettingsPath => Path.Combine(Root, "app-settings.json");
@@ -79,16 +79,34 @@ internal static class AppPaths
         _directoriesEnsured = true;
     }
 
-    private static string ResolveRoot()
+    internal static string ResolveRoot(
+        string? localAppDataEnvironment,
+        string? userProfileEnvironment,
+        string knownLocalAppData,
+        string knownUserProfile)
     {
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrEmpty(localAppData))
-        {
-            // Fallback: user-profile path (rare on Windows desktop SKUs).
-            localAppData = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "AppData", "Local");
-        }
+        var localAppData = !string.IsNullOrWhiteSpace(localAppDataEnvironment)
+            ? localAppDataEnvironment
+            : !string.IsNullOrWhiteSpace(userProfileEnvironment)
+                ? Path.Combine(userProfileEnvironment, "AppData", "Local")
+                : !string.IsNullOrWhiteSpace(knownLocalAppData)
+                    ? knownLocalAppData
+                    : Path.Combine(knownUserProfile, "AppData", "Local");
         return Path.Combine(localAppData, "FileID");
     }
+
+    internal static string ResolveDbPath(string root, string? overridePath) =>
+        string.IsNullOrWhiteSpace(overridePath) ? Path.Combine(root, "fileid.sqlite") : overridePath;
+
+    internal static string ResolveModelsDir(string root, string? overridePath) =>
+        string.IsNullOrWhiteSpace(overridePath) ? Path.Combine(root, "Models") : overridePath;
+
+    internal static string ResolveHuggingFaceDir(string modelsDir) =>
+        Path.Combine(modelsDir, "HuggingFace");
+
+    private static string ResolveRoot() => ResolveRoot(
+        Environment.GetEnvironmentVariable("LOCALAPPDATA"),
+        Environment.GetEnvironmentVariable("USERPROFILE"),
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
 }

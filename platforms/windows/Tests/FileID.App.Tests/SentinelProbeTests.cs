@@ -198,6 +198,22 @@ public sealed class SentinelProbeTests : IDisposable
         Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "florence2_base"));
     }
 
+    [Theory]
+    [InlineData("qwen3_vl_4b", "qwen3-vl-4b")]
+    [InlineData("qwen3_vl_8b", "qwen3-vl-8b")]
+    public void Qwen3InstallRequiresBothWeightsInItsRegistryDirectory(string kind, string directory)
+    {
+        CreateSized(Path.Combine("vlm", "qwen2.5-vl-7b", "model.gguf"), 1_048_576);
+        CreateSized(Path.Combine("vlm", "qwen2.5-vl-7b", "mmproj.gguf"), 1_048_576);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, kind));
+
+        CreateSized(Path.Combine("vlm", directory, "model.gguf"), 1_048_576);
+        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, kind));
+
+        CreateSized(Path.Combine("vlm", directory, "mmproj.gguf"), 1_048_576);
+        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, kind));
+    }
+
     [Fact]
     public void UnreadableDir_ReadsNotInstalled()
     {

@@ -218,8 +218,9 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
                 Svc.Clip.Fraction = 1.0;
             });
         }
-        // Deep Analyze VLM has 3 alternative weights — any one sentinel marks it installed.
-        if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("gemma_3_4b")
+        // Any supported VLM marks the shared onboarding slot installed.
+        if ((SentinelExists("qwen2_5_vl_7b") || SentinelExists("qwen3_vl_4b")
+             || SentinelExists("qwen3_vl_8b") || SentinelExists("gemma_3_4b")
              || SentinelExists("mistral_small_3_2"))
             && Svc.DeepVlm.Status != Services.ModelInstallStatus.Installed)
         {
@@ -231,18 +232,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private static bool SentinelExists(string modelId)
-    {
-        try
-        {
-            return System.IO.File.Exists(System.IO.Path.Combine(
-                AppPaths.ModelsDir, ".sentinels", $"{modelId}.installed"));
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    private static bool SentinelExists(string modelId) => SentinelProbe.Installed(modelId);
 
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -299,7 +289,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         var hw = EngineClient.Instance.Info?.Hardware;
         var isNvidia = (hw?.GpuVendor ?? "").Equals("nvidia", StringComparison.OrdinalIgnoreCase);
-        NvidiaAccelerationSection.Visibility = isNvidia ? Visibility.Visible : Visibility.Collapsed;
+        NvidiaAccelerationSection.Visibility = Visibility.Collapsed;
 
         if (isNvidia)
         {
@@ -604,9 +594,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
     private void OnOpenPrivacyDocClicked(object sender, RoutedEventArgs e)
     {
-        // Try the shipped docs path first, fall back to the repo source
-        // path if the user is running from a dev tree, then surface the
-        // hosted GitHub URL via the system browser as a last resort.
+        // Prefer the shipped document, with the repository copy available in dev builds.
         var candidates = new[]
         {
             System.IO.Path.Combine(AppContext.BaseDirectory, "Docs", "PRIVACY.md"),
@@ -625,15 +613,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             }
             catch { /* try next */ }
         }
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "https://github.com/anolle/FileID/blob/main/shared/docs/PRIVACY.md",
-                UseShellExecute = true,
-            });
-        }
-        catch { /* nothing else to try */ }
+        DebugLog.Warn("The local privacy document is unavailable.");
     }
 
     private static void RevealInExplorer(string path)
@@ -937,22 +917,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     /// page in the user's default browser. No FileID-owned redistribution.
     /// After install, the engine's system-CUDA probe (runtime.rs) picks up
     /// cuDNN on next launch and the CUDA EP becomes available.</summary>
-    private void OnOpenCudnnDownloadsClicked(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "https://developer.nvidia.com/cudnn-downloads",
-                UseShellExecute = true,
-            };
-            Process.Start(psi);
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn("Open cuDNN downloads failed: " + ex.Message);
-        }
-    }
 
     /// <summary>ask the engine to re-probe cuDNN availability after
     /// the user manually installs it. The engine replies with a

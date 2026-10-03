@@ -46,7 +46,11 @@ public sealed record FolderClassificationCounts(
 public sealed record RestructureApplyResult(
     uint Applied,
     uint Failed,
-    string? PrivilegeError = null);
+    string? PrivilegeError = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Cancelled = false,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? Planned = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? Remaining = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ShortcutUndoToken = null);
 
 public sealed record BulkActionResult(
     string Action,

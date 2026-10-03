@@ -58,10 +58,12 @@ public class ModelSlotProgressBindingTests
     public void Fail_FlipsStatusAndPreservesMessage()
     {
         var slot = new ModelSlot("Test Model", 1024UL * 1024, () => Task.CompletedTask);
+        slot.CurrentModelKind = "qwen3_vl_4b";
         slot.Fail("HTTP 503 from CDN");
         Assert.Equal(ModelInstallStatus.Failed, slot.Status);
         Assert.Equal("HTTP 503 from CDN", slot.LastError);
         Assert.Equal(0, slot.BytesPerSecond);
+        Assert.Equal("qwen3_vl_4b", slot.CurrentModelKind);
     }
 
     [Fact]
@@ -69,12 +71,14 @@ public class ModelSlotProgressBindingTests
     {
         var slot = new ModelSlot("Test Model", 1024UL * 1024, () => Task.CompletedTask);
         slot.Apply(Progress(0.5, 500_000, 1_000_000), () => false);
+        slot.CurrentModelKind = "qwen3_vl_8b";
         slot.Fail("blip");
         slot.ResetForRetry();
         Assert.Equal(ModelInstallStatus.NotInstalled, slot.Status);
         Assert.Null(slot.LastError);
         Assert.Equal(0.0, slot.Fraction);
         Assert.Null(slot.BytesDone);
+        Assert.Null(slot.CurrentModelKind);
     }
 }
 

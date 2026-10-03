@@ -48,7 +48,13 @@ impl VlmServer {
     fn server_binaries() -> Vec<PathBuf> {
         let mut out = Vec::new();
         if let Ok(root) = crate::paths::models_dir() {
-            for dir in [root.join("llama.cpp-cuda"), root.join("llama.cpp")] {
+        let mut dirs = vec![root.join("llama.cpp-cuda"), root.join("llama.cpp")];
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(application_dir) = executable.parent() {
+                dirs.push(application_dir.join("RuntimeBundles/llama.cpp"));
+            }
+        }
+        for dir in dirs {
                 for cand in [
                     dir.join(format!("llama-server{BIN_EXT}")),
                     dir.join("bin").join(format!("llama-server{BIN_EXT}")),

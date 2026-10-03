@@ -13,8 +13,12 @@
 
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+#if !FILEID_STORE
 using Microsoft.Windows.ApplicationModel.DynamicDependency;
+#endif
 using System.Threading;
+using System.Security.Cryptography;
+using System.Text;
 using WinRT;
 
 namespace FileID;
@@ -45,6 +49,15 @@ internal static class Program
     /// assert clean_exit=true.</summary>
     public static bool AutoExitAfterScan { get; private set; }
 
+    internal static string ResolveInstanceMutexName(string? testInstance, string? dbPath, string? localAppData)
+    {
+        if (string.IsNullOrWhiteSpace(testInstance)) return SingleInstanceMutexName;
+        if (string.IsNullOrWhiteSpace(dbPath) || string.IsNullOrWhiteSpace(localAppData))
+            throw new InvalidOperationException("A test instance requires isolated database and app data paths.");
+        var identity = Encoding.UTF8.GetBytes($"{testInstance}\0{dbPath}\0{localAppData}");
+        return "Local\\FileID-Test-" + Convert.ToHexString(SHA256.HashData(identity))[..24];
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -64,7 +77,7 @@ internal static class Program
 
         // Single-instance gate. Hold the mutex for the lifetime of the
         // process — `using` ensures it releases on any exit path.
-        using var instanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, out bool createdNew);
+        using var instanceMutex = new Mutex(initiallyOwned: true, name: ResolveInstanceMutexName(Environment.GetEnvironmentVariable("FILEID_TEST_INSTANCE"), Environment.GetEnvironmentVariable("FILEID_DB"), Environment.GetEnvironmentVariable("LOCALAPPDATA")), out bool createdNew);
         if (!createdNew)
         {
             // Another FileID is already running. Bring its window to the front and exit.
@@ -88,6 +101,7 @@ internal static class Program
         // package on the user's machine and wires it into the activation
         // context. MUST match the WinAppSDK package version pinned in
         // Directory.Packages.props — 1.7 = 0x00010007.
+#if !FILEID_STORE
         if (!Bootstrap.TryInitialize(0x00010007u, out int hr))
         {
             ShowFatalDialog(
@@ -98,6 +112,7 @@ internal static class Program
             );
             return hr;
         }
+#endif
 
         // Startup-trace: every step of the launch path writes to a small
         // file so when the app "opens then closes" we can diagnose without
@@ -158,8 +173,10 @@ internal static class Program
         }
         finally
         {
+#if !FILEID_STORE
             Trace("Bootstrap.Shutdown");
             Bootstrap.Shutdown();
+#endif
             Trace("end");
         }
 

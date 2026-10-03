@@ -59,7 +59,8 @@ public sealed partial class SidebarProcessingControl : UserControl
                               or nameof(EngineClient.State)
                               or nameof(EngineClient.IsPaused)
                               or nameof(EngineClient.LastScanDuration)
-                              or nameof(EngineClient.LastError))
+                              or nameof(EngineClient.LastError)
+                              or nameof(EngineClient.GpuDeviceRemoved))
             {
                 DebugLog.Debug($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(Sync);
@@ -75,6 +76,9 @@ public sealed partial class SidebarProcessingControl : UserControl
 
 
     private void OnAppChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnAppChanged), () => OnAppChangedCore(sender, e));
+
+    private void OnAppChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(AppViewModel.HasFolder))
         {
@@ -185,14 +189,6 @@ public sealed partial class SidebarProcessingControl : UserControl
 
             try
             {
-                // Optimistic UI flip: switch into the scanning panel immediately
-                // so the user gets visible feedback on click. The engine's
-                // first PhaseChanged(Discovering) event echoes the same value
-                // (no-op); any later transition (Tagging, Failed, Completed)
-                // overwrites this. If StartScanAsync faults (engine not Ready),
-                // the catch block surfaces an alert and the failure pill takes
-                // over via the Sync() Failed branch.
-                EngineClient.Instance.SetOptimisticScanningPhase();
                 await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
                 DebugLog.Info($"Sent startScan: {PathRedactor.Redact(vm.FolderPath!)}");
             }
@@ -381,6 +377,9 @@ public sealed partial class SidebarProcessingControl : UserControl
             var err = EngineClient.Instance.LastError;
             IdleStatusText.Text = err?.Message ?? "Scan failed.";
             IdleStatusText.Foreground = FailedTextBrush;
+            RestartEngineButton.Visibility = EngineClient.Instance.GpuDeviceRemoved
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             // Start Scan is enabled on HasFolder alone; the
             // click handler waits for Ready with visible feedback.
             // Exception: a Crashed engine — there's nothing to wait for.
@@ -388,6 +387,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             // can't issue a second startScan while the first is in flight.
             StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                       && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
+                                      && !EngineClient.Instance.GpuDeviceRemoved
                                       && !_startInFlight;
             return;
         }
@@ -413,7 +413,17 @@ public sealed partial class SidebarProcessingControl : UserControl
         // spam-clicking issues N concurrent IPC calls.
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
+                                  && !EngineClient.Instance.GpuDeviceRemoved
                                   && !_startInFlight;
+        RestartEngineButton.Visibility = EngineClient.Instance.GpuDeviceRemoved
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        if (EngineClient.Instance.GpuDeviceRemoved)
+        {
+            IdleStatusText.Text = EngineClient.GpuRestartRequiredMessage
+                + " Use Restart Engine here in the sidebar.";
+            IdleStatusText.Foreground = FailedTextBrush;
+        }
         // when the click has been registered but the engine hasn't
         // yet emitted PhaseChanged(Discovering), show "Starting…" so the
         // user gets visible feedback. Mirrors macOS's hourglass icon +
@@ -534,6 +544,25 @@ public sealed partial class SidebarProcessingControl : UserControl
             {
                 IdleStatusText.Foreground = FailedTextBrush;
             }
+        }
+    }
+
+    private async void OnRestartEngineClicked(object sender, RoutedEventArgs e)
+    {
+        RestartEngineButton.IsEnabled = false;
+        try
+        {
+            await EngineClient.Instance.RestartAsync();
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"GPU recovery restart failed: {ex.Message}");
+            await ShowAlertAsync("Engine restart failed", "Restart FileID and try again.");
+        }
+        finally
+        {
+            RestartEngineButton.IsEnabled = true;
+            Sync();
         }
     }
 

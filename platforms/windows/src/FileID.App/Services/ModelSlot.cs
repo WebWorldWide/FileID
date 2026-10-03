@@ -55,12 +55,16 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     /// static initializer (touched first from App.OnLaunched).</summary>
     private readonly DispatcherQueue? _ui;
 
-    public ModelSlot(string displayLabel, ulong approxBytes, Func<Task> installAction)
+    public ModelSlot(
+        string displayLabel,
+        ulong approxBytes,
+        Func<Task> installAction,
+        DispatcherQueue? uiDispatcher = null)
     {
         _displayLabel = displayLabel;
         _approxBytes = approxBytes;
         _installAction = installAction;
-        _ui = DispatcherQueue.GetForCurrentThread();
+        _ui = uiDispatcher;
     }
 
     private ModelInstallStatus _status;
@@ -112,10 +116,10 @@ internal sealed class ModelSlot : INotifyPropertyChanged
     private string? _lastError;
     public string? LastError { get => _lastError; set => Set(ref _lastError, value); }
 
-    /// <summary>The model_kind this slot is currently downloading, if any.
-    /// Set by the service on PrewarmAsync entry, cleared on terminal state.
-    /// Used by the engine-error router to decide which slot owns an
-    /// EngineError that arrived without an explicit model_kind in payload.</summary>
+    /// <summary>Model kind for this slot's current download or last failure.
+    /// Retain it on failure so per-model cards can show which install failed;
+    /// clear it after success or when retrying. Downloading rows also use it
+    /// to target cancellation.</summary>
     public string? CurrentModelKind { get; set; }
 
     /// <summary>Wall-clock UTC of the most recent progress event for this
@@ -199,7 +203,6 @@ internal sealed class ModelSlot : INotifyPropertyChanged
         LastError = message;
         BytesPerSecond = 0;
         EtaSeconds = 0;
-        CurrentModelKind = null;
     }
 
     /// <summary>Reset state (e.g. user clicked Retry).</summary>

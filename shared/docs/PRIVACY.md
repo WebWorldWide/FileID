@@ -4,26 +4,13 @@ FileID is on-device software. Your photos, documents, faces, OCR text, EXIF, fil
 
 It applies to both shipping platforms — Windows (Rust `fileid-engine` + WinUI 3 / .NET 8 app) and macOS (Swift/SwiftUI engine + app). Linux is deferred.
 
-## What we don't ship
+## What we do — Windows Store version
 
-- **No analytics SDK.** Not Sentry, not Application Insights, not Firebase, not Segment, not Mixpanel, not Amplitude, not PostHog, not Datadog, not Bugsnag, not Rollbar, not Honeycomb, not NewRelic, not Raygun, not Google Analytics, not App Center. None of them.
-- **No crash-reporting service.** No Crashpad, no Breakpad, no remote dump upload. Crashes write a structured tracing log to a local-only directory. You can attach the file to a GitHub issue manually if you choose to share it. We never receive it automatically.
-- **No update pings.** No "checking for updates" call at startup or anywhere else. If we add an auto-updater later it will be user-initiated and disclosed.
-- **No model-download telemetry.** The engine fetches model weights over plain HTTPS GETs. No metadata exfil. No "user X downloaded model Y" beacon. Not before the download, not during, not after.
-- **No license-server check, no DRM phone-home, no entitlement validation, no "user count" reporting.**
-- **No A/B test framework.** Every user gets the same code path.
-- **No `User-Agent` fingerprinting.** Model-download requests send a generic, version-only User-Agent (`FileID/<version> (+local)`) with no machine-, install-, or user-identifying fields.
+The Windows Store package includes its required Vulkan llama.cpp runtime, whisper.cpp runtime, and OpenVINO provider. These runtimes are staged from SHA-256-pinned release archives during packaging; the installed app does not fetch runtime binaries at startup.
 
-## What we do — explicitly, only when you trigger it
+The Windows Store app downloads model files only from `huggingface.co`, only after you choose to install a model. FileID verifies pinned model hashes where the model registry provides them. Your selected model and download size may be visible to your network provider as ordinary HTTPS traffic. Requests do not include your file contents, filenames, folder paths, or search history. Installed models work offline.
 
-Every network egress is initiated by you (opening the app, hitting a button, or running a feature that needs a runtime), with the destination disclosed below. The full set is five hosts:
-
-- **Model weights — `huggingface.co`.** First time you open Deep Analyze, run a scan that needs a model, or click "Get model" in Settings, FileID fetches the weights from HuggingFace. Progress bar, ETA, cancel button. Each file is SHA256-pinned against `shared/docs/MODELS.md`. After the model lands, that feature works fully offline.
-- **llama.cpp runtime — `github.com`.** Deep Analyze depends on the official llama.cpp binary, pulled from the upstream project's GitHub release artifacts. The Vulkan runtime (covers every GPU vendor — NVIDIA, AMD, Intel, Adreno) installs on first engine-ready; the CUDA runtime installs additionally on NVIDIA hardware. Opt-out: `AppSettings.DisableAutoInstallVulkanRuntime` / `DisableAutoInstallCuda` in `app-settings.json`.
-- **NVIDIA cuDNN — `developer.download.nvidia.com`.** On NVIDIA hardware, FileID fetches NVIDIA's public cuDNN Windows redistributable so the ONNX Runtime CUDA execution provider can replace DirectML for scanning (~10–15% throughput on RTX-class cards). The URL is on NVIDIA's own CDN — the same channel NVIDIA's docs point at — no third-party redistribution. Opt-out: `AppSettings.DisableAutoInstallCudnn` (then FileID uses a system-installed CUDA Toolkit + cuDNN if present, or stays on DirectML).
-- **Help / docs links — `developer.nvidia.com` and others.** Clicking a help link in Settings opens *your browser* via the OS shell (`ShellExecuteW` on Windows, `NSWorkspace.open` on macOS). The request is made by your browser, not by FileID.
-
-These four egress categories cover five hosts total (`huggingface.co`, `github.com`, `developer.download.nvidia.com`, `developer.nvidia.com`, plus `objects.githubusercontent.com` as GitHub's release-asset CDN). There are no other outbound network code paths in the binaries. The local VLM server (`llama-server`) binds an ephemeral port on `127.0.0.1` for in-process IPC; loopback never leaves the machine.
+FileID reads only files and folders you select or explicitly ask it to scan. Indexes, tags, face embeddings, OCR text, and analysis results remain in FileID's local data directory. The app does not send that data to FileID or other servers and does not include analytics, crash reporting, background update checks, or license-server checks.
 
 ## How to verify
 

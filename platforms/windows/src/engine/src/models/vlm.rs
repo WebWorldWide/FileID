@@ -108,6 +108,19 @@ impl VlmRunner {
                 }
             }
         }
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("RuntimeBundles/llama.cpp")))
+        {
+            for cand in [
+                dir.join("llama-mtmd-cli.exe"),
+                dir.join("bin").join("llama-mtmd-cli.exe"),
+            ] {
+                if cand.exists() && sanity_check_binary(&cand).is_ok() {
+                    return Ok(VlmRunner { binary: cand });
+                }
+            }
+        }
         // Distinguish "not installed at all" from "installed but too old".
         // Pre-mtmd-unification llama.cpp builds (≈b4400 and earlier) ship
         // llama-server.exe / llama-llava-cli.exe / llama-qwen2vl-cli.exe but
@@ -136,10 +149,14 @@ impl VlmRunner {
 /// without crashing.
 pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
     let root = crate::paths::models_dir().ok()?;
-    let dir = root.join("vlm").join(model_kind);
+    find_weights_at(&root, model_kind)
+}
+
+fn find_weights_at(root: &std::path::Path, model_kind: &str) -> Option<(PathBuf, PathBuf)> {
+    let dir = root.join("vlm").join(super::registry::vlm_dir_name(model_kind)?);
     let gguf = dir.join("model.gguf");
     let mmproj = dir.join("mmproj.gguf");
-    if gguf.exists() && mmproj.exists() {
+    if gguf.is_file() && mmproj.is_file() {
         Some((gguf, mmproj))
     } else {
         None
@@ -435,7 +452,36 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_best_vulkan_device;
+    use super::{find_weights_at, parse_best_vulkan_device};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn installed_weights_resolve_from_wire_model_kind() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fileid-vlm-weights-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (kind, dir) in [
+            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
+            ("gemma_3_4b", "gemma-3-4b"),
+            ("mistral_small_3_2", "mistral-small-3.2"),
+            ("qwen3_vl_4b", "qwen3-vl-4b"),
+            ("qwen3_vl_8b", "qwen3-vl-8b"),
+        ] {
+            let installed = root.join("vlm").join(dir);
+            std::fs::create_dir_all(&installed).unwrap();
+            let gguf = installed.join("model.gguf");
+            let mmproj = installed.join("mmproj.gguf");
+            std::fs::write(&gguf, b"gguf").unwrap();
+            assert_eq!(find_weights_at(&root, kind), None, "incomplete {kind}");
+            std::fs::write(&mmproj, b"mmproj").unwrap();
+            assert_eq!(find_weights_at(&root, kind), Some((gguf, mmproj)));
+        }
+        assert_eq!(find_weights_at(&root, "unknown"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn picks_discrete_over_integrated() {

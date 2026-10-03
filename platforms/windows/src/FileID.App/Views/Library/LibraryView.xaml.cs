@@ -22,6 +22,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 {
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
+    private int _trashInFlight;
     private readonly ThumbnailService _thumbnails = new();
     // Live-tile streaming during a scan. Mirrors macOS LibraryView's
     // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
@@ -426,6 +427,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnSelectAllAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnSelectAllAccelerator), () =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
             OnSelectAllClicked(this, new RoutedEventArgs());
             args.Handled = true;
         });
@@ -435,6 +437,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnUndoAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
             if (!UndoStack.Instance.CanUndo) return;
             OnUndoLastClicked(this, new RoutedEventArgs());
             args.Handled = true;
@@ -863,6 +866,27 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             int count = ViewModel.Items.Count;
             if (count == 0) return;
 
+            var shift = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Shift)
+                .HasFlag(CoreVirtualKeyStates.Down);
+            if (e.Key == VirtualKey.Application || (e.Key == VirtualKey.F10 && shift))
+            {
+                int targetIndex = _focusedIndex;
+                if (targetIndex < 0 && _lastClickedTile is not null)
+                {
+                    targetIndex = ViewModel.Items.IndexOf(_lastClickedTile);
+                }
+
+                if (targetIndex >= 0 && targetIndex < count
+                    && Repeater.TryGetElement(targetIndex) is FrameworkElement target
+                    && target.ContextFlyout is { } flyout)
+                {
+                    flyout.ShowAt(target);
+                    e.Handled = true;
+                }
+                return;
+            }
+
             int cur = _focusedIndex >= 0 ? Math.Min(_focusedIndex, count - 1) : 0;
             int last = count - 1;
 
@@ -891,24 +915,21 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
             int cols = ColumnsPerRow();
             int page = cols * Math.Max(1, VisibleRows());
-            int target;
+            int focusTarget;
             switch (e.Key)
             {
-                case VirtualKey.Left: target = cur - 1; break;
-                case VirtualKey.Right: target = cur + 1; break;
-                case VirtualKey.Up: target = cur - cols; break;
-                case VirtualKey.Down: target = cur + cols; break;
-                case VirtualKey.Home: target = 0; break;
-                case VirtualKey.End: target = last; break;
-                case VirtualKey.PageUp: target = cur - page; break;
-                case VirtualKey.PageDown: target = cur + page; break;
+                case VirtualKey.Left: focusTarget = cur - 1; break;
+                case VirtualKey.Right: focusTarget = cur + 1; break;
+                case VirtualKey.Up: focusTarget = cur - cols; break;
+                case VirtualKey.Down: focusTarget = cur + cols; break;
+                case VirtualKey.Home: focusTarget = 0; break;
+                case VirtualKey.End: focusTarget = last; break;
+                case VirtualKey.PageUp: focusTarget = cur - page; break;
+                case VirtualKey.PageDown: focusTarget = cur + page; break;
                 default: return;
             }
 
-            var shift = Microsoft.UI.Input.InputKeyboardSource
-                .GetKeyStateForCurrentThread(VirtualKey.Shift)
-                .HasFlag(CoreVirtualKeyStates.Down);
-            MoveFocusTo(target, extend: shift);
+            MoveFocusTo(focusTarget, extend: shift);
             e.Handled = true;
         });
 
@@ -1085,99 +1106,105 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private async void OnTrashSelectedClicked(object sender, RoutedEventArgs e)
     {
-        var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
-        if (ids.Length == 0) return;
-
-        long totalBytes = ViewModel.SelectedItems.Sum(t => t.SizeBytes);
-        string sizeDisplay = FormatSize(totalBytes);
-        string countDisplay = ids.Length == 1 ? "1 file" : $"{ids.Length} files";
-
-        var confirm = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "Move to Recycle Bin?",
-            Content = $"{countDisplay} ({sizeDisplay}) will be moved to the Recycle Bin. You can recover them from there.",
-            PrimaryButtonText = "Move to Recycle Bin",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        var choice = await confirm.ShowAsync();
-        if (choice != ContentDialogResult.Primary) return;
-
-        // Listen for the engine's BulkActionResult — it tags the
-        // action with "trashFiles:<batch_id>" so we can plumb undo. The
-        // UndoStack listener and WaitForBulkActionResultAsync below both
-        // subscribe independently for the same result; WaitFor resets
-        // LastBulkAction to null first (which CaptureNextBulkResult guards
-        // against), so they coexist.
-        Services.UndoStack.CaptureNextBulkResult(
-            "trashFiles:",
-            $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
-            async batchId =>
-            {
-                if (string.IsNullOrEmpty(batchId)) return false;
-                try
-                {
-                    await EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                    return true;
-                }
-                catch { return false; }
-            });
-
-        FileID.IpcSchema.BulkActionResult? result = null;
+        if (Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
         try
         {
-            // Await the engine's BulkActionResult instead of fire-and-forget:
-            // the dbwriter may fail to trash a file (open handle / permission),
-            // and unconditionally removing every selected tile told the user
-            // files were recycled when they're still on disk (silent-failure).
-            result = await EngineClient.Instance.WaitForBulkActionResultAsync(
-                "trashFiles",
-                () => EngineClient.Instance.TrashFilesAsync(ids),
-                TimeSpan.FromSeconds(30));
-        }
-        catch (TimeoutException ex)
-        {
-            Services.DebugLog.Warn("Trash timed out: " + ex.Message);
-            await ShowAlertAsync(
-                "Trash didn't confirm",
-                "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
-            return;
-        }
-        catch (Exception ex)
-        {
-            Services.DebugLog.Warn("Trash failed: " + ex.Message);
-            await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
-            return;
-        }
+            var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
+            if (ids.Length == 0) return;
 
-        // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
-        // result. Files it couldn't recycle stay on the grid so the user sees
-        // they're still there.
-        var trashedIds = new HashSet<long>(
-            result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
-                ?? Enumerable.Empty<long>());
-        foreach (var id in trashedIds)
-        {
-            var match = ViewModel.Items.FirstOrDefault(t => t.Id == id);
-            if (match is not null) ViewModel.Items.Remove(match);
-        }
-        UpdateSelectionBar();
+            long totalBytes = ViewModel.SelectedItems.Sum(t => t.SizeBytes);
+            string sizeDisplay = FormatSize(totalBytes);
+            string countDisplay = ids.Length == 1 ? "1 file" : $"{ids.Length} files";
 
-        // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
-        // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
-        // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
-        // that path silent. ids is non-empty here, so Succeeded==0 only happens on
-        // a real total failure — surface it + refresh, matching the sibling flows.
-        if (result.Failed > 0 || result.Succeeded == 0)
+            var confirm = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Move to Recycle Bin?",
+                Content = $"{countDisplay} ({sizeDisplay}) will be moved to the Recycle Bin. You can recover them from there.",
+                PrimaryButtonText = "Move to Recycle Bin",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            var choice = await confirm.ShowAsync();
+            if (choice != ContentDialogResult.Primary) return;
+
+            // Listen for the engine's BulkActionResult — it tags the
+            // action with "trashFiles:<batch_id>" so we can plumb undo. The
+            // Register undo capture inside the owning waiter before its result
+            // handler, so a terminal event cannot release the waiter first.
+            Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
+                "trashFiles:",
+                $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
+                async batchId =>
+                {
+                    if (string.IsNullOrEmpty(batchId)) return false;
+                    try
+                    {
+                        return await EngineClient.Instance.RestoreFromTrashAsync(batchId);
+                    }
+                    catch { return false; }
+                });
+
+            FileID.IpcSchema.BulkActionResult? result = null;
+            try
+            {
+                // Await the engine's BulkActionResult instead of fire-and-forget:
+                // the dbwriter may fail to trash a file (open handle / permission),
+                // and unconditionally removing every selected tile told the user
+                // files were recycled when they're still on disk (silent-failure).
+                result = await EngineClient.Instance.WaitForBulkActionResultAsync(
+                    "trashFiles",
+                    () => EngineClient.Instance.TrashFilesAsync(ids),
+                    TimeSpan.FromSeconds(30),
+                    beforeSend: beforeSend);
+            }
+            catch (TimeoutException ex)
+            {
+                Services.DebugLog.Warn("Trash timed out: " + ex.Message);
+                await ShowAlertAsync(
+                    "Trash didn't confirm",
+                    "The engine didn't confirm the move to the Recycle Bin within 30 seconds. The files may or may not have been recycled — re-run the scan to check before retrying.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                Services.DebugLog.Warn("Trash failed: " + ex.Message);
+                await ShowAlertAsync("Trash failed", $"Couldn't move the selected files to the Recycle Bin: {ex.Message}");
+                return;
+            }
+
+            // Remove ONLY tiles the engine actually trashed — a per-file Ok in the
+            // result. Files it couldn't recycle stay on the grid so the user sees
+            // they're still there.
+            var trashedIds = new HashSet<long>(
+                result.Messages?.Where(m => m.Ok && m.FileId is not null).Select(m => m.FileId!.Value)
+                    ?? Enumerable.Empty<long>());
+            foreach (var id in trashedIds)
+            {
+                var match = ViewModel.Items.FirstOrDefault(t => t.Id == id);
+                if (match is not null) ViewModel.Items.Remove(match);
+            }
+            UpdateSelectionBar();
+
+            // `Succeeded == 0` (with Failed == 0) is the engine's wholesale-error shape
+            // (e.g. a busy/locked DB: emit_bulk_result's Ok(Err) arm → succeeded:0,
+            // failed:0, one ok:false message). Guarding on Failed>0 alone would leave
+            // that path silent. ids is non-empty here, so Succeeded==0 only happens on
+            // a real total failure — surface it + refresh, matching the sibling flows.
+            if (result.Failed > 0 || result.Succeeded == 0)
+            {
+                var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
+                var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
+                var body = result.Succeeded == 0 && result.Failed == 0
+                    ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
+                    : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
+                await ShowAlertAsync("Some files couldn't be recycled", body);
+                RequestLibraryRefresh(force: true);
+            }
+        }
+        finally
         {
-            var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
-            var detail = string.IsNullOrWhiteSpace(first) ? "" : $" — {first}";
-            var body = result.Succeeded == 0 && result.Failed == 0
-                ? $"The recycle operation didn't complete{detail}. The files are unchanged; try again."
-                : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
-            await ShowAlertAsync("Some files couldn't be recycled", body);
-            RequestLibraryRefresh(force: true);
+            Interlocked.Exchange(ref _trashInFlight, 0);
         }
     }
 
@@ -1299,7 +1326,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         var sheet = new FilePreviewSheet();
         sheet.SetSiblings(siblings, tileIndex);
-        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
 
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
@@ -1315,6 +1341,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // WinUI 3's default caps at ~640×480 which would crop our sidebar.
         dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
+        dialog.Opened += (_, _) => sheet.SetFile(
+            tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
 
         // The ContentDialog — not the sheet — owns keyboard focus once shown, so
@@ -1327,7 +1355,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             new Microsoft.UI.Xaml.Input.KeyEventHandler((_, ev) => sheet.HandleKeyDown(ev)),
             handledEventsToo: true);
 
-        try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        try { await dialog.ShowAsync(); }
+        catch { /* dialog already open */ }
+        finally { sheet.CloseFromHost(); }
     }
 
     private void OnContextOpen(object sender, RoutedEventArgs e)

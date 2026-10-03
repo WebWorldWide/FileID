@@ -70,10 +70,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         Unloaded -= OnUnloadedHandler;
     }
 
-    // Resident-RAM budget per VLM, in GB. Mirrors the macOS AIModelKind
-    // .ramBudgetGB (platforms/apple .../AIModels.swift) so the OOM gate is
-    // identical across platforms. A model whose budget can't fit under the
-    // headroom is disabled — loading it would OOM-kill the engine.
+    // Resident-RAM budgets for previously supported VLMs reserve 8 GB
+    // for the OS, scan engine, and DB cache.
     private static double RamBudgetGB(string kind) => kind switch
     {
         "mistral_small_3_2" => 16.0,
@@ -97,6 +95,9 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private static bool Fits(string kind, double ramGB)
     {
+        // Qwen3 working-set peaks are not measured. Do not reject an
+        // explicitly selected model using an invented RAM threshold.
+        if (kind is "qwen3_vl_4b" or "qwen3_vl_8b") return true;
         var headroom = Math.Max(0, ramGB - 8.0);
         return RamBudgetGB(kind) <= headroom;
     }
@@ -168,6 +169,9 @@ public sealed partial class DeepAnalyzeView : UserControl
     }
 
     private void OnSelectionRegistryChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnSelectionRegistryChanged), () => OnSelectionRegistryChangedCore(sender, e));
+
+    private void OnSelectionRegistryChangedCore(object? sender, PropertyChangedEventArgs e)
         => DispatcherQueue.TryEnqueue(SyncSelectionButtons);
 
     private void SyncSelectionButtons()
@@ -271,6 +275,19 @@ public sealed partial class DeepAnalyzeView : UserControl
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
                     DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncStream(); });
                     break;
+                case nameof(EngineClient.DeepAnalyzeCommandInFlight):
+                    DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
+                    var ec = EngineClient.Instance;
+                    var attemptId = ec.DeepAnalyzeCommandAttemptId;
+                    DispatcherQueue.TryEnqueue(() =>
+                    {
+                        if (_unloaded || ec.DeepAnalyzeCommandAttemptId != attemptId) return;
+                        SyncDeepAnalyzeControls();
+                    });
+                    break;
+                case nameof(EngineClient.GpuDeviceRemoved):
+                    DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncDeepAnalyzeControls(); });
+                    break;
                 case nameof(EngineClient.Phase):
                 case nameof(EngineClient.LastFaceClustering):
                     DebugLog.Debug($"[ENGINE-SUB:DeepAnalyzeView] {e.PropertyName}");
@@ -296,21 +313,16 @@ public sealed partial class DeepAnalyzeView : UserControl
         ApplyVlmCard(MistralCard, MistralStatus, MistralProgress, MistralInstallButton, "mistral_small_3_2", slot, ramGB);
         ApplyVlmCard(QwenLargeCard, QwenLargeStatus, QwenLargeProgress, QwenLargeInstallButton, "qwen2_5_vl_7b", slot, ramGB);
         ApplyVlmCard(GemmaCard, GemmaStatus, GemmaProgress, GemmaInstallButton, "gemma_3_4b", slot, ramGB);
+        ApplyVlmCard(Qwen3FourCard, Qwen3FourStatus, Qwen3FourProgress, Qwen3FourInstallButton, "qwen3_vl_4b", slot, ramGB);
+        ApplyVlmCard(Qwen3EightCard, Qwen3EightStatus, Qwen3EightProgress, Qwen3EightInstallButton, "qwen3_vl_8b", slot, ramGB);
         HighlightActiveCard();
     }
 
-    /// <summary>True when both gguf halves for this model_kind are on disk under
-    /// %LOCALAPPDATA%\FileID\Models\vlm\&lt;kind&gt;\. Mirrors the engine's
-    /// vlm::find_weights so a card's "Installed" badge matches what Deep Analyze
-    /// can actually run.</summary>
+    /// <summary>Require both GGUF halves in the engine registry's on-disk
+    /// directory before reporting a specific VLM installed.</summary>
     private static bool VlmWeightsPresent(string kind)
     {
-        try
-        {
-            var dir = System.IO.Path.Combine(AppPaths.ModelsDir, "vlm", kind);
-            return System.IO.File.Exists(System.IO.Path.Combine(dir, "model.gguf"))
-                && System.IO.File.Exists(System.IO.Path.Combine(dir, "mmproj.gguf"));
-        }
+        try { return VlmWeightDirs.WeightsPresent(AppPaths.ModelsDir, kind); }
         catch { return false; }
     }
 
@@ -337,17 +349,28 @@ public sealed partial class DeepAnalyzeView : UserControl
         card.Opacity = 1.0;
         card.IsHitTestVisible = true;
 
-        // The shared Vlm slot tracks at most one in-flight download; attribute its
-        // Downloading/Failed state to a card only when CurrentModelKind matches.
+        // All cards share one download slot. Keep other models selectable,
+        // but block their Install/Reinstall actions until this transfer ends.
         bool isThisModel = string.Equals(slot.CurrentModelKind, kind, StringComparison.OrdinalIgnoreCase);
-        if (slot.Status == ModelInstallStatus.Downloading && isThisModel)
+        if (slot.Status == ModelInstallStatus.Downloading)
         {
-            status.Text = $"Downloading… {Math.Round(slot.Fraction * 100)}%";
-            bar.Visibility = Visibility.Visible;
-            bar.Value = slot.Fraction;
+            if (isThisModel)
+            {
+                status.Text = $"Downloading… {Math.Round(slot.Fraction * 100)}%";
+                bar.Visibility = Visibility.Visible;
+                bar.Value = slot.Fraction;
+            }
+            else
+            {
+                var installed = VlmWeightsPresent(kind);
+                status.Text = installed ? "Installed" : "Another model is downloading…";
+                bar.Visibility = Visibility.Collapsed;
+                installButton.Content = installed ? "Reinstall" : "Install";
+            }
             installButton.IsEnabled = false;
+            return;
         }
-        else if (VlmWeightsPresent(kind))
+        if (VlmWeightsPresent(kind))
         {
             status.Text = "Installed";
             bar.Visibility = Visibility.Collapsed;
@@ -377,19 +400,25 @@ public sealed partial class DeepAnalyzeView : UserControl
         MistralCard.BorderBrush = _activeModel == "mistral_small_3_2" ? gold : idle;
         QwenLargeCard.BorderBrush = _activeModel == "qwen2_5_vl_7b" ? gold : idle;
         GemmaCard.BorderBrush = _activeModel == "gemma_3_4b" ? gold : idle;
+        Qwen3FourCard.BorderBrush = _activeModel == "qwen3_vl_4b" ? gold : idle;
+        Qwen3EightCard.BorderBrush = _activeModel == "qwen3_vl_8b" ? gold : idle;
         MistralCard.BorderThickness = _activeModel == "mistral_small_3_2" ? new Thickness(2) : new Thickness(1);
         QwenLargeCard.BorderThickness = _activeModel == "qwen2_5_vl_7b" ? new Thickness(2) : new Thickness(1);
         GemmaCard.BorderThickness = _activeModel == "gemma_3_4b" ? new Thickness(2) : new Thickness(1);
+        Qwen3FourCard.BorderThickness = _activeModel == "qwen3_vl_4b" ? new Thickness(2) : new Thickness(1);
+        Qwen3EightCard.BorderThickness = _activeModel == "qwen3_vl_8b" ? new Thickness(2) : new Thickness(1);
     }
 
     private void UpdateActiveModelLabel()
     {
         ActiveModelText.Text = _activeModel switch
         {
-            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B (best quality)",
-            "gemma_3_4b" => "Active model: Gemma 3 4B (balanced)",
-            "mistral_small_3_2" => "Active model: Mistral-Small 3.2 (max quality)",
-            _ => "Active model: Qwen 2.5-VL 7B (best quality)",
+            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B",
+            "qwen3_vl_4b" => "Active model: Qwen3-VL 4B",
+            "qwen3_vl_8b" => "Active model: Qwen3-VL 8B",
+            "gemma_3_4b" => "Active model: Gemma 3 4B",
+            "mistral_small_3_2" => "Active model: Mistral-Small 3.2",
+            _ => "Active model: Qwen 2.5-VL 7B",
         };
     }
 
@@ -509,6 +538,21 @@ public sealed partial class DeepAnalyzeView : UserControl
                 : $"Done — {complete.Processed} captioned in {complete.TotalSeconds:0.#}s ({complete.Failed} failed)";
             SyncProposedNamesPill();
         }
+
+        SyncDeepAnalyzeControls();
+    }
+
+    private void SyncDeepAnalyzeControls()
+    {
+        var ec = EngineClient.Instance;
+        var busy = ec.DeepAnalyzeCommandInFlight
+                   || ec.DeepAnalyzeStarting is not null
+                   || ec.DeepAnalyzeProgress is not null;
+        var canStart = !busy && !ec.GpuDeviceRemoved;
+        CancelButton.IsEnabled = busy;
+        AnalyzeAllButton.IsEnabled = canStart;
+        AnalyzeSelectedButton.IsEnabled = canStart && SelectionRegistry.Instance.LibrarySelection.Count > 0;
+        AnalyzeCurrentButton.IsEnabled = canStart && SelectionRegistry.Instance.PreviewedFileId is not null;
     }
 
     // (Re)arm the warm-up watchdog. Always restarts the interval so a fresh
@@ -756,28 +800,30 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void OnModelCardTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
     {
-        if (sender is FrameworkElement el && el.Tag is string id)
+        if (sender is FrameworkElement { Tag: string id }) SelectModel(id);
+    }
+
+    private bool SelectModel(string id)
+    {
+        if (!AppSettings.IsAllowedVlmKind(id)) return false;
+        if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return false;
+
+        _activeModel = id;
+        HighlightActiveCard();
+        UpdateActiveModelLabel();
+        try
         {
-            // Don't let the user select a model that would OOM-kill the engine —
-            // mirrors the macOS `guard fits else { return }`. The card is also
-            // IsHitTestVisible=false in that state, but guard here defensively.
-            if (PhysicalRamGB() is double ramGB && !Fits(id, ramGB)) return;
-            _activeModel = id;
-            HighlightActiveCard();
-            UpdateActiveModelLabel();
-            // Persist so the next launch (and the post-clustering auto-
-            // chain) caption with the same model the user just picked.
-            try
+            // Use the shared settings instance so a pending debounced save
+            // cannot overwrite this choice with another instance's snapshot.
+            var settings = AppViewModel.Instance.Settings;
+            if (settings.SelectedVlmModelKind != id)
             {
-                // Shared singleton, not a fresh Load() — avoids the static-debounce
-                // lost-update where a fresh instance's Save() cancels the singleton's
-                // pending write. (audit A8)
-                var s = AppViewModel.Instance.Settings;
-                s.SelectedVlmModelKind = id;
-                s.Save();
+                settings.SelectedVlmModelKind = id;
+                settings.Save();
             }
-            catch (Exception ex) { DebugLog.Warn("Persist VLM choice failed: " + ex.Message); }
         }
+        catch (Exception ex) { DebugLog.Warn("Persist VLM choice failed: " + ex.Message); }
+        return true;
     }
 
     // Every `async void` handler below has the entire body inside a
@@ -786,28 +832,44 @@ public sealed partial class DeepAnalyzeView : UserControl
     // entries instead.
     private async void OnInstallModelClicked(object sender, RoutedEventArgs e)
     {
+        string? modelId = null;
         try
         {
-            // previous version ignored the Tag and ALWAYS installed
-            // qwen2_5_vl_3b. Now uses the per-card model id from Tag so each
-            // model card actually installs its own model.
-            if (sender is not Button b || b.Tag is not string modelId || string.IsNullOrWhiteSpace(modelId)) return;
-            // Tell the picker which model is downloading so SyncCards animates
-            // THIS card. The engine's progress events carry only model_kind, and
-            // this direct-prewarm path doesn't go through ModelInstallerService
-            // (which is where CurrentModelKind would otherwise be set).
-            ModelInstallerService.Instance.DeepVlm.CurrentModelKind = modelId;
+            if (sender is not Button { Tag: string requestedKind }) return;
+            var slot = ModelInstallerService.Instance.DeepVlm;
+            if (slot.Status == ModelInstallStatus.Downloading || !SelectModel(requestedKind)) return;
+            modelId = requestedKind;
+            // Mark the shared slot before the first await. Otherwise a second
+            // card or Welcome Install All can prewarm a different VLM while
+            // the first click is still waiting for engine progress.
+            slot.ResetForRetry();
+            slot.CurrentModelKind = modelId;
+            slot.Status = ModelInstallStatus.Downloading;
+            slot.Message = "Starting…";
+            slot.LastProgressAt = DateTime.UtcNow;
             SyncCards();
             await EngineClient.Instance.PrewarmModelAsync(modelId);
         }
         catch (Exception ex)
         {
             DebugLog.Warn("VLM install failed: " + ex);
+            if (modelId is not null)
+            {
+                var slot = ModelInstallerService.Instance.DeepVlm;
+                slot.CurrentModelKind = modelId;
+                slot.Fail(ex.Message);
+            }
         }
     }
 
     private async void OnAnalyzeAllClicked(object sender, RoutedEventArgs e)
     {
+        if (EngineClient.Instance.GpuDeviceRemoved)
+        {
+            var reason = EngineClient.GpuRestartRequiredMessage;
+            await ShowAlertAsync("Deep Analyze stopped", reason);
+            return;
+        }
         // Set the optimistic/working UI state BEFORE the await: if the send
         // throws, the catch reverts it and surfaces the error. Setting it after
         // the await meant a send failure showed the user nothing — the run
@@ -824,14 +886,22 @@ public sealed partial class DeepAnalyzeView : UserControl
         catch (Exception ex)
         {
             DebugLog.Warn("DeepAnalyzeAll failed: " + ex);
+            var reason = EngineClient.Instance.GpuDeviceRemoved
+                ? EngineClient.GpuRestartRequiredMessage
+                : ex.Message;
             // Revert the optimistic state so the UI doesn't falsely look like a
             // run is in flight, then surface a dismissible error.
             StreamCard.Visibility = Visibility.Collapsed;
             CancelButton.IsEnabled = false;
             AnalyzeAllButton.IsEnabled = true;
-            await ShowAlertAsync("Couldn't start Deep Analyze",
-                "Deep Analyze couldn't be started: " + ex.Message +
-                "\n\nMake sure the model is installed and the engine is running, then try again.");
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Deep Analyze stopped", reason);
+            }
+            else
+            {
+                await ShowAlertAsync("Deep Analyze stopped", ex.Message);
+            }
         }
     }
 
@@ -937,6 +1007,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeSelectedClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeSelectedClicked), async () =>
         {
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Restart engine", EngineClient.GpuRestartRequiredMessage
+                    + " Use Restart Engine in the sidebar.");
+                return;
+            }
             var sel = SelectionRegistry.Instance.LibrarySelection;
             if (sel.Count == 0) return;
             _selectedRunCancelled = false;
@@ -956,6 +1032,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async void OnAnalyzeCurrentClicked(object sender, RoutedEventArgs e)
         => await DebugLog.SafeRunAsync(nameof(OnAnalyzeCurrentClicked), async () =>
         {
+            if (EngineClient.Instance.GpuDeviceRemoved)
+            {
+                await ShowAlertAsync("Restart engine", EngineClient.GpuRestartRequiredMessage
+                    + " Use Restart Engine in the sidebar.");
+                return;
+            }
             var id = SelectionRegistry.Instance.PreviewedFileId;
             if (id is null) return;
             StreamCard.Visibility = Visibility.Visible;

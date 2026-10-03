@@ -34,6 +34,7 @@ public sealed class UiInteractionSafetyContractTests
         var xaml = ReadSource("Views", "People", "PeopleView.xaml");
         var detailXaml = ReadSource("Views", "People", "PersonDetailSheet.xaml");
         var source = ReadSource("Views", "People", "PeopleView.xaml.cs");
+        var detailCode = ReadSource("Views", "People", "PersonDetailSheet.xaml.cs");
 
         Assert.Contains("IsTabStop=\"True\"", xaml, StringComparison.Ordinal);
         Assert.Contains("KeyDown=\"OnClusterKeyDown\"", xaml, StringComparison.Ordinal);
@@ -46,6 +47,8 @@ public sealed class UiInteractionSafetyContractTests
         Assert.Contains("x:Name=\"LastBox\"", detailXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"SuffixBox\"", detailXaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"IsUnknownCheckBox\"", detailXaml, StringComparison.Ordinal);
+        Assert.Contains("IsUnknownCheckBox.IsChecked == true", detailCode, StringComparison.Ordinal);
+        Assert.Contains("MarkPersonsAsUnknownAsync(new[] { personId })", detailCode, StringComparison.Ordinal);
         Assert.Contains("OnClusterEditNameClicked", source, StringComparison.Ordinal);
         Assert.Contains("await OpenDetailSheetAsync(cluster)", source, StringComparison.Ordinal);
     }
