@@ -61,7 +61,7 @@
               "required": ["rootPath", "rootBookmark"],
               "properties": {
                 "rootPath": { "type": "string", "description": "Absolute filesystem path granted to the macOS engine." },
-                "rootBookmark": { "type": "string", "description": "Base64-encoded app-scoped security bookmark for rootPath." }
+                "rootBookmark": { "type": "string", "description": "Base64-encoded implicit-scope bookmark that grants the receiving helper access to rootPath." }
               }
             }
           }
@@ -77,7 +77,7 @@
               "required": ["rootPath"],
               "properties": {
                 "rootPath":    { "type": "string", "description": "Absolute filesystem path to the folder root to scan." },
-                "rootBookmark": { "type": ["string", "null"], "description": "Optional base64-encoded macOS app-scoped security bookmark granting the engine access to rootPath. Required by sandboxed Mac App Store builds; ignored by other platforms." },
+                "rootBookmark": { "type": ["string", "null"], "description": "Optional base64-encoded macOS implicit-scope bookmark granting the receiving helper access to rootPath. Required by sandboxed Mac App Store builds; ignored by other platforms." },
                 "rootDisplay": { "type": ["string", "null"], "description": "Optional human-readable label (defaults to rootPath if omitted)." },
                 "rescan":      { "type": "boolean", "default": false, "description": "When true, force every file to be reprocessed even if scanned_at >= modified_unix in the DB. Default false = incremental rescan (skip already-current files)." },
                 "excludedPaths": { "type": ["array", "null"], "items": { "type": "string" }, "default": [], "description": "Optional folder paths pruned during discovery." }
@@ -1492,7 +1492,7 @@
         },
         "destinationBookmark": {
           "type": ["string", "null"],
-          "description": "Optional base64-encoded macOS app-scoped bookmark granting write access to destination."
+          "description": "Optional base64-encoded macOS implicit-scope bookmark granting the receiving helper write access to destination."
         },
         "recipe": {
           "$ref": "#/$defs/ToolRecipe"

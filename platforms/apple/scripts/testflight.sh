@@ -68,7 +68,16 @@ esac
 echo "Building sandboxed macOS App Store binaries…"
 swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileID
 swift build -c release -Xswiftc -DFILEID_APP_STORE --product FileIDEngine
+bash scripts/ensure_mlx_metallib.sh
+[ -s "$PROJECT_DIR/.build/cache/mlx.metallib" ] || {
+    echo "The required MLX Metal library was not built; refusing to package." >&2
+    exit 1
+}
 FILEID_BUILD_CONFIGURATION=release bash scripts/assemble_app.sh "$APP" "$VERSION" "$BUILD_NUM"
+[ -s "$APP/Contents/MacOS/mlx.metallib" ] || {
+    echo "The required MLX Metal library is missing from the app bundle." >&2
+    exit 1
+}
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
 
 codesign --force --sign "$APP_IDENTITY" --timestamp --options runtime \

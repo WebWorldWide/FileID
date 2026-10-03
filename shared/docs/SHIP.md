@@ -2,7 +2,7 @@
 
 ## Mac TestFlight scaffold (2026-10-03)
 
-`com.fileid.app` and macOS App Store Connect app record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, bookmark-based folder access, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. Native tests and Store-flagged release builds pass. This is not a TestFlight release: profile, Mac Installer Distribution identity, API key, signed-package validation, upload processing, tester installation, and sandbox runtime acceptance remain blocked/open. See `NEXT.md` and `AGENT_HANDOFF.md` for owner-managed setup and exact continuation.
+`com.fileid.app` and macOS App Store Connect record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, separate persistent app and implicit-scope IPC bookmarks with bounded engine access leases, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. CI compiles the Store-flagged app and engine. This is not a TestFlight release: provisioning profile, Apple Distribution and Mac Installer Distribution identities, API key, signed-package validation, upload processing, tester installation, and sandbox runtime acceptance remain open. See `NEXT.md` and `AGENT_HANDOFF.md` for owner-managed setup and exact continuation.
 
 ## Native persistent search checkpoint (2026-10-02)
 

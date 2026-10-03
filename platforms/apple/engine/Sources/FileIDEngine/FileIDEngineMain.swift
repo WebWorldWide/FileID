@@ -255,7 +255,7 @@ struct FileIDEngineMain {
             await sink.emit(.catalogResponse(response))
         case .grantFolderAccess(let rootPath, let rootBookmark):
             do {
-                _ = try SecurityScopedAccessRegistry.shared.acquire(path: rootPath, bookmark: rootBookmark)
+                try SecurityScopedAccessRegistry.shared.replaceRootAccess(path: rootPath, bookmark: rootBookmark)
             } catch {
                 await sink.emit(.error(EngineError(
                     kind: "folder_access_denied",
@@ -289,9 +289,9 @@ struct FileIDEngineMain {
                 return
             }
             // Retain selected-root access for follow-on catalog jobs.
-            let authorizedRoot: String
+            let rootLease: SecurityScopedAccessLease
             do {
-                authorizedRoot = try SecurityScopedAccessRegistry.shared.acquire(
+                rootLease = try SecurityScopedAccessRegistry.shared.acquire(
                     path: rootPath,
                     bookmark: rootBookmark
                 )
@@ -306,6 +306,7 @@ struct FileIDEngineMain {
                 )))
                 return
             }
+            let authorizedRoot = rootLease.path
             let displayPath = rootDisplay ?? authorizedRoot
             // R4-11: allocate the scan epoch synchronously here (the command loop
             // is serial), BEFORE the next command is read, so a quick cancelScan is
@@ -320,6 +321,7 @@ struct FileIDEngineMain {
                 etaSeconds: nil  // unknown until discovery completes
             ) {
                 let task = Task.detached(priority: .userInitiated) {
+                    defer { rootLease.release() }
                     await runScan(rootPath: authorizedRoot, displayPath: displayPath,
                                   rescan: rescan ?? false, epoch: epoch,
                                   excludedPaths: excludedPaths,
@@ -358,6 +360,7 @@ struct FileIDEngineMain {
                 await sink.emit(.progress(snap))
             }
         case .shutdown:
+            SecurityScopedAccessRegistry.shared.releaseRootAccess()
             JSONLog.shared.info(ev: "shutdown_requested")
             // Cancel any active scan so paused/in-flight workers exit
             // deterministically. Without this, a scan paused at shutdown

@@ -1,5 +1,14 @@
 # FileID — State
 
+## 2026-10-03 — TestFlight sandbox and packaging follow-up (active PR #212)
+
+PR [#212](https://github.com/WebWorldWide/FileID/pull/212) adds the Mac App Store sandbox build path. The app stores explicit security-scoped bookmarks for itself and sends separate implicit-scope bookmarks to the inherited engine helper. The helper validates bookmark paths and releases reference-counted root/destination scopes when scans or operations finish. Store and normal builds compile locally; the package script fails closed when `mlx.metallib` is absent, and macOS CI builds both Store-flagged targets. App Store Connect record `6818813859` and an empty internal group exist, but no build has been uploaded.
+
+The initial PR checks found missing `root_bookmark: None` values in CLI/TUI scan clients, stale reviewed-source digests, and formatting drift in C# schema conformance fixtures; these were corrected. CLI tests pass (65 + 14), TUI tests pass (111), Swift tests and Store/normal Release builds pass locally, and bootstrap-integrity tests pass (18). Runtime-egress and complete PR checks must be green on the corrected commit; local `dotnet` is unavailable, so Windows CI remains authoritative for C# tests/format. Do not treat the branch as merged until every exact-head and merged-main workflow passes.
+
+The Mac lacks an installed Mac App Store provisioning profile, Apple Distribution app signing setup usable for Store packaging, Mac Installer Distribution identity, and API-key configuration. Keep credentials out of Git and Adlon. After they are installed, run `platforms/apple/scripts/testflight.sh`, wait for build processing, attach the build to `FileID Internal Testers`, and validate a real sandboxed scan/export/model download. Until then, TestFlight upload and runtime acceptance remain incomplete. Adlon example data remains read-only and was not used as build or test input/output.
+
+
 ## 2026-10-03 — TestFlight sandbox and App Store Connect setup (CI pending)
 
 The Mac App Store variant now has dedicated app/helper sandbox entitlements, security-scoped bookmarks for scanned roots and export destinations, helper-side bookmark validation/retention, and an app-container model cache. Developer builds retain their existing Documents cache behavior. IPC v1.7 carries the bookmark fields and folder-grant command; Swift, Rust, and C# DTOs and examples mirror the contract. `platforms/apple/scripts/testflight.sh` builds, signs, packages, and uploads a TestFlight package when the account assets are supplied.

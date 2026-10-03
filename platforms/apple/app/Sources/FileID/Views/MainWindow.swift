@@ -175,6 +175,7 @@ struct MainWindow: View {
     private func persistPickedFolder(_ url: URL?) {
         guard let url else {
             UserDefaults.standard.removeObject(forKey: SecurityScopedBookmark.pickedFolderDefaultsKey)
+            SecurityScopedBookmark.releaseRetainedAccess()
             return
         }
         // bookmarkData can do filesystem I/O on slow disks / network

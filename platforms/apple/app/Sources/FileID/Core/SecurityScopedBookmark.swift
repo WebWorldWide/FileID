@@ -1,27 +1,50 @@
 import Foundation
 
+enum SecurityScopedBookmarkError: Error {
+    case accessDenied
+}
+
 enum SecurityScopedBookmark {
     static let pickedFolderDefaultsKey = "pickedFolderBookmark.v2"
 
-    private final class RetainedAccess: @unchecked Sendable {
-        static let shared = RetainedAccess()
+    private final class RetainedRootAccess: @unchecked Sendable {
+        static let shared = RetainedRootAccess()
+
         private let lock = NSLock()
-        private var urls: [String: URL] = [:]
+        private var rootURL: URL?
 
         func retain(_ url: URL) -> Bool {
             lock.lock()
-            defer { lock.unlock() }
-            if urls[url.path] != nil { return true }
+            if rootURL?.standardizedFileURL.path == url.standardizedFileURL.path {
+                lock.unlock()
+                return true
+            }
+
             let started = url.startAccessingSecurityScopedResource()
             #if FILEID_APP_STORE
-            guard started else { return false }
+            guard started else {
+                lock.unlock()
+                return false
+            }
             #endif
-            if started { urls[url.path] = url }
+
+            let previous = rootURL
+            rootURL = started ? url : nil
+            lock.unlock()
+            previous?.stopAccessingSecurityScopedResource()
             return true
+        }
+
+        func release() {
+            lock.lock()
+            let previous = rootURL
+            rootURL = nil
+            lock.unlock()
+            previous?.stopAccessingSecurityScopedResource()
         }
     }
 
-    static var creationOptions: URL.BookmarkCreationOptions {
+    private static var persistentCreationOptions: URL.BookmarkCreationOptions {
         #if FILEID_APP_STORE
         [.withSecurityScope]
         #else
@@ -29,7 +52,7 @@ enum SecurityScopedBookmark {
         #endif
     }
 
-    static var resolutionOptions: URL.BookmarkResolutionOptions {
+    private static var persistentResolutionOptions: URL.BookmarkResolutionOptions {
         #if FILEID_APP_STORE
         [.withSecurityScope]
         #else
@@ -39,7 +62,22 @@ enum SecurityScopedBookmark {
 
     static func make(for url: URL) throws -> Data {
         try url.bookmarkData(
-            options: creationOptions,
+            options: persistentCreationOptions,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    static func makeIPCBookmark(for url: URL) throws -> Data {
+        #if FILEID_APP_STORE
+        guard url.startAccessingSecurityScopedResource() else {
+            throw SecurityScopedBookmarkError.accessDenied
+        }
+        defer { url.stopAccessingSecurityScopedResource() }
+        #endif
+
+        return try url.bookmarkData(
+            options: [],
             includingResourceValuesForKeys: nil,
             relativeTo: nil
         )
@@ -48,7 +86,7 @@ enum SecurityScopedBookmark {
     static func resolve(_ data: Data, stale: inout Bool) throws -> URL {
         try URL(
             resolvingBookmarkData: data,
-            options: resolutionOptions,
+            options: persistentResolutionOptions,
             relativeTo: nil,
             bookmarkDataIsStale: &stale
         )
@@ -59,9 +97,13 @@ enum SecurityScopedBookmark {
         do {
             var stale = false
             let url = try resolve(data, stale: &stale)
-            return RetainedAccess.shared.retain(url) ? url : nil
+            return RetainedRootAccess.shared.retain(url) ? url : nil
         } catch {
             return nil
         }
+    }
+
+    static func releaseRetainedAccess() {
+        RetainedRootAccess.shared.release()
     }
 }

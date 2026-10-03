@@ -971,8 +971,17 @@ public final class EngineClient {
         ) else { return }
         Task.detached(priority: .utility) { [weak self] in
             guard let rootURL = SecurityScopedBookmark.retainAccess(for: bookmark) else { return }
+            guard let ipcBookmark = try? SecurityScopedBookmark.makeIPCBookmark(for: rootURL) else {
+                await MainActor.run {
+                    self?.lastError = EngineError(
+                        kind: "bookmark_unavailable",
+                        message: "FileID couldn't grant the selected folder to its local engine. Choose the folder again."
+                    )
+                }
+                return
+            }
             _ = await MainActor.run {
-                self?.send(.grantFolderAccess(rootPath: rootURL.path, rootBookmark: bookmark))
+                self?.send(.grantFolderAccess(rootPath: rootURL.path, rootBookmark: ipcBookmark))
             }
         }
     }
@@ -982,21 +991,14 @@ public final class EngineClient {
         autoPilotStage = .scanning
         isPaused = false
         let displayPath = rootURL.path
-        // Resolve the security-scoped bookmark to a filesystem path APP-SIDE
-        // and send the resolved `rootPath` (the wire contract carries a path,
-        // not a bookmark). Round-tripping through bookmarkData →
-        // resolvingBookmarkData yields the canonical scoped path the sandbox
-        // actually grants; outside a sandbox it's just rootURL.path.
+        // The persisted app-scoped bookmark stays in the app; the engine gets
+        // a separate implicit-scope bookmark that can cross the process boundary.
         let client = self
         Task.detached(priority: .userInitiated) {
-            let resolvedPath: String
+            var resolvedPath = rootURL.standardizedFileURL.path
             var rootBookmark: Data?
             do {
-                let bookmark = try SecurityScopedBookmark.make(for: rootURL)
-                var stale = false
-                let resolved = try SecurityScopedBookmark.resolve(bookmark, stale: &stale)
-                resolvedPath = resolved.path
-                rootBookmark = bookmark
+                rootBookmark = try SecurityScopedBookmark.makeIPCBookmark(for: rootURL)
             } catch {
                 #if FILEID_APP_STORE
                 await MainActor.run {

@@ -132,16 +132,13 @@ struct ToolsWorkbench: View {
         invalidate()
         let selectedURL = url
         Task.detached(priority: .utility) {
-            let bookmark = try? SecurityScopedBookmark.make(for: selectedURL)
-            let authorizedBookmark = bookmark.flatMap {
-                SecurityScopedBookmark.retainAccess(for: $0) == nil ? nil : $0
-            }
+            let authorizedBookmark = try? SecurityScopedBookmark.makeIPCBookmark(for: selectedURL)
             await MainActor.run {
                 guard session.destination == selectedURL.path else { return }
                 session.destinationBookmark = authorizedBookmark
                 #if FILEID_APP_STORE
                 if authorizedBookmark == nil {
-                    session.message = "FileID couldn't retain access to that output folder. Choose it again."
+                    session.message = "FileID couldn't grant the output folder to its local engine. Choose it again."
                 }
                 #endif
                 invalidate()
