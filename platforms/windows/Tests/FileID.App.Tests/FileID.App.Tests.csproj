@@ -23,7 +23,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
-    <PackageReference Include="Microsoft.CodeCoverage" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.CodeCoverage" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -54,9 +54,8 @@
 
   <Target Name="StageCodeCoverageRuntimeForTestHost" AfterTargets="Build" Condition="'$(RuntimeIdentifier)' != ''">
     <PropertyGroup>
-      <CodeCoveragePackageVersion>$([System.IO.Path]::GetFileName('$(PkgMicrosoft_CodeCoverage)'))</CodeCoveragePackageVersion>
-      <CodeCoverageShim>$(PkgMicrosoft_CodeCoverage)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
-      <CodeCoverageShimTarget>$(TargetDir)Microsoft.CodeCoverage\$(CodeCoveragePackageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShimTarget>
+      <CodeCoverageShim>$(NuGetPackageRoot)microsoft.codecoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShim>
+      <CodeCoverageShimTarget>$(TargetDir)Microsoft.CodeCoverage\$(MicrosoftCodeCoverageVersion)\lib\netcoreapp3.1\Microsoft.VisualStudio.CodeCoverage.Shim.dll</CodeCoverageShimTarget>
     </PropertyGroup>
     <Error Condition="!Exists('$(CodeCoverageShim)')" Text="CodeCoverage test-host runtime asset is missing: $(CodeCoverageShim)" />
     <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(CodeCoverageShimTarget)'))" />
