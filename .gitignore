@@ -60,6 +60,9 @@ platforms/windows/**/*.user
 platforms/windows/**/*.suo
 platforms/windows/.vs/
 platforms/windows/dist/
+platforms/windows/build/store-*.log
+platforms/windows/src/engine/store-clippy.log
+platforms/windows/**/TestResults/
 platforms/windows/**/AppPackages/
 platforms/windows/**/BundleArtifacts/
 platforms/windows/**/Generated\ Files/

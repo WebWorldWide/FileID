@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using FileID.IpcSchema;
+using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -55,6 +56,26 @@ public sealed partial class DrillDownSheet : UserControl
     public DrillDownSheet()
     {
         InitializeComponent();
+    }
+
+    internal static IList<RestructureFileRowVm> PrepareSelectableRows(IList<RestructureFileRowVm> rows)
+        => rows;
+
+    internal void SetSelectableRows(IList<RestructureFileRowVm> rows, string title)
+    {
+        HeaderText.Text = title;
+        CountText.Text = $"{rows.Count:N0} file{(rows.Count == 1 ? "" : "s")}";
+        FileRepeater.Visibility = Visibility.Collapsed;
+        SelectableRepeater.ItemsSource = PrepareSelectableRows(rows);
+        SelectableRepeater.Visibility = Visibility.Visible;
+    }
+
+    private void OnSelectableCheckClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is CheckBox checkBox && checkBox.DataContext is RestructureFileRowVm row)
+        {
+            row.IsSelected = checkBox.IsChecked == true;
+        }
     }
 
     /// <summary>Filter to the moves whose source-folder bucket = `source` AND category = `category`.</summary>

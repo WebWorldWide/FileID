@@ -17,7 +17,7 @@ public sealed class EngineLifecycleSafetyContractTests
         try
         {
             File.WriteAllText(path, $"{{\"version\":{version},\"library_root\":{System.Text.Json.JsonSerializer.Serialize(root)}}}\n");
-            Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Null(PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
 
             var identity = version == 3
                 ? ",\"source_identity\":{\"volume\":1,\"file\":2}"
@@ -25,7 +25,7 @@ public sealed class EngineLifecycleSafetyContractTests
             File.AppendAllText(
                 path,
                 $"{{\"file_id\":1,\"from\":\"a\",\"to\":\"b\"{identity}}}\n");
-            Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Equal(root, PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
         }
         finally
         {
@@ -58,15 +58,15 @@ public sealed class EngineLifecycleSafetyContractTests
             var priorUpdated = new DateTime(2026, 7, 29, 10, 30, 0, DateTimeKind.Utc);
             File.SetLastWriteTimeUtc(prior, priorUpdated);
 
-            Assert.Equal(root, EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Equal(root, PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
             Assert.Equal(
                 priorUpdated,
-                EngineClient.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
+                PersistedUndoReader.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
 
             File.Delete(path);
             Assert.Equal(
                 priorUpdated,
-                EngineClient.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
+                PersistedUndoReader.ReadPersistedRestructureUndo(path)?.UpdatedUtc);
 
             File.WriteAllText(
                 Path.Combine(
@@ -75,7 +75,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 header
                 + "{\"file_id\":2,\"from\":\"c\",\"to\":\"d\","
                 + "\"source_identity\":{\"volume\":1,\"file\":3}}\n");
-            Assert.Null(EngineClient.ReadPersistedRestructureUndoRoot(path));
+            Assert.Null(PersistedUndoReader.ReadPersistedRestructureUndoRoot(path));
         }
         finally
         {
@@ -95,7 +95,7 @@ public sealed class EngineLifecycleSafetyContractTests
         {
             WriteShortcutManifest(directory, root, token, version);
 
-            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+            var persisted = PersistedUndoReader.ReadPersistedShortcutUndo(directory);
 
             Assert.True(persisted.HasValue);
             Assert.Equal(root, persisted.Value.LibraryRoot);
@@ -120,26 +120,26 @@ public sealed class EngineLifecycleSafetyContractTests
             File.AppendAllText(path, validEntry + "\n");
             Assert.Equal(
                 token,
-                EngineClient.ReadPersistedShortcutUndo(directory)?.Token);
+                PersistedUndoReader.ReadPersistedShortcutUndo(directory)?.Token);
 
             WriteShortcutManifest(directory, root, token, version: 3);
             File.AppendAllText(path, "{\"file_id\":2}\n");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(directory, root, token, version: 3);
             File.AppendAllText(path, new string('x', 64 * 1024 + 1) + "\n");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(directory, root, token, version: 3);
             using (var stream = new FileStream(path, FileMode.Append, FileAccess.Write))
             {
                 stream.Write(new byte[] { 0xff, (byte)'\n' });
             }
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(directory, root, token, version: 3);
             File.AppendAllText(path, "{\"file_id\":");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -161,7 +161,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 token,
                 version: 3,
                 stagingLinkName: "not-a-guid.link");
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
 
             WriteShortcutManifest(
                 directory,
@@ -171,7 +171,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 stagingLinkName: Path.Combine(
                     "nested",
                     Guid.NewGuid().ToString("D") + ".link"));
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -195,7 +195,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 headerOnly: true,
                 writeIntent: true);
 
-            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+            var persisted = PersistedUndoReader.ReadPersistedShortcutUndo(directory);
 
             Assert.True(persisted.HasValue);
             Assert.Equal(token, persisted.Value.Token);
@@ -235,7 +235,7 @@ public sealed class EngineLifecycleSafetyContractTests
                 truncatedPath,
                 File.ReadAllText(truncatedPath).TrimEnd('\n'));
 
-            var persisted = EngineClient.ReadPersistedShortcutUndo(directory);
+            var persisted = PersistedUndoReader.ReadPersistedShortcutUndo(directory);
 
             Assert.True(persisted.HasValue);
             Assert.Equal(validToken, persisted.Value.Token);
@@ -264,13 +264,13 @@ public sealed class EngineLifecycleSafetyContractTests
 
             Assert.Equal(
                 newerToken,
-                EngineClient.ReadPersistedShortcutUndo(directory)?.Token);
+                PersistedUndoReader.ReadPersistedShortcutUndo(directory)?.Token);
             Assert.Equal(
                 olderToken,
-                EngineClient.ReadPersistedShortcutUndo(directory, newerToken)?.Token);
+                PersistedUndoReader.ReadPersistedShortcutUndo(directory, newerToken)?.Token);
 
             File.SetLastWriteTimeUtc(newerPath, olderTime);
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {
@@ -293,8 +293,8 @@ public sealed class EngineLifecycleSafetyContractTests
                 version: 3,
                 includeSourceIdentity: false);
 
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
-            Assert.False(EngineClient.IsRegularPersistedUndoFileAttributes(
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
+            Assert.False(PersistedUndoReader.IsRegularPersistedUndoFileAttributes(
                 FileAttributes.ReparsePoint));
         }
         finally
@@ -316,7 +316,7 @@ public sealed class EngineLifecycleSafetyContractTests
                     "");
             }
 
-            Assert.Null(EngineClient.ReadPersistedShortcutUndo(directory));
+            Assert.Null(PersistedUndoReader.ReadPersistedShortcutUndo(directory));
         }
         finally
         {

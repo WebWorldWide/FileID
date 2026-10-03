@@ -562,10 +562,10 @@ pub(crate) async fn handle_trash_files(
                 messages.push(BulkActionItem {
                     file_id: Some(*fid),
                     ok: false,
-                    message: Some(if !accepted {
-                        "Exact duplicate changed, keeper missing, or selected file no longer matches its indexed identity.".into()
-                    } else {
+                    message: Some(if *accepted {
                         format!("trash failed: {}", path.display())
+                    } else {
+                        "Exact duplicate changed, keeper missing, or selected file no longer matches its indexed identity.".into()
                     }),
                 });
             }

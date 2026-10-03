@@ -19,15 +19,6 @@ internal sealed record ExactCleanupRejection(long FileId, string Reason);
 
 internal sealed record ExactCleanupProgress(int CompletedFiles, int TotalFiles);
 
-internal sealed record ExactTrashIdentity(
-    long FileId,
-    string Path,
-    long SizeBytes,
-    string Hash,
-    string KeeperPath,
-    long KeeperSizeBytes,
-    string KeeperHash);
-
 internal sealed record ExactCleanupProof(
     IReadOnlyList<ExactTrashIdentity> Identities,
     IReadOnlyList<ExactCleanupRejection> Rejections,

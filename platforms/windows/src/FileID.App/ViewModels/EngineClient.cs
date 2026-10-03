@@ -51,6 +51,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly DispatcherQueue _ui;
     private readonly Subject<IpcEvent> _events = new();
     private readonly object _writeLock = new();
+    private readonly GenerationHealthWaiters _healthWaiters = new();
+    private int _transportFailureGeneration = -1;
 
     // S4: bounded engine-stdout framing — a wedged/garbled engine that never
     // emits a newline can't grow an unbounded read buffer and OOM the UI process.
@@ -62,15 +64,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // — so all four caps are kept symmetric. Bumped 32→64 MiB (R3-07B/R5-12) to hold
     // a full ~200k-move whole-library plan while still bounding a runaway line. An
     // oversize drop is also surfaced as a visible error (see StdoutLoopAsync), never silent.
-    private const int MaxFrameChars = 64 * 1024 * 1024;
+    private const int MaxFrameBytes = 64 * 1024 * 1024;
 
     /// <summary>Per-loop stdout framing state (#22). Owned by a single
     /// StdoutLoopAsync invocation — never shared across loops, so an overlapping
     /// loop from a respawn can't race another's buffer/resync flag.</summary>
-    private sealed class StdoutFraming
+    internal sealed class StdoutFraming
     {
         public readonly StringBuilder Buffer = new();
         public readonly char[] Chunk = new char[16 * 1024];
+        public readonly Encoder Utf8Encoder = Encoding.UTF8.GetEncoder();
+        public long BufferedBytes;
         // How many leading buffer chars are already confirmed newline-free, so a
         // multi-MB frame isn't rescanned from index 0 on every chunk (the old
         // O(n^2) that pegged a core for minutes on a large restructurePlan). (audit A0)
@@ -82,6 +86,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     private Process? _process;
+    private int _spawnGeneration;
     private CancellationTokenSource? _readCts;
     private Task? _stdoutLoop;
     private Task? _stderrLoop;
@@ -108,12 +113,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // ARM64 — bool reads can theoretically tear on weakly-ordered
     // architectures, and OnProcessExited fires on whichever thread
     // detects process exit (not always the UI thread).
-    private int _expectingExit; // 0 = false, 1 = true
-    // When _expectingExit was set (UTC ticks). A shutdown request that never
-    // produces an exit would otherwise latch the flag forever, so a real crash
-    // much later gets mis-read as user-initiated and never respawns. Only honor
-    // the flag if the exit follows the request within ExpectingExitWindow.
-    private long _expectingExitAtTicks;
+    private readonly ConcurrentDictionary<Process, long> _expectedExitProcesses = new();
     private static readonly TimeSpan ExpectingExitWindow = TimeSpan.FromSeconds(60);
 
     private DateTime _lastDeepAnalyzeFileDone = DateTime.MinValue;
@@ -192,11 +192,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     // ─── Observable surface (mirror of macOS @Observable) ──────────────
 
     private LifecycleState _state = LifecycleState.Starting;
+    internal const string StoppedReason = "Engine stopped";
     public LifecycleState State
     {
         get => _state;
         private set => Set(ref _state, value);
     }
+    public int SpawnGeneration => Volatile.Read(ref _spawnGeneration);
 
     private string? _crashReason;
     public string? CrashReason
@@ -223,7 +225,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     public EngineError? LastError
     {
         get => _lastError;
-        private set => Set(ref _lastError, value);
+        private set
+        {
+            if (ReferenceEquals(_lastError, value)) return;
+            _lastError = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastError)));
+        }
     }
 
     private EngineError? _lastWarning;
@@ -296,7 +303,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     public RestructureApplyResult? LastRestructureApplyResult
     {
         get => _lastRestructureApplyResult;
-        private set => Set(ref _lastRestructureApplyResult, value);
+        private set
+        {
+            if (ReferenceEquals(_lastRestructureApplyResult, value)) return;
+            _lastRestructureApplyResult = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastRestructureApplyResult)));
+        }
     }
 
     private bool _canUndoRestructure;
@@ -409,6 +421,33 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// </summary>
     public async Task StartAsync()
     {
+        if (!_ui.HasThreadAccess)
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_ui.TryEnqueue(async () =>
+            {
+                try
+                {
+                    await StartCoreAsync();
+                    completion.TrySetResult();
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }))
+            {
+                throw new InvalidOperationException("The UI dispatcher is unavailable; the engine cannot be started safely.");
+            }
+            await completion.Task.ConfigureAwait(false);
+            return;
+        }
+
+        await StartCoreAsync();
+    }
+
+    private async Task StartCoreAsync()
+    {
         if (_process is { HasExited: false })
         {
             // Engine is already running. Don't touch _isStarting — another
@@ -435,6 +474,15 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // body in try/finally so the release is unconditional.
         try
         {
+            if (_process is { HasExited: true } exitedProcess && ReferenceEquals(exitedProcess, _process))
+            {
+                ResetProcessBoundScanState();
+                Phase = ScanPhase.Idle;
+                LastError = null;
+                LastWarning = null;
+                Cleanup();
+            }
+
             // Notify singleton services that any cached engine state is now
             // stale and they should re-attach to PropertyChanged. Cheap +
             // idempotent.
@@ -442,7 +490,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             State = LifecycleState.Starting;
             CrashReason = null;
-            Interlocked.Exchange(ref _expectingExit, 0);
             _lastSpawnAttempt = DateTime.UtcNow;
 
             var enginePath = AppPaths.EngineExePath;
@@ -578,11 +625,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 var p = Process.Start(psi)
                         ?? throw new InvalidOperationException("Process.Start returned null");
                 _process = p;
+                var generation = Interlocked.Increment(ref _spawnGeneration);
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
                 _stdin = p.StandardInput;
 
                 _readCts = new CancellationTokenSource();
                 var ct = _readCts.Token;
-                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, ct), ct);
+                var startupReady = new TaskCompletionSource<EngineInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _stdoutLoop = Task.Run(() => StdoutLoopAsync(p.StandardOutput, p, generation, startupReady, ct), ct);
                 _stderrLoop = Task.Run(() => StderrLoopAsync(p.StandardError, ct), ct);
 
                 // Hook exit so we can auto-respawn. Subscribe BEFORE enabling
@@ -591,6 +641,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 // handler is attached, and the crash respawn never fires.
                 p.Exited += OnProcessExited;
                 p.EnableRaisingEvents = true;
+                _ = VerifyStartupChannelAsync(p, generation, startupReady.Task, ct);
             }
             catch (Exception ex)
             {
@@ -600,16 +651,6 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            // Send a status request — when the engine returns ready, we'll
-            // populate Info and flip State to Ready.
-            try
-            {
-                await SendCommandAsync(new RequestStatusCommand());
-            }
-            catch (Exception ex)
-            {
-                DebugLog.Warn("EngineClient: requestStatus failed at spawn: " + ex.Message);
-            }
         }
         finally
         {
@@ -622,12 +663,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     /// <summary>S4: read one newline-delimited engine frame, bounded to
-    /// <see cref="MaxFrameChars"/>. A frame that exceeds the cap before a
+    /// <see cref="MaxFrameBytes"/>. A frame that exceeds the cap before a
     /// newline arrives is discarded and we resync to the next newline, so a
     /// never-terminating line can't OOM the UI. Returns null at EOF. All framing
     /// state lives in the caller-owned <paramref name="st"/>, so each
     /// StdoutLoopAsync owns its own — no cross-loop sharing (#22).</summary>
-    private static async Task<string?> ReadBoundedFrameAsync(StreamReader reader, StdoutFraming st, CancellationToken ct)
+    internal static async Task<string?> ReadBoundedFrameAsync(
+        StreamReader reader, StdoutFraming st, CancellationToken ct, int maxFrameBytes = MaxFrameBytes)
     {
         while (true)
         {
@@ -646,11 +688,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 string frame = st.Buffer.ToString(0, nl);
                 st.Buffer.Remove(0, nl + 1);
                 st.Scanned = 0;
+                st.Utf8Encoder.Reset();
+                st.BufferedBytes = st.Utf8Encoder.GetByteCount(st.Buffer.ToString().AsSpan(), flush: false);
                 if (st.Resyncing)
                 {
                     // This frame is the tail of an oversize line — drop it and
                     // resume normal framing from the next one.
                     st.Resyncing = false;
+                    continue;
+                }
+                if (Encoding.UTF8.GetByteCount(frame) > maxFrameBytes)
+                {
+                    st.OversizeDropped = true;
                     continue;
                 }
                 if (frame.Length > 0 && frame[^1] == '\r') frame = frame[..^1];
@@ -660,11 +709,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             st.Scanned = st.Buffer.Length;
             // No newline yet: if the buffer crossed the cap, the engine is
             // emitting an oversize/garbage frame. Drop it and resync.
-            if (st.Buffer.Length > MaxFrameChars)
+            if (st.BufferedBytes > maxFrameBytes)
             {
-                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {MaxFrameChars} chars); discarding and resyncing.");
+                DebugLog.Warn($"Engine emitted an oversize IPC frame (> {maxFrameBytes} UTF-8 bytes); discarding and resyncing.");
                 st.Buffer.Clear();
                 st.Scanned = 0;
+                st.Utf8Encoder.Reset();
+                st.BufferedBytes = 0;
                 st.Resyncing = true;
                 st.OversizeDropped = true;
             }
@@ -677,6 +728,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     string tail = st.Buffer.ToString();
                     st.Buffer.Clear();
                     st.Scanned = 0;
+                    st.Utf8Encoder.Reset();
+                    st.BufferedBytes = 0;
+                    if (Encoding.UTF8.GetByteCount(tail) > maxFrameBytes)
+                    {
+                        st.OversizeDropped = true;
+                        return null;
+                    }
                     if (tail.Length > 0 && tail[^1] == '\r') tail = tail[..^1];
                     return tail;
                 }
@@ -689,6 +747,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // accumulated buffer (the O(n^2) on a large frame). (audit A0)
             int bufLenBefore = st.Buffer.Length;
             st.Buffer.Append(st.Chunk, 0, read);
+            st.BufferedBytes += st.Utf8Encoder.GetByteCount(st.Chunk.AsSpan(0, read), flush: false);
             if (Array.IndexOf(st.Chunk, '\n', 0, read) >= 0)
             {
                 st.Scanned = bufLenBefore;
@@ -700,7 +759,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private async Task StdoutLoopAsync(StreamReader reader, CancellationToken ct)
+    private async Task StdoutLoopAsync(StreamReader reader, Process captured, int generation,
+        TaskCompletionSource<EngineInfo> startupReady, CancellationToken ct)
     {
         // Per-loop framing state — a respawn starts a fresh loop with its own
         // buffer, so stale bytes can never carry over or race (#22).
@@ -716,8 +776,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         //     engine if the C# app dies),
         //   - the engine's GPU TDR detection (sticky cancellation +
         //     EngineError), and
-        //   - per-command timeouts on the C# side (WaitForReadyAsync,
-        //     CudaAutoInstaller's 30-min cap, etc).
+        //   - per-command timeouts on the C# side (WaitForReadyAsync
+        //     and model install stall guards).
         // A global stdout idle timer is the wrong granularity.
         while (!ct.IsCancellationRequested)
         {
@@ -730,6 +790,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             catch (Exception ex)
             {
                 DebugLog.Warn("Engine stdout read error: " + ex.Message);
+                startupReady.TrySetException(ex);
+                await HandleTransportFailureAsync(captured, generation, "stdout read failure", ex).ConfigureAwait(false);
                 return;
             }
             if (framing.OversizeDropped)
@@ -744,12 +806,13 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     "If this was a Restructure plan on a very large library, the plan may be incomplete — " +
                     "try restructuring a subfolder.",
                     null)));
-                _ui.TryEnqueue(() => Apply(oversize));
+                _ui.TryEnqueue(() => Apply(oversize, generation));
             }
             if (line is null)
             {
-                // EOF — engine closed stdout (likely exiting). Process.Exited
-                // will pick up the cleanup.
+                startupReady.TrySetException(new IOException("Engine stdout closed before startup completed."));
+                if (!ct.IsCancellationRequested)
+                    await HandleTransportFailureAsync(captured, generation, "stdout EOF").ConfigureAwait(false);
                 return;
             }
             if (string.IsNullOrWhiteSpace(line))
@@ -768,8 +831,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 continue;
             }
 
-            // Marshal to UI thread before touching observable state.
-            _ui.TryEnqueue(() => Apply(ev));
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+            if (ev.Payload is ReadyEvent ready && ready.Info.Pid == captured.Id)
+                startupReady.TrySetResult(ready.Info);
+            if (ev.Payload is HealthCheckResultEvent health)
+                _healthWaiters.TryResolve(health.Result.RequestId, health.Result.Pid, generation);
+            _ui.TryEnqueue(() => Apply(ev, generation));
         }
     }
 
@@ -815,6 +882,17 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         new(@"(?:[A-Za-z]:\\|\\\\)[^"",)\]}>\r\n]*",
             System.Text.RegularExpressions.RegexOptions.Compiled);
 
+    private bool ConsumeExpectedExit(Process? exited)
+    {
+        if (exited is null || !_expectedExitProcesses.TryRemove(exited, out var requestedAtTicks))
+        {
+            return false;
+        }
+
+        var requestedAt = new DateTime(requestedAtTicks, DateTimeKind.Utc);
+        return DateTime.UtcNow - requestedAt <= ExpectingExitWindow;
+    }
+
     private void OnProcessExited(object? sender, EventArgs e)
     {
         // Capture the exit code from the process that ACTUALLY exited (sender),
@@ -826,6 +904,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         try { exitCode = exited?.ExitCode; } catch { /* not-exited / disposed */ }
         _ui.TryEnqueue(() =>
         {
+            var expectedExit = ConsumeExpectedExit(exited);
+
             // Ignore a stale exit from a process we've already replaced. In the
             // RestartAsync path (StopAndWaitForExitAsync → StartAsync), the OLD
             // process's Exited callback is queued to the UI thread and can run
@@ -846,6 +926,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             }
             DebugLog.Warn($"EngineClient: process exited (code={exitCode?.ToString() ?? "?"}).");
             Cleanup();
+            ResetProcessBoundScanState();
 
             // Notify install service immediately so any in-flight download
             // owned by the now-dead engine flips to Failed instead of
@@ -858,19 +939,11 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // or trigger the auto-respawn — that would drag the engine
             // back up after the user explicitly asked it to stop.
             // Interlocked.Exchange both reads + clears in one atomic op.
-            if (Interlocked.Exchange(ref _expectingExit, 0) == 1)
+            if (expectedExit)
             {
-                var setAt = new DateTime(Interlocked.Read(ref _expectingExitAtTicks), DateTimeKind.Utc);
-                if (DateTime.UtcNow - setAt <= ExpectingExitWindow)
-                {
-                    State = LifecycleState.Crashed; // "stopped" UI; user can manually start
-                    CrashReason = string.Empty;
-                    return;
-                }
-                // Stale flag: a shutdown was requested long ago but the engine
-                // never exited then. This exit is a real (later) crash — fall
-                // through to the auto-respawn path.
-                DebugLog.Warn("EngineClient: stale _expectingExit ignored; treating exit as a crash.");
+                CrashReason = StoppedReason;
+                State = LifecycleState.Crashed;
+                return;
             }
 
             // Auto-respawn with bounded backoff. The 3-strike window is
@@ -928,6 +1001,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private void Cleanup()
     {
+        _healthWaiters.FailGeneration(SpawnGeneration, new InvalidOperationException("The engine generation stopped."));
+        _scanStartSlot.ReleaseGeneration(SpawnGeneration);
+        Interlocked.Increment(ref _scanPresentationRevision);
         try { _readCts?.Cancel(); } catch { }
         _readCts?.Dispose();
         _readCts = null;
@@ -949,6 +1025,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             try { p.Dispose(); } catch { }
         }
         _process = null;
+        Interlocked.Increment(ref _spawnGeneration);
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
 
         // R5-06: release the auto-advance gates on every engine teardown. A crash
         // mid-clustering (or mid-deep-analyze) never emits the Complete/Failed
@@ -963,6 +1041,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         // restructureApplyResult that clears this, so the next apply's result would
         // be mis-attributed as the dead undo's. (audit R2-app)
         UndoRestructureInFlight = false;
+        Interlocked.Exchange(ref _restructureCommandInFlight, 0);
     }
 
     public void Dispose()
@@ -984,6 +1063,94 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     /// or surfaces a clean error — never silently throws "Engine not
     /// running."
     /// </summary>
+    internal static bool IsHealthTargetCurrent(int capturedGeneration, int currentGeneration,
+        Process? captured, Process? current, bool capturedHasExited)
+        => captured is not null && ReferenceEquals(captured, current)
+            && capturedGeneration == currentGeneration && !capturedHasExited;
+
+    private static bool ProcessHasExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch (InvalidOperationException) { return true; }
+    }
+
+    public async Task ProbeCommandChannelAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
+        ct.ThrowIfCancellationRequested();
+        var captured = _process ?? throw new InvalidOperationException("The engine is not running.");
+        var generation = SpawnGeneration;
+        if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
+            throw new InvalidOperationException("The engine changed before its health check.");
+        var requestId = Guid.NewGuid().ToString("N");
+        var waiter = _healthWaiters.Register(requestId, generation, captured.Id);
+        try
+        {
+            if (waiter.Task.IsFaulted) await waiter.Task.ConfigureAwait(false);
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
+                throw new InvalidOperationException("The engine changed before its health check was sent.");
+            await SendCommandAsync(new HealthCheckCommand(requestId), ct).ConfigureAwait(false);
+            await waiter.Task.WaitAsync(timeout, ct).ConfigureAwait(false);
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
+                throw new InvalidOperationException("The engine changed during its health check.");
+        }
+        catch (Exception ex)
+        {
+            _healthWaiters.TryFail(requestId, ex);
+            try { await waiter.Task.ConfigureAwait(false); } catch { }
+            throw;
+        }
+    }
+
+    private async Task VerifyStartupChannelAsync(Process captured, int generation, Task<EngineInfo> ready, CancellationToken ct)
+    {
+        try
+        {
+            await ready.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+            await ProbeCommandChannelAsync(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+            _ui.TryEnqueue(() =>
+            {
+                if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+                _lastReadyAt = DateTime.UtcNow;
+                CrashReason = null;
+                State = LifecycleState.Ready;
+            });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            await HandleTransportFailureAsync(captured, generation, "startup health check failed", ex).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleTransportFailureAsync(Process captured, int generation, string reason, Exception? failure = null)
+    {
+        if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+        if (Interlocked.Exchange(ref _transportFailureGeneration, generation) == generation) return;
+        _healthWaiters.FailGeneration(generation, failure ?? new IOException("The engine command channel closed."));
+        if (_expectedExitProcesses.ContainsKey(captured)) return;
+        DebugLog.Warn($"Engine transport failure: {reason} ({failure?.GetType().Name ?? "closed"}).");
+        try
+        {
+            if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured))) return;
+            captured.Kill(entireProcessTree: true);
+            await captured.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Engine transport recovery failed: " + ex.GetType().Name);
+            _ui.TryEnqueue(() =>
+            {
+                if (generation != SpawnGeneration || !ReferenceEquals(captured, _process)) return;
+                CrashReason = "The engine command channel closed. Stop the engine or restart FileID before continuing.";
+                State = LifecycleState.Crashed;
+            });
+        }
+        if (generation == SpawnGeneration && ReferenceEquals(captured, _process) && ProcessHasExited(captured))
+            OnProcessExited(captured, EventArgs.Empty);
+    }
+
     public Task WaitForReadyAsync(TimeSpan timeout, CancellationToken ct = default)
     {
         if (State == LifecycleState.Ready) return Task.CompletedTask;
@@ -1047,8 +1214,40 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     // ─── Event router ──────────────────────────────────────────────────
 
-    private void Apply(IpcEvent ev)
+    private void ObserveAuthoritativeScanEvent(int generation)
     {
+        var owner = _scanStartSlot.Current;
+        if (owner is null || owner.Generation != generation)
+        {
+            return;
+        }
+
+        if (_scanStartSlot.Release(owner))
+        {
+            Interlocked.Increment(ref _scanPresentationRevision);
+        }
+    }
+
+    private void RejectScanStartCommand(int generation)
+    {
+        var owner = _scanStartSlot.Current;
+        if (owner is null || owner.Generation != generation)
+        {
+            return;
+        }
+
+        if (_scanStartSlot.Release(owner)
+            && owner.Generation == SpawnGeneration
+            && owner.Revision == Volatile.Read(ref _scanPresentationRevision))
+        {
+            Phase = owner.Payload.PreviousPhase;
+            _scanStartedAt = null;
+        }
+    }
+
+    private void Apply(IpcEvent ev, int generation)
+    {
+        if (generation != SpawnGeneration) return;
         // per-event diagnostic tracing. See _applySeq comment above
         // for why this exists. Only logs the event TYPE, never the payload
         // (payloads can contain user file paths — those route through
@@ -1087,34 +1286,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 {
                     case ReadyEvent r:
                         Info = r.Info;
-                        // C1: re-arm the background auto-installers BEFORE
-                        // flipping State to Ready. Their one-shot attempt gate
-                        // latches after the first fire; a crash that interrupted
-                        // a mid-flight model download would otherwise abandon the
-                        // model for the rest of the session (no VLM tags until a
-                        // full app restart). Re-arming here lets the State=Ready
-                        // PropertyChanged below re-trigger them; each re-checks
-                        // its sentinel/weights and only re-downloads if still
-                        // missing. Harmless on the first Ready (nothing attempted
-                        // yet → the gate is already 0).
-                        Services.LlamaRuntimeAutoInstaller.ResetAttempt();
-                        Services.CudaAutoInstaller.ResetAttempt();
-                        State = LifecycleState.Ready;
-                        CrashReason = null;
-                        // R5-07: record when the engine reached Ready, but do NOT
-                        // reset the strike counter here. An engine that reaches
-                        // Ready then deterministically crashes within seconds (a
-                        // re-armed auto-installer re-firing a fatal model load, or
-                        // the first command hitting a fatal native path) would
-                        // otherwise zero the counter on every respawn and flap ~1s
-                        // forever, never reaching terminal Crashed. OnProcessExited
-                        // treats a crash AFTER >= StabilitySettle of continuous
-                        // Ready as genuine recovery and only then clears the
-                        // counter — preserving the corrupt-.gguf "user removed the
-                        // bad file" recovery without the flap.
-                        _lastReadyAt = DateTime.UtcNow;
                         break;
                     case ProgressEvent p:
+                        ObserveAuthoritativeScanEvent(generation);
                         // Discovery + tagging emit ProgressEvents CONCURRENTLY
                         // during the pipeline overlap (discovery still walking
                         // while tagging workers consume). A late Discovering event
@@ -1147,6 +1321,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         Phase = p.Progress.Phase;
                         break;
                     case PhaseChangedEvent pc:
+                        ObserveAuthoritativeScanEvent(generation);
                         Phase = pc.Phase;
                         // Authoritative phase boundary — sync the monotonic latch
                         // so a late interleaved ProgressEvent can't pull the
@@ -1190,6 +1365,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         LastBatch = b.Summary;
                         break;
                     case ScanCompleteEvent sce:
+                        ObserveAuthoritativeScanEvent(generation);
                         // Authoritative final count for the completed-scan summary
                         // (LastProgress.Processed can be throttle-stale by a batch).
                         LastScanProcessedFiles = sce.Result.ProcessedFiles;
@@ -1225,6 +1401,16 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         _ = AutoTriggerFaceClusteringAsync();
                         break;
                     case ErrorEvent e:
+                        if (e.Error.Kind == "scan_already_running")
+                        {
+                            RejectScanStartCommand(generation);
+                        }
+
+                        if (e.Error.Kind is "apply_restructure" or "undo_restructure")
+                        {
+                            UndoRestructureInFlight = false;
+                            Interlocked.Exchange(ref _restructureCommandInFlight, 0);
+                        }
                         if (IsNonFatalWarningKind(e.Error.Kind))
                         {
                             LastWarning = e.Error;
@@ -1313,20 +1499,42 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                     case RestructurePlanEvent rp:
                         LastRestructurePlan = rp.Plan;
                         break;
+                    case HealthCheckResultEvent:
+                        break;
                     case RestructureApplyResultEvent rar:
-                        LastRestructureApplyResult = rar.Result;
-                        // Toggle the "Undo last run" affordance: an apply that
-                        // moved files makes the run undoable; the undo's own reply
-                        // clears it. (R2)
-                        if (UndoRestructureInFlight)
+                        try
                         {
-                            UndoRestructureInFlight = false;
-                            CanUndoRestructure = false;
+                            LastRestructureResultWasUndo = UndoRestructureInFlight;
+                            LastRestructureResultWasShortcutApply = !UndoRestructureInFlight && _restructureApplyUsesSymlinks;
+                            // Toggle the "Undo last run" affordance: an apply that
+                            // moved files makes the run undoable; the undo's own reply
+                            // clears it. (R2)
+                            if (UndoRestructureInFlight)
+                            {
+                                UndoRestructureInFlight = false;
+                                CanUndoRestructure = rar.Result.Failed > 0
+                                    || (rar.Result.Cancelled && rar.Result.Remaining.GetValueOrDefault() > 0);
+                            }
+                            else
+                            {
+                                CanUndoRestructure = !_restructureApplyUsesSymlinks && rar.Result.Applied > 0;
+                            }
+                            if (!LastRestructureResultWasUndo
+                                && RestructureUndoPolicy.ShouldRecord(LastRestructureResultWasShortcutApply, rar.Result.Applied, CanUndoRestructure)
+                                && RestructureOperationRoot is { Length: > 0 } operationRoot)
+                            {
+                                DebugLog.SafeRun("EngineClient.RecordRestructureChange", () =>
+                                {
+                                    ChangeLog.Instance.Push($"Restructured {rar.Result.Applied:N0} files", ChangeKind.Restructure, async () =>
+                                    {
+                                        var undoResult = await UndoRestructureAndWaitAsync(operationRoot);
+                                        return !undoResult.Cancelled && undoResult.Failed == 0 && undoResult.Applied > 0;
+                                    });
+                                });
+                            }
+                            LastRestructureApplyResult = rar.Result;
                         }
-                        else
-                        {
-                            CanUndoRestructure = rar.Result.Applied > 0;
-                        }
+                        finally { Interlocked.Exchange(ref _restructureCommandInFlight, 0); }
                         break;
                     case BulkActionResultEvent bar:
                         LastBulkAction = bar.Result;

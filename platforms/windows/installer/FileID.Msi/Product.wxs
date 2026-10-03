@@ -65,7 +65,7 @@
     <!-- Apps & Features metadata. -->
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPPRODUCTICON" Value="FileIDIcon" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/anthropics/claude-code/issues" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/WebWorldWide/FileID/issues" />
     <Property Id="ARPURLINFOABOUT" Value="https://fileid.app" />
     <!-- Privacy posture is a product feature; surface it in Apps & Features. -->
     <Property Id="ARPCOMMENTS" Value="On-device AI file organizer. No telemetry. No cloud." />

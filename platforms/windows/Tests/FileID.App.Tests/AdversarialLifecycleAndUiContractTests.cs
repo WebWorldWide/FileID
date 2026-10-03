@@ -105,7 +105,7 @@ public sealed class EngineLifecycleCoordinatorTests
         bool expected)
         => Assert.Equal(
             expected,
-            EngineClient.IsSafeToFinalizeApplicationClose(
+            EngineLifecyclePolicy.IsSafeToFinalizeApplicationClose(
                 terminalStopActive,
                 startInFlight,
                 processAlive));

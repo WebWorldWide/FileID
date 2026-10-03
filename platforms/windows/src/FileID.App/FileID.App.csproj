@@ -41,6 +41,8 @@
          generator's auto-Main wraps in #if !DISABLE_XAML_GENERATED_MAIN;
          define the constant to skip its generation. -->
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <DefineConstants Condition="'$(FileIDStoreBuild)' == 'true'">$(DefineConstants);FILEID_STORE</DefineConstants>
+    <WindowsAppSDKBootstrapInitialize Condition="'$(FileIDStoreBuild)' == 'true'">false</WindowsAppSDKBootstrapInitialize>
 
     <!-- Performance: ReadyToRun pre-JITs IL on publish. Native AOT for
          WinUI 3 still has rough edges as of WinAppSDK 1.6 (XAML compiler +

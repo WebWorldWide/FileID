@@ -17,6 +17,7 @@ internal static class DebugLog
 {
     private const long MaxLogBytes = 10 * 1024 * 1024;
     private static readonly object s_writeLock = new();
+    private static bool s_traceEnabled;
     // NOTE: writes are intentionally SYNCHRONOUS. An async/batched sink was tried
     // (audit P2) but the fix re-audit caught that it loses the last <200 ms of
     // lines on a NATIVE fast-fail — exactly the [APPLY:N]/[ENGINE-SUB] tail this
@@ -28,6 +29,15 @@ internal static class DebugLog
     public static void Warn(string message) => Write("WARN ", message);
     public static void Error(string message) => Write("ERROR", message);
     public static void Debug(string message) => Write("DEBUG", message);
+    public static bool TraceEnabled
+    {
+        get => Volatile.Read(ref s_traceEnabled);
+        set => Volatile.Write(ref s_traceEnabled, value);
+    }
+    public static void Trace(string message)
+    {
+        if (TraceEnabled) Write("TRACE", message);
+    }
 
     /// <summary>Handler-wrap helper. UI click handlers that call IPC or
     /// touch the file system should route through this so a thrown

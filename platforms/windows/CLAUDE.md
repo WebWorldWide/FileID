@@ -8,7 +8,7 @@ Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE
 
 - **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp).
 - **App** — WinUI 3 (Windows App SDK 1.6+, .NET 8, C#/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
-- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed.
+- **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed. The reserved Store product uses the separate x64 MSIX path in `build/publish-store.ps1`; see `shared/docs/WINDOWS_STORE.md` for identity and release gates.
 
 ## Layout
 
@@ -69,7 +69,7 @@ In progress / not done: butler restructure P2–P4 (VLM group naming, confidence
 
 ## Conventions — WinUI 3 app
 
-- **Unpackaged desktop app.** No MSIX / Store / `Package.appxmanifest`. Self-contained .NET publish (runtime bundled).
+- **Native desktop app.** MSI/dev builds are unpackaged. Store builds wrap the same WinUI app and engine in MSIX using `store/AppxManifest.xml` and `FileIDStoreBuild=true`; Store framework dependencies replace the unpackaged bootstrapper. Self-contained .NET publish.
 - **Forced dark mode** (`RequestedTheme = Dark` + `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`). **Mica window backdrop** (`MicaController`, falling back to `DesktopAcrylicController` when Mica is unsupported); GlassCard surfaces render a XAML `AcrylicBrush` in their template — real DWM materials, not a fake.
 - **Springs via `SpringScalarNaturalMotionAnimation`** — map SwiftUI `.spring(response:dampingFraction:)` 1:1 (`Period = response`, `DampingRatio = dampingFraction`).
 - **Custom rendering**: LavaLampBackground via `Microsoft.UI.Composition`, the Restructure Sankey via pure-XAML `Path`/Bézier geometry, IridescentBorder via Win2D (`CanvasSweepGradient`); pause when occluded. **No third-party UI libraries** beyond Windows App SDK + Win2D.
