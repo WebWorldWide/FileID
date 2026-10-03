@@ -6,11 +6,11 @@ Continue the full next-version plan on the Mac. The owner has a Windows/Linux PC
 
 ## Current continuation — Mac persistent hybrid retrieval
 
-Catalog v23 and IPC v1.6 connect the native Library to the persistent CLIP index, with incremental SQLite epochs, restart recovery, eligibility checks, and timestamp-preserving hybrid retrieval. Validate the current checkpoint before extending it. Then integrate rebuilding into durable jobs with CPU/I/O/memory admission, cancellation and progress; add text/catalog embedding indexes and person/event/exact filters; measure real 100,000-file end-to-end latency. Existing flat ReadStore helpers remain only as legacy/internal APIs and test coverage, not the Library execution path.
+Catalog v23 and IPC v1.6 connect the native Library to the persistent CLIP index, with incremental SQLite epochs, restart recovery, eligibility checks, and timestamp-preserving hybrid retrieval. PR #198 is merged at `94c96d51caf43007c147b0bb584bfcec8124e3e7` after eighteen exact-head checks passed; use STATE.md for merged-main acceptance. Start the next milestone from current main. Then integrate rebuilding into durable jobs with CPU/I/O/memory admission, cancellation and progress; add text/catalog embedding indexes and person/event/exact filters; measure real 100,000-file end-to-end latency. Existing flat ReadStore helpers remain only as legacy/internal APIs and test coverage, not the Library execution path.
 
 Continue the complete NEXT_VERSION.md plan: model routing, reversible chat operations, naming preferences/companions, face exemplars/corrections/calibration, dense temporal analysis, automatic chapters, best takes, conversion/enhancement/reframing and broader toolbox. No milestone or green CI proves the complete Mac product is finished. Windows/Linux new features and physical acceptance remain deferred to the owner's PC; shared contracts, migration parity and existing CI stay coherent.
 
-## Day-end continuation — 2026-10-02
+## Historical day-end continuation — superseded by Mac-first priority
 
 The full accepted goal remains active after the owner resumed sustained work; this is a recovery checkpoint, not a pause or release completion. Read AGENT_HANDOFF.md and ARCHIVED_BRANCHES.md first. Resume the unfinished Windows safety/test-parity checkpoint from archive/2026-10-02/windows-test-parity-wip; do not merge the recovery snapshot wholesale. Restore real behavior, canonical IPC fields and genuine test execution, then require both test suites, x64/ARM64 builds and format checks. Main app packaging success currently omits the suites because of a path bug.
 
