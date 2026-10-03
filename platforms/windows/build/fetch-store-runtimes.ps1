@@ -34,7 +34,7 @@ function Expand-VerifiedZip([string]$Name, [string]$Uri, [string]$Sha256, [strin
 $llamaRoot = Join-Path $OutputRoot 'llama.cpp'
 $whisperRoot = Join-Path $OutputRoot 'whisper.cpp'
 $openvinoRoot = Join-Path $OutputRoot 'packs/openvino'
-$openvinoStage = Join-Path $CacheDir 'openvino-extract'
+$openvinoStage = Join-Path $CacheDir ("openvino-extract-" + [Guid]::NewGuid().ToString('N'))
 
 Expand-VerifiedZip `
     'llama-b9254-bin-win-vulkan-x64.zip' `
