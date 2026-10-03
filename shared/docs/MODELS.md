@@ -1,5 +1,9 @@
 # Models — canonical registry
 
+## macOS CLIP cache identity (2026-10-02)
+
+The native shared manifest pins OpenCLIP ViT-B/32 image/text ONNX and BPE vocabulary/merges. Mac loaders verify local bytes against those pins before creating sessions. Cache identity also includes the current RGB stretch-to-224, BPE-77 and L2-normalization contract. Legacy `mobileclip_s2` rows are excluded until fresh inference refreshes them. This is compatibility validation, not promotion of a replacement model or a measured accuracy gain.
+
 FileID never ships model weights. Every model is downloaded at runtime from its upstream repository, with progress + cancellation visible to the user, after they explicitly trigger the download. **Every artifact is SHA256-pinned in `engine/src/models/registry.rs`** — the canonical hash is the `oid sha256:` from each HuggingFace LFS pointer (or the sha256 of the GitHub/NVIDIA release asset); the engine downloader verifies the downloaded bytes against the pin before use, and a CI gate (`windows-engine.yml`) fails the build on any unpinned (`sha256: None`) entry. No telemetry on the download.
 
 This file is the cross-platform source of truth for what FileID asks for and where it lives. Per-platform installers (`platforms/apple/scripts/install_clip_models.sh`, `platforms/windows/build/install-models.ps1`, future Linux equivalent) read this list.

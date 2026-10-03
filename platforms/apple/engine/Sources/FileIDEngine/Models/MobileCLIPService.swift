@@ -3,8 +3,8 @@
 // same path `ArcFaceService` uses. Replaces Apple's MobileCLIP-S2 CoreML
 // model (research-only license). Input is 224×224 RGB with CLIP mean/std
 // normalization (matches the Windows engine's `models/mobileclip.rs`);
-// output is an L2-normalized 512-d float vector — unchanged dimension, so
-// the `clip_embeddings` schema and all cosine comparisons stay the same.
+// output is an L2-normalized 512-d float vector. Legacy MobileCLIP vectors
+// require fresh inference; equal dimensions do not establish compatibility.
 //
 // `@unchecked Sendable`: locks guard internals. `inferenceSem` bounds ANE
 // concurrency at 4 (flooding from 14 workers thrashes the ANE).
@@ -69,9 +69,9 @@ public final class MobileCLIPService: @unchecked Sendable {
 
         let modelURL = url ?? Self.defaultImageModelURL
         let safe = redactPathForLog(modelURL.path)
-        guard FileManager.default.fileExists(atPath: modelURL.path) else {
+        guard CLIPEmbeddingSpace.verifyArtifact(at: modelURL, id: "clip_vitb32_image") else {
             JSONLog.shared.warn(ev: "clip_model_missing", path: safe,
-                                error: "CLIP ViT-B/32 image ONNX not downloaded; embeddings disabled")
+                                error: "CLIP image weights are missing or fail artifact verification; embeddings disabled")
             return false
         }
         do {

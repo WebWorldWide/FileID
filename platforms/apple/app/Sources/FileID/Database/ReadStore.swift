@@ -389,9 +389,9 @@ public final class ReadStore: @unchecked Sendable {
         guard let q = queue else { return [] }
         let seedVec: [Float] = (try? q.read { db -> [Float] in
             guard let blob = try Data.fetchOne(db, sql:
-                "SELECT embedding FROM clip_embeddings WHERE file_id = ?",
-                arguments: [seedID]) else { return [] }
-            return blobToFloats(blob)
+                "SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id = ? AND e.model = ? AND f.failed=0",
+                arguments: [seedID, CLIPEmbeddingSpace.modelID]) else { return [] }
+            return CLIPEmbeddingSpace.vector(from: blob) ?? []
         }) ?? []
         guard !seedVec.isEmpty else { return [] }
         return rankByCosine(against: seedVec, limit: limit, excludeID: seedID)
@@ -411,7 +411,10 @@ public final class ReadStore: @unchecked Sendable {
     /// (seed = a CLIP text embedding).
     public func rankByCosine(against query: [Float], limit: Int = 60,
                               excludeID: Int64? = nil) -> [FileRow] {
-        guard let q = queue, !query.isEmpty, limit > 0 else { return [] }
+        guard let q = queue, query.count == CLIPEmbeddingSpace.dimension,
+              query.allSatisfy(\.isFinite), limit > 0 else { return [] }
+        let squaredNorm = query.reduce(0.0) { $0 + Double($1) * Double($1) }
+        guard abs(squaredNorm - 1) <= 0.02 else { return [] }
         return (try? q.read { db -> [FileRow] in
             // failed = 0 at SQL time (parity with Windows
             // SemanticSearchAsync): a failed row scored here would land
@@ -423,16 +426,16 @@ public final class ReadStore: @unchecked Sendable {
                 sql = """
                     SELECT e.file_id, e.embedding FROM clip_embeddings e
                     JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0 AND e.file_id != ?
+                    WHERE f.failed = 0 AND e.model = ? AND e.file_id != ?
                     """
-                args = [exclude]
+                args = [CLIPEmbeddingSpace.modelID, exclude]
             } else {
                 sql = """
                     SELECT e.file_id, e.embedding FROM clip_embeddings e
                     JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0
+                    WHERE f.failed = 0 AND e.model = ?
                     """
-                args = []
+                args = [CLIPEmbeddingSpace.modelID]
             }
             // Stream rows through a cursor and keep only a bounded top-K
             // min-heap. fetchAll would hold every 512-float embedding blob
@@ -447,8 +450,7 @@ public final class ReadStore: @unchecked Sendable {
             while let r = try cursor.next() {
                 guard let fid: Int64 = r["file_id"],
                       let blob: Data = r["embedding"] else { continue }
-                let v = blobToFloats(blob)
-                guard v.count == query.count else { continue }
+                guard let v = CLIPEmbeddingSpace.vector(from: blob) else { continue }
                 var s: Float = 0
                 for i in 0..<v.count { s += query[i] * v[i] }
                 heap.offer(id: fid, score: s, order: order)

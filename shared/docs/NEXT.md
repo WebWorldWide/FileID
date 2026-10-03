@@ -1,8 +1,14 @@
 # NEXT — resume here
 
-## Current continuation — health and Windows safety
+## Owner priority — macOS first (2026-10-02)
 
-The health-contract follow-up is under review. IPC v1.5 supplies bounded nonce/PID replies in both engines and portable DTOs; C# IPC tests/format/report fixtures pass on the isolated Adlon VM. Finish Rust 1.90/Swift and fresh hosted/main CI acceptance, then continue the archived Windows lifecycle, exact-cleanup, Undo and restructure repairs. A dedicated IPC suite gate now runs; the legacy app-service test block is still skipped. Preserve all service tests and analyzer gates. No next-version completion or release acceptance is implied.
+Continue the full next-version plan on the Mac. The owner has a Windows/Linux PC and explicitly deferred new port implementation and physical validation until working there. Preserve the archived Windows safety restoration; do not discard tests or claim port acceptance. Shared contracts must remain coherent, and already-running CI still requires inspection. On macOS, finish verified embedding provenance and persistent hybrid retrieval, then the remaining scheduler, chat, rename, face, timeline, best-take and Tools milestones from NEXT_VERSION.md. The Mac version is not complete or perfect yet.
+
+## Current continuation — macOS retrieval foundation
+
+Validate and land the verified CLIP-space change, then build persistent, incremental, rebuildable model-separated nearest-neighbor indexes and combine them with exact filters, catalog evidence and full-text retrieval. Keep source-revision invalidation explicit; index corruption must fall back to rebuilding from SQLite. The current native semantic search still scans compatible embeddings and does not meet the persistent-index acceptance requirement.
+
+Health IPC v1.5 is merged in PR #194 after all eighteen exact-head checks passed. Inspect fresh main CI before recording acceptance. The dedicated Windows IPC suite/report/format gate runs; the legacy app service-test discovery still skips and remains a release blocker. Resume its archived lifecycle, exact-cleanup, Undo and restructure repairs on the owner's PC, preserving all tests and analyzer gates.
 
 ## Day-end continuation — 2026-10-02
 

@@ -403,13 +403,13 @@ public enum Restructure {
             let ecursor = try GRDB.Row.fetchCursor(db, sql: """
                 SELECT ce.file_id, ce.embedding FROM clip_embeddings ce
                 JOIN files f ON f.id = ce.file_id
-                WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model')
+                WHERE f.failed = 0 AND f.kind IN ('image', 'video', 'model') AND ce.model = ?
                   AND (? = '' OR f.path_text = ? OR (f.path_text >= ? AND f.path_text < ?))
-                """, arguments: [bounds.root, bounds.root, bounds.prefix, bounds.upper])
+                """, arguments: [CLIPEmbeddingSpace.modelID, bounds.root, bounds.root, bounds.prefix, bounds.upper])
             while embeddings.count < signalCap, let row = try ecursor.next() {
                 let id: Int64 = row["file_id"] ?? 0
-                if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
-                    embeddings[id] = Self.floatsLE(data)
+                if let data: Data = row["embedding"], let vector = CLIPEmbeddingSpace.vector(from: data) {
+                    embeddings[id] = vector
                 }
             }
             // Content tags for distinctive-term naming + fusion.

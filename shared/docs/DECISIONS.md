@@ -3472,3 +3472,10 @@ Linux CI failed during runner setup with a full guest disk. The FileID workspace
 Promote the existing macOS probe to IPC v1.5 and portable mirrors before restoring Windows generation-bound lifecycle checks. `requestStatus` may re-emit ready on Rust and trigger client state/download setup; it is unsuitable for a liveness probe. Echo only a bounded opaque nonce and actual PID, validate the nonce before acknowledging it, and keep storage/model probes out of this command. Add real process fixtures on all engine CI targets and a non-skippable C# IPC suite with positive executed-test report verification. Full Windows app-service test restoration remains a separate unfinished safety repair; do not treat this gate as that suite.
 
 The main.rs source-boundary digest update covers only the reviewed health dispatch arm. No transport, runtime host, download allowlist or subprocess capability changed. The six existing off-policy artifact URLs remain release blockers.
+
+
+## 2026-10-02 — Bind macOS CLIP caches to verified artifacts
+
+The native image worker actually loads OpenCLIP ViT-B/32 while its writer labeled every vector `mobileclip_s2`. Dimension alone cannot establish compatibility. Use one space identity derived from all four pinned artifacts and the existing RGB stretch/BPE/L2 preprocessing contract; verify local files before loading image/text sessions. Refresh legacy derived caches through fresh inference while preserving user evidence. Reject invalid vectors at insertion and retrieval. Keep SQLite authoritative; a future persistent index must use the same identity and remain rebuildable. This adds no dependency and promotes no new model.
+
+The owner deferred new Windows/Linux implementation and physical validation until working on the PC. Continue the full Mac plan and retain narrowly recoverable port work in verified remote tags.
