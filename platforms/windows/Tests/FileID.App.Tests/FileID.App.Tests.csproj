@@ -37,4 +37,12 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\FileID.App\FileID.App.csproj" />
   </ItemGroup>
+
+  <Target Name="CopyWindowsSdkRuntimeAssemblyForTestHost" AfterTargets="Build" Condition="'$(OS)' == 'Windows_NT' and '$(RuntimeIdentifier)' != ''">
+    <PropertyGroup>
+      <WindowsSdkRuntimeAssembly>$(MSBuildProjectDirectory)\..\..\src\FileID.App\bin\$(Platform)\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\Microsoft.Windows.SDK.NET.dll</WindowsSdkRuntimeAssembly>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(WindowsSdkRuntimeAssembly)')" Text="Windows SDK runtime assembly is missing from app output: $(WindowsSdkRuntimeAssembly)" />
+    <Copy SourceFiles="$(WindowsSdkRuntimeAssembly)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>
