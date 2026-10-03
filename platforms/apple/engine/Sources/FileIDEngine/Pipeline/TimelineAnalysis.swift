@@ -118,6 +118,14 @@ actor TimelineAnalysis {
                     }
                     seconds += 10
                 }
+                try await requireRunning(id, database: database)
+                try await persistChapterSuggestions(
+                    fileID: fileID,
+                    sourceRevision: source.1,
+                    frameModelVersion: job.version,
+                    duration: duration,
+                    database: database
+                )
                 let progress = Double(index+1)/Double(job.ids.count)
                 try await database.pool.write { db in
                     try db.execute(sql: "UPDATE catalog_jobs SET checkpoint_json=?,progress=?,updated_at=? WHERE id=? AND state='running'", arguments: [String(index+1),progress,Date().timeIntervalSince1970,id])
@@ -144,6 +152,42 @@ actor TimelineAnalysis {
     private func requireRunning(_ id: String, database: Database) async throws {
         let state = try await database.pool.read { db in try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=?", arguments: [id]) }
         guard state == "running" else { throw Interrupted() }
+    }
+
+    func persistChapterSuggestions(
+        fileID: Int64,
+        sourceRevision: String,
+        frameModelVersion: String,
+        duration: Double,
+        database: Database
+    ) async throws {
+        let captions = try await database.pool.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT start_seconds,text FROM catalog_passages
+                WHERE file_id=? AND source_revision=? AND model_version=? AND stale=0
+                  AND start_seconds IS NOT NULL AND confidence=0
+                ORDER BY start_seconds,id
+                """, arguments: [fileID, sourceRevision, frameModelVersion]).map { row in
+                    TimelineChapterSuggestions.Caption(seconds: row["start_seconds"], text: row["text"])
+                }
+        }
+        let suggestions = TimelineChapterSuggestions.propose(
+            fileID: fileID,
+            sourceRevision: sourceRevision,
+            frameModelVersion: frameModelVersion,
+            duration: duration,
+            captions: captions
+        )
+        guard !suggestions.isEmpty else { return }
+
+        try await database.pool.write { db in
+            guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+            try db.execute(sql: "DELETE FROM catalog_chapters WHERE file_id=? AND user_edited=0 AND model_version LIKE 'timeline-chapter-suggestion-v1/%'", arguments: [fileID])
+            for chapter in suggestions {
+                let userEdited = try Bool.fetchOne(db, sql: "SELECT user_edited FROM catalog_chapters WHERE id=?", arguments: [chapter.id]) ?? false
+                if !userEdited { try CatalogStore.upsertChapter(db, chapter: chapter) }
+            }
+        }
     }
 
     private func publish(_ id: String, database: Database, sink: IPCSink) async {
