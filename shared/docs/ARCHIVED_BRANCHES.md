@@ -102,3 +102,12 @@ Additional recovery checkpoints:
 To resume, fetch the appropriate archive tag, create a new `codex/` branch from current main, and port/review its changes. Archive tags do not trigger the `v*` release workflow. Do not force-push main or infer model/license/Store acceptance from a backup tag.
 
 Validated checkpoint branches also retain recovery tags before removal: `archive/2026-10-02/codex/adlon-clang-bootstrap` points to reviewed head `20679d5f542c72466f18dad7249791c0bbf17661`; `archive/2026-10-02/codex/day-end-handoff` preserves the final documentation review head. These integrations are separate from the unvalidated proposal backups above.
+
+
+## 2026-10-02 — republished Store proposal
+
+The Store branch reappeared during Mac validation. Its exact head was preserved in a verified remote annotated tag before exact-lease removal; the separate local Store checkout was not modified. This extensively divergent proposal has not been integrated or validated.
+
+| Former branch | Commit | Recoverable tag |
+|---|---|---|
+| `codex/store-msix` | `07c0ad8e688e0293484ae628e9f3c7aeac862e90` | `archive/2026-10-02/store-msix-republished` |

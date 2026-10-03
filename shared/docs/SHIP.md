@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Latest Mac checkpoint and runner acceptance (2026-10-02)
+
+PRs #195/#196 integrate verified CLIP compatibility and native graph/snapshot groundwork; all 450 native tests pass. Both PRs passed their exact-head checks and fresh merged-main Mac/policy validation. All nineteen health merged-main checks passed, including Adlon Linux/Windows and the genuine zero-skip 48-test IPC gate. Full legacy Windows service tests, physical hardware and the remaining `NEXT_VERSION.md` gates remain open. No release was published.
+
 ## Current owner priority and retrieval gate (2026-10-02)
 
 Complete the Mac next-version implementation first; new Windows/Linux implementation and physical acceptance are deferred until the owner works on the PC. Verified CLIP cache identity is a prerequisite, not completion of the persistent search-index gate. Native accuracy, broad best-take evaluation, conversion fidelity, physical hardware, strict offline egress, signing and all remaining `NEXT_VERSION.md` acceptance gates remain open.
