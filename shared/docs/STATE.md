@@ -1,16 +1,18 @@
 # FileID — State
 
-## 2026-10-03 — Sparse timeline chapter drafts (active branch)
+## 2026-10-03 — Sparse timeline chapter drafts merged (PR #214)
 
-Branch `codex/mac-timeline-chapter-suggestions` adds reviewable low-confidence chapters after a video’s sampled-frame job completes. Captions must show a distinct transition confirmed by the following frame; sparse sampling does not establish event absence. Suggestions carry source revision/model provenance, appear as drafts, refresh the selected file on job completion, and cannot overwrite user-edited chapters. Cancellation is rechecked before suggestions persist. No IPC/schema/dependency change; Windows and Linux source remain untouched.
+PR [#214](https://github.com/WebWorldWide/FileID/pull/214) was squash-merged to `main` at `ba12b17b738bca1567e37daa72ed8cdcc5b985e6`; exact PR head was `08f21faf1f60750ffd090700c840495346659ada`. Mac timeline jobs now make reviewable low-confidence chapter drafts only when a sampled caption changes and the next frame confirms the transition. Drafts store source revision/model provenance, are labeled as sparse/unverified, refresh the selected video after job completion, and preserve accepted user edits. Cancellation and source revision are checked before persistence. No schema, IPC, dependency, Windows, or Linux source change.
 
-Validation on internal temporary fixtures: 491 Swift tests across 99 suites, including four focused generation/persistence/abstention tests; Release FileID and FileIDEngine builds; catalog schema check; runtime-egress audit; `git diff --check`. This feature branch has not yet been merged. Its next agent must record exact-head CI, merge-main run IDs, merge SHA, and delete only its own feature branch.
+Exact-head macOS workflow `37143652457` and action-pin policy `37143652446` passed. Local validation passed: 491 Swift tests across 99 suites, including four chapter tests; Release app/engine builds; catalog schema; runtime-egress; current-document; self-hosted-runner policy; diff checks. The PR branch was deleted. New main workflows `37145111901` (macOS) and `37145111879` (repository policy) were still running at this checkpoint. Do not claim those post-merge checks until complete.
 
-## 2026-10-03 — TestFlight sandbox scaffold merged to main; merged-main CI in progress
+The preceding TestFlight scaffold merge `6cde4a817e276b5b325fa36f9a7926e2abdf073a` has all seven workflows green; runner IDs are recorded below. The independent Windows Store PR #213 and its checkout were left untouched.
+
+## 2026-10-03 — TestFlight sandbox scaffold merged to main; all seven workflows green
 
 PR [#212](https://github.com/WebWorldWide/FileID/pull/212) was squash-merged at `6cde4a817e276b5b325fa36f9a7926e2abdf073a`; corrected PR head was `cb5bea3c10b8cde29fd3e95422eadc8d80b4268f`. The Store-only app/helper sandbox build, bookmark flow, container-local model cache, packaging/upload script, and Swift/Rust/C# IPC mirror are on `main`. Local credential preflight confirms TestFlight upload cannot proceed without a Mac App Store provisioning profile, usable Apple Distribution app identity, Mac Installer Distribution identity, and App Store Connect API key. The app record `6818813859` and `FileID Internal Testers` group exist; no build was uploaded.
 
-Merged-main runs on `6cde4a817e276b5b325fa36f9a7926e2abdf073a`: Linux `37140880192`, macOS `37140880181`, repository policy `37140880104`, Linux Flatpak `37140880171`, Windows app `.NET` `37140880225`, and native tools `37140880202` pass. Windows engine `37140880180` was still running its x64 job on `adlon-fileid-windows`. Linux jobs used `adlon-fileid-linux`; Windows app x64/ARM64 and engine cross-build jobs used `adlon-fileid-windows`. The Adlon example-data corpus was not mounted or accessed; these jobs use isolated runner guest disks.
+All seven merged-main workflows pass on `6cde4a817e276b5b325fa36f9a7926e2abdf073a`: Linux `37140880192`, macOS `37140880181`, repository policy `37140880104`, Linux Flatpak `37140880171`, Windows app `.NET` `37140880225`, Windows engine `37140880180`, and native tools `37140880202`. Linux used `adlon-fileid-linux`; Windows app and cross-engine jobs used `adlon-fileid-windows`. Native x64 Windows engine tests and smoke probes passed on Adlon. The example-data corpus was not mounted or accessed; jobs used isolated runner guest disks.
 
 ## 2026-10-03 — TestFlight sandbox and App Store Connect setup
 
