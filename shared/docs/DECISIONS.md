@@ -3547,3 +3547,7 @@ Scan queue delay is an ephemeral per-file value and is reported only as aggregat
 ## 2026-10-03 — Resolve only confirmed People names in chat
 
 Chat identity terms are matched against user-managed People labels and first-name aliases, then constrained to existing face prints and non-stale video observations before result limits. Unknown clusters are excluded; ambiguous exact first names return all matching confirmed identities. Return stored non-stale video appearances as timestamped person evidence so chat can seek to the observation; label unedited model links unverified until corrected. Keep keyword action terms in the query and preserve selected identity through refinements. This uses existing catalog records and response DTOs, so no schema or IPC migration is needed. Semantic/event-group retrieval remains separate work.
+
+## 2026-10-03 — Validate App Store profile identifiers and nested code signatures
+
+Apple's macOS App Store provisioning profile uses `com.apple.application-identifier` and may store the bundle identifier with a team prefix. Accept either entitlement key and verify the suffix against the configured bundle ID. The MLX `mlx.metallib` is nested code for strict deep verification; sign it explicitly before signing and verifying the containing app. Keep these checks in the packaging script and policy fixture. Local package validation now passes; upload and sandbox runtime acceptance remain separate gates.
