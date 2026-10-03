@@ -1,5 +1,9 @@
 # Architecture — cross-platform overview
 
+## Native vector-index storage groundwork (2026-10-02)
+
+The existing engine-owned Swift HNSW implementation can serialize and restore bounded binary graph snapshots. Each contains a model identity, source-revision token, graph/RNG state and checksum. Atomic cache writes enforce read-only-location protection. Corrupt or incompatible snapshots throw rather than producing partial indexes. These APIs are not yet connected to catalog retrieval; SQLite remains the source of truth and durable change tracking must establish the revision token before reuse.
+
 ## macOS semantic-cache compatibility (2026-10-02)
 
 The engine writes CLIP embeddings with the shared pinned artifact/preprocessing identity. Native semantic search and restructure accept only compatible finite normalized 512-dimensional vectors. Rescans refresh legacy image/video embeddings through fresh inference without rebuilding user evidence. SQLite remains authoritative and the native retrieval loop is still a flat scan; persistent incremental indexes and engine-owned hybrid search remain outstanding.

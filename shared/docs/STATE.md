@@ -1,5 +1,19 @@
 # FileID — State
 
+
+## 2026-10-02 — native index recall regression and benchmark
+
+Release-mode benchmarking exposed loss of routes between dense clusters in the existing closest-only HNSW pruning. Diversified neighbour selection during insertion and trimming improved synthetic mean recall at ten from 62.5% to 100% on 100,000 × 512 vectors, and from 57% to 100% on 16,000 × 128 vectors. Each run uses twenty unseen queries and exact top-ten comparison. The final 100k run measured 1.07 ms warm index-only p95, 62.91 s build, 1.07 s save and 0.58 s load; restored results were identical. These are synthetic index measurements, not face precision or end-to-end search claims.
+
+A smaller clustered retrieval regression test and reproducible release benchmark are included. Snapshot construction version 2 rejects older closest-only graphs. All remaining persistent catalog integration and held-out accuracy gates stay open. Cache-compatibility PR #195 passed both required checks at `686df8603c786800e128ecb8a9f1ec9d28d0f868` and merged as `144bc4b20851e8b0baf873103200225e0c57192d`. Health merged-main Windows checks are still compiling on Adlon; no failures are reported.
+
+
+## 2026-10-02 — native nearest-neighbor snapshot groundwork
+
+The existing Swift HNSW graph now has bounded, checksummed binary snapshots tied to an exact model identity and caller-supplied source revision. Restoration preserves node IDs, tombstones, graph topology and RNG state, so subsequent inserts retain deterministic behavior. Atomic disk writes use the shared read-only-location guard; invalid files, graphs, model identities and source revisions are rejected. Four new tests cover restored search/insertion equality, empty indexes, incompatible/stale snapshots, corrupted/truncated/bounded malformed input and protected output rejection.
+
+This is a storage API, not yet a catalog-integrated persistent index. Automatic cache reuse, SQLite change tracking, entity mapping, rebuild recovery, hybrid engine retrieval and latency acceptance remain unfinished. The snapshot-only implementation passed all 449 native tests across 92 suites. The final combined diversified graph change passes all 450 native tests across 93 suites, including the clustered recall regression. No dependency, IPC or database schema changed.
+
 ## 2026-10-02 — macOS verified CLIP embedding compatibility
 
 Mac search and restructure now use a shared CLIP space identity derived from the pinned image encoder, text encoder, tokenizer artifacts and preprocessing version. Local model loading verifies those artifact hashes. Newly inferred vectors must be finite, 512-dimensional and normalized; legacy `mobileclip_s2`, malformed and failed-file candidates are excluded rather than relabeled. Rescans refresh legacy image/video caches without replacing accepted names, user tags or face assignments. An unrenderable legacy OBJ clears only its incompatible derived embedding and records the completed attempt.

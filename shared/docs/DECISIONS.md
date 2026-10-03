@@ -3479,3 +3479,13 @@ The main.rs source-boundary digest update covers only the reviewed health dispat
 The native image worker actually loads OpenCLIP ViT-B/32 while its writer labeled every vector `mobileclip_s2`. Dimension alone cannot establish compatibility. Use one space identity derived from all four pinned artifacts and the existing RGB stretch/BPE/L2 preprocessing contract; verify local files before loading image/text sessions. Refresh legacy derived caches through fresh inference while preserving user evidence. Reject invalid vectors at insertion and retrieval. Keep SQLite authoritative; a future persistent index must use the same identity and remain rebuildable. This adds no dependency and promotes no new model.
 
 The owner deferred new Windows/Linux implementation and physical validation until working on the PC. Continue the full Mac plan and retain narrowly recoverable port work in verified remote tags.
+
+
+## 2026-10-02 — Reuse native HNSW for persistent-index groundwork
+
+Keep the existing Accelerate-backed Swift graph and add a versioned binary storage API, avoiding a new package. Preserve graph IDs, tombstones and RNG state across restart so incremental insertion does not silently change identities or approximate results. Bind snapshots to both model identity and a caller-supplied source revision; verify checksums and graph structure before accepting them. Bound disk reads, dimensions, graph size, neighbour counts and layer depth, and enforce read-only output guards. Catalog integration must supply durable SQLite invalidation and external entity mapping before any automatic reuse; this API alone does not satisfy persistent retrieval acceptance.
+
+
+## 2026-10-02 — Preserve diverse routes in native HNSW
+
+A release-mode synthetic benchmark exposed poor nearest-neighbour recall from closest-only insertion/pruning: 62.5% mean recall at ten on 100,000 × 512 vectors, and 57% on the smaller 16,000 × 128 fixture, including zero-recall queries. Apply diversified neighbour selection during both insertion and trimming, following the [original HNSW paper](https://arxiv.org/abs/1603.09320). Candidate ordering breaks equal-distance ties by node ID to preserve deterministic behavior. Both fixtures reached 100% on their twenty unseen queries; the final 100k run measured 1.07 ms warm index-only p95. Snapshots use construction version 2 so earlier closest-only graphs cannot be reused silently. The committed benchmark and JSON preserve parameters, compiler and source hashes. This does not establish real face accuracy or semantic retrieval acceptance; those gates remain open.
