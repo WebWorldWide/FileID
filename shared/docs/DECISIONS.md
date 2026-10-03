@@ -3513,3 +3513,11 @@ Reuse catalog_jobs priority/checkpoint/state fields for pinned-model `catalogInd
 
 
 Hosted Swift release compilation exceeded its type-check budget for the detached index-worker closure despite local Debug validation. Extract the body into a typed static helper and split nested arithmetic, retaining ownership, admission, job state and cancellation behavior. Verify Release products/probes as well as native tests; a Debug build alone is insufficient for this gate.
+
+## 2026-10-03 — Share resource admission across native analysis work
+
+The macOS engine now uses one process-wide actor for estimated memory, CPU concurrency, and I/O concurrency claims. Keep the current system/app RAM reserve and free-memory floor; do not add a second independent estimator for index and VLM paths. The resident VLM keeps its memory lease after load, while load-time CPU/I/O claims are returned. Catalog indexing is background priority and persists a paused catalog job when it cannot fit beside interactive resident work; interactive requests precede waiting background work, but admitted jobs are not preempted. On Apple Silicon GPU/ANE allocations share unified memory, so the scheduler charges process memory and exposes no separate accelerator-memory budget. The actor is process-local; durable catalog job state remains in SQLite. Its measured coverage is currently the native index and DeepAnalyze paths, not every file worker or a multi-model runtime.
+
+## 2026-10-03 — Reuse the verified Metal library builder
+
+The standard macOS launcher now delegates MLX kernel compilation to `scripts/ensure_mlx_metallib.sh`. That helper applies the pinned MLX/Xcode 27 compatibility adjustments to the generated SwiftPM checkout and builds the library in a temporary directory. Keep the reviewed bootstrap digest and its equality test synchronized whenever the launcher changes.

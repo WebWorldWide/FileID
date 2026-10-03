@@ -45,7 +45,7 @@ enum CatalogIndexJob {
 
     static func finish(_ pool: DatabasePool, error: Error? = nil) throws {
         try pool.write { db in
-            let state = error is CancellationError || error is AdmissionDeferred ? "paused" : error == nil ? "completed" : "failed"
+            let state = error is CancellationError || error is AdmissionDeferred || error is ResourceScheduler.AdmissionError ? "paused" : error == nil ? "completed" : "failed"
             try db.execute(sql: "UPDATE catalog_jobs SET state=?,progress=CASE WHEN ?='completed' THEN 1 ELSE progress END,error=?,updated_at=? WHERE id=? AND state='running'", arguments: [state,state,error?.localizedDescription,Date().timeIntervalSince1970,id])
         }
     }
