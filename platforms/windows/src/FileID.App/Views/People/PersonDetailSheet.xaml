@@ -33,7 +33,7 @@
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
 
-        <Grid Grid.Row="1" ColumnSpacing="10" RowSpacing="8">
+        <Grid Grid.Row="1" x:Name="NameFieldsPanel" ColumnSpacing="10" RowSpacing="8">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -50,6 +50,11 @@
             <TextBox Grid.Row="0" Grid.Column="2" x:Name="MiddleBox" Header="Middle"  />
             <TextBox Grid.Row="0" Grid.Column="3" x:Name="LastBox"   Header="Last"    />
             <TextBox Grid.Row="0" Grid.Column="4" x:Name="SuffixBox" Header="Suffix"  PlaceholderText="Jr." />
+            <CheckBox Grid.Row="1"
+                      Grid.ColumnSpan="5"
+                      x:Name="IsUnknownCheckBox"
+                      Content="Mark this person as unknown"
+                      AutomationProperties.HelpText="Hide this person's name from People suggestions and summaries." />
         </Grid>
 
         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">

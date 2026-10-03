@@ -192,12 +192,22 @@
                                        Stretch="UniformToFill"
                                        Width="120" Height="120" />
                             </Border>
-                            <TextBlock Grid.Row="1"
-                                       Text="{x:Bind Caption}"
-                                       Margin="0,8,0,0"
-                                       Style="{StaticResource BodyTextBlockStyle}"
-                                       TextAlignment="Center"
-                                       TextTrimming="CharacterEllipsis"/>
+                            <Button Grid.Row="1"
+                                    Margin="0,8,0,0"
+                                    Padding="4,2"
+                                    Background="Transparent"
+                                    BorderThickness="0"
+                                    HorizontalAlignment="Center"
+                                    IsTabStop="True"
+                                    KeyDown="OnClusterKeyDown"
+                                    Click="OnClusterEditNameClicked"
+                                    AutomationProperties.Name="Edit person name"
+                                    AutomationProperties.HelpText="Open this person's details and edit their name.">
+                                <TextBlock Text="{x:Bind Caption}"
+                                           Style="{StaticResource BodyTextBlockStyle}"
+                                           TextAlignment="Center"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Button>
                             <!-- FEAT-CRIT-1: per-card selection checkbox.
                                  Visibility driven from PeopleView code-behind
                                  (UpdateSelectionVisibility on each Loaded). -->

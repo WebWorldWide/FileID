@@ -17,7 +17,8 @@ public sealed class MissingFileVisibilityContractTests
         Assert.Contains("WHERE failed = 0\n                  AND vlm_proposed_name", readStore, StringComparison.Ordinal);
         Assert.Contains("SELECT COUNT(*) FROM files WHERE failed = 0 AND vlm_proposed_name", readStore, StringComparison.Ordinal);
         Assert.Contains("SELECT kind, COUNT(*) FROM files WHERE failed = 0 GROUP BY kind", readStore, StringComparison.Ordinal);
-        Assert.Contains("FROM files WHERE failed = 0", restructure, StringComparison.Ordinal);
+        Assert.Contains("FROM files f", restructure, StringComparison.Ordinal);
+        Assert.Contains("WHERE f.failed = 0", restructure, StringComparison.Ordinal);
     }
 
     private static string PathInRepo(params string[] parts)

@@ -26,6 +26,7 @@
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>false</EnableMsixTooling>
     <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSdkBootstrapInitialize>false</WindowsAppSdkBootstrapInitialize>
     <!-- Framework-dependent mode. Self-contained mode (the inverse) bundles
          the WinAppSDK runtime into the publish folder, but on Windows 11
          build 26200+ the bundled Microsoft.UI.Xaml.dll fast-fails (0xC000027B)

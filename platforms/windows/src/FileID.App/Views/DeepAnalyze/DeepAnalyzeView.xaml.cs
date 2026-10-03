@@ -169,6 +169,9 @@ public sealed partial class DeepAnalyzeView : UserControl
     }
 
     private void OnSelectionRegistryChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnSelectionRegistryChanged), () => OnSelectionRegistryChangedCore(sender, e));
+
+    private void OnSelectionRegistryChangedCore(object? sender, PropertyChangedEventArgs e)
         => DispatcherQueue.TryEnqueue(SyncSelectionButtons);
 
     private void SyncSelectionButtons()

@@ -70,6 +70,14 @@ public sealed partial class DrillDownSheet : UserControl
         SelectableRepeater.Visibility = Visibility.Visible;
     }
 
+    private void OnSelectionElementPrepared(ItemsRepeater sender, ItemsRepeaterElementPreparedEventArgs args)
+    {
+        if (args.Element is not FrameworkElement element) return;
+        element.DataContext = RestructureView.ResolveRepeaterItem<RestructureFileRowVm>(
+            sender.ItemsSource,
+            args.Index);
+    }
+
     private void OnSelectableCheckClicked(object sender, RoutedEventArgs e)
     {
         if (sender is CheckBox checkBox && checkBox.DataContext is RestructureFileRowVm row)

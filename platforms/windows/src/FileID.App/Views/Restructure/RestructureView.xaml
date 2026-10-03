@@ -331,7 +331,8 @@
                                        Margin="0,0,0,8"
                                        AutomationProperties.HeadingLevel="Level2" />
                             <ItemsRepeater x:Name="RecommendationsRepeater"
-                                           ItemsSource="{x:Bind _recommendations, Mode=OneWay}">
+                                           ItemsSource="{x:Bind _recommendations, Mode=OneWay}"
+                                           ElementPrepared="OnRecommendationElementPrepared">
                                 <ItemsRepeater.Layout>
                                     <StackLayout Orientation="Vertical" Spacing="6" />
                                 </ItemsRepeater.Layout>
@@ -427,7 +428,8 @@
                                                 <StackPanel Margin="52,10,0,0"
                                                             Spacing="6"
                                                             Visibility="{x:Bind ExpandedVisibility, Mode=OneWay}">
-                                                    <ItemsRepeater ItemsSource="{x:Bind Files, Mode=OneWay}">
+                                                    <ItemsRepeater ItemsSource="{x:Bind Files, Mode=OneWay}"
+                                                                   ElementPrepared="OnFileElementPrepared">
                                                         <ItemsRepeater.Layout>
                                                             <StackLayout Orientation="Vertical" Spacing="4" />
                                                         </ItemsRepeater.Layout>

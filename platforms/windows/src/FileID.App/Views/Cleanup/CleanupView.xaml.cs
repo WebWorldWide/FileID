@@ -114,6 +114,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnViewModelPropertyChanged), () => OnViewModelPropertyChangedCore(sender, e));
+
+    private void OnViewModelPropertyChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
@@ -184,6 +187,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     private void OnGroupOrMemberChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnGroupOrMemberChanged), () => OnGroupOrMemberChangedCore(sender, e));
+
+    private void OnGroupOrMemberChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
         if (e.PropertyName is nameof(DuplicateMember.IsKeeper) or nameof(DuplicateGroup.IsSkipped))
@@ -396,9 +402,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             return;
         }
 
-        // UndoStack still captures the same reply independently (it listens
-        // on its own PropertyChanged subscription); leave it in place.
-        Services.UndoStack.CaptureNextBulkResult(
+        // Register undo capture with the waiter so its lifetime follows the
+        // engine terminal or generation transition.
+        Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
             async batchId =>
@@ -406,8 +412,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try
                 {
-                    await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                    return true;
+                return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId);
                 }
                 catch { return false; }
             });
@@ -421,7 +426,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
                 () => ViewModels.EngineClient.Instance.TrashExactFilesAsync(proof.Identities),
-                ExactCleanupProofBuilder.EngineTimeout(proof.AuthorizationBytes));
+                timeout: Timeout.InfiniteTimeSpan,
+                beforeSend: beforeSend);
             if (result.Failed > 0 || !BulkActionResultTruth.ConfirmsExactSuccess(result, ids))
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;
@@ -614,14 +620,15 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             await ShowAlertAsync("Duplicates changed", "One or more selected files no longer match their keeper. Refresh Cleanup and review the group before trying again.");
             return;
         }
-        // UndoStack still captures the same reply independently; leave it in place.
-        Services.UndoStack.CaptureNextBulkResult(
+        // Register undo capture with the waiter so its lifetime follows the
+        // engine terminal or generation transition.
+        Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Count} duplicate{(ids.Count == 1 ? "" : "s")}",
             async batchId =>
             {
                 if (string.IsNullOrEmpty(batchId)) return false;
-                try { await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); return true; }
+                try { return await ViewModels.EngineClient.Instance.RestoreFromTrashAsync(batchId); }
                 catch { return false; }
             });
 
@@ -632,7 +639,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             var result = await ViewModels.EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
                 () => ViewModels.EngineClient.Instance.TrashExactFilesAsync(proof.Identities),
-                ExactCleanupProofBuilder.EngineTimeout(proof.AuthorizationBytes));
+                timeout: Timeout.InfiniteTimeSpan,
+                beforeSend: beforeSend);
             if (result.Failed > 0 || !BulkActionResultTruth.ConfirmsExactSuccess(result, ids))
             {
                 var first = result.Messages?.FirstOrDefault(m => !m.Ok)?.Message;

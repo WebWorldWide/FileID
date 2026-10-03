@@ -552,15 +552,11 @@ async fn run_deep_analyze_batch(
                     )
                     .unwrap_or(false)
                 } else {
-                    // F-C1-020: the full pass is model-aware too. "Already done"
-                    // must mean "captioned BY THIS MODEL" (vlm_model match), not
-                    // "captioned by anything" — otherwise switching the VLM and
-                    // re-running skips every file the OLD model captioned, so the
-                    // new model never runs. Require both a non-null caption AND a
-                    // matching vlm_model so a model switch re-analyzes.
+                    // Only a completed full pass satisfies skip-existing. A
+                    // caption-only or tags-only run may leave partial results.
                     conn.query_row(
                         "SELECT EXISTS(SELECT 1 FROM files \
-                         WHERE id=?1 AND vlm_model=?2 AND vlm_description IS NOT NULL)",
+                         WHERE id=?1 AND vlm_full_model = ?2)",
                         rusqlite::params![file_id, model_kind],
                         |r| r.get::<_, bool>(0),
                     )

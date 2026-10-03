@@ -23,6 +23,9 @@ public sealed partial class SidebarFolderHeader : UserControl
     }
 
     private void OnAppViewModelChanged(object? sender, PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnAppViewModelChanged), () => OnAppViewModelChangedCore(sender, e));
+
+    private void OnAppViewModelChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(AppViewModel.FolderPath)
                           or nameof(AppViewModel.FolderDisplay)

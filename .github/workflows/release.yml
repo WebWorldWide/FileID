@@ -44,6 +44,18 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Verify tag matches product version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          FILEID_RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          ./build/verify-version.ps1
+          $expectedTag = "v$((Get-Content VERSION -Raw).Trim())"
+          if ($env:FILEID_RELEASE_REF -ne $expectedTag) {
+            throw "Release tag '$($env:FILEID_RELEASE_REF)' must match the product version '$expectedTag'."
+          }
+
       - name: Resolve signing mode
         id: mode
         shell: pwsh
@@ -128,7 +140,12 @@ jobs:
             "dist/installer/FileID-x64.msi",
             "dist/installer/FileID-arm64.msi"
           )
-          foreach ($asset in $assets) { Copy-Item -LiteralPath $asset -Destination $stage }
+        foreach ($asset in $assets) { Copy-Item -LiteralPath $asset -Destination $stage }
+        $checksums = Get-ChildItem -LiteralPath $stage -File | Sort-Object Name | ForEach-Object {
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+          "$hash  $($_.Name)"
+        }
+        $checksums | Set-Content -LiteralPath (Join-Path $stage "SHA256SUMS.txt") -Encoding ascii
 
       - name: Upload release-ready assets
         if: steps.mode.outputs.publish == 'true'

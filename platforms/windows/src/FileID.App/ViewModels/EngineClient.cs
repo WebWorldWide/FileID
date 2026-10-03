@@ -278,6 +278,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _deepAnalyzeComplete, value);
     }
 
+    public bool DeepAnalyzeCommandInFlight => _deepAnalyzeSlot.Current is not null;
+
     private ModelDownloadProgress? _modelDownloadProgress;
     public ModelDownloadProgress? ModelDownloadProgress
     {
@@ -501,14 +503,35 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // in play, ship with the constant defined and the strict path
             // refuses Unsigned + tamper-mismatched binaries.
             var expectedThumb = Environment.GetEnvironmentVariable("FILEID_EV_THUMBPRINT");
+            FileStream? spawnPin = null;
+            try
+            {
+                spawnPin = new FileStream(enginePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            }
+            catch (FileNotFoundException)
+            {
+                // Let the trust checker report a stable NotFound verdict.
+            }
+            catch (DirectoryNotFoundException)
+            {
+                // Let the trust checker report a stable NotFound verdict.
+            }
+            catch (Exception ex)
+            {
+                CrashReason = "Engine binary could not be pinned for verification: " + ex.Message;
+                State = LifecycleState.Crashed;
+                DebugLog.Error("EngineClient: failed to lease engine image before verification.");
+                return;
+            }
+            using var spawnPinLease = spawnPin;
             // Off the UI thread: WinVerifyTrust does SHA-256 over the multi-MB engine
             // binary AND can make an OCSP/CRL revocation round-trip — synchronously on
             // the startup (UI) thread before the first frame, and again on every
             // crash-respawn. await Task.Run keeps the security gate (the spawn still
             // waits for the verdict) while unblocking first paint; the continuation
             // resumes on the UI thread. (audit Pc / H11)
-            var verdict = await Task.Run(
-                () => WinVerifyTrustChecker.Verify(enginePath, expectedThumbprintHex: expectedThumb));
+            var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
+                enginePath, expectedThumbprintHex: expectedThumb));
             switch (verdict)
             {
                 case IntegrityVerdict.NotFound:
@@ -622,8 +645,10 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 // (debug in dev profiles, info in release).
                 psi.Environment["FILEID_LOG"] = Environment.GetEnvironmentVariable("FILEID_LOG") ?? "info";
 
-                var p = Process.Start(psi)
-                        ?? throw new InvalidOperationException("Process.Start returned null");
+                Process startedProcess;
+                startedProcess = Process.Start(psi)
+                    ?? throw new InvalidOperationException("Process.Start returned null");
+                var p = startedProcess;
                 _process = p;
                 var generation = Interlocked.Increment(ref _spawnGeneration);
                 PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
@@ -1001,8 +1026,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private void Cleanup()
     {
-        _healthWaiters.FailGeneration(SpawnGeneration, new InvalidOperationException("The engine generation stopped."));
-        _scanStartSlot.ReleaseGeneration(SpawnGeneration);
+        var retiringGeneration = SpawnGeneration;
+        _healthWaiters.FailGeneration(retiringGeneration, new InvalidOperationException("The engine generation stopped."));
+        RetireDeepAnalyzeGeneration(retiringGeneration);
+        if (_scanStartSlot.ReleaseGeneration(SpawnGeneration) is { } scanStart)
+        {
+            scanStart.Payload.Confirmation.TrySetException(
+                new InvalidOperationException("The engine stopped before confirming the scan start."));
+        }
         Interlocked.Increment(ref _scanPresentationRevision);
         try { _readCts?.Cancel(); } catch { }
         _readCts?.Dispose();
@@ -1222,6 +1253,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        owner.Payload.Confirmation.TrySetResult(true);
         if (_scanStartSlot.Release(owner))
         {
             Interlocked.Increment(ref _scanPresentationRevision);
@@ -1236,6 +1268,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        owner.Payload.Confirmation.TrySetException(
+            new InvalidOperationException("The engine rejected the scan start."));
         if (_scanStartSlot.Release(owner)
             && owner.Generation == SpawnGeneration
             && owner.Revision == Volatile.Read(ref _scanPresentationRevision))
@@ -1473,6 +1507,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         }
                         break;
                     case DeepAnalyzeCompleteEvent dac:
+                        if (!CompleteDeepAnalyzeCommand(generation, dac.Result)) break;
                         DeepAnalyzeComplete = dac.Result;
                         DeepAnalyzeProgress = null;
                         DeepAnalyzeStarting = null;

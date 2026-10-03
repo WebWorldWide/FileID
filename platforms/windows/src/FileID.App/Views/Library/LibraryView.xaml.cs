@@ -22,6 +22,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 {
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
+    private int _trashInFlight;
     private readonly ThumbnailService _thumbnails = new();
     // Live-tile streaming during a scan. Mirrors macOS LibraryView's
     // .onChange(of: engine.lastBatch?.batchIndex) — refresh the grid
@@ -426,6 +427,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnSelectAllAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnSelectAllAccelerator), () =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
             OnSelectAllClicked(this, new RoutedEventArgs());
             args.Handled = true;
         });
@@ -435,6 +437,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnUndoAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnUndoAccelerator), () =>
         {
+            if (KeyboardFocusGuard.IsTextEditing(XamlRoot)) return;
             if (!UndoStack.Instance.CanUndo) return;
             OnUndoLastClicked(this, new RoutedEventArgs());
             args.Handled = true;
@@ -863,6 +866,27 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             int count = ViewModel.Items.Count;
             if (count == 0) return;
 
+            var shift = Microsoft.UI.Input.InputKeyboardSource
+                .GetKeyStateForCurrentThread(VirtualKey.Shift)
+                .HasFlag(CoreVirtualKeyStates.Down);
+            if (e.Key == VirtualKey.Application || (e.Key == VirtualKey.F10 && shift))
+            {
+                int targetIndex = _focusedIndex;
+                if (targetIndex < 0 && _lastClickedTile is not null)
+                {
+                    targetIndex = ViewModel.Items.IndexOf(_lastClickedTile);
+                }
+
+                if (targetIndex >= 0 && targetIndex < count
+                    && Repeater.TryGetElement(targetIndex) is FrameworkElement target
+                    && target.ContextFlyout is { } flyout)
+                {
+                    flyout.ShowAt(target);
+                    e.Handled = true;
+                }
+                return;
+            }
+
             int cur = _focusedIndex >= 0 ? Math.Min(_focusedIndex, count - 1) : 0;
             int last = count - 1;
 
@@ -891,24 +915,21 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
             int cols = ColumnsPerRow();
             int page = cols * Math.Max(1, VisibleRows());
-            int target;
+            int focusTarget;
             switch (e.Key)
             {
-                case VirtualKey.Left: target = cur - 1; break;
-                case VirtualKey.Right: target = cur + 1; break;
-                case VirtualKey.Up: target = cur - cols; break;
-                case VirtualKey.Down: target = cur + cols; break;
-                case VirtualKey.Home: target = 0; break;
-                case VirtualKey.End: target = last; break;
-                case VirtualKey.PageUp: target = cur - page; break;
-                case VirtualKey.PageDown: target = cur + page; break;
+                case VirtualKey.Left: focusTarget = cur - 1; break;
+                case VirtualKey.Right: focusTarget = cur + 1; break;
+                case VirtualKey.Up: focusTarget = cur - cols; break;
+                case VirtualKey.Down: focusTarget = cur + cols; break;
+                case VirtualKey.Home: focusTarget = 0; break;
+                case VirtualKey.End: focusTarget = last; break;
+                case VirtualKey.PageUp: focusTarget = cur - page; break;
+                case VirtualKey.PageDown: focusTarget = cur + page; break;
                 default: return;
             }
 
-            var shift = Microsoft.UI.Input.InputKeyboardSource
-                .GetKeyStateForCurrentThread(VirtualKey.Shift)
-                .HasFlag(CoreVirtualKeyStates.Down);
-            MoveFocusTo(target, extend: shift);
+            MoveFocusTo(focusTarget, extend: shift);
             e.Handled = true;
         });
 
@@ -1085,6 +1106,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private async void OnTrashSelectedClicked(object sender, RoutedEventArgs e)
     {
+        if (Interlocked.CompareExchange(ref _trashInFlight, 1, 0) != 0) return;
+        try
+        {
         var ids = ViewModel.SelectedItems.Select(t => t.Id).ToArray();
         if (ids.Length == 0) return;
 
@@ -1106,11 +1130,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         // Listen for the engine's BulkActionResult — it tags the
         // action with "trashFiles:<batch_id>" so we can plumb undo. The
-        // UndoStack listener and WaitForBulkActionResultAsync below both
-        // subscribe independently for the same result; WaitFor resets
-        // LastBulkAction to null first (which CaptureNextBulkResult guards
-        // against), so they coexist.
-        Services.UndoStack.CaptureNextBulkResult(
+        // Register undo capture inside the owning waiter before its result
+        // handler, so a terminal event cannot release the waiter first.
+        Func<IDisposable?> beforeSend = () => Services.UndoStack.CaptureNextBulkResult(
             "trashFiles:",
             $"trash {ids.Length} file{(ids.Length == 1 ? "" : "s")}",
             async batchId =>
@@ -1118,8 +1140,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 if (string.IsNullOrEmpty(batchId)) return false;
                 try
                 {
-                    await EngineClient.Instance.RestoreFromTrashAsync(batchId);
-                    return true;
+                return await EngineClient.Instance.RestoreFromTrashAsync(batchId);
                 }
                 catch { return false; }
             });
@@ -1134,7 +1155,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             result = await EngineClient.Instance.WaitForBulkActionResultAsync(
                 "trashFiles",
                 () => EngineClient.Instance.TrashFilesAsync(ids),
-                TimeSpan.FromSeconds(30));
+                TimeSpan.FromSeconds(30),
+                beforeSend: beforeSend);
         }
         catch (TimeoutException ex)
         {
@@ -1178,6 +1200,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 : $"Moved {result.Succeeded}; {result.Failed} couldn't be moved to the Recycle Bin{detail}. They may be open in another app or you may not have permission.";
             await ShowAlertAsync("Some files couldn't be recycled", body);
             RequestLibraryRefresh(force: true);
+        }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _trashInFlight, 0);
         }
     }
 
@@ -1299,7 +1326,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
         var sheet = new FilePreviewSheet();
         sheet.SetSiblings(siblings, tileIndex);
-        sheet.SetFile(tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
 
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
@@ -1315,6 +1341,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // WinUI 3's default caps at ~640×480 which would crop our sidebar.
         dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
+        dialog.Opened += (_, _) => sheet.SetFile(
+            tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
 
         // The ContentDialog — not the sheet — owns keyboard focus once shown, so
@@ -1328,6 +1356,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             handledEventsToo: true);
 
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
+        finally { sheet.CloseFromHost(); }
     }
 
     private void OnContextOpen(object sender, RoutedEventArgs e)

@@ -1,7 +1,6 @@
-﻿// SidebarQueueList code-behind. Builds rows for each pending job.
-// Hidden when the queue is empty.
-
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
@@ -9,32 +8,23 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Text;
 using Windows.UI;
 
 namespace FileID.Views.Sidebar;
 
 public sealed partial class SidebarQueueList : UserControl
 {
-    // Stable per-job-rows container, created once and reused. Mutating the
-    // parent's Children mid-event-burst (the old rebuild-on-every-QueueState
-    // design) races the layout pass and fast-fails the renderer — so only this
-    // container's own children ever change.
-    private StackPanel? _rowsContainer;
-
-    // Two brushes per BuildRow (running vs idle background) used to be
-    // allocated fresh on every QueueState event — 10 Hz × 50 rows = 500
-    // SolidColorBrush allocations/sec, each a DispatcherObject. Cache them
-    // once on the UI thread at first use and reuse.
+    private readonly ObservableCollection<QueueRow> _visibleRows = new();
     private static readonly SolidColorBrush RunningBackground =
         new(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
-    private static readonly SolidColorBrush TransparentBackground =
-        new(Colors.Transparent);
-    private static readonly FontFamily FluentIconsFont =
-        new("Segoe Fluent Icons");
+    private static readonly SolidColorBrush TransparentBackground = new(Colors.Transparent);
+    private static readonly FontFamily FluentIconsFont = new("Segoe Fluent Icons");
 
     public SidebarQueueList()
     {
         InitializeComponent();
+        JobsRepeater.ItemsSource = _visibleRows;
         Loaded += (_, _) => Sync();
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Unloaded += (_, _) => EngineClient.Instance.PropertyChanged -= OnEngineChanged;
@@ -43,118 +33,49 @@ public sealed partial class SidebarQueueList : UserControl
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun("SidebarQueueList.OnEngineChanged", () =>
         {
-            if (e.PropertyName is nameof(EngineClient.QueueState))
-            {
-                DebugLog.Debug($"[ENGINE-SUB:SidebarQueueList] {e.PropertyName}");
-                DispatcherQueue.TryEnqueue(Sync);
-            }
+            if (e.PropertyName != nameof(EngineClient.QueueState)) return;
+            DebugLog.Debug($"[ENGINE-SUB:SidebarQueueList] {e.PropertyName}");
+            DispatcherQueue.TryEnqueue(Sync);
         });
 
     private void Sync()
     {
-        var qs = EngineClient.Instance.QueueState;
-        if (qs is null || (qs.Running is null && qs.Pending.Count == 0))
-        {
-            Root.Visibility = Visibility.Collapsed;
-            return;
-        }
-        Root.Visibility = Visibility.Visible;
+        var state = EngineClient.Instance.QueueState;
+        var desired = new List<(QueuedJob Job, bool Running)>();
+        if (state?.Running is { } running) desired.Add((running, true));
+        if (state is not null) desired.AddRange(state.Pending.Select(job => (job, false)));
 
-        TotalEtaText.Text = qs.TotalEtaSeconds is { } eta && eta > 0
+        Root.Visibility = desired.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        TotalEtaText.Text = state?.TotalEtaSeconds is { } eta && eta > 0
             ? "≈ " + FormatDuration(eta)
-            : "";
+            : string.Empty;
 
-        // replace the ItemsRepeater with a stable container exactly
-        // ONCE (lazy). Subsequent syncs only mutate that container's
-        // Children — never the parent panel — so the renderer never sees
-        // a sibling list change. See _rowsContainer field comment.
-        if (_rowsContainer is null)
+        for (var index = 0; index < desired.Count; index++)
         {
-            _rowsContainer = new StackPanel { Spacing = 4 };
-            if (JobsRepeater.Parent is StackPanel parent)
+            var (job, isRunning) = desired[index];
+            var currentIndex = -1;
+            for (var candidate = index; candidate < _visibleRows.Count; candidate++)
             {
-                int idx = parent.Children.IndexOf(JobsRepeater);
-                // Remove the unused ItemsRepeater + any leftover panels
-                // from earlier imperative-rebuild paths.
-                parent.Children.Remove(JobsRepeater);
-                while (parent.Children.Count > idx)
+                if (_visibleRows[candidate].Id == job.Id)
                 {
-                    parent.Children.RemoveAt(idx);
+                    currentIndex = candidate;
+                    break;
                 }
-                parent.Children.Add(_rowsContainer);
             }
-        }
 
-        // Off-tree build, then in-place swap. WinUI 3 tolerates Children
-        // mutation on a panel that's not currently being measured; the
-        // single Clear+AddRange is one Reset notification rather than N.
-        _rowsContainer.Children.Clear();
-        if (qs.Running is { } running)
-        {
-            _rowsContainer.Children.Add(BuildRow(running, isRunning: true));
-        }
-        foreach (var job in qs.Pending)
-        {
-            _rowsContainer.Children.Add(BuildRow(job, isRunning: false));
-        }
-    }
-
-    private static UIElement BuildRow(QueuedJob job, bool isRunning)
-    {
-        var icon = new FontIcon
-        {
-            FontFamily = FluentIconsFont,
-            Glyph = job.Category switch
+            if (currentIndex < 0)
             {
-                JobCategory.Scan => "",
-                JobCategory.FaceCluster => "",
-                JobCategory.DeepAnalyze => "",
-                _ => "",
-            },
-            FontSize = 11,
-            Opacity = isRunning ? 1.0 : 0.55,
-        };
-        var title = new TextBlock
-        {
-            Text = job.Title,
-            FontSize = 11,
-            FontWeight = isRunning ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-        };
-        var eta = new TextBlock
-        {
-            Text = job.EtaSeconds is { } e && e > 0 ? FormatDuration(e) : "",
-            FontSize = 10,
-            Opacity = 0.5,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
+                _visibleRows.Insert(index, new QueueRow(job, isRunning));
+                continue;
+            }
 
-        var grid = new Grid
-        {
-            Padding = new Thickness(8, 6, 8, 6),
-            CornerRadius = new CornerRadius(8),
-            Background = isRunning ? RunningBackground : TransparentBackground,
-        };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var row = _visibleRows[currentIndex];
+            row.Update(job, isRunning);
+            if (currentIndex != index) _visibleRows.Move(currentIndex, index);
+        }
 
-        Grid.SetColumn(icon, 0);
-        icon.Margin = new Thickness(0, 0, 8, 0);
-        Grid.SetColumn(title, 1);
-        Grid.SetColumn(eta, 2);
-
-        grid.Children.Add(icon);
-        grid.Children.Add(title);
-        grid.Children.Add(eta);
-
-        // Screen-reader name for the queue row: running/queued + title + ETA,
-        // so each pending job announces as one coherent line.
-        var name = (isRunning ? "Running: " : "Queued: ") + job.Title;
-        if (eta.Text.Length > 0) name += $", {eta.Text} remaining";
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(grid, name);
-        return grid;
+        while (_visibleRows.Count > desired.Count)
+            _visibleRows.RemoveAt(_visibleRows.Count - 1);
     }
 
     private static string FormatDuration(double seconds)
@@ -162,5 +83,44 @@ public sealed partial class SidebarQueueList : UserControl
         if (seconds < 60) return $"{seconds:F0}s";
         if (seconds < 3600) return $"{seconds / 60:F0}m";
         return $"{seconds / 3600:F1}h";
+    }
+
+    private sealed class QueueRow : INotifyPropertyChanged
+    {
+        private string _title = string.Empty;
+        private string _eta = string.Empty;
+        private bool _isRunning;
+
+        public QueueRow(QueuedJob job, bool isRunning)
+        {
+            Id = job.Id;
+            Update(job, isRunning);
+        }
+
+        public string Id { get; }
+        public string Title => _title;
+        public string Eta => _eta;
+        public string Glyph => string.Empty;
+        public double IconOpacity => _isRunning ? 1.0 : 0.55;
+        public Windows.UI.Text.FontWeight TitleWeight => _isRunning
+            ? Microsoft.UI.Text.FontWeights.SemiBold
+            : Microsoft.UI.Text.FontWeights.Normal;
+        public Brush RowBackground => _isRunning ? RunningBackground : TransparentBackground;
+        public string AutomationName => (_isRunning ? "Running: " : "Queued: ") + _title
+            + (_eta.Length == 0 ? string.Empty : $", {_eta} remaining");
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public void Update(QueuedJob job, bool isRunning)
+        {
+            if (job.Id != Id) throw new InvalidOperationException("Queue row identity cannot change.");
+            _title = job.Title;
+            _eta = job.EtaSeconds is { } seconds && seconds > 0 ? FormatDuration(seconds) : string.Empty;
+            _isRunning = isRunning;
+            OnPropertyChanged(string.Empty);
+        }
+
+        private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+            => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
 }

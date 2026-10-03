@@ -160,14 +160,14 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          if (Test-Path Tests) {
-            dotnet test FileID.IpcSchema.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            dotnet test FileID.App.Tests/ -c Debug --verbosity minimal
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } else {
-            Write-Host "No Tests/ directory; skipping."
-          }
+          msbuild FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          msbuild FileID.App.Tests/FileID.App.Tests.csproj /t:Restore,Build /p:Configuration=Debug /p:Platform=x64 /v:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 
       # V15.3 Phase 6 gates moved AFTER the build: an earlier placement
