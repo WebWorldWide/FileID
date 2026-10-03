@@ -10,21 +10,21 @@ Local Windows app tests pass 432/432 and the local Store package verifier passes
 
 ## Secondary priority — macOS first (2026-10-03)
 
-Continue the full next-version plan on Mac. The owner has deferred new Windows/Linux feature implementation and physical acceptance until they are on that PC. The Mac app is not complete or release-ready.
+Continue the accepted next-version plan on macOS. The owner deferred new Windows/Linux feature work and physical acceptance until using the PC. The release and TestFlight acceptance are incomplete.
 
-PR #208 improved confirmed-person retrieval and scan admission diagnostics. PR #210 added exact user-edited event-title filters and explicit time search over existing timestamped evidence. Both are merged; PR #210's main SHA is `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. All five main workflows passed on that exact commit. Run IDs and Adlon runner placement are recorded at the top of `shared/docs/STATE.md` and `shared/docs/AGENT_HANDOFF.md`. The feature branch was deleted; `origin` has only `main`.
+PR #212 is merged to `main` at `6cde4a817e276b5b325fa36f9a7926e2abdf073a`, with all seven workflows green. PR #214 adds cautious macOS chapter drafts and is merged at `ba12b17b738bca1567e37daa72ed8cdcc5b985e6`; its exact-head tests pass. The post-merge macOS workflow `37145111901` and repository-policy workflow `37145111879` both pass on `ba12b17b738bca1567e37daa72ed8cdcc5b985e6`. Adlon jobs use isolated guest disks and never mount or access the example-data corpus.
+
+The handoff-doc update PR #215 merged to `main` at `91cdd410cc84a4210e02d153b6caddc35d74d2d8`; repository-policy run `37147137135` passed. Current macOS implementation is on branch `codex/mac-video-transcripts`: it adds timestamped on-device speech passages to the existing timeline catalog. Local validation passes 497 tests in 100 suites plus standard and App Store-sandbox Release builds. Exact-head CI and merge are pending. TestFlight still needs owner-managed signing and App Store Connect assets.
 
 ## TestFlight completion gate
 
-The Mac App Store build path uses separate persistent app-scoped and transient implicit-scope IPC bookmarks for selected source/output folders, a sandbox-inheriting engine helper with bounded access leases, container-local model weights, and a signed package/upload script. App ID `com.fileid.app`, App Store Connect record `6818813859`, and an empty internal group (`FileID Internal Testers`) exist. No build has been uploaded or submitted. CI compiles the `FILEID_APP_STORE` app and engine; package creation, upload, processing, install, and sandbox acceptance still require owner-managed signing assets.
+The App Store build path uses scoped source/output bookmarks, a sandbox-inheriting helper, container-local model weights, and a signed-package/upload script. App ID `com.fileid.app`, App Store Connect record `6818813859`, and the empty `FileID Internal Testers` group exist. No build has been uploaded. Upload remains blocked by the missing Mac App Store provisioning profile, usable Apple Distribution app identity, Mac Installer Distribution identity, and App Store Connect API key. After owner-managed credentials are installed, run `platforms/apple/scripts/testflight.sh`, wait for Apple processing, and validate sandboxed scan/export/model-download behavior. Keep signing material and `.p8` keys out of Git and Adlon.
 
-Do not claim TestFlight-ready until an App Store provisioning profile, Apple Distribution app identity, Mac Installer Distribution signing identity, and App Store Connect API key are installed locally, `scripts/testflight.sh` produces and uploads a signed package, Apple finishes processing, and the sandboxed build passes a real library/export/model-download test. Never put the `.p8` key or certificates into Git or Adlon. The package script checks the profile bundle ID and required MLX metallib before packaging; invoke `platforms/apple/scripts/testflight.sh` after local signing setup. Keep account credentials user-managed.
+## Next Mac increment — make timeline coverage reliable
 
-## Next Mac increment — populate timeline evidence
+The current timeline samples one frame every ten seconds. It now creates clearly labeled low-confidence draft chapters only when a changed caption is supported by the following sample. These drafts do not establish that an event occurred or did not occur. Next add shot/activity proposals, timestamped speech, face tracks, dense candidate analysis, and explicit coverage through long recordings and chunk boundaries. Add quality fixtures for brief actions, overlaps, scene boundaries, and events that cross chunks.
 
-Build on the existing timeline/catalog foundation with bounded, cancellable production of timestamped speech, shots, tracks, and coverage. Preserve chapter ranges and person moments for direct playback. Treat uncovered intervals as unknown; sparse samples do not establish that an event was absent. Add fixtures for long recordings, overlaps, scene boundaries, and events crossing chunks.
-
-Then continue `shared/docs/NEXT_VERSION.md`: measure scheduler pressure, improve face accuracy/speed, implement broad best-take ranking, and finish conversion/enhancement/reframing tools. Keep macOS-first validation and update the persistence docs with each merged increment. For Adlon CI, use guest disks only and never mount or access its example-data volume. Run Windows engine and app workflows serially on the single Windows VM.
+Continue `shared/docs/NEXT_VERSION.md`: improve face accuracy/speed, best-take ranking, conversion/enhancement/reframing, hybrid search, and local model scheduling. Validate macOS changes natively; keep port feature work deferred until the owner is on the PC. Use only isolated Adlon runner guest disks for CI and keep the example-data volume read-only and unmounted.
 
 ## Historical day-end continuation — superseded by Mac-first priority
 
