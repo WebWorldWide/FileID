@@ -1,12 +1,10 @@
 # NEXT — resume here
 
-## Windows Store submission readiness — PR #213 merged
+## Current owner request — Windows Store release (2026-10-03)
 
-PR [#213](https://github.com/WebWorldWide/FileID/pull/213) merged to `main` at `a11cbd09284b7e8305f298baf502473a3ed2b392`. It prepared a CI-built MSIX and runtime files; it did not submit the app to Microsoft Store. Preserve the separate Store checkout and remote branches `codex/windows-store-readiness` and `codex/windows-store-version-bump`.
+PR [#213](https://github.com/WebWorldWide/FileID/pull/213) prepared the Store package path and merged to `main` at `a11cbd09284b7e8305f298baf502473a3ed2b392`. PR [#219](https://github.com/WebWorldWide/FileID/pull/219) raises the Windows Store package to `0.1.1.0`; its exact-head Store workflow [37160912487](https://github.com/WebWorldWide/FileID/actions/runs/37160912487) built and verified `FileID-0.1.1-x64.msix` for identity `AdamNolle.FileID`. SHA-256: `99b8661db9fec40d375cf1f55d06d0acfe18699683d7adc6c211030983216aba`. The Windows app, Linux, Linux packaging, repository policy, Store package, and native tools CI workflows passed on that head. The Windows engine x64 test is still running.
 
-The local Windows app tests passed 432/432, and the downloaded CI package passed the identity/hash verifier. The package from CI run [37153295543](https://github.com/WebWorldWide/FileID/actions/runs/37153295543) is `platforms/windows/dist/store/ci-37153295543/FileID-0.1.0-x64.msix`. `verify-store-package.ps1` passed for `AdamNolle.FileID` v0.1.0.0; SHA-256 is `7bfe659e06113d16759f738a63663845a59016181a5415538856ffd37245cf2a`. Partner Center still needs the current package, pricing/listing completion, genuine screenshots, and final ratings (Current Rating ID was pending). WACK was unavailable in the prior PC session; fresh-profile install/launch/upgrade and GPU/model acceptance remain open. Do not install or run this unsigned package without the required action-time confirmation.
-
-The owner deferred Windows/Linux feature work and physical acceptance until they are on the PC. Review PR #213 and its CI artifacts before continuing; do not modify Adlon example data.
+Main advanced after PR #219 was opened, producing documentation conflicts in `NEXT.md` and `STATE.md`. Merge the latest main update and rerun exact-head CI before merging the PR. The Partner Center product `9PC8HSD86887`, submission `1152921505702035520`, has complete pricing, properties, IARC 12+ / ESRB Teen age ratings, and English listing; automatic publication after certification is selected. It still contains only the validated `0.1.0.0` package. A stale duplicate upload was canceled. The verified `0.1.1.0` artifact remains to upload and validate, then submit for certification. WACK and on-hardware model/GPU acceptance remain unverified. Do not modify Adlon example data.
 
 ## Active priority — macOS first (2026-10-03)
 

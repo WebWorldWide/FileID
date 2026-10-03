@@ -1,3 +1,7 @@
+## 2026-10-03 — Windows Store release continuation
+
+PR #219's exact-head Store workflow built and verified the `AdamNolle.FileID` 0.1.1.0 MSIX. Artifact SHA-256 is `99b8661db9fec40d375cf1f55d06d0acfe18699683d7adc6c211030983216aba`. Repository policy, Linux, Windows app, Linux packaging, Store package, and native tools workflows passed; the Windows engine x64 test remains active. Main advanced during CI, causing conflicts in `NEXT.md` and `STATE.md`; merge the latest `main`, preserve both the new macOS handoff and Store release record, then rerun exact-head checks. Partner Center still has only 0.1.0.0. Its duplicate upload is canceled; the 0.1.1.0 upload and certification submission remain. The in-app browser's documented file-chooser flow timed out twice, so the artifact is not uploaded yet.
+
 ## 2026-10-03 — Windows app test and TestFlight handoff
 
 PR [#213](https://github.com/WebWorldWide/FileID/pull/213) merged to `main` at `a11cbd09284b7e8305f298baf502473a3ed2b392`. The Windows Store package-preparation work is merged, but no Microsoft Store submission has occurred; remaining Partner Center and PC acceptance gates are listed in `NEXT.md`. Preserve the existing Store worktree and remote branches `codex/windows-store-readiness` and `codex/windows-store-version-bump`.

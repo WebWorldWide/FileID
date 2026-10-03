@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="AdamNolle.FileID"
             Publisher="CN=B6BC6354-0217-4C63-8B82-7040B465A25E"
-            Version="0.1.0.0" ProcessorArchitecture="x64" />
+            Version="0.1.1.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>FileID</DisplayName>
     <PublisherDisplayName>Adam Nolle</PublisherDisplayName>
