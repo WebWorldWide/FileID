@@ -88,10 +88,13 @@ import FileIDShared
             }
             try sql.execute(sql: "INSERT INTO persons(id,name,file_count,created_at,is_unknown) VALUES(7,'Grandma',1,0,0)")
             try sql.execute(sql: "INSERT INTO catalog_observations(id,file_id,person_id,start_seconds,end_seconds,source_revision,model_version,confidence,stale) VALUES('grandma-in-video',1,7,12,13,'1:1','test',1,0)")
+            try sql.execute(sql: "INSERT INTO catalog_observations(id,file_id,person_id,start_seconds,end_seconds,source_revision,model_version,confidence,user_edited,stale) VALUES('grandma-confirmed',1,7,14,15,'1:1','test',1,1,0)")
 
             let hits = try CatalogStore.search(sql, query: "opening presents", kinds: ["video"], personIDs: [7])
             #expect(Set(hits.map(\.fileID)) == [1])
             #expect(hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 })
+            #expect(hits.contains { $0.evidenceID == "person:grandma-in-video" && $0.text.contains("unverified appearance") })
+            #expect(hits.contains { $0.evidenceID == "person:grandma-confirmed" && $0.text.contains("user-confirmed appearance") })
             let personOnly = try CatalogStore.search(sql, query: "", kinds: ["video"], personIDs: [7])
             #expect(personOnly.contains { $0.evidenceID == "person:grandma-in-video" && $0.startSeconds == 12 })
         }

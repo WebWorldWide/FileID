@@ -92,7 +92,7 @@ public enum CatalogStore {
             guard filter != nil || peopleFilter != nil else { return [] }
             var hits = try Row.fetchAll(db, sql: """
                 SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files f
-                WHERE (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+                WHERE f.failed=0 AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
                   AND (? IS NULL OR f.id IN (
                     SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
                     UNION SELECT file_id FROM catalog_observations
@@ -146,7 +146,7 @@ public enum CatalogStore {
     private static func personObservationHits(_ db: GRDB.Database, peopleFilter: String?) throws -> [CatalogHit] {
         guard let peopleFilter else { return [] }
         return try Row.fetchAll(db, sql: """
-            SELECT o.id AS observation_id,o.start_seconds,p.name,p.title,p.first_name,p.middle_name,p.last_name,p.suffix,
+            SELECT o.id AS observation_id,o.start_seconds,o.user_edited,p.name,p.title,p.first_name,p.middle_name,p.last_name,p.suffix,
                    f.id,f.path_text,f.kind
             FROM catalog_observations o
             JOIN persons p ON p.id=o.person_id
@@ -166,13 +166,15 @@ public enum CatalogStore {
                 .joined(separator: " ")
             let legacyName: String? = row["name"]
             let personName = structuredName.isEmpty ? legacyName ?? "Person" : structuredName
+            let userEdited: Bool = row["user_edited"]
+            let source = userEdited ? "user-confirmed" : "unverified"
             let observationID: String = row["observation_id"]
             let startSeconds: Double = row["start_seconds"]
             return CatalogHit(
                 fileID: row["id"],
                 path: row["path_text"],
                 kind: row["kind"],
-                text: "Person: \(personName)",
+                text: "Person: \(personName) · \(source) appearance",
                 evidenceID: "person:" + observationID,
                 startSeconds: startSeconds
             )
