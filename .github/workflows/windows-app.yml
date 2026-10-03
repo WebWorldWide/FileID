@@ -202,8 +202,8 @@ jobs:
           if (-not $sqlitePackage) { throw 'Microsoft.Data.Sqlite.Core is missing from the app test dependency manifest' }
           $sqliteVersion = $sqlitePackage.Split('/', 2)[1]
           $relativeSqlite = "microsoft.data.sqlite.core/$sqliteVersion/lib/net8.0/Microsoft.Data.Sqlite.dll"
-          $sqliteSource = Join-Path (Split-Path -Parent $depsFile) 'Microsoft.Data.Sqlite.dll'
-          if (-not (Test-Path $sqliteSource -PathType Leaf)) { throw "SQLite test output assembly is missing: $sqliteSource" }
+          $sqliteSource = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/Microsoft.Data.Sqlite.dll'
+          if (-not (Test-Path $sqliteSource -PathType Leaf)) { throw "SQLite app output assembly is missing: $sqliteSource" }
           foreach ($packageFolder in $packageFolders) {
             $packageSqlite = Join-Path $packageFolder $relativeSqlite
             if (-not (Test-Path $packageSqlite -PathType Leaf)) {
