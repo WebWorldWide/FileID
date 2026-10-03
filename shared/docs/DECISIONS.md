@@ -3510,3 +3510,6 @@ The republished Store workflows occupied the persistent Adlon Windows runner fro
 ## 2026-10-02 — durable native index preparation
 
 Reuse catalog_jobs priority/checkpoint/state fields for pinned-model `catalogIndex` preparation rather than adding a migration. Existing string worker-kind DTOs and pause/resume/cancel actions cover the wire shape; the canonical kind description specifies explicit index retries. Dispatch controls by worker kind so index resume does not depend on an MLX visual model. Resume of failed/cancelled index jobs is explicit. Recovery pauses interrupted jobs and replays from verified snapshot/SQLite revisions; cursor counts do not certify a graph. Keep actor ownership and coalesced awaiter receipts intact. Admit against both live/raw counts and bounded on-disk cache sizes; a large historical cache can consume memory even after its live rows disappear. General atomic resource/model reservations remain separate work.
+
+
+Hosted Swift release compilation exceeded its type-check budget for the detached index-worker closure despite local Debug validation. Extract the body into a typed static helper and split nested arithmetic, retaining ownership, admission, job state and cancellation behavior. Verify Release products/probes as well as native tests; a Debug build alone is insufficient for this gate.

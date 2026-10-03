@@ -92,34 +92,8 @@ actor CatalogVectorIndex {
             let memoryInfo = self.memoryInfo
             let id = UUID()
             workerID = id
-            worker = Task.detached(priority: .utility) {
-                try Task.checkCancellation()
-                let latest = try pool.read { try Self.revision($0) }
-                if let previous, previous.revision == latest {
-                    try CatalogIndexJob.finishCached(pool)
-                    return Prepared(cache: previous, revision: latest)
-                }
-                try CatalogIndexJob.begin(pool)
-                do {
-                    let count = try pool.read { db in
-                        try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=? AND f.failed=0", arguments: [CLIPEmbeddingSpace.modelID]) ?? 0
-                    }
-                    let memory = memoryInfo()
-                    let (graphURL, manifestURL) = Self.paths(directory)
-                    let graphBytes = max(0, (try? graphURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-                    let manifestBytes = max(0, (try? manifestURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-                    guard graphBytes <= 512 * 1024 * 1024, manifestBytes <= 64 * 1024 * 1024 else { throw IndexError.capacityExceeded }
-                    let requested = UInt64(max(min(250_000, max(count, previous?.graph.rawCount ?? 0)) * 9 / 1024, (graphBytes * 3 + manifestBytes * 2) / 1_048_576) + 64)
-                    if ModelMemoryAdmission.rejection(totalMB: memory.total, availableMB: memory.available, requestedMB: requested) != nil {
-                        throw CatalogIndexJob.AdmissionDeferred(message: "Search index preparation needs about \(requested) MB plus system headroom. Free memory and resume its job in Tools.")
-                    }
-                    let cache = try Self.synchronize(previous, pool: pool, directory: directory, maximumFiles: maximumFiles)
-                    try CatalogIndexJob.finish(pool)
-                    return Prepared(cache: cache, revision: cache.revision)
-                } catch {
-                    try? CatalogIndexJob.finish(pool, error: error)
-                    throw error
-                }
+            worker = Task.detached(priority: .utility) { () throws -> Prepared in
+                try Self.prepareWorker(previous, pool: pool, directory: directory, maximumFiles: maximumFiles, memoryInfo: memoryInfo)
             }
         }
         let id = workerID
@@ -197,6 +171,40 @@ actor CatalogVectorIndex {
     func prepare() {
         guard worker == nil, !failed else { return }
         Task { _ = try? await synchronize() }
+    }
+
+    private static func prepareWorker(_ previous: Cache?, pool: DatabasePool, directory: URL,
+                                      maximumFiles: Int, memoryInfo: @Sendable () -> (total: UInt64, available: UInt64)) throws -> Prepared {
+        try Task.checkCancellation()
+        let latest = try pool.read { try Self.revision($0) }
+        if let previous, previous.revision == latest {
+            try CatalogIndexJob.finishCached(pool)
+            return Prepared(cache: previous, revision: latest)
+        }
+        try CatalogIndexJob.begin(pool)
+        do {
+            let count = try pool.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=? AND f.failed=0", arguments: [CLIPEmbeddingSpace.modelID]) ?? 0
+            }
+            let memory = memoryInfo()
+            let (graphURL, manifestURL) = Self.paths(directory)
+            let graphBytes = max(0, (try? graphURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            let manifestBytes = max(0, (try? manifestURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            guard graphBytes <= 512 * 1024 * 1024, manifestBytes <= 64 * 1024 * 1024 else { throw IndexError.capacityExceeded }
+            let rawCount: Int = max(count, previous?.graph.rawCount ?? 0)
+            let vectorMegabytes = min(250_000, rawCount) * 9 / 1024
+            let diskMegabytes = (graphBytes * 3 + manifestBytes * 2) / 1_048_576
+            let requested = UInt64(max(vectorMegabytes, diskMegabytes) + 64)
+            if ModelMemoryAdmission.rejection(totalMB: memory.total, availableMB: memory.available, requestedMB: requested) != nil {
+                throw CatalogIndexJob.AdmissionDeferred(message: "Search index preparation needs about \(requested) MB plus system headroom. Free memory and resume its job in Tools.")
+            }
+            let cache = try Self.synchronize(previous, pool: pool, directory: directory, maximumFiles: maximumFiles)
+            try CatalogIndexJob.finish(pool)
+            return Prepared(cache: cache, revision: cache.revision)
+        } catch {
+            try? CatalogIndexJob.finish(pool, error: error)
+            throw error
+        }
     }
 
     private static func synchronize(_ previous: Cache?, pool: DatabasePool, directory: URL, maximumFiles: Int) throws -> Cache {
