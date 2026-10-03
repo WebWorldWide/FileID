@@ -206,12 +206,16 @@ jobs:
           $relativeSqlite = "microsoft.data.sqlite.core/$sqliteVersion/lib/net8.0/Microsoft.Data.Sqlite.dll"
           $sqliteSource = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/Microsoft.Data.Sqlite.dll'
           if (-not (Test-Path $sqliteSource -PathType Leaf)) { throw "SQLite app output assembly is missing: $sqliteSource" }
+          $testOutputSqlite = Join-Path (Split-Path -Parent $depsFile) 'Microsoft.Data.Sqlite.dll'
+          Copy-Item -LiteralPath $sqliteSource -Destination $testOutputSqlite -Force
           foreach ($packageFolder in $packageFolders) {
             $packageSqlite = Join-Path $packageFolder $relativeSqlite
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packageSqlite) | Out-Null
             Copy-Item -LiteralPath $sqliteSource -Destination $packageSqlite -Force
+            if (-not (Test-Path $packageSqlite -PathType Leaf)) { throw "SQLite package asset was not staged as a file: $packageSqlite" }
             Write-Host "Staged SQLite runtime asset in test-host package folder: $packageSqlite"
           }
+          Write-Host "Staged SQLite runtime asset in test output: $testOutputSqlite"
           dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
