@@ -1,3 +1,11 @@
+## 2026-10-07 — macOS and Linux feature work; Windows CI repair merged
+
+PR #221 merged to `main` at `9d3e85297ee2341b279fa6408d8f413bfa3110c1`. Its x64 `FileID.App.Tests` run discovered 432 tests and passed all 432 with zero skipped; app ARM64, engine x64/ARM64, MSIX, and policy checks passed. Post-merge exact-main validation on Adlon-backed guests remains to be checked.
+
+PR #222 adds cancellable visual-change signals to macOS timeline sampling; its local Swift suite passed 319 tests, its Release build and generated-frame worker smoke passed, and exact-head CI is pending. PR #223 wires the Linux GTK app's existing Deep Analyze and Restructure modules into the canonical six-tab stack, remembers a valid tab and existing selected library root, and leaves scans user-initiated. The Linux PR is being rebased over #221; its exact-head app, engine, Flatpak, and policy checks must pass. This Mac lacks GTK4/libadwaita development packages, so no local Linux app build is claimed. Adlon example data was not read or written.
+
+TestFlight package/signing assets remain local and verified. The owner approved Apple's internal-use API agreement, but separate approval to create a team-wide App Store Connect API key is still required before key creation/upload. Do not invite testers without an explicit request. Preserve the unrelated Store worktree and defer Windows feature development until the owner is on their PC.
+
 ## 2026-10-07 — Continue Mac features and close the app-test discovery gap
 
 Current `main` is `754f8b0b69b0e04ac6764cff01fa34d136ebb8ad`. All seven merged-main workflows passed: Windows app [37163044481](https://github.com/WebWorldWide/FileID/actions/runs/37163044481), Windows engine [37163044539](https://github.com/WebWorldWide/FileID/actions/runs/37163044539), Linux [37163044477](https://github.com/WebWorldWide/FileID/actions/runs/37163044477), Linux Flatpak [37163044478](https://github.com/WebWorldWide/FileID/actions/runs/37163044478), native tools [37163044472](https://github.com/WebWorldWide/FileID/actions/runs/37163044472), Store package [37163044476](https://github.com/WebWorldWide/FileID/actions/runs/37163044476), and repository policy [37163044482](https://github.com/WebWorldWide/FileID/actions/runs/37163044482). Windows x64/app and Linux jobs used isolated Adlon CI guests; the Windows ARM64 app cross-build passed.
