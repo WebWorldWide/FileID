@@ -27,6 +27,12 @@ pub enum EngineState {
     BulkActionResult(fileid_engine::ipc::BulkActionResult),
     MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
     ModelDownloadProgress(ModelDownloadProgress),
+    DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting),
+    DeepAnalyzeProgress(fileid_engine::ipc::DeepAnalyzeProgress),
+    DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone),
+    DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete),
+    RestructurePlan(fileid_engine::ipc::RestructurePlan),
+    RestructureApplyResult(fileid_engine::ipc::RestructureApplyResult),
     Error { kind: String, message: String, model_kind: Option<String> },
     Failed(String),
     Exited,
@@ -317,10 +323,18 @@ fn drain_engine_stdout(reader: impl BufRead, subscribers: Arc<Mutex<Vec<Sender<E
             EventPayload::ScanComplete(result) => EngineState::ScanComplete(result.inner.processed_files),
             EventPayload::FaceClusteringComplete(result) => EngineState::FaceClusteringComplete(result.inner),
             EventPayload::BulkActionResult(result) => EngineState::BulkActionResult(result.inner),
-            EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
-            EventPayload::ModelDownloadProgress(progress) =>
-                EngineState::ModelDownloadProgress(progress.inner),
-            EventPayload::Error(error) => match error.inner.kind.as_str() {
+        EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
+        EventPayload::ModelDownloadProgress(progress) =>
+            EngineState::ModelDownloadProgress(progress.inner),
+        EventPayload::DeepAnalyzeStarting(event) => EngineState::DeepAnalyzeStarting(event.inner),
+        EventPayload::DeepAnalyzeProgress(event) => EngineState::DeepAnalyzeProgress(event.inner),
+        EventPayload::DeepAnalyzeFileDone(event) => EngineState::DeepAnalyzeFileDone(event.inner),
+        EventPayload::DeepAnalyzeComplete(event) => EngineState::DeepAnalyzeComplete(event.inner),
+        EventPayload::RestructurePlan(plan) => EngineState::RestructurePlan(plan.inner),
+        EventPayload::RestructureApplyResult(result) => {
+            EngineState::RestructureApplyResult(result.inner)
+        }
+        EventPayload::Error(error) => match error.inner.kind.as_str() {
                 "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
                 "face_clustering_busy" => EngineState::FaceClusteringBusy(error.inner.message),
                 _ => EngineState::Error {

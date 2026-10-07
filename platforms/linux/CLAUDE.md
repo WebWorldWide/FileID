@@ -22,7 +22,7 @@ platforms/linux/
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs             # GTK app entrypoint
-│           ├── window.rs           # Library / People / Settings navigation
+│           ├── window.rs           # Six-tab navigation + remembered selection
 │           ├── engine_client.rs    # shared engine child process, typed NDJSON IPC
 │           └── tabs/
 │               ├── library.rs      # wired Library
@@ -57,7 +57,7 @@ The root `./build.sh -linux` delegates to `platforms/linux/build/build.sh`, whic
 
 For isolated staging, set `FILEID_LINUX_DIST_DIR` to a new absolute directory; `CARGO_TARGET_DIR` likewise keeps Cargo artifacts outside the repository.
 
-The compiled UI wires Library, Cleanup, People, and required-model Settings. Library has native folder picking, scan status, filename/tag/text search, kind filtering, and image thumbnails/preview. Cleanup uses read-only SQLite queries and full-file SHA-256 for exact duplicates, indexed perceptual hashes for similar images, typed engine IPC for user-confirmed Trash/restore, and the no-overwrite Linux XDG Trash implementation. People reads indexed faces from the shared engine's SQLite DB, displays face crops and photo details, and saves names, unknown status, and merges via engine IPC. All-hidden people remain reviewable with Show them. Face reassignment is hidden because the shared engine has no `reassignFace` contract. Deep Analyze and Restructure are not wired or compiled.
+The compiled UI wires Library, People, Cleanup, Deep Analyze, Restructure, and required-model Settings. Library has native folder picking, scan status, filename/tag/text search, kind filtering, and image thumbnails/preview. Cleanup uses read-only SQLite queries and full-file SHA-256 for exact duplicates, indexed perceptual hashes for similar images, typed engine IPC for user-confirmed Trash/restore, and the no-overwrite Linux XDG Trash implementation. People reads indexed faces from the shared engine's SQLite DB, displays face crops and photo details, and saves names, unknown status, and merges via engine IPC. All-hidden people remain reviewable with Show them. Face reassignment is hidden because the shared engine has no `reassignFace` contract. Deep Analyze routes VLM selection, download progress, batch/file analysis, and smart-name actions through typed engine IPC. Restructure routes plan, preview, apply, and undo through the shared engine; the current IPC contract does not expose restructure cancellation. The window remembers the last valid tab and picked library path; it never starts a scan automatically on launch.
 
 Settings offers only `mobileclip_s2` (CLIP image encoder) and `arcface` (YuNet + SFace): user-initiated prewarm/cancel, progress, error/retry, and Installed status gated on pinned SHA256 verification. There is no startup download. Missing-model scan errors open Settings. Offline fake-engine interaction exercised model progress/cancellation, but no real weight download, verified installed-bundle UI state, or inference-backed scan has run. Native Linux VLM runtime/download/inference, video thumbnails, Flatpak, and AppImage remain unsupported.
 

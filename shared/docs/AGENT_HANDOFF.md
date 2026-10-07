@@ -1,20 +1,21 @@
 # FileID next-version handoff — 2026-10-07
 
-## Current checkpoint — macOS work, TestFlight approval, and app-test discovery
+## Current checkpoint — Mac milestone merged; Linux PR rebased
 
-Current `main` is `754f8b0b69b0e04ac6764cff01fa34d136ebb8ad`. Its seven workflows passed: repository policy 37163044482, Windows engine 37163044539, Windows app 37163044481, Linux 37163044477, Linux Flatpak 37163044478, Windows Store package 37163044476, and native tools 37163044472. Windows x64/app and Linux jobs used Adlon CI guests; the Windows ARM64 app cross-build passed.
+Current `main` is `cf61a6ab1df44caf9589fb4abb38f704dcea05e5`, merged from PR #222. It adds bounded, cancellable visual-change sampling signals to the macOS timeline worker and a deterministic EOF wait in the test IPC capture. The exact-head macOS workflow [37675371238](https://github.com/WebWorldWide/FileID/actions/runs/37675371238) and policy workflow [37675371126](https://github.com/WebWorldWide/FileID/actions/runs/37675371126) both passed. Main's macOS/policy runs [37679170907](https://github.com/WebWorldWide/FileID/actions/runs/37679170907) and [37679170836](https://github.com/WebWorldWide/FileID/actions/runs/37679170836) were in progress when this handoff was written.
 
-The Windows app workflow on PR #213's source commit built `FileID.App.Tests`, passed 49 IPC tests, then reported no app tests and exited successfully. The current-main app job is green but still lacks a test-count assertion. PR [#221](https://github.com/WebWorldWide/FileID/pull/221) now supplies the xUnit adapter explicitly and requires a passing app TRX with at least one executed test. It has been rebased onto current main; inspect the exact-head Windows result and report the actual count before merging. The earlier 157 diagnostics came from pre-PR #213 sources and are superseded.
+PR [#223](https://github.com/WebWorldWide/FileID/pull/223) is rebased onto this `main`. It wires all six Linux tabs, restores first-run onboarding on current IPC events, and replaces the stale Restructure screen with preview/selective apply/undo. The previous head passed all Linux, Flatpak, and policy checks, but this rebase and handoff update require a fresh exact-head run. Linux runtime-egress mutation tests passed 23/23, with no newly detected egress.
 
-PR #219 built and verified the `AdamNolle.FileID` 0.1.1.0 x64 MSIX; SHA-256 `99b8661db9fec40d375cf1f55d06d0acfe18699683d7adc6c211030983216aba`. Partner Center still contains 0.1.0.0; upload, certification, WACK, and on-hardware acceptance remain open. Preserve `/Users/adamnolle/Desktop/Code/FileID-msix-store`, remote `codex/windows-store-version-bump`, and the user's local `codex/store-msix` worktree.
+## Next agent actions
 
-The local Mac App Store profile, Apple Distribution identity, Mac Installer Distribution identity, and signed package are ready. App Store Connect record `6818813859` and the empty `FileID Internal Testers` group exist. The owner accepted and submitted Apple's internal-use API acknowledgment, enabling team API access. Separate approval to create the team-wide API key remains pending. No TestFlight build was uploaded and no testers were invited. Do not create or use that key until the distinct approval arrives.
+1. Read `shared/docs/NEXT.md`, `shared/docs/STATE.md`, `shared/docs/NEXT_VERSION.md`, `shared/docs/ARCHITECTURE.md`, and `shared/docs/SHIP.md`.
+2. Push the rebased Linux branch, wait for all fresh exact-head jobs, fix any failure, then merge PR #223 only when green.
+3. Verify the resulting Linux main CI uses the Adlon isolated guest runner and passes. Never mount, read, index, tag, rename, move, repair, or write the Adlon example-data volume. Delete only completed task branches; preserve `/Users/adamnolle/Desktop/Code/FileID-msix-store`, `codex/windows-store-version-bump`, and `codex/store-msix`.
+4. Check the merged-main Mac and policy runs above. Update `STATE.md`, `NEXT.md`, and this file with final Linux merge SHA and main-run IDs. Keep Windows feature work deferred until the owner is back on that PC.
 
-## Instructions for next agent
+TestFlight: app record `6818813859` and the internal tester group exist. The local profile, Apple Distribution identity, Mac Installer Distribution identity, and signed package are ready. Apple team API access and the internal-use acknowledgment were approved. The owner has been asked for separate approval to create a team-wide App Store Connect API key. Until approval arrives, do not create the key or upload; do not invite testers without a request.
 
-Read current `main`, `STATE.md`, `NEXT.md`, and this handoff first. Continue the macOS next-version plan with bounded shot/activity proposals, dense candidate analysis, face tracks, and explicit coverage; preserve user edits and provenance. For PR #221, inspect its actual TRX and test count, merge only if all required checks pass with real app tests, then verify merged-main Adlon CI. Keep Windows/Linux feature implementation and physical acceptance deferred until the owner is on the PC. Never mount, read, or write Adlon's example-data volume; CI uses isolated guest disks. Keep signing material outside Git and Adlon.
-
-## Current checkpoint — Mac event/time retrieval merged and CI green
+## Historical checkpoint — Mac event/time retrieval merged and CI green (2026-10-03)
 
 PR #210 is merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. Chat search resolves exact titles from user-edited event groups and explicit `MM:SS` or `HH:MM:SS` requests. It filters files by event membership and returns existing chapter/passage intervals that contain the requested time plus person observations within 15 seconds. Stale chapter/passage evidence is excluded, and refinements retain event/time filters. This is retrieval over catalog evidence; automatic timeline population and open-ended event detection remain unimplemented. No schema, IPC, model, dependency, or network changes.
 
