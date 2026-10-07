@@ -1,19 +1,22 @@
 # FileID next-version handoff — 2026-10-07
 
-## Current checkpoint — Mac milestone merged; Linux PR rebased
+## Verified main state
 
-Current `main` is `cf61a6ab1df44caf9589fb4abb38f704dcea05e5`, merged from PR #222. It adds bounded, cancellable visual-change sampling signals to the macOS timeline worker and a deterministic EOF wait in the test IPC capture. The exact-head macOS workflow [37675371238](https://github.com/WebWorldWide/FileID/actions/runs/37675371238) and policy workflow [37675371126](https://github.com/WebWorldWide/FileID/actions/runs/37675371126) both passed. Main's macOS/policy runs [37679170907](https://github.com/WebWorldWide/FileID/actions/runs/37679170907) and [37679170836](https://github.com/WebWorldWide/FileID/actions/runs/37679170836) were in progress when this handoff was written.
+`main` is `05a162be34700d9b42255e9d8b19c072ec2cc033`. PR #222 added bounded macOS visual-change sampling hints for timeline analysis. PR #223 completed the Linux GTK six-tab shell, current-IPC onboarding progress, and Restructure preview/selective apply/undo. Both are merged and their exact-head checks passed.
 
-PR [#223](https://github.com/WebWorldWide/FileID/pull/223) is rebased onto this `main`. It wires all six Linux tabs, restores first-run onboarding on current IPC events, and replaces the stale Restructure screen with preview/selective apply/undo. The previous head passed all Linux, Flatpak, and policy checks, but this rebase and handoff update require a fresh exact-head run. Linux runtime-egress mutation tests passed 23/23, with no newly detected egress.
+Merged-main macOS app, App Store sandbox, tests, integration, recovery, and privacy workflow passed in [37679170907](https://github.com/WebWorldWide/FileID/actions/runs/37679170907); macOS policy passed in [37679170836](https://github.com/WebWorldWide/FileID/actions/runs/37679170836). Linux engine, CLI, TUI, GTK, Clippy, tests, health probes, and privacy passed on `adlon-fileid-linux` in [37680534466](https://github.com/WebWorldWide/FileID/actions/runs/37680534466); policy passed in [37680534735](https://github.com/WebWorldWide/FileID/actions/runs/37680534735). Linux Flatpak main workflow [37680534406](https://github.com/WebWorldWide/FileID/actions/runs/37680534406) was still running at 20:33 UTC in the GitHub-hosted `Install flatpak + flatpak-builder` step. Exact-head Flatpak check for PR #223 passed. Check the merged-main packaging result before recording all checks green.
+
+The runner `adlon-fileid-linux` uses an isolated CI guest disk. Adlon remains example data only: do not mount or inspect its data volume, and never write databases, caches, thumbnails, tags, sidecars, exports, temporary files, or test outputs there. No example data was touched during the current work.
 
 ## Next agent actions
 
-1. Read `shared/docs/NEXT.md`, `shared/docs/STATE.md`, `shared/docs/NEXT_VERSION.md`, `shared/docs/ARCHITECTURE.md`, and `shared/docs/SHIP.md`.
-2. Push the rebased Linux branch, wait for all fresh exact-head jobs, fix any failure, then merge PR #223 only when green.
-3. Verify the resulting Linux main CI uses the Adlon isolated guest runner and passes. Never mount, read, index, tag, rename, move, repair, or write the Adlon example-data volume. Delete only completed task branches; preserve `/Users/adamnolle/Desktop/Code/FileID-msix-store`, `codex/windows-store-version-bump`, and `codex/store-msix`.
-4. Check the merged-main Mac and policy runs above. Update `STATE.md`, `NEXT.md`, and this file with final Linux merge SHA and main-run IDs. Keep Windows feature work deferred until the owner is back on that PC.
+1. Read `shared/docs/NEXT.md`, `shared/docs/STATE.md`, `shared/docs/NEXT_VERSION.md`, `shared/docs/ARCHITECTURE.md`, and `shared/docs/SHIP.md` before editing.
+2. Check Linux Flatpak run 37680534406. If it fails in the hosted apt install step, record it as an infrastructure failure and rerun the packaging check; do not change source without logs identifying a repository defect.
+3. Continue active macOS and Linux feature work. Keep macOS the visual/behavioral reference and make Linux native GTK parity real, not just tab-level. Next focused feature slice: timeline candidate evaluation and dense follow-up analysis with explicit coverage/provenance, then expose the evidence to chapters, best takes, and search. Windows feature work waits until the owner is on that PC.
+4. Preserve six-tab palette/springs/LavaLampBackground, engine-only writes, canonical IPC-first changes, no-new-dependency policy, no telemetry, and source/model/revision evidence. Update `STATE.md`, `NEXT.md`, and this handoff after each merged milestone.
+5. TestFlight app record `6818813859` and `FileID Internal Testers` group exist. Team API access and its internal-use acknowledgment were accepted. The App Store Connect upload API key has not been created or installed, and no build was uploaded. Continue only when the pending user approval for API-key creation is answered; do not expose private key material in messages.
 
-TestFlight: app record `6818813859` and the internal tester group exist. The local profile, Apple Distribution identity, Mac Installer Distribution identity, and signed package are ready. Apple team API access and the internal-use acknowledgment were approved. The owner has been asked for separate approval to create a team-wide App Store Connect API key. Until approval arrives, do not create the key or upload; do not invite testers without a request.
+The feature program is incomplete. Do not treat current CI success as completion of best-take detection, chapters, smart rename, face accuracy, conversion/reframing, hybrid search/chat, scheduler/model routing, or release acceptance.
 
 ## Historical checkpoint — Mac event/time retrieval merged and CI green (2026-10-03)
 
