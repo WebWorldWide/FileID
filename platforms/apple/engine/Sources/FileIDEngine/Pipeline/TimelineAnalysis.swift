@@ -9,6 +9,7 @@ actor TimelineAnalysis {
     private var scheduled: Set<String> = []
     private var runningID: String?
     private var samplerTask: Task<VideoFrameWorker.Sample, Error>?
+    private var signalTask: Task<[TimelineSignalAnalysis.Signal], Error>?
     private var speechTask: Task<[TimelineSpeechTranscription.Passage]?, Never>?
     private struct Recipe: Codable, Sendable { let modelKind: String; let modelVersion: String; let intervalSeconds: Double }
 
@@ -21,7 +22,7 @@ actor TimelineAnalysis {
             let unique = Array(Set(ids)).sorted()
             let id = UUID().uuidString
             let encodedIDs = String(decoding: try JSONEncoder().encode(unique), as: UTF8.self)
-            let recipe = String(decoding: try JSONEncoder().encode(Recipe(modelKind: model.rawValue, modelVersion: "timeline-frame-v1/" + model.rawValue + "@" + (ModelManifest.vlmPin(forRepo: model.sourceRepo)?.revision ?? "unversioned"), intervalSeconds: 10)), as: UTF8.self)
+            let recipe = String(decoding: try JSONEncoder().encode(Recipe(modelKind: model.rawValue, modelVersion: "timeline-frame-v2/" + model.rawValue + "@" + (ModelManifest.vlmPin(forRepo: model.sourceRepo)?.revision ?? "unversioned"), intervalSeconds: 10)), as: UTF8.self)
             let now = Date().timeIntervalSince1970
             try await database.pool.write { db in
                 for fileID in unique {
@@ -30,7 +31,7 @@ actor TimelineAnalysis {
                 try db.execute(sql: "INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,created_at,updated_at) VALUES(?,'timelineSample',?,?,'queued',?,?)", arguments: [id,encodedIDs,recipe,now,now])
             }
             await schedule(id, database: database, sink: sink)
-            return CatalogResponse(requestID: request.requestID, status: "ok", message: "Visual sampling checks one frame every ten seconds. When a video has audio and on-device speech recognition is available, timestamped transcript passages are added. Sparse visual coverage can miss fast events.", jobs: try await CatalogStore.jobs(database))
+            return CatalogResponse(requestID: request.requestID, status: "ok", message: "Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed. When on-device speech recognition is available, timestamped transcript passages are added.", jobs: try await CatalogStore.jobs(database))
         } catch {
             return CatalogResponse(requestID: request.requestID, status: "error", message: error.localizedDescription)
         }
@@ -53,6 +54,7 @@ actor TimelineAnalysis {
             if request.action == "resumeJob" { await schedule(id, database: database, sink: sink) }
             else if id == runningID {
                 samplerTask?.cancel()
+                signalTask?.cancel()
                 speechTask?.cancel()
                 await DeepAnalyze.shared.requestCancel()
             }
@@ -71,7 +73,7 @@ actor TimelineAnalysis {
         runningID = id
 
         do {
-            let job: (ids: [Int64], model: String, version: String, index: Int) = try await database.pool.write { db in
+            let job: (ids: [Int64], model: String, version: String, index: Int, intervalSeconds: Double) = try await database.pool.write { db in
                 guard let row = try Row.fetchOne(db, sql: "SELECT * FROM catalog_jobs WHERE id=? AND state='queued' AND kind='timelineSample'", arguments: [id]) else { throw Interrupted() }
                 let json: String = row["file_ids_json"]
                 let checkpoint: String = row["checkpoint_json"]
@@ -79,7 +81,7 @@ actor TimelineAnalysis {
                 try db.execute(sql: "UPDATE catalog_jobs SET state='running',error=NULL,updated_at=? WHERE id=?", arguments: [Date().timeIntervalSince1970,id])
                 let recipeJSON: String = row["recipe_json"]
                 let recipe = try JSONDecoder().decode(Recipe.self, from: Data(recipeJSON.utf8))
-                return (try JSONDecoder().decode([Int64].self, from: Data(json.utf8)), recipe.modelKind, recipe.modelVersion, index)
+                return (try JSONDecoder().decode([Int64].self, from: Data(json.utf8)), recipe.modelKind, recipe.modelVersion, index, recipe.intervalSeconds)
             }
             await DeepAnalyze.shared.clearCancel()
             for (index, fileID) in job.ids.enumerated() where index >= job.index {
@@ -97,11 +99,58 @@ actor TimelineAnalysis {
                 try await database.pool.write { db in
                     try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,0,?,'incomplete',?,?)", arguments: [id+"-"+String(fileID)+"-coverage",fileID,duration,source.1,job.version])
                 }
-                var seconds = 0.0
-                while seconds < duration {
+                var signals: [TimelineSignalAnalysis.Signal] = []
+                var signalStart = 0.0
+                while signalStart < duration {
+                    try await requireRunning(id, database: database)
+                    guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
+                          activeModel.rawValue == job.model else { throw ModelChanged() }
+                    let signalEnd = min(duration, signalStart + 60)
+                    try await recordSignalCoverage(
+                        fileID: fileID,
+                        sourceRevision: source.1,
+                        start: signalStart,
+                        end: signalEnd,
+                        status: "incomplete",
+                        database: database
+                    )
+                    let chunk: [TimelineSignalAnalysis.Signal]
+                    do {
+                        chunk = try await scanSignals(
+                            source: url,
+                            start: max(0, signalStart - 1),
+                            end: signalEnd
+                        )
+                    } catch is VideoFrameWorker.SourceRevisionChanged {
+                        throw SourceChanged()
+                    } catch {
+                        try await requireRunning(id, database: database)
+                        break
+                    }
+                    try await recordSignalCoverage(
+                        fileID: fileID,
+                        sourceRevision: source.1,
+                        start: signalStart,
+                        end: signalEnd,
+                        status: "sampled",
+                        database: database
+                    )
+                    let previousSignalTime = signals.last?.seconds ?? -1
+                    signals.append(contentsOf: chunk.filter {
+                        $0.seconds >= signalStart && $0.seconds > previousSignalTime + 0.1
+                    })
+                    signalStart = signalEnd
+                }
+
+                let sampleTimes = TimelineSignalAnalysis.sampleTimes(
+                    duration: duration,
+                    intervalSeconds: job.intervalSeconds,
+                    signals: signals
+                )
+                for seconds in sampleTimes {
                     try await requireRunning(id, database: database)
                     guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState, activeModel.rawValue == job.model else { throw ModelChanged() }
-                    let evidenceID = "frame:\(fileID):\(source.1):\(job.version):\(Int(seconds))"
+                    let evidenceID = "frame:\(fileID):\(source.1):\(job.version):\(Int(seconds * 1_000))"
                     let exists = try await database.pool.read { db in try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=? AND source_revision=? AND stale=0)", arguments: [evidenceID,source.1]) ?? false }
                     if !exists {
                         let frame = seconds == 0 ? first : try await sample(source: url, seconds: seconds)
@@ -122,7 +171,6 @@ actor TimelineAnalysis {
                             try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,'sampled',?,?)", arguments: [evidenceID,fileID,start,min(duration,start+0.001),source.1,job.version])
                         }
                     }
-                    seconds += 10
                 }
                 try await transcribeSpeech(
                     fileID: fileID,
@@ -328,6 +376,35 @@ actor TimelineAnalysis {
     private func publish(_ id: String, database: Database, sink: IPCSink) async {
         if let jobs = try? await CatalogStore.jobs(database) {
             await sink.emit(.catalogResponse(CatalogResponse(requestID: id, status: "ok", jobs: jobs)))
+        }
+    }
+
+    private func scanSignals(source: URL, start: Double, end: Double) async throws -> [TimelineSignalAnalysis.Signal] {
+        let task = Task {
+            try await VideoFrameWorker.scanSignals(source: source, start: start, end: end, interval: 1)
+        }
+        signalTask = task
+        defer { signalTask = nil }
+        return try await task.value
+    }
+
+    private func recordSignalCoverage(
+        fileID: Int64,
+        sourceRevision: String,
+        start: Double,
+        end: Double,
+        status: String,
+        database: Database
+    ) async throws {
+        guard start.isFinite, end.isFinite, end > start,
+              ["incomplete", "sampled"].contains(status) else { throw CatalogStore.InvalidRequest() }
+        let id = "visual-change:\(fileID):\(sourceRevision):signal-v1:\(Int(start * 1_000))"
+        try await database.pool.write { db in
+            guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,?,?,?)",
+                arguments: [id, fileID, start, end, status, sourceRevision, "visual-change-signal-v1"]
+            )
         }
     }
 

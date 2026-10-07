@@ -3566,3 +3566,13 @@ The Windows app job's nested-path check silently skipped `FileID.App.Tests`. A h
 ## 2026-10-03 — Fail Windows app CI when xUnit discovers zero tests
 
 After PR #213 updated the app test sources and workflow, the app test assembly built but VSTest reported `No test is available` and exited zero; the 49-test IPC suite was separate. Supply the xUnit adapter path explicitly and require the app TRX report to show at least one executed test with all passing. This supersedes the earlier decision to defer stale test-source repair: those 157 diagnostics came from the pre-#213 tree and are not current-main evidence. Do not accept build success or a zero-test VSTest exit as app-suite coverage.
+
+
+## 2026-10-07 — wire Linux's existing native analysis and restructure flows
+
+The Linux Deep Analyze and Restructure screens already implemented typed engine workflows but were not declared in the tab module or added to the GTK window. Expose those existing screens in the canonical six-tab order instead of duplicating engine behavior or introducing new IPC/dependencies. Restore the last valid tab and still-existing picked folder for continuity, but never start a scan on launch. Windows feature work remains deferred until the owner resumes on that PC.
+
+
+## 2026-10-07 — visual-change signals guide sampling only
+
+Use a cancellable child worker to compute one-second, low-resolution grayscale change signals in bounded chunks, recording each chunk incomplete until it finishes. Select the strongest change for sparse visual-model sampling and fall back to uniform times when signals are weak. These inexpensive signals are not event recognition and cannot support negative claims about moments that were not examined. Keep the inference budget bounded and add no runtime dependency.

@@ -18,8 +18,33 @@ final class WireCapture: @unchecked Sendable {
     private final class Box: @unchecked Sendable {
         private let lock = NSLock()
         private var buffer = Data()
+        private var reachedEOF = false
+        private var eofWaiters: [CheckedContinuation<Void, Never>] = []
+
         func append(_ d: Data) { lock.lock(); buffer.append(d); lock.unlock() }
         func bytes() -> Data { lock.lock(); defer { lock.unlock() }; return buffer }
+
+        func markEOF() {
+            lock.lock()
+            reachedEOF = true
+            let waiters = eofWaiters
+            eofWaiters.removeAll()
+            lock.unlock()
+            waiters.forEach { $0.resume() }
+        }
+
+        func waitForEOF() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if reachedEOF {
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    eofWaiters.append(continuation)
+                    lock.unlock()
+                }
+            }
+        }
     }
 
     let sink: IPCSink
@@ -35,7 +60,11 @@ final class WireCapture: @unchecked Sendable {
         // check passes.
         let handler: @Sendable (FileHandle) -> Void = { handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { handle.readabilityHandler = nil; return }
+            guard !chunk.isEmpty else {
+                box.markEOF()
+                handle.readabilityHandler = nil
+                return
+            }
             box.append(chunk)
         }
         pipe.fileHandleForReading.readabilityHandler = handler
@@ -54,6 +83,7 @@ final class WireCapture: @unchecked Sendable {
     func finish() async {
         await sink.drainAndClose()
         try? pipe.fileHandleForWriting.close()
+        await box.waitForEOF()
     }
 }
 

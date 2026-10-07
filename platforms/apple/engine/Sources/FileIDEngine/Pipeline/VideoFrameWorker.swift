@@ -2,6 +2,7 @@ import Foundation
 import Darwin
 import ImageIO
 import AVFoundation
+import CoreGraphics
 import FileIDShared
 
 struct VideoFrameMetadata: Codable, Sendable, Equatable {
@@ -14,6 +15,8 @@ struct VideoFrameMetadata: Codable, Sendable, Equatable {
 
 enum VideoFrameWorker {
     struct Sample: Sendable { let url: URL; let metadata: VideoFrameMetadata }
+    private struct SignalFrame: @unchecked Sendable { let image: CGImage; let seconds: Double }
+    private struct SignalGenerator: @unchecked Sendable { let value: AVAssetImageGenerator }
 
     static func sweepAbandonedFrames(directory: URL = FileManager.default.temporaryDirectory, now: Date = Date()) {
         guard (try? ReadOnlyLocations.requireWritable(directory)) != nil,
@@ -56,6 +59,58 @@ enum VideoFrameWorker {
             try FileHandle.standardOutput.write(contentsOf: JSONEncoder().encode(metadata))
             return 0
         } catch { return 3 }
+    }
+
+    static func runSignals(arguments: [String]) async -> Int32 {
+        let parentPID = getppid()
+        let parentMonitor = Task.detached {
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                let parent = getppid()
+                if parent == 1 || parent != parentPID { kill(getpid(), SIGKILL); return }
+            }
+        }
+        defer { parentMonitor.cancel() }
+
+        do {
+            guard arguments.count == 4,
+                  let start = Double(arguments[1]), start.isFinite, start >= 0,
+                  let end = Double(arguments[2]), end.isFinite, end > start,
+                  let interval = Double(arguments[3]), interval.isFinite, interval >= 0.25, interval <= 5 else { return 2 }
+
+            let source = URL(fileURLWithPath: arguments[0])
+            let before = try attributes(source)
+            let asset = AVURLAsset(url: source)
+            guard let duration = await DeepAnalyze.loadVideoDurationSeconds(asset, timeoutSeconds: 8),
+                  duration.isFinite, duration > 0, start < duration else { return 3 }
+
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 32, height: 18)
+            generator.requestedTimeToleranceBefore = CMTime(seconds: interval / 2, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: interval / 2, preferredTimescale: 600)
+            let generatorRef = SignalGenerator(value: generator)
+
+            var signals: [TimelineSignalAnalysis.Signal] = []
+            var previousPixels: [UInt8]?
+            var target = start
+            while target < min(end, duration), !Task.isCancelled {
+                let frame = await generateSignalFrame(using: generatorRef, at: target)
+                guard let frame else { return 3 }
+                guard frame.seconds.isFinite else { return 3 }
+                let pixels = try grayscaleSignature(frame.image)
+                let score = previousPixels.map { difference($0, pixels) } ?? 0
+                signals.append(.init(seconds: frame.seconds, changeScore: score))
+                previousPixels = pixels
+                target += interval
+            }
+            guard !Task.isCancelled else { return 3 }
+            guard try attributes(source) == before else { return 4 }
+            try FileHandle.standardOutput.write(contentsOf: JSONEncoder().encode(signals))
+            return 0
+        } catch {
+            return 3
+        }
     }
 
     static func runPhoto(arguments: [String]) async -> Int32 {
@@ -113,6 +168,62 @@ enum VideoFrameWorker {
         }
     }
 
+    static func scanSignals(source: URL, start: Double, end: Double, interval: Double) async throws -> [TimelineSignalAnalysis.Signal] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        process.arguments = ["--scan-video-signals", source.path, String(start), String(end), String(interval)]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let status = try await CancellableProcess.wait(process, timeoutSeconds: 90)
+        if status == 4 { throw SourceRevisionChanged() }
+        guard status == 0 else { throw WorkerFailure() }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        return try JSONDecoder().decode([TimelineSignalAnalysis.Signal].self, from: data)
+    }
+
+    private static func generateSignalFrame(using generator: SignalGenerator, at seconds: Double) async -> SignalFrame? {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                generator.value.generateCGImageAsynchronously(for: CMTime(seconds: seconds, preferredTimescale: 600)) { image, time, _ in
+                    continuation.resume(returning: image.map { SignalFrame(image: $0, seconds: time.seconds) })
+                }
+            }
+        } onCancel: {
+            generator.value.cancelAllCGImageGeneration()
+        }
+    }
+
+    private static func grayscaleSignature(_ image: CGImage) throws -> [UInt8] {
+        let width = 32
+        let height = 18
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let rendered = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(
+                data: bytes.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { throw WorkerFailure() }
+        return pixels
+    }
+
+    private static func difference(_ lhs: [UInt8], _ rhs: [UInt8]) -> Double {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return 0 }
+        let total = zip(lhs, rhs).reduce(0) { sum, pair in
+            sum + abs(Int(pair.0) - Int(pair.1))
+        }
+        return Double(total) / Double(lhs.count * 255)
+    }
+
     private struct Attributes: Equatable { let size: Int64; let modified: Double }
     private static func attributes(_ source: URL) throws -> Attributes {
         let values = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
@@ -120,6 +231,7 @@ enum VideoFrameWorker {
         return Attributes(size: Int64(size), modified: modified.timeIntervalSince1970)
     }
     struct WorkerFailure: LocalizedError { var errorDescription: String? { "The video worker could not decode a stable source frame." } }
+    struct SourceRevisionChanged: LocalizedError { var errorDescription: String? { "The video changed while visual activity was being sampled." } }
 }
 
 enum CancellableProcess {
