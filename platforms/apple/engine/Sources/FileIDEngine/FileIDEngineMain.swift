@@ -22,6 +22,9 @@ struct FileIDEngineMain {
         if CommandLine.arguments.dropFirst().first == "--sample-video" {
             exit(await VideoFrameWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
+        if CommandLine.arguments.dropFirst().first == "--scan-video-signals" {
+            exit(await VideoFrameWorker.runSignals(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         if CommandLine.arguments.dropFirst().first == "--convert-video" {
             exit(await VideoConversionWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
