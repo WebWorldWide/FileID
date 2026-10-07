@@ -197,6 +197,11 @@ public sealed class InstallerContractTests
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
+            "$testOutputAssetFlat = Join-Path $testOutputRoot",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains("$env:PATH =", workflow, StringComparison.Ordinal);
+        Assert.Contains(
             "assert-test-report.ps1 -Path (Join-Path $appTestResults 'app-tests.trx')",
             workflow,
             StringComparison.Ordinal);

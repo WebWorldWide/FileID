@@ -238,6 +238,12 @@ jobs:
                 if (-not (Test-Path $testOutputAsset -PathType Leaf)) {
                   Copy-Item -LiteralPath $assetSource -Destination $testOutputAsset
                 }
+                if ($preserveAssetPath) {
+                  $testOutputAssetFlat = Join-Path $testOutputRoot ([IO.Path]::GetFileName($asset.Name))
+                  if (-not (Test-Path $testOutputAssetFlat -PathType Leaf)) {
+                    Copy-Item -LiteralPath $assetSource -Destination $testOutputAssetFlat
+                  }
+                }
               }
             }
           }
@@ -248,6 +254,10 @@ jobs:
           if (-not (Test-Path (Join-Path $adapterPath 'xunit.runner.visualstudio.testadapter.dll') -PathType Leaf)) { throw "xUnit VSTest adapter is missing: $adapterPath" }
           $appTestResults = 'FileID.App.Tests/TestResults'
           $appTestAssembly = Join-Path $testOutputRoot 'FileID.App.Tests.dll'
+          $nativeSQLite = Get-ChildItem -LiteralPath $testOutputRoot -Filter 'e_sqlite3.dll' -Recurse -File | Select-Object -First 1
+          if (-not $nativeSQLite) { throw "Native SQLite runtime was not staged under $testOutputRoot" }
+          Write-Host "Staged native SQLite runtime: $($nativeSQLite.FullName)"
+          $env:PATH = "$($nativeSQLite.DirectoryName);$testOutputRoot;$env:PATH"
           Get-ChildItem -LiteralPath $adapterPath -Filter '*.dll' | Copy-Item -Destination $testOutputRoot -Force
           $adapterPath = $testOutputRoot
           Write-Host "Using xUnit VSTest adapter from $adapterPath"
