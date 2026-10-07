@@ -247,6 +247,14 @@ jobs:
               }
             }
           }
+          $appNativeSQLite = Get-ChildItem -LiteralPath $appOutputRoot -Filter 'e_sqlite3.dll' -Recurse -File | Select-Object -First 1
+          if (-not $appNativeSQLite) { throw "Native SQLite runtime was not found under $appOutputRoot" }
+          $sqliteRelativePath = [IO.Path]::GetRelativePath($appOutputRoot, $appNativeSQLite.FullName)
+          $testNativeSQLite = Join-Path $testOutputRoot $sqliteRelativePath
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $testNativeSQLite) | Out-Null
+          Copy-Item -LiteralPath $appNativeSQLite.FullName -Destination $testNativeSQLite -Force
+          $testNativeSQLiteFlat = Join-Path $testOutputRoot 'e_sqlite3.dll'
+          Copy-Item -LiteralPath $appNativeSQLite.FullName -Destination $testNativeSQLiteFlat -Force
           $testHostRuntimeConfig = Join-Path $testOutputRoot 'testhost.runtimeconfig.json'
           $runtimeConfig = @{ runtimeOptions = @{ tfm = 'net8.0'; frameworks = @(@{ name = 'Microsoft.NETCore.App'; version = '8.0.0' }, @{ name = 'Microsoft.WindowsDesktop.App'; version = '8.0.0' }) } } | ConvertTo-Json -Depth 4
           Set-Content -LiteralPath $testHostRuntimeConfig -Value $runtimeConfig -Encoding utf8

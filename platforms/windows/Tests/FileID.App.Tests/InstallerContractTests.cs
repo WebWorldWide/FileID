@@ -200,6 +200,10 @@ public sealed class InstallerContractTests
             "$testOutputAssetFlat = Join-Path $testOutputRoot",
             workflow,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "$appNativeSQLite = Get-ChildItem -LiteralPath $appOutputRoot",
+            workflow,
+            StringComparison.Ordinal);
         Assert.Contains("$env:PATH =", workflow, StringComparison.Ordinal);
         Assert.Contains(
             "assert-test-report.ps1 -Path (Join-Path $appTestResults 'app-tests.trx')",
