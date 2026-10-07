@@ -1,16 +1,18 @@
-# FileID next-version handoff — 2026-10-03
+# FileID next-version handoff — 2026-10-07
 
-## Current checkpoint — TestFlight approval and Windows app test gap
+## Current checkpoint — macOS work, TestFlight approval, and app-test discovery
 
-Current `main` is `a11cbd09284b7e8305f298baf502473a3ed2b392`; PR [#213](https://github.com/WebWorldWide/FileID/pull/213) merged Windows Store package preparation, but no Store submission has happened. Preserve the separate Store worktree and remote branches `codex/windows-store-readiness` and `codex/windows-store-version-bump`; its remaining Partner Center and PC acceptance gates are in `NEXT.md`.
+Current `main` is `754f8b0b69b0e04ac6764cff01fa34d136ebb8ad`. Its seven workflows passed: repository policy 37163044482, Windows engine 37163044539, Windows app 37163044481, Linux 37163044477, Linux Flatpak 37163044478, Windows Store package 37163044476, and native tools 37163044472. Windows x64/app and Linux jobs used Adlon CI guests; the Windows ARM64 app cross-build passed.
 
-The local Mac App Store profile, Apple Distribution identity, Mac Installer Distribution identity, and signed package are ready. The owner accepted Apple's internal-use API acknowledgment. Separate approval is still required before creating the team API key, which grants access to every app on the team. No TestFlight build or tester invitation exists.
+The Windows app workflow on PR #213's source commit built `FileID.App.Tests`, passed 49 IPC tests, then reported no app tests and exited successfully. The current-main app job is green but still lacks a test-count assertion. PR [#221](https://github.com/WebWorldWide/FileID/pull/221) now supplies the xUnit adapter explicitly and requires a passing app TRX with at least one executed test. It has been rebased onto current main; inspect the exact-head Windows result and report the actual count before merging. The earlier 157 diagnostics came from pre-PR #213 sources and are superseded.
 
-The main Windows app run [37155528723](https://github.com/WebWorldWide/FileID/actions/runs/37155528723) passed packaging and 49 IPC tests but printed `No Tests/ directory; skipping.` and did not run `FileID.App.Tests`. PR #220's discovery experiment [37161178829](https://github.com/WebWorldWide/FileID/actions/runs/37161178829) invoked that project and failed with 157 compilation errors because existing tests expect members absent from current app sources. The final PR diff is documentation-only; no Windows/Linux product or test source changed.
+PR #219 built and verified the `AdamNolle.FileID` 0.1.1.0 x64 MSIX; SHA-256 `99b8661db9fec40d375cf1f55d06d0acfe18699683d7adc6c211030983216aba`. Partner Center still contains 0.1.0.0; upload, certification, WACK, and on-hardware acceptance remain open. Preserve `/Users/adamnolle/Desktop/Code/FileID-msix-store`, remote `codex/windows-store-version-bump`, and the user's local `codex/store-msix` worktree.
+
+The local Mac App Store profile, Apple Distribution identity, Mac Installer Distribution identity, and signed package are ready. App Store Connect record `6818813859` and the empty `FileID Internal Testers` group exist. The owner accepted and submitted Apple's internal-use API acknowledgment, enabling team API access. Separate approval to create the team-wide API key remains pending. No TestFlight build was uploaded and no testers were invited. Do not create or use that key until the distinct approval arrives.
 
 ## Instructions for next agent
 
-Read current `main`, `STATE.md`, `NEXT.md`, and this handoff first. Continue the accepted macOS next-version plan with bounded shot/activity and face-track analysis that records coverage and preserves user edits. When the owner is on the PC, reconcile the Windows app tests with current APIs, then make test discovery fail closed without excluding tests. Preserve the Store worktree and branches. Never write to Adlon's example-data volume; CI must use isolated runner guest disks. No TestFlight upload has happened; wait for separate team-key approval, then use the existing signed package/upload script and verify processing and sandbox behavior.
+Read current `main`, `STATE.md`, `NEXT.md`, and this handoff first. Continue the macOS next-version plan with bounded shot/activity proposals, dense candidate analysis, face tracks, and explicit coverage; preserve user edits and provenance. For PR #221, inspect its actual TRX and test count, merge only if all required checks pass with real app tests, then verify merged-main Adlon CI. Keep Windows/Linux feature implementation and physical acceptance deferred until the owner is on the PC. Never mount, read, or write Adlon's example-data volume; CI uses isolated guest disks. Keep signing material outside Git and Adlon.
 
 ## Current checkpoint — Mac event/time retrieval merged and CI green
 

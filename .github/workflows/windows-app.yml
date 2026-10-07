@@ -174,6 +174,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           [xml]$packageProps = Get-Content ../Directory.Packages.props
           $coverageVersion = $packageProps.Project.PropertyGroup.MicrosoftCodeCoverageVersion
+          $xunitRunnerVersion = $packageProps.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -eq 'xunit.runner.visualstudio' } | Select-Object -First 1 -ExpandProperty Version
           $relativeShim = "microsoft.codecoverage/$coverageVersion/lib/netcoreapp3.1/Microsoft.VisualStudio.CodeCoverage.Shim.dll"
           $depsFile = 'FileID.App.Tests/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/FileID.App.Tests.deps.json'
           $deps = Get-Content $depsFile -Raw | ConvertFrom-Json
@@ -216,7 +217,8 @@ jobs:
                 if ([IO.Path]::GetExtension($asset.Name) -ne '.dll') { continue }
                 if ($assetKind -eq 'runtimeTargets' -and $asset.Value.assetType -notin @('runtime', 'native')) { continue }
                 $relativeAsset = "$($libraryParts[0].ToLowerInvariant())/$($libraryParts[1])/$($asset.Name)"
-                $assetName = [IO.Path]::GetFileName($asset.Name)
+                $preserveAssetPath = $assetKind -eq 'runtimeTargets' -and $asset.Value.assetType -eq 'native'
+                $assetName = if ($preserveAssetPath) { $asset.Name } else { [IO.Path]::GetFileName($asset.Name) }
                 $packageAssets = @($packageFolders | ForEach-Object { Join-Path $_ $relativeAsset })
                 $assetCandidates = @($packageAssets) + @((Join-Path $testOutputRoot $assetName), (Join-Path $appOutputRoot $assetName))
                 $assetSource = $assetCandidates | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
@@ -229,16 +231,49 @@ jobs:
                   }
                 }
                 $testOutputAsset = Join-Path $testOutputRoot $assetName
+                $testOutputDirectory = Split-Path -Parent $testOutputAsset
+                if (-not (Test-Path $testOutputDirectory -PathType Container)) {
+                  New-Item -ItemType Directory -Force -Path $testOutputDirectory | Out-Null
+                }
                 if (-not (Test-Path $testOutputAsset -PathType Leaf)) {
                   Copy-Item -LiteralPath $assetSource -Destination $testOutputAsset
+                }
+                if ($preserveAssetPath) {
+                  $testOutputAssetFlat = Join-Path $testOutputRoot ([IO.Path]::GetFileName($asset.Name))
+                  if (-not (Test-Path $testOutputAssetFlat -PathType Leaf)) {
+                    Copy-Item -LiteralPath $assetSource -Destination $testOutputAssetFlat
+                  }
                 }
               }
             }
           }
+          $appNativeSQLite = Get-ChildItem -LiteralPath $appOutputRoot -Filter 'e_sqlite3.dll' -Recurse -File | Select-Object -First 1
+          if (-not $appNativeSQLite) { throw "Native SQLite runtime was not found under $appOutputRoot" }
+          $sqliteRelativePath = [IO.Path]::GetRelativePath($appOutputRoot, $appNativeSQLite.FullName)
+          $testNativeSQLite = Join-Path $testOutputRoot $sqliteRelativePath
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $testNativeSQLite) | Out-Null
+          Copy-Item -LiteralPath $appNativeSQLite.FullName -Destination $testNativeSQLite -Force
+          $testNativeSQLiteFlat = Join-Path $testOutputRoot 'e_sqlite3.dll'
+          Copy-Item -LiteralPath $appNativeSQLite.FullName -Destination $testNativeSQLiteFlat -Force
           $testHostRuntimeConfig = Join-Path $testOutputRoot 'testhost.runtimeconfig.json'
           $runtimeConfig = @{ runtimeOptions = @{ tfm = 'net8.0'; frameworks = @(@{ name = 'Microsoft.NETCore.App'; version = '8.0.0' }, @{ name = 'Microsoft.WindowsDesktop.App'; version = '8.0.0' }) } } | ConvertTo-Json -Depth 4
           Set-Content -LiteralPath $testHostRuntimeConfig -Value $runtimeConfig -Encoding utf8
-          dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 -p:RuntimeIdentifier=win-x64 --logger "console;verbosity=minimal"
+          $adapterPath = (Resolve-Path (Join-Path $env:NUGET_PACKAGES "xunit.runner.visualstudio/$xunitRunnerVersion/build/net6.0")).Path
+          if (-not (Test-Path (Join-Path $adapterPath 'xunit.runner.visualstudio.testadapter.dll') -PathType Leaf)) { throw "xUnit VSTest adapter is missing: $adapterPath" }
+          $appTestResults = 'FileID.App.Tests/TestResults'
+          $appTestAssembly = Join-Path $testOutputRoot 'FileID.App.Tests.dll'
+          $nativeSQLite = Get-ChildItem -LiteralPath $testOutputRoot -Filter 'e_sqlite3.dll' -Recurse -File | Select-Object -First 1
+          if (-not $nativeSQLite) { throw "Native SQLite runtime was not staged under $testOutputRoot" }
+          Write-Host "Staged native SQLite runtime: $($nativeSQLite.FullName)"
+          $env:PATH = "$($nativeSQLite.DirectoryName);$testOutputRoot;$env:PATH"
+          Get-ChildItem -LiteralPath $adapterPath -Filter '*.dll' | Copy-Item -Destination $testOutputRoot -Force
+          $adapterPath = $testOutputRoot
+          Write-Host "Using xUnit VSTest adapter from $adapterPath"
+          $vstestDiagnostic = Join-Path $env:RUNNER_TEMP 'vstest-app-tests.diag.log'
+          dotnet vstest $appTestAssembly "--TestAdapterPath:$adapterPath" "--Logger:trx;LogFileName=app-tests.trx" "--ResultsDirectory:$appTestResults" "--Diag:$vstestDiagnostic" '--Logger:console;verbosity=minimal'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Select-String -Path $vstestDiagnostic -Pattern 'xunit|testadapter|ExtensionManager|Skipping|Warning|Error|Exception|No test|Could not load|Discovery' | Select-Object -Last 80 | ForEach-Object { Write-Host $_.Line }
+          & ../build/assert-test-report.ps1 -Path (Join-Path $appTestResults 'app-tests.trx')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         working-directory: platforms/windows/Tests
 

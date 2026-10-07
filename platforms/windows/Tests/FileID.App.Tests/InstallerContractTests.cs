@@ -185,7 +185,7 @@ public sealed class InstallerContractTests
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
-            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj",
+            "dotnet vstest $appTestAssembly",
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
@@ -193,9 +193,23 @@ public sealed class InstallerContractTests
             workflow,
             StringComparison.Ordinal);
         Assert.Contains(
-            "dotnet test FileID.App.Tests/FileID.App.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64",
+            "--TestAdapterPath:$adapterPath",
             workflow,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "$testOutputAssetFlat = Join-Path $testOutputRoot",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "$appNativeSQLite = Get-ChildItem -LiteralPath $appOutputRoot",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.Contains("$env:PATH =", workflow, StringComparison.Ordinal);
+        Assert.Contains(
+            "assert-test-report.ps1 -Path (Join-Path $appTestResults 'app-tests.trx')",
+            workflow,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("dotnet test FileID.App.Tests", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("vstest.console.exe", workflow, StringComparison.Ordinal);
         Assert.DoesNotContain("Test-Path Tests", workflow, StringComparison.Ordinal);
         Assert.Contains("-p:Platform=x64", workflow, StringComparison.Ordinal);
