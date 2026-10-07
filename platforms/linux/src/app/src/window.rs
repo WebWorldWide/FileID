@@ -182,7 +182,13 @@ pub fn on_activate(app: &adw::Application) {
                 | EngineState::FaceClusteringFailed(_)
                 | EngineState::FaceClusteringBusy(_)
                 | EngineState::BulkActionResult(_)
-                | EngineState::MergeSuggestions(_)) {
+                | EngineState::MergeSuggestions(_)
+                | EngineState::DeepAnalyzeStarting(_)
+                | EngineState::DeepAnalyzeProgress(_)
+                | EngineState::DeepAnalyzeFileDone(_)
+                | EngineState::DeepAnalyzeComplete(_)
+                | EngineState::RestructurePlan(_)
+                | EngineState::RestructureApplyResult(_)) {
                 continue;
             }
             let available = matches!(&state, EngineState::Ready | EngineState::ScanComplete(_) | EngineState::Error { .. });
@@ -204,7 +210,13 @@ pub fn on_activate(app: &adw::Application) {
                 | EngineState::FaceClusteringFailed(_)
                 | EngineState::FaceClusteringBusy(_)
                 | EngineState::BulkActionResult(_)
-                | EngineState::MergeSuggestions(_) => continue,
+                | EngineState::MergeSuggestions(_)
+                | EngineState::DeepAnalyzeStarting(_)
+                | EngineState::DeepAnalyzeProgress(_)
+                | EngineState::DeepAnalyzeFileDone(_)
+                | EngineState::DeepAnalyzeComplete(_)
+                | EngineState::RestructurePlan(_)
+                | EngineState::RestructureApplyResult(_) => continue,
                 EngineState::Failed(message) => format!("Engine: {message}"),
                 EngineState::Exited => "Engine: exited".to_string(),
             };

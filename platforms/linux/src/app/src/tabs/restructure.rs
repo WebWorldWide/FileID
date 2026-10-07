@@ -328,7 +328,7 @@ fn wire_actions(ui: &Rc<Ui>) {
     ));
 }
 
-fn show_plan(ui: &Ui, plan: RestructurePlan) {
+fn show_plan(ui: &Rc<Ui>, plan: RestructurePlan) {
     ui.operation.set(None);
     ui.can_undo.set(false);
     ui.rows.borrow_mut().clear();
@@ -360,7 +360,7 @@ fn show_plan(ui: &Ui, plan: RestructurePlan) {
     update_controls(ui);
 }
 
-fn append_move(ui: &Ui, movement: RestructureMove) {
+fn append_move(ui: &Rc<Ui>, movement: RestructureMove) {
     let check = gtk::CheckButton::new();
     check.set_active(default_selected(&movement.confidence));
     let paths = gtk::Label::builder()
@@ -409,7 +409,7 @@ fn append_move(ui: &Ui, movement: RestructureMove) {
     row.set_child(Some(&line));
     ui.list.append(&row);
 
-    let ui_for_toggle = ui.clone();
+    let ui_for_toggle = Rc::clone(ui);
     check.connect_toggled(move |_| update_selection(&ui_for_toggle));
     ui.rows.borrow_mut().push(MoveRow { check, movement });
 }
