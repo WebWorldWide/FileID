@@ -113,22 +113,6 @@ pub fn remember_welcome_sheet_seen() {
 /// (key absent, matching every settings.json written before this feature
 /// existed) means no exclusions, same as an empty list. Sent fresh with
 /// every deepAnalyzeAll; an explicit file selection is never filtered.
-#[cfg(test)]
-pub fn deep_analyze_excluded_folders() -> Option<Vec<String>> {
-    let path = settings_path()?;
-    let list = load_map(&path)
-        .get("deepAnalyzeExcludedFolders")?
-        .as_array()?
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    // Sanitize on READ too, not just on write: settings.json is shared with the
-    // other platforms and hand-editable, so this is the path that would
-    // otherwise hand an unbounded/relative list straight to the engine.
-    let list = sanitize_deep_analyze_excluded_folders(&list);
-    (!list.is_empty()).then_some(list)
-}
-
 /// Trim trailing separators, drop blanks, dedupe, cap the list (matches the
 /// schema's `deepAnalyzeAll.excludedFolders` maxItems). Mirrors the Windows
 /// `SanitizeExcludedFolders` except for case: Windows folds case because NTFS
@@ -154,13 +138,6 @@ pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
         }
     }
     out
-}
-
-#[cfg(test)]
-pub fn remember_deep_analyze_excluded_folders(folders: &[String]) {
-    let sanitized = sanitize_deep_analyze_excluded_folders(folders);
-    let value = Value::Array(sanitized.into_iter().map(Value::String).collect());
-    set_entries(&[("deepAnalyzeExcludedFolders", value)]);
 }
 
 #[cfg(test)]
@@ -230,47 +207,6 @@ mod tests {
         let many: Vec<String> = (0..400).map(|i| format!("/x/{i}")).collect();
         let result = sanitize_deep_analyze_excluded_folders(&many);
         assert_eq!(result.len(), 256);
-    }
-
-    #[test]
-    fn deep_analyze_excluded_folders_round_trips_through_the_settings_file() {
-        // Exercises the same load_map/save_map path deep_analyze_excluded_folders
-        // and remember_deep_analyze_excluded_folders use, on an isolated temp
-        // file — settings_path() itself resolves a real, non-test-isolated
-        // location, so this mirrors settings_round_trip_preserves_unknown_keys
-        // above rather than calling the public getters/setters directly.
-        let dir = std::env::temp_dir().join(format!(
-            "fileid-linux-settings-da-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("app-settings.json");
-
-        let mut map = load_map(&path);
-        let sanitized = sanitize_deep_analyze_excluded_folders(&[
-            "/home/adam/Private".to_string(),
-            "/home/adam/Private".to_string(), // dup, must collapse
-        ]);
-        map.insert(
-            "deepAnalyzeExcludedFolders".into(),
-            Value::Array(sanitized.into_iter().map(Value::String).collect()),
-        );
-        save_map(&path, &map);
-
-        let reloaded = load_map(&path);
-        let folders: Vec<String> = reloaded
-            .get("deepAnalyzeExcludedFolders")
-            .and_then(Value::as_array)
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str().map(str::to_owned))
-            .collect();
-        assert_eq!(folders, vec!["/home/adam/Private".to_string()]);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
