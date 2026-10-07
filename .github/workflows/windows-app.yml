@@ -217,7 +217,8 @@ jobs:
                 if ([IO.Path]::GetExtension($asset.Name) -ne '.dll') { continue }
                 if ($assetKind -eq 'runtimeTargets' -and $asset.Value.assetType -notin @('runtime', 'native')) { continue }
                 $relativeAsset = "$($libraryParts[0].ToLowerInvariant())/$($libraryParts[1])/$($asset.Name)"
-                $assetName = [IO.Path]::GetFileName($asset.Name)
+                $preserveAssetPath = $assetKind -eq 'runtimeTargets' -and $asset.Value.assetType -eq 'native'
+                $assetName = if ($preserveAssetPath) { $asset.Name } else { [IO.Path]::GetFileName($asset.Name) }
                 $packageAssets = @($packageFolders | ForEach-Object { Join-Path $_ $relativeAsset })
                 $assetCandidates = @($packageAssets) + @((Join-Path $testOutputRoot $assetName), (Join-Path $appOutputRoot $assetName))
                 $assetSource = $assetCandidates | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
@@ -230,6 +231,10 @@ jobs:
                   }
                 }
                 $testOutputAsset = Join-Path $testOutputRoot $assetName
+                $testOutputDirectory = Split-Path -Parent $testOutputAsset
+                if (-not (Test-Path $testOutputDirectory -PathType Container)) {
+                  New-Item -ItemType Directory -Force -Path $testOutputDirectory | Out-Null
+                }
                 if (-not (Test-Path $testOutputAsset -PathType Leaf)) {
                   Copy-Item -LiteralPath $assetSource -Destination $testOutputAsset
                 }
