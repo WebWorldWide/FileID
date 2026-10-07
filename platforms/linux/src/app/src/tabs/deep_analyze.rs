@@ -491,14 +491,12 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
             if !crate::model_license::ensure_or_prompt(button, kind) {
                 return;
             }
-            let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-                model_kind: kind.to_string(),
-                skip_existing: ui.skip_check.is_active(),
-                file_ids: None,
-                tags_only: false,
-                propose_renames: true,
-                excluded_folders: crate::app_settings::deep_analyze_excluded_folders(),
-            });
+        let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
+            model_kind: kind.to_string(),
+            skip_existing: ui.skip_check.is_active(),
+            tags_only: false,
+            propose_renames: true,
+        });
             if send_cmd(&ui, payload) {
                 begin_run(&ui);
             }
@@ -810,7 +808,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.download_card.set_visible(true);
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
-        EngineEvent::Error(_) | EngineEvent::ModelDownloadFailed { .. } | EngineEvent::Exited => {
+        EngineEvent::Error { .. } | EngineEvent::Exited => {
             end_run(ui)
         }
         _ => {}

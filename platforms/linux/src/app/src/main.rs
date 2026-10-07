@@ -6,7 +6,9 @@
 // adw::Application, registers the shared brand CSS, spawns the
 // engine subprocess, and presents the main window.
 
+mod app_settings;
 mod engine_client;
+mod model_license;
 mod spring;
 mod tabs;
 mod window;

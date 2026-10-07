@@ -6,7 +6,7 @@
 
 PR [#222](https://github.com/WebWorldWide/FileID/pull/222) adds cancellable, chunked visual-change signals to macOS timeline sampling. Its local 319-test Swift suite, Release build, and internal-fixture worker smoke passed. Exact-head CI must pass before merge.
 
-PR [#223](https://github.com/WebWorldWide/FileID/pull/223) wires Linux's existing native Deep Analyze and Restructure screens into the canonical six-tab GTK app, restores a valid tab and existing selected library folder, and keeps scans user-initiated. It has been rebased onto #221 at `9d3e8529`; the rebased head must pass Linux app, engine, Flatpak, and policy checks before merge. This Mac has no GTK4/libadwaita development packages, so there is no local Linux app build result.
+PR [#223](https://github.com/WebWorldWide/FileID/pull/223) wires Linux's native Deep Analyze and preview/apply/undo Restructure tabs into the canonical six-tab GTK app, restores a valid tab and existing selected library folder, and keeps scans user-initiated. It has been rebased onto #221 at `9d3e8529`; the rebased head must pass Linux app, engine, Flatpak, and policy checks before merge. This Mac has no GTK4/libadwaita development packages, so there is no local Linux app build result.
 
 The user wants macOS and Linux work to continue, Windows product work deferred until their PC, completed changes merged to `main`, and no leftover task branches. Merge only after exact-head checks; after each merge, refresh remaining branches, preserve both sides of docs, then verify all exact-main workflows including Adlon guest runs. Delete only these task branches after merge. Preserve the unrelated `FileID-msix-store` checkout and Store-release work. Never mount or write Adlon's example-data volume.
 
