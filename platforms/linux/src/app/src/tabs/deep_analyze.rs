@@ -156,10 +156,6 @@ fn host_recommended_vlm_kind() -> &'static str {
     recommended_vlm_kind(total, available, free)
 }
 
-pub fn recommended_vlm_kind_for_host() -> &'static str {
-    host_recommended_vlm_kind()
-}
-
 // ─── Tab entrypoint ──────────────────────────────────────────────────────────
 
 pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {

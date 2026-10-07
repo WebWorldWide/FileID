@@ -90,21 +90,6 @@ pub fn remember_active_tab(tab: &str) {
     set_entries(&[("activeTab", Value::String(tab.to_owned()))]);
 }
 
-/// Sidebar visibility across launches (Windows `sidebarVisible`).
-pub fn sidebar_visible() -> bool {
-    let Some(path) = settings_path() else {
-        return true;
-    };
-    load_map(&path)
-        .get("sidebarVisible")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-}
-
-pub fn remember_sidebar_visible(visible: bool) {
-    set_entries(&[("sidebarVisible", Value::Bool(visible))]);
-}
-
 /// Has the user dismissed the first-launch Welcome sheet? Mirrors the Windows
 /// `welcomeSheetSeen` key / macOS `@AppStorage("welcomeSheetSeen")`.
 pub fn welcome_sheet_seen() -> bool {
@@ -128,6 +113,7 @@ pub fn remember_welcome_sheet_seen() {
 /// (key absent, matching every settings.json written before this feature
 /// existed) means no exclusions, same as an empty list. Sent fresh with
 /// every deepAnalyzeAll; an explicit file selection is never filtered.
+#[cfg(test)]
 pub fn deep_analyze_excluded_folders() -> Option<Vec<String>> {
     let path = settings_path()?;
     let list = load_map(&path)
@@ -150,6 +136,7 @@ pub fn deep_analyze_excluded_folders() -> Option<Vec<String>> {
 /// `~/photos` are genuinely different directories. Folding here would silently
 /// drop one of them from a privacy-motivated control — the user would believe a
 /// folder was excluded when it wasn't.
+#[cfg(test)]
 pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
     const MAX: usize = 256;
     let mut seen = std::collections::HashSet::new();
@@ -169,6 +156,7 @@ pub fn sanitize_deep_analyze_excluded_folders(raw: &[String]) -> Vec<String> {
     out
 }
 
+#[cfg(test)]
 pub fn remember_deep_analyze_excluded_folders(folders: &[String]) {
     let sanitized = sanitize_deep_analyze_excluded_folders(folders);
     let value = Value::Array(sanitized.into_iter().map(Value::String).collect());

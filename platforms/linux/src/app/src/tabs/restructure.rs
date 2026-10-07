@@ -364,7 +364,7 @@ fn append_move(ui: &Rc<Ui>, movement: RestructureMove) {
     let check = gtk::CheckButton::new();
     check.set_active(default_selected(&movement.confidence));
     let paths = gtk::Label::builder()
-        .label(&format!("{}  →  {}", movement.source, movement.destination))
+        .label(format!("{}  →  {}", movement.source, movement.destination))
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .hexpand(true)
@@ -378,7 +378,7 @@ fn append_move(ui: &Rc<Ui>, movement: RestructureMove) {
         .as_deref()
         .unwrap_or("No explanation was provided.");
     let detail = gtk::Label::builder()
-        .label(&format!(
+        .label(format!(
             "{} · {} · {}",
             movement.category,
             movement.tier.as_deref().unwrap_or("Unclassified"),

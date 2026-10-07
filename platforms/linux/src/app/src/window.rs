@@ -229,4 +229,7 @@ pub fn on_activate(app: &adw::Application) {
     ));
 
     window.present();
+    if crate::welcome::should_show() {
+        crate::welcome::present(&window, engine.clone());
+    }
 }

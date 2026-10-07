@@ -11,6 +11,7 @@ mod engine_client;
 mod model_license;
 mod spring;
 mod tabs;
+mod welcome;
 mod window;
 
 use adw::prelude::*;

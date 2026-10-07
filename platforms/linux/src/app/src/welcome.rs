@@ -15,7 +15,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::engine_client::{EngineClient, EngineEvent};
+use crate::engine_client::{EngineClient, EngineState};
 use fileid_engine::ipc::{CommandPayload, PrewarmModelPayload};
 use fileid_engine::models::registry::{self, LookupResult};
 
@@ -294,7 +294,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                     break;
                 }
                 match event {
-                    EngineEvent::ModelDownloadProgress(progress) => {
+                    EngineState::ModelDownloadProgress(progress) => {
                         if let Some(&index) = by_kind.get(progress.model_kind.as_str()) {
                             let row = &rows[index];
                             row.bar.set_visible(true);
@@ -305,9 +305,10 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                             }
                         }
                     }
-                    EngineEvent::ModelDownloadFailed {
-                        model_kind,
+                    EngineState::Error {
+                        model_kind: Some(model_kind),
                         message,
+                        ..
                     } => {
                         if let Some(&index) = by_kind.get(model_kind.as_str()) {
                             let row = &rows[index];
