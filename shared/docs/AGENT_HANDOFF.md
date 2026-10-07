@@ -1,22 +1,21 @@
 # FileID next-version handoff — 2026-10-07
 
-## Current checkpoint — macOS and Linux implementation (2026-10-07)
+## Current checkpoint — Mac milestone merged; Linux PR rebased
 
-`main` is `9d3e85297ee2341b279fa6408d8f413bfa3110c1`, including PR #221's Windows CI test-discovery repair. Its x64 app suite discovered 432 tests and passed all 432 with zero skipped; app ARM64, engine x64/ARM64, MSIX, and policy checks also passed. Verify exact-main Adlon-backed runs for this merged commit before calling CI acceptance complete.
+Current `main` is `cf61a6ab1df44caf9589fb4abb38f704dcea05e5`, merged from PR #222. It adds bounded, cancellable visual-change sampling signals to the macOS timeline worker and a deterministic EOF wait in the test IPC capture. The exact-head macOS workflow [37675371238](https://github.com/WebWorldWide/FileID/actions/runs/37675371238) and policy workflow [37675371126](https://github.com/WebWorldWide/FileID/actions/runs/37675371126) both passed. Main's macOS/policy runs [37679170907](https://github.com/WebWorldWide/FileID/actions/runs/37679170907) and [37679170836](https://github.com/WebWorldWide/FileID/actions/runs/37679170836) were in progress when this handoff was written.
 
-PR [#222](https://github.com/WebWorldWide/FileID/pull/222) adds cancellable, chunked visual-change signals to macOS timeline sampling. Its local 319-test Swift suite, Release build, and internal-fixture worker smoke passed. Exact-head CI must pass before merge.
+PR [#223](https://github.com/WebWorldWide/FileID/pull/223) is rebased onto this `main`. It wires all six Linux tabs, restores first-run onboarding on current IPC events, and replaces the stale Restructure screen with preview/selective apply/undo. The previous head passed all Linux, Flatpak, and policy checks, but this rebase and handoff update require a fresh exact-head run. Linux runtime-egress mutation tests passed 23/23, with no newly detected egress.
 
-PR [#223](https://github.com/WebWorldWide/FileID/pull/223) wires Linux's native Deep Analyze and preview/apply/undo Restructure tabs into the canonical six-tab GTK app, restores a valid tab and existing selected library folder, and keeps scans user-initiated. It has been rebased onto #221 at `9d3e8529`; the rebased head must pass Linux app, engine, Flatpak, and policy checks before merge. This Mac has no GTK4/libadwaita development packages, so there is no local Linux app build result.
+## Next agent actions
 
-The user wants macOS and Linux work to continue, Windows product work deferred until their PC, completed changes merged to `main`, and no leftover task branches. Merge only after exact-head checks; after each merge, refresh remaining branches, preserve both sides of docs, then verify all exact-main workflows including Adlon guest runs. Delete only these task branches after merge. Preserve the unrelated `FileID-msix-store` checkout and Store-release work. Never mount or write Adlon's example-data volume.
+1. Read `shared/docs/NEXT.md`, `shared/docs/STATE.md`, `shared/docs/NEXT_VERSION.md`, `shared/docs/ARCHITECTURE.md`, and `shared/docs/SHIP.md`.
+2. Push the rebased Linux branch, wait for all fresh exact-head jobs, fix any failure, then merge PR #223 only when green.
+3. Verify the resulting Linux main CI uses the Adlon isolated guest runner and passes. Never mount, read, index, tag, rename, move, repair, or write the Adlon example-data volume. Delete only completed task branches; preserve `/Users/adamnolle/Desktop/Code/FileID-msix-store`, `codex/windows-store-version-bump`, and `codex/store-msix`.
+4. Check the merged-main Mac and policy runs above. Update `STATE.md`, `NEXT.md`, and this file with final Linux merge SHA and main-run IDs. Keep Windows feature work deferred until the owner is back on that PC.
 
-The local TestFlight signing assets and package passed strict signature checks. Apple team API access is enabled, but separate owner approval to create a team-wide App Store Connect API key remains pending. Do not create the key or upload before approval; do not invite testers without an explicit request.
+TestFlight: app record `6818813859` and the internal tester group exist. The local profile, Apple Distribution identity, Mac Installer Distribution identity, and signed package are ready. Apple team API access and the internal-use acknowledgment were approved. The owner has been asked for separate approval to create a team-wide App Store Connect API key. Until approval arrives, do not create the key or upload; do not invite testers without a request.
 
-## Instructions next agent
-
-Read the newest `STATE.md`, `NEXT.md`, and this handoff. Complete the three PRs and exact-main CI gates, refresh these instructions with the merged SHA and run links, then continue the accepted macOS/Linux plan. Keep Windows feature development deferred. Preserve the Store worktree, signing material, Adlon example-data volume, and any unrelated user work.
-
-## Current checkpoint — Mac event/time retrieval merged and CI green
+## Historical checkpoint — Mac event/time retrieval merged and CI green (2026-10-03)
 
 PR #210 is merged to `main` as `e272fb233eaf7db2180e10c7a497f5d631c8e0b7`. Chat search resolves exact titles from user-edited event groups and explicit `MM:SS` or `HH:MM:SS` requests. It filters files by event membership and returns existing chapter/passage intervals that contain the requested time plus person observations within 15 seconds. Stale chapter/passage evidence is excluded, and refinements retain event/time filters. This is retrieval over catalog evidence; automatic timeline population and open-ended event detection remain unimplemented. No schema, IPC, model, dependency, or network changes.
 

@@ -1,24 +1,12 @@
-## 2026-10-07 — macOS and Linux feature work; Windows CI repair merged
-
-PR #221 merged to `main` at `9d3e85297ee2341b279fa6408d8f413bfa3110c1`. Its x64 `FileID.App.Tests` run discovered 432 tests and passed all 432 with zero skipped; app ARM64, engine x64/ARM64, MSIX, and policy checks passed. Post-merge exact-main validation on Adlon-backed guests remains to be checked.
-
-PR #222 adds cancellable visual-change signals to macOS timeline sampling; its local Swift suite passed 319 tests, its Release build and generated-frame worker smoke passed, and exact-head CI is pending. PR #223 wires the Linux GTK app's Deep Analyze and preview/apply/undo Restructure tabs into the canonical six-tab stack, remembers a valid tab and existing selected library root, and leaves scans user-initiated. The Linux PR is rebased over #221 at `9d3e8529`; its new exact-head app, engine, Flatpak, and policy checks must pass. This Mac lacks GTK4/libadwaita development packages, so no local Linux app build is claimed. Adlon example data was not read or written.
-
-TestFlight package/signing assets remain local and verified. The owner approved Apple's internal-use API agreement, but separate approval to create a team-wide App Store Connect API key is still required before key creation/upload. Do not invite testers without an explicit request. Preserve the unrelated Store worktree and defer Windows feature development until the owner is on their PC.
-
-## 2026-10-07 — Continue Mac features and close the app-test discovery gap
-
-Current `main` is `754f8b0b69b0e04ac6764cff01fa34d136ebb8ad`. All seven merged-main workflows passed: Windows app [37163044481](https://github.com/WebWorldWide/FileID/actions/runs/37163044481), Windows engine [37163044539](https://github.com/WebWorldWide/FileID/actions/runs/37163044539), Linux [37163044477](https://github.com/WebWorldWide/FileID/actions/runs/37163044477), Linux Flatpak [37163044478](https://github.com/WebWorldWide/FileID/actions/runs/37163044478), native tools [37163044472](https://github.com/WebWorldWide/FileID/actions/runs/37163044472), Store package [37163044476](https://github.com/WebWorldWide/FileID/actions/runs/37163044476), and repository policy [37163044482](https://github.com/WebWorldWide/FileID/actions/runs/37163044482). Windows x64/app and Linux jobs used isolated Adlon CI guests; the Windows ARM64 app cross-build passed.
-
-On PR #213's source commit, the Windows app workflow built `FileID.App.Tests`, passed IPC 49/49, then reported no tests for the app suite while exiting successfully. The current-main app workflow is green but does not enforce a non-empty app-test report. PR [#221](https://github.com/WebWorldWide/FileID/pull/221) now provides the pinned xUnit adapter path and requires a passing app TRX with at least one executed test. It is rebased onto current main and awaits exact-head CI; inspect its actual test count before merge. Earlier 157 compile diagnostics came from pre-PR #213 sources and do not describe current `main`.
-
-PR #219 built and verified the `AdamNolle.FileID` 0.1.1.0 x64 MSIX, SHA-256 `99b8661db9fec40d375cf1f55d06d0acfe18699683d7adc6c211030983216aba`. Partner Center still contains 0.1.0.0; upload, certification, WACK, and hardware acceptance remain open. Preserve the separate Store checkout, remote `codex/windows-store-version-bump`, and local `codex/store-msix` worktree.
-
-The signed TestFlight package passed strict local signature checks. Apple's internal-use API acknowledgment was accepted and submitted, enabling team API access. Separate approval to create the team-wide App Store Connect API key remains pending; no build was uploaded and no testers were invited. Adlon's example-data volume was not mounted or accessed.
-
-PR #216 added cancellable chunked on-device video transcription with verified-chunk resume and explicit incomplete coverage; it merged after 497 Swift tests and standard/App Store-sandbox Release builds passed. PR #217 fixed App Store profile matching and signed embedded `mlx.metallib`; its local package passed strict bundle and installer-signature verification. Neither milestone completes TestFlight distribution or timeline coverage.
-
 # FileID — State
+
+## 2026-10-07 — Mac milestone merged; Linux app continuation
+
+PR [#222](https://github.com/WebWorldWide/FileID/pull/222) merged as `cf61a6ab1df44caf9589fb4abb38f704dcea05e5`. It adds bounded, cancellable low-resolution visual-change signals to guide macOS video sampling and synchronizes test-pipe reading to EOF. Exact-head checks passed: macOS app [37675371238](https://github.com/WebWorldWide/FileID/actions/runs/37675371238) (29m44s, SwiftPM and App Store sandbox builds, full tests and integration/privacy probes) and policy [37675371126](https://github.com/WebWorldWide/FileID/actions/runs/37675371126). The follow-up merged-main Mac and policy checks are [37679170907](https://github.com/WebWorldWide/FileID/actions/runs/37679170907) and [37679170836](https://github.com/WebWorldWide/FileID/actions/runs/37679170836), still in progress at this entry.
+
+PR [#223](https://github.com/WebWorldWide/FileID/pull/223) continues Linux GTK work on a branch rebased onto `cf61a6ab`. It wires the six native tabs, restores first-run onboarding on current IPC events, and provides Restructure preview, selective apply, and undo. The pre-rebase head passed Linux GTK/Clippy, Rust engine, CLI, TUI, Flatpak, and policy: [37677608047](https://github.com/WebWorldWide/FileID/actions/runs/37677608047), [37677607947](https://github.com/WebWorldWide/FileID/actions/runs/37677607947), and [37677607944](https://github.com/WebWorldWide/FileID/actions/runs/37677607944). Rebase and documentation updates require a fresh exact-head run before merge. Local runtime-egress tests passed 23/23; the known-blocker audit found no new egress.
+
+The timeline worker's visual-change signals are only sampling hints, never event recognition or proof that an event is absent. Linux Restructure has no pause/cancel control because the current IPC contract does not provide those actions. No Adlon example data was mounted, read, or modified; main-branch CI uses isolated runner disks. TestFlight signing is ready, but approval to create a team-wide App Store Connect API key remains pending; no build upload or tester invitation occurred.
 
 ## 2026-10-03 — Sparse timeline chapter drafts merged (PR #214)
 
