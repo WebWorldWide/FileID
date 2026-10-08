@@ -46,13 +46,16 @@ def main():
             engine.close()
         with sqlite3.connect(directory / "FileID/fileid.sqlite") as db:
             db.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?,1,?,?,0,'image','png')", (str(source), source.stat().st_size, source.stat().st_mtime))
-        for preview_swift, execute_swift, output_format in [(True, False, "jpeg"), (False, True, "tiff")]:
+        for preview_swift, execute_swift, output_format, enlarge in [(True, False, "jpeg", False), (False, True, "tiff", False), (True, False, "png", True), (False, True, "png", True)]:
             engine = Engine((args.swift_engine if preview_swift else args.rust_engine).resolve(), directory, swift=preview_swift)
             try:
                 engine.wait("ready")
                 capabilities = tool(engine, "capabilities")["capabilities"]
                 assert any(c["id"] == "photo" and c["available"] for c in capabilities)
-                preview = tool(engine, "preview", fileIDs=[1], destination=str(directory), recipe={"kind": "photo", "format": output_format, "maxDimension": 16})
+                recipe = {"kind": "photo", "format": output_format, "maxDimension": 64 if enlarge else 16}
+                if enlarge:
+                    recipe["allowUpscale"] = True
+                preview = tool(engine, "preview", fileIDs=[1], destination=str(directory), recipe=recipe)
             finally:
                 engine.close()
             operation_id = preview["operationID"]
@@ -61,23 +64,31 @@ def main():
             engine = Engine((args.swift_engine if execute_swift else args.rust_engine).resolve(), directory, swift=execute_swift)
             try:
                 engine.wait("ready")
-                exported = tool(engine, "execute", operationID=operation_id)
+                exported = tool(engine, "execute", operationID=operation_id, destination=str(directory))
                 assert exported["outputs"][0]["state"] == "completed" and output.is_file()
             finally:
                 engine.close()
+            if enlarge:
+                data = output.read_bytes()
+                assert data[:8] == b"\x89PNG\r\n\x1a\n"
+                assert struct.unpack(">II", data[16:24]) == (64, 32)
             assert hashlib.sha256(source.read_bytes()).hexdigest() == original
             engine = Engine((args.swift_engine if preview_swift else args.rust_engine).resolve(), directory, swift=preview_swift)
             try:
                 engine.wait("ready")
                 assert tool(engine, "history")["operationID"] == operation_id
-                undone = tool(engine, "undo", operationID=operation_id)
+                undone = tool(engine, "undo", operationID=operation_id, destination=str(directory))
                 assert undone["outputs"][0]["state"] == "undone" and not output.exists()
+                history = tool(engine, "history")
+                assert history["operationID"] == operation_id
+                assert history["outputs"][0]["state"] == "undone"
+                assert "Recoverable at" in history["outputs"][0]["message"]
             finally:
                 engine.close()
             assert hashlib.sha256(source.read_bytes()).hexdigest() == original
             with sqlite3.connect(directory / "FileID/fileid.sqlite") as db:
                 assert db.execute("SELECT COUNT(*) FROM catalog_assets").fetchone()[0] == 0
-        print("Swift/Rust export preview → cross-engine execution → persistent Undo passed")
+        print("Swift/Rust legacy conversion and enlargement → cross-engine execution → persistent Undo passed")
 
 
 if __name__ == "__main__":

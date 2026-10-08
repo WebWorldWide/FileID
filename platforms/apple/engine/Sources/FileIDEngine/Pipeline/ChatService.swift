@@ -53,7 +53,7 @@ actor ChatService {
                     ? "Add a subject, event, time, or media type such as videos or photos. No search was run."
                     : hits.isEmpty
                         ? "No catalog evidence matches \(scope)\(filter)\(people)\(events)\(time). Try names or a few descriptive terms. Unanalyzed files may still contain the requested event."
-                        : "Found \(hits.count) file or evidence matches \(scope)\(filter)\(people)\(events)\(time). Sampled-frame descriptions remain unverified."
+                        : "Found \(hits.count) file or evidence matches \(scope)\(filter)\(people)\(events)\(time)." + (hits.contains { $0.kind == "sampledFrame" } ? " Sampled-frame descriptions remain unverified." : "")
                 await emit(request, status: "retrieving", message: explanation, hits: hits, database: database, sink: sink)
                 guard active[request.conversationID] == request.requestID else { return }
                 if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState {
@@ -64,7 +64,10 @@ actor ChatService {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
                 } else {
-                    let message = explanation + (request.useModel == true ? " No model was loaded or no evidence was available; no download was started." : "")
+                    let modelNote = hits.isEmpty
+                        ? " No model summary was attempted."
+                        : " No local model is loaded; showing catalog evidence only."
+                    let message = explanation + (request.useModel == true ? modelNote + " No download was started." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }
                     active.removeValue(forKey: request.conversationID)

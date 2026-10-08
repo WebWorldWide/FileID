@@ -31,6 +31,8 @@ pub enum EngineState {
     DeepAnalyzeProgress(fileid_engine::ipc::DeepAnalyzeProgress),
     DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone),
     DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete),
+    CatalogResponse(fileid_engine::ipc::CatalogResponse),
+    ToolResponse(fileid_engine::ipc::ToolResponse),
     RestructurePlan(fileid_engine::ipc::RestructurePlan),
     RestructureApplyResult(fileid_engine::ipc::RestructureApplyResult),
     Error { kind: String, message: String, model_kind: Option<String> },
@@ -330,6 +332,8 @@ fn drain_engine_stdout(reader: impl BufRead, subscribers: Arc<Mutex<Vec<Sender<E
         EventPayload::DeepAnalyzeProgress(event) => EngineState::DeepAnalyzeProgress(event.inner),
         EventPayload::DeepAnalyzeFileDone(event) => EngineState::DeepAnalyzeFileDone(event.inner),
         EventPayload::DeepAnalyzeComplete(event) => EngineState::DeepAnalyzeComplete(event.inner),
+        EventPayload::CatalogResponse(response) => EngineState::CatalogResponse(response.inner),
+        EventPayload::ToolResponse(response) => EngineState::ToolResponse(response.inner),
         EventPayload::RestructurePlan(plan) => EngineState::RestructurePlan(plan.inner),
         EventPayload::RestructureApplyResult(result) => {
             EngineState::RestructureApplyResult(result.inner)

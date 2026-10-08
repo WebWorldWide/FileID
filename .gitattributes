@@ -2,3 +2,7 @@
 # stamp CRLF, which breaks the shebang under WSL/Git Bash: `env: 'bash\r'`).
 *.sh text eol=lf
 packaging/aur/PKGBUILD text eol=lf
+
+# Windows native sources use the documented CRLF checkout format.
+*.cs whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.xaml whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

@@ -20,6 +20,7 @@ struct CatalogWorkbench: View {
     @State private var player: AVPlayer?
     @State private var editingID: String?
     @State private var refreshedTimelineJobs: Set<String> = []
+    @State private var timelineMode = "sampled"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -47,7 +48,7 @@ struct CatalogWorkbench: View {
                         send(CatalogRequest(requestID: UUID().uuidString, action: "detail", fileID: hit.fileID))
                         if isVideo(hit.path) {
                             let next = AVPlayer(url: URL(fileURLWithPath: hit.path))
-                            next.seek(to: CMTime(seconds: start, preferredTimescale: 600))
+                            next.seek(to: CMTime(seconds: hit.startSeconds ?? 0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
                             player = next
                         } else { player = nil }
                     } label: {
@@ -55,23 +56,31 @@ struct CatalogWorkbench: View {
                             Text(URL(fileURLWithPath: hit.path).lastPathComponent).font(.headline).lineLimit(1)
                             if let time = hit.startSeconds { Text("At \(time, specifier: "%.1f") seconds · \(hit.kind == "sampledFrame" ? "sampled frame, unverified" : hit.kind)").font(.caption).foregroundStyle(.secondary) }
                             if !hit.text.isEmpty { Text(hit.text).font(.caption).lineLimit(3) }
-                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(.plain)
                 }.frame(minWidth: 260)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         if let selected {
                             Text(URL(fileURLWithPath: selected.path).lastPathComponent).font(.headline)
-                            if let player { VideoPlayer(player: player).frame(height: 220) }
+                            if let player { NativeVideoPlayer(player: player).frame(height: 220) }
                             HStack {
                                 Button("Open file") { NSWorkspace.shared.open(URL(fileURLWithPath: selected.path)) }
-                                if isVideo(selected.path) {
-                                    Button("Analyze timeline") {
-                                        send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [selected.fileID]))
+                if isVideo(selected.path) {
+                    Picker("Analysis", selection: $timelineMode) {
+                        Text("Quick samples").tag("sampled")
+                        Text("Significant moments").tag("moments")
+                    }.frame(width: 240)
+                                    Button("Analyze") {
+                        send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [selected.fileID], timelineMode: timelineMode))
                                     }
                                 }
                             }
-                            Text("Chapters").font(.headline)
+                Text("Chapters").font(.headline)
+                if chapters.contains(where: { $0.modelVersion.hasPrefix("timeline-moment-sequence-v1/") && !$0.userEdited && !$0.stale }) {
+                    Text("Moment drafts describe sampled frame sequences. Review actions, outcomes, and timing before accepting.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                             if chapters.contains(where: { $0.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") && !$0.userEdited && !$0.stale }) {
                                 Text("Draft suggestions use sparse frame samples. Review before relying on them; brief events can be missed.")
                                     .font(.caption).foregroundStyle(.secondary)
@@ -87,7 +96,7 @@ struct CatalogWorkbench: View {
                                         summary = chapter.summary
                                         start = chapter.startSeconds
                                         end = chapter.endSeconds
-                                        player?.seek(to: CMTime(seconds: start, preferredTimescale: 600))
+                                        player?.seek(to: CMTime(seconds: chapter.startSeconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
                                     } label: {
                                         Text("\(chapter.startSeconds, specifier: "%.1f")s · \(chapter.title)\(chapter.stale ? " · stale" : "")")
                                     }.buttonStyle(.plain)

@@ -29,7 +29,7 @@ These caused real incidents this project. Every test run obeys them:
    - CLI: `--db /tmp/test.sqlite` (or `$FILEID_DB`).
    - macOS app-support resolution: `CFFIXED_USER_HOME=/tmp/fid_home` (macOS resolves app-support via `getpwuid`, so `$HOME` is **not** enough — you must set `CFFIXED_USER_HOME`).
    - Engine scratch: `XDG_DATA_HOME=/tmp/fid_scratch` (macOS/Linux) or `LOCALAPPDATA=...` (Windows).
-   - Models: `FILEID_MODELS_DIR=/tmp/fid_models` to test missing/partial model states without disturbing the real set.
+   - macOS visual-model cache: `FILEID_HF_CACHE_ROOT=/tmp/fid_models/huggingface` redirects the shared app/engine cache root. Use an absolute path; repositories live under its `models/` directory. This does not relocate other ONNX installers. Follow platform settings for Rust/CLI model storage; the undocumented `FILEID_MODELS_DIR` is not a universal override.
 3. **Never run destructive ops on real paths:** no `applyRestructure`, no `fileid restructure --apply`, no `dedupe --apply` against real corpus paths. Use a copied test corpus.
 4. **Never run `platforms/apple/.../run.sh` against the real library** — it wipes the DB + UserDefaults. It's for a scratch run only.
 5. **No telemetry, ever** is a release gate — see [§7](#7-cross-cutting-checks). 
@@ -240,3 +240,26 @@ A surface passes when, on its OS, against an isolated DB/corpus:
 8. Telemetry scan is clean.
 
 Record results in `STATE.md` (newest on top); file regressions in `NEXT.md`.
+
+## Explicit macOS significant-moment model evaluation
+
+Default Swift tests never download or load evaluation weights. Obtain the owner's download approval before enabling the download test. The 2026-10-07 session approval covered only the already registered Apache-2.0 Qwen3-VL 4B model. Its pinned MLX revision is `552af30c9952c44f1e1a27c7c5810ded58e892bc`; the existing downloader verifies the installed manifest and weight integrity.
+
+```bash
+cd platforms/apple
+FILEID_HF_CACHE_ROOT=/tmp/FileIDMomentQAData/huggingface \
+FILEID_DOWNLOAD_EVALUATION_MODEL=1 \
+swift test --scratch-path /tmp/fileid-next-build --jobs 4 \
+  --filter VisualModelEvaluationTests.downloadRegisteredModel
+```
+
+For inference, build the pinned Metal library with `FILEID_METALLIB_CACHE=/tmp/FileIDMomentQAData/mlx.metallib bash scripts/ensure_mlx_metallib.sh`, then copy it beside the actual test executable in the scratch build directory. Supply an internal fixture directory containing `frame-0.png` through `frame-7.png` and `metadata.json`, the ordered metadata array returned by the native `--sample-video-sequence` worker. The test uses actual decoded timestamps and removes duplicate presentation times before inference.
+
+```bash
+FILEID_HF_CACHE_ROOT=/tmp/FileIDMomentQAData/huggingface \
+FILEID_EVALUATION_FRAMES=/tmp/FileIDMomentQAData/model-sequence-fixture \
+swift test --scratch-path /tmp/fileid-next-build --jobs 4 \
+  --filter VisualModelEvaluationTests.evaluateMomentFrames
+```
+
+The existing available-memory safeguard must pass; do not weaken it for a test. This opt-in test checks the real multi-image path and bounded response format. Generated test patterns do not measure sports outcomes, gift appearances, faces or broad-event recognition. Those require consented, labeled positive/negative/uncertain fixtures and human review against the NEXT_VERSION.md acceptance criteria. Keep all media outputs, catalog data, models and logs internal; do not mount or access Adlon.

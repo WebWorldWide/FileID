@@ -47,13 +47,14 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
     ToolResponse {request_id:id.into(),status:status.into(),message:message.into(),operation_id:None,outputs:vec![],capabilities:vec![]}
 }
 fn capabilities() -> Vec<ToolCapability> {
-    vec![ToolCapability{id:"photo".into(),available:true,input_formats:vec!["png".into(),"jpeg".into()],output_formats:vec!["png".into(),"jpeg".into(),"tiff".into()],detail:"Single-image conversion and bounded downsize. EXIF orientation is applied. Camera/location metadata is stripped; inputs with embedded ICC profiles are rejected until color-managed conversion is available. Output is 8-bit SDR. JPEG transparency is flattened onto white. HEIC/TIFF inputs are not yet supported on this adapter.".into()},
+    vec![ToolCapability{id:"photo".into(),available:true,input_formats:vec!["png".into(),"jpeg".into()],output_formats:vec!["png".into(),"jpeg".into(),"tiff".into()],detail:"Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected; this does not recover missing detail. EXIF orientation is applied. Camera/location metadata is stripped; inputs with embedded ICC profiles are rejected until color-managed conversion is available. Output is 8-bit SDR. JPEG transparency is flattened onto white. HEIC/TIFF inputs are not yet supported on this adapter.".into()},
     ToolCapability{id:"chapters".into(),available:true,input_formats:vec!["catalog chapters".into()],output_formats:vec!["json".into(),"vtt".into()],detail:"Export current chapter markers. WebVTT is a chapter cue list, not speech subtitles.".into()},
     ToolCapability{id:"video".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Native video export is currently macOS-only; the portable worker is not available.".into()},
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
 }
 fn supports(recipe: &ToolRecipe) -> bool {
     (1..=8192).contains(&recipe.max_dimension) &&
+    (recipe.allow_upscale != Some(true) || recipe.kind=="photo") &&
     ((recipe.kind=="photo" && ["png","jpeg","tiff"].contains(&recipe.format.as_str())) ||
      (recipe.kind=="chapters" && ["json","vtt"].contains(&recipe.format.as_str())))
 }
@@ -80,7 +81,7 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
     match request.action.as_str() {
         "capabilities"=>result.capabilities=capabilities(),
         "history"=> {
-            let id:Option<String>=conn.query_row("SELECT id FROM catalog_operations WHERE json_extract(plan_json,'$.type')='export' AND state IN ('completed','failed') ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).optional()?;
+            let id:Option<String>=conn.query_row("SELECT id FROM catalog_operations WHERE json_extract(plan_json,'$.type')='export' AND state IN ('completed','failed','undone') ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).optional()?;
             if let Some(id)=id {let (_,receipts,_)=load(conn,&id)?;result.operation_id=Some(id);result.outputs=receipts.into_iter().map(|r|r.output).collect();result.message="Last export operation.".into();}
             else {result.message="No completed export history.".into();}
         }
@@ -237,6 +238,7 @@ fn validate_image(path:&Path)->Result<()> {
     Ok(())
 }
 fn export_photo(source:&Path,file:&mut File,recipe:&ToolRecipe)->Result<()> {
+    if recipe.kind!="photo" || !supports(recipe) {bail!("Unsupported photo recipe")}
     validate_image(source)?;
     let mut reader=ImageReader::open(source)?.with_guessed_format()?;
     let mut limits=Limits::default();limits.max_alloc=Some(512*1024*1024);limits.max_image_width=Some(65536);limits.max_image_height=Some(65536);reader.limits(limits);
@@ -246,7 +248,7 @@ fn export_photo(source:&Path,file:&mut File,recipe:&ToolRecipe)->Result<()> {
     if decoder.icc_profile()?.is_some() {bail!("This adapter requires untagged sRGB input; use color-managed conversion for embedded ICC profiles")}
     let orientation=decoder.orientation()?;
     let mut image=DynamicImage::from_decoder(decoder)?;image.apply_orientation(orientation);
-    if image.width().max(image.height())>recipe.max_dimension {image=image.resize(recipe.max_dimension,recipe.max_dimension,image::imageops::FilterType::Lanczos3);}
+    if recipe.allow_upscale==Some(true) || image.width().max(image.height())>recipe.max_dimension {image=image.resize(recipe.max_dimension,recipe.max_dimension,image::imageops::FilterType::Lanczos3);}
     let rgba=image.to_rgba8();
     image=if recipe.format=="jpeg" {
         let mut rgb=image::RgbImage::new(rgba.width(),rgba.height());
@@ -281,10 +283,44 @@ mod tests {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?1,1,100,0,'image','png')",[source.to_str().unwrap()]).unwrap();
             Self{root,source,conn}
         }
- fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16}),operation_id:None,destination_bookmark:None}}
+ fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16,allow_upscale:None}),operation_id:None,destination_bookmark:None}}
     }
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
  fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None,destination_bookmark:None}}
+    #[test]
+    fn enlargement_is_opt_in_preserves_sources_and_undo() {
+        let mut fixture=Fixture::new();
+        let original=hash(&fixture.source).unwrap();
+        for flag in [None,Some(false),Some(true)] {
+            for format in ["png","jpeg","tiff"] {
+                let mut request=fixture.request(format);
+                let recipe=request.recipe.as_mut().unwrap();recipe.max_dimension=64;recipe.allow_upscale=flag;
+                let preview=execute(&mut fixture.conn,&request).unwrap();
+                let exported=execute(&mut fixture.conn,&action(preview.operation_id.clone(),"execute")).unwrap();
+                assert_eq!(exported.status,"ok","{}",exported.message);
+                let output=std::path::PathBuf::from(&exported.outputs[0].output_path);
+                let image=image::open(&output).unwrap();
+                assert_eq!((image.width(),image.height()),if flag==Some(true) {(64,32)} else {(32,16)});
+                assert_eq!(hash(&fixture.source).unwrap(),original);
+                let undone=execute(&mut fixture.conn,&action(preview.operation_id.clone(),"undo")).unwrap();
+                assert_eq!(undone.outputs[0].state,"undone");assert!(!output.exists());
+                let history=execute(&mut fixture.conn,&action(None,"history")).unwrap();
+                assert_eq!(history.operation_id,preview.operation_id);
+                assert_eq!(history.outputs[0].state,"undone");
+                assert!(history.outputs[0].message.contains("Recoverable at"));
+            }
+        }
+    }
+    #[test]
+    fn enlargement_flags_are_compatible_and_reject_wrong_types_and_tools() {
+        let recipe:ToolRecipe=serde_json::from_str(r#"{"kind":"photo","format":"png","maxDimension":64}"#).unwrap();
+        assert_eq!(recipe.allow_upscale,None);
+        assert!(serde_json::to_value(&recipe).unwrap().get("allowUpscale").is_none());
+        assert!(serde_json::from_str::<ToolRecipe>(r#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#).is_err());
+        for (kind,format,dimension) in [("chapters","json",64),("video","mp4",1920),("photo","png",8193)] {
+            assert!(!supports(&ToolRecipe{kind:kind.into(),format:format.into(),max_dimension:dimension,allow_upscale:Some(true)}));
+        }
+    }
     #[test]
     fn mac_video_plan_cannot_execute_as_chapter_text_on_portable_adapter() {
         let mut fixture=Fixture::new();
@@ -327,7 +363,7 @@ mod tests {
         let fixture=Fixture::new();let stage=fixture.root.join(format!(".FileIDExport-{}.part",uuid::Uuid::new_v4()));let unrelated=fixture.root.join(".FileIDExport-user.part");
         fs::write(&stage,b"Partial output").unwrap();fs::write(&unrelated,b"Unrelated").unwrap();let original=hash(&fixture.source).unwrap();
         let item=Item{output:ToolOutput{file_id:1,source_path:fixture.source.to_string_lossy().into_owned(),output_path:fixture.root.join("Export.png").to_string_lossy().into_owned(),state:"pending".into(),message:String::new()},source_hash:original.clone(),chapters:vec![]};
-        let plan=Plan{version:1,r#type:"export".into(),recipe:ToolRecipe{kind:"photo".into(),format:"png".into(),max_dimension:16},items:vec![item],stage_paths:Some(vec![stage.to_string_lossy().into_owned(),unrelated.to_string_lossy().into_owned()])};
+        let plan=Plan{version:1,r#type:"export".into(),recipe:ToolRecipe{kind:"photo".into(),format:"png".into(),max_dimension:16,allow_upscale:None},items:vec![item],stage_paths:Some(vec![stage.to_string_lossy().into_owned(),unrelated.to_string_lossy().into_owned()])};
         fixture.conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES('interrupted',?1,'[]','running',0)",[serde_json::to_string(&plan).unwrap()]).unwrap();
         recover(&fixture.conn).unwrap();let deadline=std::time::Instant::now()+std::time::Duration::from_secs(6);
         while stage.exists() && std::time::Instant::now()<deadline {std::thread::sleep(std::time::Duration::from_millis(50));}

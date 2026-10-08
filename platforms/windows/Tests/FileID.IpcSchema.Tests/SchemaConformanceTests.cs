@@ -124,6 +124,25 @@ public class SchemaConformanceTests
         Assert.Contains(errors, e => e.Contains("'modelKind'", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void PhotoEnlargementRecipes_PreserveLegacyAndExplicitFlags()
+    {
+        var variants = SchemaVariants("CommandPayload");
+        var errors = new List<string>();
+        foreach (bool? flag in new bool?[] { null, false, true })
+        {
+            var recipe = new ToolRecipe("photo", "png", 64, AllowUpscale: flag);
+            var payload = new ToolRequestCommand(new ToolRequest("resize", "preview", Recipe: recipe));
+            var line = IpcCoder.Encode(new IpcCommand("resize", payload));
+            CheckTaggedPayload("IPCCommand", variants, line, "resize", errors);
+            using var document = JsonDocument.Parse(line);
+            var properties = document.RootElement.GetProperty("payload").GetProperty("toolRequest").GetProperty("request").GetProperty("recipe");
+            Assert.Equal(flag.HasValue, properties.TryGetProperty("allowUpscale", out var value));
+            if (flag.HasValue) Assert.Equal(flag.Value, value.GetBoolean());
+        }
+        AssertNoErrors(errors);
+    }
+
     // ── Exemplars ────────────────────────────────────────────────────────
     // One fully-populated instance per variant, constructed exactly as the
     // app constructs them. Optional fields are set so the serialized keys
@@ -134,9 +153,9 @@ public class SchemaConformanceTests
     private static IReadOnlyList<CommandPayload> CommandExemplars() => new CommandPayload[]
     {
         new ChatRequestCommand(new ChatRequest("chat", "c", "send", "birthday", true)),
-        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("video", "mp4", 1920), "plan", DestinationBookmark: "AQID")),
+        new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("photo", "png", 64, AllowUpscale: true), "plan", DestinationBookmark: "AQID")),
         new GrantFolderAccessCommand(@"C:\Users\adam\Pictures", "AQID"),
-        new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 })),
+        new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 }, TimelineMode: "moments")),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true, RootBookmark: "AQID", ExcludedPaths: [@"C:\Users\adam\Pictures\.cache"]),
         new PauseScanCommand(),
         new ResumeScanCommand(),

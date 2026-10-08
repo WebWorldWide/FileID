@@ -119,6 +119,20 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
     title_row.append(&title);
     title_row.append(&count_label);
+    let moments_button = gtk::Button::with_label("Search & Moments");
+    title_row.append(&moments_button);
+    moments_button.connect_clicked(clone!(
+        #[strong]
+        engine,
+        move |button| super::catalog::present(&engine, button),
+    ));
+    let tools_button = gtk::Button::with_label("File Tools");
+    title_row.append(&tools_button);
+    tools_button.connect_clicked(clone!(
+        #[strong]
+        engine,
+        move |button| super::tools::present(&engine, button),
+    ));
 
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Search filenames, tags, text in images…")

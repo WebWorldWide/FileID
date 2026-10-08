@@ -51,7 +51,12 @@ pub fn execute(conn: &mut Connection, request: &ChatRequest) -> Result<ChatRespo
                 "Add a subject or a media type such as videos or photos. No search was run.".into()
             } else if response.hits.is_empty() {
                 format!("No keyword matches for {scope}{filter}. Try names or a few descriptive terms. Unanalyzed files may still contain the requested event.")
-            } else { format!("Found {} file or evidence matches for {scope}{filter}. Sampled-frame descriptions remain unverified.",response.hits.len()) };
+            } else {
+                let sample_note = if response.hits.iter().any(|hit| hit.kind == "sampledFrame") {
+                    " Sampled-frame descriptions remain unverified."
+                } else { "" };
+                format!("Found {} file or evidence matches for {scope}{filter}.{sample_note}",response.hits.len())
+            };
             if request.use_model == Some(true) { response.message.push_str(" Model summaries are not yet available on this adapter; no download was started."); }
             let tx = conn.transaction()?;
             for (role,content) in [("user",text),("assistant",&response.message)] {

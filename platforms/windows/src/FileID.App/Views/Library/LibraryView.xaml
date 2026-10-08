@@ -42,7 +42,12 @@
         </Grid.RowDefinitions>
 
         <!-- Page header -->
-        <StackPanel Grid.Row="0" Spacing="4">
+        <Grid Grid.Row="0" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+        <StackPanel Spacing="4">
             <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}"
                        AutomationProperties.HeadingLevel="Level1" />
             <TextBlock Text="Search across filenames, OCR text, and CLIP semantic embeddings."
@@ -50,6 +55,11 @@
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        TextWrapping="Wrap" />
         </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button Content="Search &amp; Moments" Click="OnCatalogClicked"/>
+                <Button Content="File Tools" Click="OnToolsClicked"/>
+            </StackPanel>
+        </Grid>
 
         <!-- Toolbar: search + kind filter + Select-all-visible + Undo pill. -->
         <Grid Grid.Row="1" ColumnSpacing="12">

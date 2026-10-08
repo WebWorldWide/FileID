@@ -6,6 +6,8 @@ pub struct ToolRecipe {
     pub kind: String,
     pub format: String,
     pub max_dimension: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_upscale: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

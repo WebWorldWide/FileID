@@ -3,7 +3,11 @@ using System.Text.Json.Serialization;
 
 namespace FileID.IpcSchema;
 
-public sealed record ToolRecipe(string Kind, string Format, uint MaxDimension);
+public sealed record ToolRecipe(
+    string Kind,
+    string Format,
+    uint MaxDimension,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? AllowUpscale = null);
 public sealed record ToolCapability(string Id, bool Available, IReadOnlyList<string> InputFormats, IReadOnlyList<string> OutputFormats, string Detail);
 public sealed record ToolOutput(long FileID, string SourcePath, string OutputPath, string State, string Message);
 public sealed record ToolRequest(

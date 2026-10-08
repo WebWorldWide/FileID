@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.7.0",
+  "version": "1.9.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1215,6 +1215,14 @@
             "type": "integer"
           },
           "maxItems": 10000
+        },
+        "timelineMode": {
+          "type": "string",
+          "enum": [
+            "sampled",
+            "moments"
+          ],
+          "description": "Optional enqueueTimeline depth. Omitted means sampled. Moments requests overlapping frame-sequence analysis; unavailable workers must reject it explicitly. Neither mode proves absence of unobserved events."
         }
       }
     },
@@ -1402,6 +1410,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 8192
+        },
+        "allowUpscale": {
+          "type": "boolean",
+          "description": "For photo conversion only. Omitted or false preserves bounded downsize behavior; true enlarges smaller images to maxDimension with conventional interpolation, not AI super-resolution."
         }
       }
     },

@@ -1646,87 +1646,48 @@ public enum FaceClustering {
 
     // MARK: - Phase 1: lazy print extraction
 
-    /// Hard cap on prints extracted per clustering run. Bounds wall time:
-    /// at ~50 ms per file × 4 concurrent extractions, 5000 prints ≈ 60 s
-    /// extraction phase. Re-run clustering if more prints accumulate.
-    public static let maxExtractionsPerRun: Int = 5000
-
-    /// Bounded GCD queue so we don't reproduce the inline-tagging ANE
-    /// thrash that killed scan throughput. 4 concurrent Vision extractions
-    /// is enough to keep ANE busy without saturating; tested safe.
+    public static let maxExtractionsPerBatch: Int = 5000
     private static let extractionConcurrency = 4
-
-    /// After this many failed extraction attempts a row is treated as
-    /// permanently failing and skipped for the rest of the engine session, so a
-    /// corrupt/missing image at a low id can't sit at the front of the
-    /// `ORDER BY id ASC LIMIT` window forever and starve newer faces. (F-C3-033)
-    private static let maxExtractionAttempts = 3
-
-    /// Process-lifetime extraction-attempt tally (face_id → consecutive misses).
-    /// In-memory only — never marks a row excluded in the DB, so a transient
-    /// failure can still recover after an engine restart.
-    private static let extractionFailureLock = NSLock()
-    private nonisolated(unsafe) static var extractionAttempts: [Int64: Int] = [:]
-
-    static func permanentlyFailedExtractions() -> Set<Int64> {
-        extractionFailureLock.lock(); defer { extractionFailureLock.unlock() }
-        return Set(extractionAttempts.filter { $0.value >= maxExtractionAttempts }.keys)
-    }
-
-    static func recordExtractionOutcomes(attempted: [Int64], succeeded: Set<Int64>) {
-        extractionFailureLock.lock(); defer { extractionFailureLock.unlock() }
-        for id in attempted {
-            if succeeded.contains(id) { extractionAttempts[id] = nil }
-            else { extractionAttempts[id, default: 0] += 1 }
-        }
-    }
-
-    /// Test seam: reset the in-memory extraction-failure tally.
-    static func resetExtractionFailuresForTesting() {
-        extractionFailureLock.lock(); defer { extractionFailureLock.unlock() }
-        extractionAttempts.removeAll()
-    }
 
     /// One face_prints row that's missing its ArcFace embedding.
     fileprivate typealias PendingRow = FaceAnalysisCache.Input
 
-    /// Extract ArcFace embeddings for any face_prints row that's missing
-    /// one. Excluded rows are skipped entirely. `skipFaceIDs` lets callers
-    /// pass the face_ids of unknown-person rows so we don't waste ANE
-    /// inference on faces the user has explicitly opted out of clustering.
-    /// Idempotent. Skips work silently if the model isn't loaded —
-    /// runClustering surfaces that upstream. `cancelBaseline` is the enclosing
-    /// run's snapshot of the sticky scan-cancel mirror; the per-file task loop
-    /// polls `clusterShouldCancel` against it so a mid-pass Cancel/shutdown aborts
-    /// this ~60 s embedding phase at a file boundary instead of holding the
-    /// single-job engine hostage until every face is extracted. (audit R-07,
-    /// F-C3-042 parity)
     static func extractPendingPrints(
         database: Database, sink: IPCSink,
-        skipFaceIDs: Set<Int64> = [],
-        cancelBaseline: Bool = false
+        skipFaceIDs: Set<Int64> = [], cancelBaseline: Bool = false
     ) async {
         guard ArcFaceService.shared.isReady, let modelVersion = ArcFaceService.shared.modelVersion else { return }
-        let permanentlyFailed = permanentlyFailedExtractions()
+        var cursor: Int64 = 0
+        while let next = await extractPendingBatch(database: database, sink: sink,
+                skipFaceIDs: skipFaceIDs, cancelBaseline: cancelBaseline,
+                modelVersion: modelVersion, afterFaceID: cursor) {
+            guard next > cursor else { return }
+            cursor = next
+        }
+    }
+
+    private static func extractPendingBatch(
+        database: Database, sink: IPCSink, skipFaceIDs: Set<Int64>,
+        cancelBaseline: Bool, modelVersion: String, afterFaceID: Int64
+    ) async -> Int64? {
+        guard ArcFaceService.shared.isReady, ArcFaceService.shared.modelVersion == modelVersion,
+              !Self.clusterShouldCancel(baseline: cancelBaseline,
+                  current: ScanCoordinator.isCancelledSync(), shuttingDown: ScanCoordinator.isShuttingDownSync())
+        else { return nil }
         let pending: [PendingRow]
         do {
             pending = try await database.pool.read { db in
-                // Fetch a window wide enough that even if every skipped row
-                // (unknown faces + permanently-failing rows) lands at the front,
-                // we still surface `maxExtractionsPerRun` fresh rows past them —
-                // the front-of-window starvation fix. (F-C3-033)
-                let fetchLimit = maxExtractionsPerRun + skipFaceIDs.count + permanentlyFailed.count
-                let rows = try FaceAnalysisCache.pending(db, modelVersion: modelVersion, limit: fetchLimit)
-                let filtered = rows.filter { !skipFaceIDs.contains($0.id) && !permanentlyFailed.contains($0.id) }
-                return Array(filtered.prefix(maxExtractionsPerRun))
+                let rows = try FaceAnalysisCache.pending(db, modelVersion: modelVersion,
+                    limit: maxExtractionsPerBatch + skipFaceIDs.count, afterFaceID: afterFaceID)
+                return Array(rows.filter { !skipFaceIDs.contains($0.id) }.prefix(maxExtractionsPerBatch))
             }
         } catch {
             JSONLog.shared.warn(ev: "face_print_pending_query_failed", error: "\(error)")
-            return
+            return nil
         }
         guard !pending.isEmpty else {
             JSONLog.shared.info(ev: "face_print_no_pending")
-            return
+            return nil
         }
         JSONLog.shared.info(ev: "face_print_extract_start",
                             extra: ["pending": AnyCodable(pending.count)])
@@ -1787,6 +1748,9 @@ public enum FaceClustering {
             baseline: cancelBaseline,
             current: ScanCoordinator.isCancelledSync(),
             shuttingDown: ScanCoordinator.isShuttingDownSync())
+        let failureReasons = Dictionary(uniqueKeysWithValues: pending.map { input in
+            (input.id, input.currentIdentity() == nil ? "source_unavailable_or_changed" : "no_embedding")
+        })
         do {
             let savedIDs = try await database.pool.write { db in
                 var saved = Set<Int64>()
@@ -1795,10 +1759,13 @@ public enum FaceClustering {
                         saved.insert(face.input.id)
                     }
                 }
+                if !cancelled {
+                    for input in pending where !saved.contains(input.id) {
+                        try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: modelVersion,
+                            reason: failureReasons[input.id] ?? "no_embedding")
+                    }
+                }
                 return saved
-            }
-            if !cancelled {
-                recordExtractionOutcomes(attempted: pending.map { $0.id }, succeeded: savedIDs)
             }
             for face in extractedSnapshot where savedIDs.contains(face.input.id) {
                 if let jpeg = face.jpeg { saveFaceCrop(faceID: face.input.id, jpeg: jpeg) }
@@ -1816,12 +1783,14 @@ public enum FaceClustering {
                                             "files": AnyCodable(byPath.count),
                                             "seconds": AnyCodable(Date().timeIntervalSince(start))])
             }
+            return cancelled ? nil : pending.last?.id
         } catch {
             JSONLog.shared.error(ev: "face_print_persist_failed", error: "\(error)")
             await sink.emit(.error(EngineError(
                 kind: "face_print_persist_failed",
                 message: "Could not persist extracted prints: \(error)"
             )))
+            return nil
         }
     }
 
@@ -1836,7 +1805,8 @@ public enum FaceClustering {
                 let result = autoreleasepool { () -> [PendingExtract] in
                     let url = URL(fileURLWithPath: path)
                     guard let identity = rows.first?.currentIdentity(), rows.allSatisfy({ $0.currentIdentity() == identity }),
-                          let cg = loadCGImage(url: url) else { return [] }
+                          let loaded = loadCGImage(url: url) else { return [] }
+                    let cg = loaded.image
                     let detected = FaceAlign.enabled ? detectFaceLandmarks(in: cg) : []
                     let pixels = detected.isEmpty ? nil : FaceAlign.pixels(source: cg)
                     var aligned = 0
@@ -1846,13 +1816,13 @@ public enum FaceClustering {
                         var crop: CGImage?
                         if let pixels,
                            let pts = matchLandmarks(forBBox: row.bbox,
-                                                    imageWidth: cg.width, imageHeight: cg.height,
+                                                    imageWidth: cg.width, imageHeight: cg.height, sourceOrientation: loaded.orientation,
                                                     in: detected),
                            let acrop = FaceAlign.align112(source: pixels, landmarks: pts) {
                             crop = acrop
                             aligned += 1
                         } else {
-                            crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox)
+                            crop = cropFaceCGImage(cgImage: cg, bboxString: row.bbox, sourceOrientation: loaded.orientation)
                         }
                         guard let crop else { continue }
                         guard let vec = ArcFaceService.shared.embed(crop) else { continue }
@@ -1941,19 +1911,19 @@ public enum FaceClustering {
 
     private static func matchLandmarks(
         forBBox bboxString: String,
-        imageWidth: Int, imageHeight: Int,
+        imageWidth: Int, imageHeight: Int, sourceOrientation: Int,
         in detected: [(bounds: CGRect, points: [(Float, Float)])]
     ) -> [(Float, Float)]? {
         guard !detected.isEmpty,
-              let b = FaceBBox.parseNormalized(bboxString, imageWidth: imageWidth, imageHeight: imageHeight)
+              let b = FaceBBox.parseNormalized(bboxString, imageWidth: imageWidth, imageHeight: imageHeight, sourceOrientation: sourceOrientation)
         else { return nil }
         let bounds = CGRect(x: b.x, y: b.y, width: b.w, height: b.h)
         guard let index = FaceLandmarkMatch.index(stored: bounds, candidates: detected.map(\.bounds)) else { return nil }
         return detected[index].points
     }
 
-    static func cropFaceCGImage(cgImage: CGImage, bboxString: String) -> CGImage? {
-        guard let roi = parseBBox(bboxString, imageWidth: cgImage.width, imageHeight: cgImage.height) else { return nil }
+    static func cropFaceCGImage(cgImage: CGImage, bboxString: String, sourceOrientation: Int = 1) -> CGImage? {
+        guard let roi = parseBBox(bboxString, imageWidth: cgImage.width, imageHeight: cgImage.height, sourceOrientation: sourceOrientation) else { return nil }
         let imgW = CGFloat(cgImage.width)
         let imgH = CGFloat(cgImage.height)
         let pixelRect = CGRect(
@@ -1993,8 +1963,8 @@ public enum FaceClustering {
     /// FaceBBox) → normalized bottom-left CGRect with 15% padding (matches the
     /// historical v1 padding). Image dims convert the Windows pixel/top-left form;
     /// the CSV branch is unchanged, so a macOS-native library is byte-identical.
-    private static func parseBBox(_ s: String, imageWidth: Int, imageHeight: Int) -> CGRect? {
-        guard let b = FaceBBox.parseNormalized(s, imageWidth: imageWidth, imageHeight: imageHeight) else { return nil }
+    private static func parseBBox(_ s: String, imageWidth: Int, imageHeight: Int, sourceOrientation: Int = 1) -> CGRect? {
+        guard let b = FaceBBox.parseNormalized(s, imageWidth: imageWidth, imageHeight: imageHeight, sourceOrientation: sourceOrientation) else { return nil }
         let pad: CGFloat = 0.15
         let bx = CGFloat(b.x); let by = CGFloat(b.y)
         let bw = CGFloat(b.w); let bh = CGFloat(b.h)
@@ -2011,13 +1981,16 @@ public enum FaceClustering {
     /// face out of the source for VLM comparison, the face is large
     /// enough for Qwen to make a confident verdict. A face at 10% of
     /// the image is ~50px at 512 (unusable) but ~200px at 2048 (great).
-    private static func loadCGImage(url: URL) -> CGImage? {
+    private static func loadCGImage(url: URL) -> (image: CGImage, orientation: Int)? {
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
            let size = attrs[.size] as? Int, size < 256 {
             return nil
         }
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return decodeBoundedImage(src, maxPixelSize: 2048)
+        let properties = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        guard (1...8).contains(orientation), let image = decodeBoundedImage(src, maxPixelSize: 2048) else { return nil }
+        return (image, orientation)
     }
 
 }

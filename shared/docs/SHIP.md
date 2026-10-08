@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Next-version checkpoint (2026-10-08)
+
+The isolated Mac fixture now verifies native scan completion, timestamped manual chapter editing, document-content chat retrieval, and original-preserving photo enlargement/Undo. Swift and Rust suites, pinned Rust lint, and actual cross-engine catalog/chat/tool probes pass locally. This is a functional checkpoint, not release acceptance: model-backed accuracy, best takes, stabilization/enhancement/reframing, broad formats, native Linux/Windows execution, strict offline egress, protected-source write tracing, and the 100,000-file/16 GB performance targets remain open. The visual-model test requires explicit rights-clear frames and suitable available memory; default tests skip it. TestFlight has no uploaded build yet.
+
 ## Mac TestFlight scaffold (2026-10-03)
 
 `com.fileid.app` and macOS App Store Connect record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, separate persistent app and implicit-scope IPC bookmarks with bounded engine access leases, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. The local Mac App Store profile and Apple Distribution / Mac Installer Distribution identities are installed, and a signed package passed strict deep verification and installer signature checks. Apple’s API-access acknowledgment is accepted. A team API key—which Apple grants access to every app—is pending owner confirmation. No build has been uploaded, no testers have been added, and sandbox runtime acceptance is open. See `NEXT.md` and `AGENT_HANDOFF.md` for exact continuation.

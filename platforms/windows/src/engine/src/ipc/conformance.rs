@@ -303,7 +303,7 @@ fn restructure_move() -> RestructureMove {
 fn command_exemplars() -> Vec<CommandPayload> {
     vec![
         serde_json::from_value(serde_json::json!({"chatRequest":{"request":{"requestID":"chat","conversationID":"c","action":"send","text":"birthday","useModel":true}}})).unwrap(),
-        serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","destinationBookmark":"AQID","recipe":{"kind":"video","format":"mp4","maxDimension":1920},"operationID":"plan"}}})).unwrap(),
+        serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","destinationBookmark":"AQID","recipe":{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":true},"operationID":"plan"}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogRequest":{"request":{"requestID":"r1","action":"search","query":"birthday"}}})).unwrap(),
         CommandPayload::GrantFolderAccess(GrantFolderAccessPayload {
             root_path: r"C:\Photos".into(),

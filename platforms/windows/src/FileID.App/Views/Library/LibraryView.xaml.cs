@@ -20,6 +20,35 @@ namespace FileID.Views.Library;
 
 public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 {
+    private async void OnCatalogClicked(object sender, RoutedEventArgs args)
+        => await DebugLog.SafeRunAsync(nameof(OnCatalogClicked), async () =>
+        {
+            using var workbench = new CatalogWorkbench();
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = "Search & Moments",
+                Content = workbench,
+                CloseButtonText = "Done",
+                DefaultButton = ContentDialogButton.Close
+            };
+            dialog.Resources["ContentDialogMaxWidth"] = 980d;
+            await dialog.ShowAsync();
+        });
+
+    private async void OnToolsClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnToolsClicked), async () =>
+        {
+            using var workbench = new ToolsWorkbench();
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot, Title = "File Tools", Content = workbench,
+                CloseButtonText = "Done", DefaultButton = ContentDialogButton.Close
+            };
+            dialog.Resources["ContentDialogMaxWidth"] = 980d;
+            await dialog.ShowAsync();
+        });
+
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
     private int _trashInFlight;

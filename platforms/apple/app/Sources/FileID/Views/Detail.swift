@@ -193,7 +193,7 @@ private struct EmptyState: View {
                         }
                 }
             }
-            Text("Local-first photo organizer. Everything runs on your Mac.")
+            Text("Local-first file organizer. Everything runs on your Mac.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
         }

@@ -53,4 +53,24 @@ import Foundation
         #expect(FaceBBox.parseNormalized(#"{"x":1,"y":2,"h":4}"#, imageWidth: 100, imageHeight: 100) == nil) // missing w
         #expect(FaceBBox.parseNormalized(#"{"x":1,"y":2,"w":3,"h":4}"#, imageWidth: 0, imageHeight: 0) == nil) // bad dims
     }
+    @Test func rawPixelBoxesFollowAllExifOrientations() throws {
+        let box = #"{"x":100,"y":160,"w":300,"h":320,"coordinateSpace":"pixel-top-left","sourceWidth":1000,"sourceHeight":800}"#
+        let expected: [(Double,Double,Double,Double)] = [
+            (0.1,0.4,0.3,0.4),(0.6,0.4,0.3,0.4),(0.6,0.2,0.3,0.4),(0.1,0.2,0.3,0.4),
+            (0.2,0.6,0.4,0.3),(0.4,0.6,0.4,0.3),(0.4,0.1,0.4,0.3),(0.2,0.1,0.4,0.3)
+        ]
+        for orientation in 1...8 {
+            let actual = try #require(FaceBBox.parseNormalized(box, imageWidth: 800, imageHeight: 1000, sourceOrientation: orientation))
+            let wanted = expected[orientation-1]
+            #expect(abs(actual.x-wanted.0)<1e-9)
+            #expect(abs(actual.y-wanted.1)<1e-9)
+            #expect(abs(actual.w-wanted.2)<1e-9)
+            #expect(abs(actual.h-wanted.3)<1e-9)
+        }
+        #expect(FaceBBox.parseNormalized(box, imageWidth: 800, imageHeight: 1000, sourceOrientation: 9) == nil)
+        #expect(FaceBBox.parseNormalized(#"{"x":100,"y":160,"w":300,"h":320}"#, imageWidth: 800, imageHeight: 1000, sourceOrientation: 6) == nil)
+        let native = try #require(FaceBBox.parseNormalized("0.1,0.2,0.3,0.4", imageWidth: 800, imageHeight: 1000, sourceOrientation: 6))
+        #expect(native.x == 0.1 && native.y == 0.2 && native.w == 0.3 && native.h == 0.4)
+    }
+
 }

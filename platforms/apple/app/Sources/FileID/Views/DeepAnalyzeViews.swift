@@ -557,7 +557,7 @@ struct DeepAnalyzeView: View {
                 .padding(.top, 4)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Deep Analyze").font(.largeTitle.bold())
-                Text("Reads each of your images and writes a sentence about it plus a smart filename.")
+                Text("Analyzes supported files and suggests descriptions and short filenames.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -576,7 +576,7 @@ struct DeepAnalyzeView: View {
                     BadgePill(label: "\(Int(settings.systemRAMGB)) GB Mac",
                                color: .secondary)
                 }
-                Text("Run a scan first (in the Sidebar). Then come back here — Deep Analyze adds human-readable captions and suggests smart filenames for every image. Without it, files keep their original names.")
+                Text("Run a scan first (in the Sidebar). Deep Analyze then suggests descriptions and short filenames for supported files. Without it, files keep their original names.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.bottom, 2)
@@ -587,7 +587,7 @@ struct DeepAnalyzeView: View {
                         Text(settings.activeKind.displayName).font(.callout.monospaced())
                     }
                     GridRow {
-                        Text("Total images").foregroundStyle(.secondary)
+                        Text("Eligible files").foregroundStyle(.secondary)
                         Text("\(totals.total)").font(.callout.monospaced())
                     }
                     GridRow {

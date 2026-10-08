@@ -9,8 +9,23 @@ public enum SmartFileName {
             if words.prefix(prefix.count).map({ $0.lowercased() }) == prefix { words.removeFirst(prefix.count); break }
         }
         let subjects = Array(Set(confirmedSubjects.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })).sorted()
-        let subjectWords = Set(subjects.flatMap { $0.split(whereSeparator: \.isWhitespace).map { $0.lowercased() } })
-        while let first = words.first, subjectWords.contains(first.lowercased()) { words.removeFirst() }
+        let subjectPrefixes: [[String]] = subjects.flatMap { subject -> [[String]] in
+            let full = subject.split { $0.isWhitespace || $0 == "-" || $0 == "_" }.map { $0.lowercased() }
+            guard let first = full.first else { return [] }
+            return [full, [first]]
+        }
+        func subjectPrefixLength(_ candidate: ArraySlice<String>) -> Int? {
+            subjectPrefixes.filter { prefix in
+                candidate.prefix(prefix.count).map { $0.lowercased() } == prefix
+            }.map(\.count).max()
+        }
+        while let count = subjectPrefixLength(words[...]) {
+            words.removeFirst(count)
+            if let first = words.first, ["and", "&"].contains(first.lowercased()),
+               subjectPrefixLength(words.dropFirst()) != nil {
+                words.removeFirst()
+            }
+        }
         let generic = Set(["untitled", "filename", "file", "photo", "picture", "image", "video", "document"])
         guard !words.isEmpty, words.contains(where: { !generic.contains($0.lowercased()) }) else { return nil }
         let event = words.map { word in word.prefix(1).uppercased() + word.dropFirst().lowercased() }.joined(separator: " ")
