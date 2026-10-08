@@ -3637,3 +3637,7 @@ MLX Swift LM 3.32.3 is required for Qwen3.5 VLM support and changes the 2.x mode
 ## 2026-10-08 — Bind Metal kernels to their MLX source and keep SwiftPM checkouts clean
 
 The previous one-time `mlx.metallib` cache could survive an MLX dependency upgrade, and its Xcode 27 workaround edited SwiftPM's nested MLX checkout. That checkout then blocked the new package revision. The Metal build now copies source into a temporary directory, applies any compiler workaround there, and records the MLX submodule revision alongside the generated library. A missing or mismatched stamp rebuilds before packaging. MLX 0.32.3 has a new multi-line Metal flag layout and Metal 4 NAX kernels; forcing the old global Metal 3.2 flag on it failed compilation, so retain that flag only for the old layout and keep the fence compatibility patch in the temporary copy. Build/packaging scripts may take an explicit internal-drive Metal library and SwiftPM product directory for isolated validation. No external storage or Adlon paths are touched.
+
+## 2026-10-08 — Pin hosted macOS CI to Xcode 26.3
+
+The `macos-15` GitHub runner's `/Applications/Xcode_16.app` is Xcode 16.0 / Swift tools 6.0, which cannot resolve MLX Swift LM 3.32.3 (tools 6.2), recent GRDB, or swift-crypto. Select the runner's installed Xcode 26.3 explicitly; it retains a macOS 15 deployment target while providing the required Swift toolchain. Fail if that path disappears instead of silently falling back to Swift 6.0. Keep local Xcode 27 validation as a separate hardware check.
