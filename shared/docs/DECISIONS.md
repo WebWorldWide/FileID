@@ -3629,3 +3629,19 @@ Apple's App Store Connect validation rejected signed build 874 despite local `co
 ## 2026-10-08 — Suggest related takes without guessing their outcome
 
 IPC v1.11 adds a read-only, explicitly scoped related-take suggestion action. Compare existing current-model visual embeddings only among selected media with nearby file creation dates; omit known exact duplicates, cataloged derived exports, and files already in a saved group. Return visual similarity as a cosine score and require a user to review membership, name the group, and state the desired outcome before saving. This starts automatic candidate grouping while preserving outcome-evidence abstention. The 0.90 similarity threshold and 20-minute window are proposal filters, not calibrated accuracy claims. Do not promote them to automatic catalog-wide detection or a release gate until rights-cleared grouped attempts and measured false-positive and false-negative rates support it. No new model, dependency, or database migration is required.
+
+## 2026-10-08 — Use a local-only MLX 3 adapter for compact macOS vision
+
+MLX Swift LM 3.32.3 is required for Qwen3.5 VLM support and changes the 2.x model-factory and `LanguageModel` interfaces. Pin it exactly while preserving FileID's Qwen3-VL weight-key adapter. Promote the previously transitive Apache-2.0 `swift-transformers` tokenizer package to an explicit dependency; the updated MLX package and its syntax/JSON support are permissively licensed (MIT/Apache-2.0). Continue using FileID's revision-pinned, integrity-checked VLM downloader, then pass only the verified local directory to MLX through an adapter that rejects a different repository. Keep model-specific prompt and EOS settings rather than silently relying on the new local-directory defaults. Introduce the Apache-2.0 4-bit Qwen3.5 2B conversion as a manual macOS candidate with conservative provisional memory admission. Do not make it the default until rights-cleared quality and latency comparisons pass; do not weaken the current memory guard to force a test.
+
+## 2026-10-08 — Bind Metal kernels to their MLX source and keep SwiftPM checkouts clean
+
+The previous one-time `mlx.metallib` cache could survive an MLX dependency upgrade, and its Xcode 27 workaround edited SwiftPM's nested MLX checkout. That checkout then blocked the new package revision. The Metal build now copies source into a temporary directory, applies any compiler workaround there, and records the MLX submodule revision alongside the generated library. A missing or mismatched stamp rebuilds before packaging. MLX 0.32.3 has a new multi-line Metal flag layout and Metal 4 NAX kernels; forcing the old global Metal 3.2 flag on it failed compilation, so retain that flag only for the old layout and keep the fence compatibility patch in the temporary copy. Build/packaging scripts may take an explicit internal-drive Metal library and SwiftPM product directory for isolated validation. No external storage or Adlon paths are touched.
+
+## 2026-10-08 — Pin hosted macOS CI to Xcode 26.3
+
+The `macos-15` GitHub runner's `/Applications/Xcode_16.app` is Xcode 16.0 / Swift tools 6.0, which cannot resolve MLX Swift LM 3.32.3 (tools 6.2), recent GRDB, or swift-crypto. Select the runner's installed Xcode 26.3 explicitly; it retains a macOS 15 deployment target while providing the required Swift toolchain. Fail if that path disappears instead of silently falling back to Swift 6.0. Keep local Xcode 27 validation as a separate hardware check.
+
+## 2026-10-08 — Correct hosted macOS CI to Xcode 26.6
+
+The Xcode 26.3 hosted attempt still failed: transitive MLX Swift 0.32.3 declares Swift tools 6.3, and Xcode 26.3 ships Swift 6.2. GitHub's macOS 26 image includes Xcode 26.6, which Apple documents as including Swift 6.3. Pin that image and toolchain, retaining the package's macOS 15 deployment target. This supersedes the Xcode 26.3 decision above; check exact-head CI before considering the change validated.

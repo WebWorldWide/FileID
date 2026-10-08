@@ -519,8 +519,8 @@ class RuntimeEgressTests(unittest.TestCase):
             relative = "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift"
             path = root / relative
             source = path.read_text(encoding="utf-8").replace(
-                "Data(contentsOf: configurationURL)",
-                'Data(contentsOf: URL(string: "https://evil.invalid/pixel")!)',
+                "using: #huggingFaceTokenizerLoader()",
+                "using: #huggingFaceTokenizerLoader() /* altered local loader */",
                 1,
             )
             path.write_text(source, encoding="utf-8")

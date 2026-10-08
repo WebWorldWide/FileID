@@ -131,7 +131,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "820c7428acee9b0aba5d4a60812e70e117c34bd5ea340c875c215e32d23752e7",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "ec15669910981cf2a883279f0da492176d767213b9686f4fd5466723829d9486",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "5f28da80f4f78a08d23aec5cd2b3a3e29166610bd99211aad8ea22002e72d6b7",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "b35d92123749d4509347e9474d388674976bf649d549f9261267cecbb6740158",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "5161576507280378b65864025c3fd27c21e2572ea1b6122348a3420735bf7186",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "cd782e591ca9b87c2581ad8144b06a39ed420a1e8df05cd460c8771bea184fce",
@@ -597,7 +597,7 @@ def source_boundary_violations(root: Path) -> list[str]:
         "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": 1,
         "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": 2,
         "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": 2,
-        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": 2,
+        "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": 1,
         "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": 1,
         "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": 3,
     }

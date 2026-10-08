@@ -12,7 +12,8 @@ import QuickLookThumbnailing
 import MLX
 import MLXLMCommon
 import MLXVLM
-import Hub
+import MLXHuggingFace
+import Tokenizers
 import FileIDShared
 
 public actor DeepAnalyze {
@@ -83,13 +84,12 @@ public actor DeepAnalyze {
         topP: 1.0
     )
 
-    private static let qwen3VLWeightAdapterInstalled: Void = {
-        VLMTypeRegistry.shared.registerModelType("qwen3_vl") { configurationURL in
-            let data = try Data(contentsOf: configurationURL)
+    private func installQwen3VLWeightAdapter() async {
+        await VLMTypeRegistry.shared.registerModelType("qwen3_vl") { data in
             let configuration = try JSONDecoder().decode(Qwen3VLConfiguration.self, from: data)
             return Qwen3VLWeightAdapter(configuration)
         }
-    }()
+    }
 
     private init() {}
 
@@ -169,20 +169,22 @@ public actor DeepAnalyze {
 
     // MARK: - Model lifecycle
 
-    /// Map AIModelKind → MLX ModelConfiguration.
     nonisolated static func vlmConfig(for kind: AIModelKind) -> ModelConfiguration {
         switch kind {
-        // Qwen2.5-VL 7B shares the registered 3B's architecture, so a repo-id
-        // ModelConfiguration resolves it. Mistral-Small-3.2 is mapped by repo
-        // id too; if this MLX-VLM build lacks its architecture, `ensureLoaded`
-        // surfaces a load error rather than crashing (verify on-device).
-        case .qwen2VL7B:      return ModelConfiguration(id: kind.sourceRepo)
-        case .qwen3VL4B:      return VLMRegistry.qwen3VL4BInstruct4Bit
-        case .qwen3VL8B:      return ModelConfiguration(id: kind.sourceRepo)
-        case .gemma3_4B:      return VLMRegistry.gemma3_4B_qat_4bit
-        case .gemma3_12B:     return VLMRegistry.gemma3_12B_qat_4bit
-        case .mistralSmall32: return ModelConfiguration(id: kind.sourceRepo)
-        case .paligemma3B:    return VLMRegistry.paligemma3bMix448_8bit
+        case .qwen2VL7B, .qwen3VL8B, .mistralSmall32:
+            return ModelConfiguration(id: kind.sourceRepo)
+        case .qwen3VL4B:
+            return VLMRegistry.qwen3VL4BInstruct4Bit
+        case .qwen35_2B:
+            return ModelConfiguration(id: kind.sourceRepo,
+                                      defaultPrompt: "Describe image in English",
+                                      extraEOSTokens: ["<|im_end|>"])
+        case .gemma3_4B:
+            return VLMRegistry.gemma3_4B_qat_4bit
+        case .gemma3_12B:
+            return VLMRegistry.gemma3_12B_qat_4bit
+        case .paligemma3B:
+            return VLMRegistry.paligemma3bMix448_8bit
         }
     }
 
@@ -190,6 +192,7 @@ public actor DeepAnalyze {
         switch kind {
         case .gemma3_12B, .mistralSmall32:      return 8_192
         case .qwen2VL7B, .qwen3VL8B:            return 4_096
+        case .qwen35_2B:                        return 2_048
         case .qwen3VL4B, .gemma3_4B,
              .paligemma3B:                      return 3_072
         }
@@ -305,9 +308,8 @@ public actor DeepAnalyze {
             if let reason = ModelMemoryAdmission.rejection(totalMB: totalMB, availableMB: initialAvailableMB, requestedMB: requestedMB) {
                 throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
             }
-            let config = Self.vlmConfig(for: kind)
             if kind == .qwen3VL4B || kind == .qwen3VL8B {
-                _ = Self.qwen3VLWeightAdapterInstalled
+                await installQwen3VLWeightAdapter()
             }
             let documentsHF = ModelCachePaths.huggingFaceRoot
 
@@ -345,10 +347,8 @@ public actor DeepAnalyze {
                 modelDir: documentsHF.appending(component: "models")
                     .appending(component: kind.sourceRepo)
             )
-
-            // 4. Files are local; HubApi.useOfflineMode = true skips
-            //    swift-transformers' slow single-stream fetcher.
-            let hub = HubApi(downloadBase: documentsHF, useOfflineMode: true)
+            let modelDirectory = documentsHF.appending(component: "models")
+                .appending(component: kind.sourceRepo)
             let waitingMessage = "Waiting for memory and processing capacity…"
             loadState = .loading(progress: 0.99, message: waitingMessage)
             progress?(0.99, waitingMessage, 0, 0)
@@ -361,11 +361,10 @@ public actor DeepAnalyze {
                 throw NSError(domain: "FileID.ModelMemoryAdmission", code: 1, userInfo: [NSLocalizedDescriptionKey: reason])
             }
             let loaded = try await VLMModelFactory.shared.loadContainer(
-                hub: hub,
-                configuration: config
-            ) { _ in
-                // Loading from local files; no remote download.
-            }
+                from: LocalVLMDownloader(repo: kind.sourceRepo, directory: modelDirectory),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: Self.vlmConfig(for: kind)
+            )
             JSONLog.shared.info(ev: "deep_loadcontainer_returned",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
             JSONLog.shared.flush()

@@ -14,17 +14,18 @@ final class Qwen3VLWeightAdapter: Module, LanguageModel {
     func prepare(
         _ input: LMInput,
         cache: [any KVCache],
-        windowSize: Int?
+        state: LMOutput.State?,
+        prefill: PrefillParameters
     ) throws -> PrepareResult {
-        try model.prepare(input, cache: cache, windowSize: windowSize)
+        try model.prepare(input, cache: cache, state: state, prefill: prefill)
     }
 
     func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
         model(inputs, cache: cache)
     }
 
-    func newCache(parameters: GenerateParameters?) -> [any KVCache] {
-        model.newCache(parameters: parameters)
+    func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
+        try model.newCache(parameters: parameters)
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
