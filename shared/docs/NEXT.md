@@ -2,7 +2,7 @@
 
 ## Day-end handoff after PR #225 (2026-10-08)
 
-`main` merge `4e3d708a0bcfa153714ddb3d772f9d52d8294fe1` contains the completed checkpoint. Before further changes, inspect **all eight exact-main GitHub workflows** for that SHA (including Adlon guest Linux/Windows jobs) and fix any failures on a new branch. Repository policy and Linux Flatpak were green at the time of this entry; the other six were pending. The exact-main signed `FileID-0.1.1-867.pkg` is local under `platforms/apple/dist/`; SHA-256 and sandbox validation are in the newest `STATE.md` entry. No macOS TestFlight build has been uploaded. See `AGENT_HANDOFF.md` for key/download recovery and safe next steps.
+`main` merge `4e3d708a0bcfa153714ddb3d772f9d52d8294fe1` contains the completed checkpoint, and all eight exact-main GitHub workflows passed, including the isolated Adlon guest Linux/Windows jobs. The exact-main signed `FileID-0.1.1-867.pkg` is local under `platforms/apple/dist/`; SHA-256 and sandbox validation are in the newest `STATE.md` entry. No macOS TestFlight build has been uploaded. See `AGENT_HANDOFF.md` for key/download recovery and safe next steps.
 
 Continue macOS-first product work after CI/TestFlight closure: use rights-clear internal fixtures for opt-in moment and face accuracy evaluation, then improve measured failures. The accepted best-takes, stabilization, video/photo enhancement, reframing, broader conversions, fast chat, and hardware gates remain incomplete. Carry shared contracts and Linux implementation forward; defer physical Windows GPU acceptance until the owner is at that PC. Adlon is strictly read-only example data, including for CI: no application or test writes, temporary files, indexes, sidecars, exports, or companion edits on its volume.
 

@@ -2,7 +2,7 @@
 
 ## Signed Mac package checkpoint (2026-10-08)
 
-PR #225 is merged at `4e3d708a0bcfa153714ddb3d772f9d52d8294fe1`. Exact-main package `platforms/apple/dist/FileID-0.1.1-867.pkg` passed installer and extracted-app signature checks and a real sandboxed internal-fixture scan/search. App Store Connect has no TestFlight build yet: its one-time API-key download was not delivered by the in-app browser. See `AGENT_HANDOFF.md` for recovery and exact-main CI run IDs. This checkpoint is not a release or completion of the next-version gates.
+PR #225 is merged at `4e3d708a0bcfa153714ddb3d772f9d52d8294fe1`. Exact-main package `platforms/apple/dist/FileID-0.1.1-867.pkg` passed installer and extracted-app signature checks and a real sandboxed internal-fixture scan/search. App Store Connect has no TestFlight build yet: its one-time API-key download was not delivered by the in-app browser. All eight exact-main CI workflows passed, including Adlon guest Linux/Windows jobs; see `AGENT_HANDOFF.md` for run IDs and upload recovery. This checkpoint is not a release or completion of the next-version gates.
 
 ## Next-version checkpoint (2026-10-08)
 
