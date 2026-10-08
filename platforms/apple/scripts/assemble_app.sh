@@ -24,9 +24,9 @@ case "$BUILD_CONFIGURATION" in
     release|debug) ;;
     *) echo "❌ unsupported FILEID_BUILD_CONFIGURATION: $BUILD_CONFIGURATION"; exit 1 ;;
 esac
-BUILD_DIR="$PROJECT_DIR/.build/$BUILD_CONFIGURATION"
+BUILD_DIR="${FILEID_BUILD_DIR:-$PROJECT_DIR/.build/$BUILD_CONFIGURATION}"
 CONTENTS="$APP_BUNDLE/Contents"
-METALLIB_CACHE="$PROJECT_DIR/.build/cache/mlx.metallib"
+METALLIB_CACHE="${FILEID_METALLIB_CACHE:-$PROJECT_DIR/.build/cache/mlx.metallib}"
 
 [ -x "$BUILD_DIR/FileID" ]       || { echo "❌ $BUILD_DIR/FileID missing — build first"; exit 1; }
 [ -x "$BUILD_DIR/FileIDEngine" ] || { echo "❌ $BUILD_DIR/FileIDEngine missing — build first"; exit 1; }

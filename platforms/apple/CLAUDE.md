@@ -46,6 +46,8 @@ swift test                                                   # Shared + Engine s
 
 `run.sh` needs cmake + the Xcode Metal Toolchain (for `mlx.metallib`). Release bundling: `swift build -c release --product {FileID,FileIDEngine}`, copy both into `FileID.app/Contents/MacOS/`, `open`.
 
+`ensure_mlx_metallib.sh` keys the cached Metal library to the checked-out MLX revision and builds from a temporary source copy. It must never patch SwiftPM's checkout in place. For an isolated scratch build, set `FILEID_MLX_SOURCE` and `FILEID_METALLIB_CACHE` for that script, then `FILEID_BUILD_DIR` and the same `FILEID_METALLIB_CACHE` for `scripts/assemble_app.sh`.
+
 ## Conventions
 
 - **Swift 6 strict concurrency.** `@MainActor` for UI, `actor` for shared mutable services, `@unchecked Sendable` only with explicit lock coverage.

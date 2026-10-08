@@ -24,7 +24,8 @@ let package = Package(
     ],
     dependencies: [
         // VLM inference for Deep Analyze + AI face clustering.
-        .package(url: "https://github.com/ml-explore/mlx-swift-examples", from: "2.21.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm", exact: "3.32.3"),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
         // Bounded AsyncChannel for the backpressured streaming pipeline.
         .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
         // SQLite (WAL-mode) — the engine's primary store. Explicit
@@ -58,8 +59,10 @@ let package = Package(
                 "FileIDShared",
                 .product(name: "AsyncAlgorithms",      package: "swift-async-algorithms"),
                 .product(name: "GRDB",                 package: "GRDB.swift"),
-                .product(name: "MLXLMCommon",          package: "mlx-swift-examples"),
-                .product(name: "MLXVLM",               package: "mlx-swift-examples"),
+                .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
+                .product(name: "MLXVLM",               package: "mlx-swift-lm"),
+                .product(name: "MLXHuggingFace",       package: "mlx-swift-lm"),
+                .product(name: "Tokenizers",           package: "swift-transformers"),
                 .product(name: "onnxruntime",          package: "onnxruntime-swift-package-manager")
             ],
             path: "engine/Sources/FileIDEngine",

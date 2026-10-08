@@ -1,5 +1,11 @@
 # Models — canonical registry
 
+## 2026-10-08 — Compact macOS vision model candidate
+
+The macOS picker now exposes opt-in `qwen3_5_2b`, pinned to `mlx-community/Qwen3.5-2B-MLX-4bit` revision `93760be4f1f69842a46bc13dbdc0f19e291392a3` (Apache-2.0, approximately 1.75 GB download). Its 3 GB resident-memory estimate and 3 seconds/image ETA are provisional; it is not a recommended default or an accuracy claim. The [upstream model](https://huggingface.co/Qwen/Qwen3.5-2B) and [MLX conversion](https://huggingface.co/mlx-community/Qwen3.5-2B-MLX-4bit) both declare Apache-2.0. No weights are bundled. A separate user-initiated download is required for measured inference and promotion against the same rights-cleared FileID fixtures as the incumbent model.
+
+The macOS runtime moved from `mlx-swift-examples` 2.29.1 to [mlx-swift-lm 3.32.3](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.32.3), which registers the Qwen3.5 VLM architecture. `swift-transformers` 1.3.4 provides only local tokenizer loading; FileID's existing pinned, integrity-checked `VLMDownloader` remains the sole VLM network path. A local-only factory adapter rejects any different repository and preserves the existing per-model prompt and stop-token configuration. Existing memory admission is unchanged. Runtime inference, latency, accuracy, and packaging regression still require on-device evaluation before changing the default or release claims.
+
 IPC v1.11 related-take proposals reuse each platform's existing installed image/video CLIP embedding space (`CLIPEmbeddingSpace.modelID` on macOS, `mobileclip_s2` in the Rust engine). The same-model cosine is displayed as visual similarity, not an event-outcome probability. No weight, download, runtime, or license choice changed; threshold calibration remains a release task.
 
 ## 2026-10-08 opt-in moment-model evaluation
@@ -242,7 +248,7 @@ The v23 native index accepts only `CLIPEmbeddingSpace.modelID`, which identifies
 
 ## Runtime follow-up — October 2, 2026
 
-[MLX Swift LM 3.32.3](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.32.3) includes Qwen3.5 state/sanitization, Gemma 4 loading and image processing, cancellation and guided-generation fixes. FileID still resolves `mlx-swift-examples` 2.29.1, revision `9bff95ca5f0b9e8c021acc4d71a2bbe4a7441631`. A dependency transition must verify API/model-factory compatibility, OS/SDK requirements, offline behavior including automatic MTP downloads, licenses and identical-fixture regressions. No dependency or model was promoted by this research.
+[MLX Swift LM 3.32.3](https://github.com/ml-explore/mlx-swift-lm/releases/tag/3.32.3) includes Qwen3.5 state/sanitization, Gemma 4 loading and image processing, cancellation and guided-generation fixes. The macOS dependency transition described above landed as an opt-in candidate; model-backed identical-fixture regressions, OS/SDK packaging, and MTP/offline behavior remain evaluation gates. No model was promoted to the automatic default.
 
 [Gemma 4's card](https://ai.google.dev/gemma/docs/core/model_card_4) lists Apache-2.0 and substantial separate embedding storage for its E-series. Effective parameter counts do not determine resident memory. Budget actual converted tensors, context/recurrent states and visual buffers. [llama.cpp's router](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) supports `--models-max` (default four; zero unlimited), but that is a model-count cap, not FileID memory admission. Measure loading concurrency, resident models and parallel requests separately; keep interactive work responsive on the 16 GB Mac before changing defaults.
 

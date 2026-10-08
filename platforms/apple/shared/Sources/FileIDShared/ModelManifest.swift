@@ -110,6 +110,11 @@ public enum ModelManifest {
             revision: "a0afc48efd9308fb14b4d58bbd49d382f7d4f845",
             approxBytes: 5_776_636_403),
         VLMRepoPin(
+            repo: "mlx-community/Qwen3.5-2B-MLX-4bit",
+            kind: "qwen3_5_2b",
+            revision: "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+            approxBytes: 1_750_000_000),
+        VLMRepoPin(
             repo: "mlx-community/gemma-3-4b-it-qat-4bit",
             kind: "gemma_3_4b",
             revision: "3d9ef289111449933c22761961f16a5df237ce2a",

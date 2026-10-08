@@ -1,5 +1,9 @@
 # FileID next-version handoff — 2026-10-08
 
+## Compact macOS model/runtime checkpoint
+
+The macOS MLX runtime was updated to 3.32.3 and the opt-in Qwen3.5 2B vision candidate was pinned in the shared manifest. Existing models retain their prompt/EOS settings through an offline-only factory adapter; `VLMDownloader` remains the revision/integrity gate. Engine/app builds and the 341-test Swift suite pass; Rust manifest consistency passes. Run `bash platforms/apple/run.sh --no-wipe --debug` to verify bundle launch if not already recorded in the newest `STATE.md`. Do not claim 2B inference or model promotion: the separate 1.75 GB user-initiated download approval and rights-cleared evaluation are still pending. Verify exact-head and exact-main CI before declaring the checkpoint merged. Uploaded TestFlight build 875 is older and still requires Apple processing/owner-only group assignment. Keep Adlon read-only; all caches and fixtures stay on internal storage.
+
 ## Related-take proposal follow-up
 
 IPC v1.11 adds `suggestTakeGroups` with Swift/Rust engines, C# mirror, and a Mac Best Takes review surface. It is read-only, scoped to current search results, and uses same-model image/video embeddings plus file dates; it neither discovers the user's desired outcome nor saves a group until the user names it. Local full Swift, pinned Rust, and GTK tests/strict Clippy passed. Confirm exact-head and exact-main GitHub CI for the latest commit before reporting green. Next agent should build held-out grouping/outcome fixtures, calibrate per-model thresholds, add durable library-wide discovery and goal-conditioned timestamped evidence, then native GTK/WinUI review. TestFlight build 875 was uploaded by Xcode but App Store Connect still displayed `No Builds` at the latest check; refresh the existing owner-only internal group and assign the build only after processing. Keep Adlon example data read-only, with all writable artifacts on internal storage.

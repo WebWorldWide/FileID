@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Compact macOS VLM candidate (2026-10-08)
+
+The opt-in Qwen3.5 2B model and MLX Swift LM 3.32.3 runtime compile with the macOS app and engine. A revision-matched Metal library builds, and an isolated debug app/engine bundle launches. This does not clear the model release gate: run actual local inference on rights-cleared positive/negative/uncertain media, compare it with the incumbent on identical fixtures, measure memory and latency under background load, and validate packaged sandbox behavior. Keep it out of automatic recommendations until those results pass. No model weights are bundled, and Adlon remains read-only example data.
+
 ## Related-take proposal checkpoint (2026-10-08)
 
 IPC v1.11 adds read-only visual grouping proposals among selected search results. Local Swift, pinned Rust, and GTK suites and strict Clippy pass; C# and hosted CI remain the merge gate. This is a usability step toward Best Takes, not the release target: no calibrated broad-event detection, catalog-wide grouping job, held-out eight-category ranking benchmark, or GTK/WinUI review UI exists yet. Apple still must expose uploaded macOS build 875 in TestFlight before installation or sandbox acceptance can be claimed. Keep the broader conversion, face, search, chat, privacy, hardware, and distribution gates in this file open.

@@ -38,6 +38,24 @@ struct Qwen3VLWeightAdapterTests {
     }
 }
 
+@Suite("Offline VLM factory adapter")
+struct LocalVLMDownloaderTests {
+    @Test("returns only the verified repository directory")
+    func exactRepository() async throws {
+        let directory = URL(fileURLWithPath: "/tmp/fileid-vlm-test")
+        let downloader = LocalVLMDownloader(repo: "example/model", directory: directory)
+        let resolved = try await downloader.download(
+            id: "example/model", revision: "main", matching: ["*.json"],
+            useLatest: true, progressHandler: { _ in })
+        #expect(resolved == directory)
+        await #expect(throws: NSError.self) {
+            try await downloader.download(
+                id: "other/model", revision: nil, matching: [],
+                useLatest: false, progressHandler: { _ in })
+        }
+    }
+}
+
 @Suite("Deep Analyze pure-logic fixes (C3-DA)")
 struct DeepAnalyzePureLogicTests {
 

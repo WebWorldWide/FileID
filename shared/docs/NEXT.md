@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## Compact macOS VLM follow-up
+
+Verify the latest exact-main GitHub SHA and workflows before relying on this checkpoint. The Qwen3.5 2B MLX model is an experimental manual picker option, not a new default. The owner was asked for a separate user-initiated 1.75 GB model download to an internal-drive cache because the earlier approval covered only Qwen3-VL 4B. If approved, use rights-cleared positive/negative/uncertain frames to measure actual load, memory, timestamped-event quality, and latency beside the incumbent; preserve memory admission and abstention. If approval is not given, leave the candidate unpromoted and continue independent Mac/Linux catalog, timeline, and conversion work. Do not write to Adlon. Current Swift tests and Rust manifest checks pass; verify no-wipe native launch and GitHub exact-head/main CI before marking this slice landed. TestFlight build 875 remains a separate Apple processing/assignment task.
+
 ## Following IPC v1.11 related-take proposals
 
 Verify the latest GitHub `main` SHA and all exact-main workflows before claiming this checkpoint. The Mac window's “Find related takes” proposes groups only among current search hits. Do not describe it as event-outcome recognition. Next: collect rights-cleared attempts with positive, negative, and uncertain labels; measure grouping precision/recall separately for Mac CLIP and Rust MobileCLIP, including missing embeddings and unreliable file dates. Move full-library discovery into a durable, cancellable job with progress before enabling automatic catalog-wide groups. Connect goal-conditioned dense timeline evidence to take outcome scoring, then build native GTK/WinUI review surfaces. Continue checking App Store Connect for uploaded build 875; assign it to the existing owner-only internal group only when Apple exposes a processed build. Preserve Adlon's example-data volume as read-only and use internal-drive fixtures for changes.
