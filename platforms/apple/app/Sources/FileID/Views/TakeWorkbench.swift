@@ -17,6 +17,7 @@ struct TakeWorkbench: View {
     @State private var eventQuery = ""
     @State private var selectedIDs: Set<Int64> = []
     @State private var selectedTakeID: Int64?
+    @State private var lastDeletedEventID: String?
     @State private var player: AVPlayer?
     @State private var pendingID = ""
     @State private var pendingAction = ""
@@ -33,6 +34,9 @@ struct TakeWorkbench: View {
                 Text("Best Takes").font(.title2.bold())
                 Spacer()
                 Button("New group") { newGroup() }
+                if let lastDeletedEventID {
+                    Button("Undo delete") { send("undoEventEdit", eventID: lastDeletedEventID) }
+                }
                 Button("Done") { dismiss() }
             }
             Text("Group related clips, describe the result you want, and review each outcome. FileID only recommends a winner when the evidence supports it.")
@@ -47,6 +51,7 @@ struct TakeWorkbench: View {
                     List(events, id: \.id) { event in
                         Button {
                             selectedEvent = event
+                            lastDeletedEventID = nil
                             title = event.title
                             goal = event.goal
                             selectedIDs = Set(event.fileIDs)
@@ -71,7 +76,10 @@ struct TakeWorkbench: View {
                                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedIDs.count < 2)
                             if let event = selectedEvent {
                                 Button("Undo group edit") { send("undoEventEdit", eventID: event.id) }
-                                Button("Delete group") { send("deleteEvent", eventID: event.id) }
+                                Button("Delete group") {
+                                    lastDeletedEventID = event.id
+                                    send("deleteEvent", eventID: event.id)
+                                }
                             }
                         }
                         Text("Select at least two files from the search results to make a group. Originals are never changed.")
@@ -160,6 +168,7 @@ struct TakeWorkbench: View {
     }
 
     private func saveGroup() {
+        lastDeletedEventID = nil
         let event = CatalogEvent(id: selectedEvent?.id ?? UUID().uuidString, title: title, goal: goal,
                                  fileIDs: Array(selectedIDs).sorted())
         send("saveEvent", event: event)
@@ -188,7 +197,10 @@ struct TakeWorkbench: View {
         pendingID = ""
         pendingAction = ""
         message = response.message ?? (response.status == "ok" ? "" : "The request failed.")
-        guard response.status == "ok" else { return }
+        guard response.status == "ok" else {
+            if action == "deleteEvent" { lastDeletedEventID = nil }
+            return
+        }
         if let events = response.events {
             if action == "takeGroup" || action == "saveEvent" || action == "setTakeFeedback" || action == "undoTakeFeedback" {
                 if let event = events.first {
@@ -207,6 +219,7 @@ struct TakeWorkbench: View {
             recommendation = response.recommendation
         }
         if action == "saveEvent" || action == "deleteEvent" || action == "undoEventEdit" {
+            if action == "undoEventEdit" { lastDeletedEventID = nil }
             send("listEvents", query: eventQuery)
         }
     }
