@@ -3616,3 +3616,7 @@ ImageIO returns upright thumbnails, while the current Rust scan's explicit pixel
 ## 2026-10-08 — Terminal scan state and existing text indexes are catalog evidence
 
 Emit an explicit terminal `ScanProgress` before `scanComplete`: short scans can finish between periodic snapshots, and the app's phase-change event deliberately does not mutate its displayed progress. Reuse the existing `doc_fts` and `ocr_fts` tables for bounded catalog/chat snippets instead of creating another document index. Keep media/person/event filters on those hits, and label sampled-frame uncertainty only for sampled-frame evidence. The welcome sheet's `Skip for now` now persists even with missing models; Settings remains the model-install surface. These changes add no dependency or network path.
+
+## 2026-10-08 — Best-take groups abstain without current outcome evidence
+
+Reuse catalog v21 for manual grouping, goal review, and reversible corrections. An explicit user preference wins, then the best supported outcome; technical quality breaks only close outcome ties. Unknown, stale, low-confidence, and multiple-preferred groups return an explanation or tie rather than a forced winner. User feedback carries the current file revision so rescans can invalidate it while preserving the correction journal. This slice adds no model, dependency, or automatic detection claim. The opt-in Qwen3-VL 4B frame evaluation reached the existing 16 GB Mac memory admission guard; do not relax that guard merely to produce a quality result.

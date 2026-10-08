@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.9.0",
+  "version": "1.10.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1162,6 +1162,51 @@
         }
       }
     },
+    "CatalogEvent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "title", "goal", "fileIDs", "userEdited"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 200},
+        "title": {"type": "string", "minLength": 1, "maxLength": 200},
+        "goal": {"type": "string", "maxLength": 500},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 100},
+        "userEdited": {"type": "boolean"}
+      }
+    },
+    "CatalogTakeFeedback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventID", "fileID", "preferred"],
+      "properties": {
+        "eventID": {"type": "string", "minLength": 1, "maxLength": 200},
+        "fileID": {"type": "integer"},
+        "outcomeScore": {"type": "number", "minimum": 0, "maximum": 1},
+        "preferred": {"type": "boolean"}
+      }
+    },
+    "CatalogTake": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventID", "fileID", "path", "preferred", "stale"],
+      "properties": {
+        "eventID": {"type": "string"}, "fileID": {"type": "integer"},
+        "path": {"type": "string"},
+        "outcomeScore": {"type": "number", "minimum": 0, "maximum": 1},
+        "qualityScore": {"type": "number", "minimum": 0, "maximum": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "explanation": {"type": "string"},
+        "sourceRevision": {"type": "string"}, "modelVersion": {"type": "string"},
+        "preferred": {"type": "boolean"}, "stale": {"type": "boolean"}
+      }
+    },
+    "CatalogTakeRecommendation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["eventID", "status", "fileIDs", "reason"],
+      "properties": {
+        "eventID": {"type": "string"},
+        "status": {"type": "string", "enum": ["preferred", "ranked", "tie", "insufficient"]},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "maxItems": 100},
+        "reason": {"type": "string"}
+      }
+    },
     "CatalogRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -1190,7 +1235,14 @@
             "enqueueTimeline",
             "pauseJob",
             "resumeJob",
-            "cancelJob"
+            "cancelJob",
+            "listEvents",
+            "saveEvent",
+            "deleteEvent",
+            "undoEventEdit",
+            "takeGroup",
+            "setTakeFeedback",
+            "undoTakeFeedback"
           ]
         },
         "query": {
@@ -1216,6 +1268,9 @@
           },
           "maxItems": 10000
         },
+        "event": {"$ref": "#/$defs/CatalogEvent"},
+        "eventID": {"type": "string", "maxLength": 200},
+        "takeFeedback": {"$ref": "#/$defs/CatalogTakeFeedback"},
         "timelineMode": {
           "type": "string",
           "enum": [
@@ -1262,6 +1317,9 @@
             "$ref": "#/$defs/CatalogChapter"
           }
         },
+        "events": {"type": "array", "items": {"$ref": "#/$defs/CatalogEvent"}},
+        "takes": {"type": "array", "items": {"$ref": "#/$defs/CatalogTake"}},
+        "recommendation": {"$ref": "#/$defs/CatalogTakeRecommendation"},
         "jobs": {
           "type": "array",
           "items": {

@@ -1,5 +1,9 @@
 # Architecture — cross-platform overview
 
+## Best-take review catalog (IPC v1.10)
+
+Both engines use the existing v21 event, event-file, take-score, operation, and correction tables. Typed catalog actions create and edit groups, record user outcomes/preferences, and undo the last matching correction. Source revision checks stale scores after a file changes. Recommendation ranks a supported desired outcome before technical quality, returns ties, and abstains when evidence is incomplete or stale. The Mac Search & Moments window opens a native Best Takes review surface using catalog search hits as candidates. This is a manual review and ranking slice; automatic broad event grouping and model-backed outcome detection are still pending. The shared Rust implementation serves Linux and Windows clients; native port review UI is not yet implemented.
+
 ## Linux native app surface (2026-10-07)
 
 The GTK `Stack` exposes the six product tabs in the canonical order: Library, People, Cleanup, Deep Analyze, Restructure, and Settings. Deep Analyze and Restructure use the shared engine's existing typed IPC routes; this UI wiring adds no schema fields or dependencies. The window restores only a valid saved tab and an existing saved library folder, and scanning remains an explicit user action. Restructure applies selected moves and supports undo; the current IPC contract does not expose restructure cancellation.

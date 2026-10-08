@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Best-take review checkpoint (2026-10-08)
+
+Mac and shared Rust now support manual event groups, desired-outcome feedback, preference, correction/Undo, and honest recommendation abstention under IPC v1.10; Mac has a native review window. Automatic broad best-take detection, measured event accuracy, native GTK/WinUI review controls, and the remaining conversion/media/hardware gates are open. The 4B model fixture did not pass memory admission on the 16 GB Mac, so no recognition quality is claimed. TestFlight still has no uploaded build: the replacement Apple team key's one-time download did not reach local storage, despite a signed package and available signing assets.
+
 ## Signed Mac package checkpoint (2026-10-08)
 
 PR #225 is merged at `4e3d708a0bcfa153714ddb3d772f9d52d8294fe1`. Exact-main package `platforms/apple/dist/FileID-0.1.1-867.pkg` passed installer and extracted-app signature checks and a real sandboxed internal-fixture scan/search. App Store Connect has no TestFlight build yet: its one-time API-key download was not delivered by the in-app browser. All eight exact-main CI workflows passed, including Adlon guest Linux/Windows jobs; see `AGENT_HANDOFF.md` for run IDs and upload recovery. This checkpoint is not a release or completion of the next-version gates.
@@ -10,7 +14,7 @@ The isolated Mac fixture now verifies native scan completion, timestamped manual
 
 ## Mac TestFlight scaffold (2026-10-03)
 
-`com.fileid.app` and macOS App Store Connect record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, separate persistent app and implicit-scope IPC bookmarks with bounded engine access leases, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. The local Mac App Store profile and Apple Distribution / Mac Installer Distribution identities are installed, and a signed package passed strict deep verification and installer signature checks. Apple’s API-access acknowledgment is accepted. A team API key—which Apple grants access to every app—is pending owner confirmation. No build has been uploaded, no testers have been added, and sandbox runtime acceptance is open. See `NEXT.md` and `AGENT_HANDOFF.md` for exact continuation.
+`com.fileid.app` and macOS App Store Connect record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, separate persistent app and implicit-scope IPC bookmarks with bounded engine access leases, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. The local Mac App Store profile and Apple Distribution / Mac Installer Distribution identities are installed, and a signed package passed strict deep verification and installer signature checks. Apple’s API-access acknowledgment is accepted. Team-key creation was authorized, but browser delivery of the one-time `.p8` repeatedly failed; see the newest checkpoint. No build has been uploaded, no testers have been added, and sandbox runtime acceptance is open. See `NEXT.md` and `AGENT_HANDOFF.md` for exact continuation.
 
 ## Native persistent search checkpoint (2026-10-02)
 
