@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-08 — Related-take proposals, IPC v1.11
+
+The Mac Best Takes window can now ask the engine for visually similar media among its current search results, review proposed membership, and then use the existing explicit event save. Swift and Rust engines compare current-model CLIP embeddings and file creation dates in bounded groups, excluding known byte-identical copies, derived exports, and files already assigned to a group. Returned cosine similarity is not an outcome score. No file or catalog mutation occurs on suggestion. This does not establish automatic detection of a hit, catch, gift, or any other outcome; all outcome ranking still requires reviewed evidence. Schema and Swift/Rust/C# DTOs moved to IPC v1.11; no migration, dependency, or model download was added. Synthetic regression covers similar video keyframes, unrelated footage, far dates, copies, derivatives, and old-model embeddings. Local full Swift tests passed (167 shared, 21 app, 340 engine); pinned Rust 1.90 all-target tests and strict Clippy passed; GTK 38 tests and strict Clippy passed. Local .NET is unavailable; GitHub CI must validate C# and package targets. The 0.90/20-minute proposal filter still needs rights-cleared calibration and catalog-wide job design.
+
 ## 2026-10-08 — Unused API key revoked; owner enrolled for TestFlight
 
 With the owner's action-time approval, revoked unusable team Developer key `6VXJ3PBDMS`; App Store Connect now shows **zero active team API keys** and three revoked upload attempts. Xcode's authenticated upload of build 875 succeeded independently of these keys. Added only `adammnolle@gmail.com` (the Account Holder/Admin) to the existing `FileID Internal Testers` group. The group shows **1 tester, 0 builds, No Builds Available** as of 13:08 CDT; Apple processing and build assignment remain open. No invite was sent to anyone else.

@@ -21,7 +21,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
 }
 
 fn response(id: &str, status: &str, message: Option<String>) -> CatalogResponse {
-    CatalogResponse { request_id: id.into(), status: status.into(), message, hits: vec![], chapters: vec![], jobs: vec![], events: None, takes: None, recommendation: None }
+    CatalogResponse { request_id: id.into(), status: status.into(), message, hits: vec![], chapters: vec![], jobs: vec![], events: None, takes: None, recommendation: None, suggested_take_groups: None }
 }
 
 pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
@@ -105,7 +105,7 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             result.jobs = jobs(conn)?;
         }
         "enqueueTimeline" => bail!("Automatic timeline analysis is not yet available in this engine"),
-        "listEvents" | "saveEvent" | "deleteEvent" | "undoEventEdit" | "takeGroup" | "setTakeFeedback" | "undoTakeFeedback" => {
+        "listEvents" | "suggestTakeGroups" | "saveEvent" | "deleteEvent" | "undoEventEdit" | "takeGroup" | "setTakeFeedback" | "undoTakeFeedback" => {
             crate::commands::catalog_takes::execute(conn, request, &mut result)?;
         }
         _ => bail!("Unknown catalog action"),

@@ -141,6 +141,28 @@ public struct CatalogTakeRecommendation: Codable, Sendable, Equatable {
     }
 }
 
+public struct CatalogTakeGroupMember: Codable, Sendable, Equatable {
+    public var fileID: Int64
+    public var path: String
+
+    public init(fileID: Int64, path: String) {
+        self.fileID = fileID
+        self.path = path
+    }
+}
+
+public struct CatalogTakeGroupSuggestion: Codable, Sendable, Equatable {
+    public var members: [CatalogTakeGroupMember]
+    public var similarity: Double
+    public var reason: String
+
+    public init(members: [CatalogTakeGroupMember], similarity: Double, reason: String) {
+        self.members = members
+        self.similarity = similarity
+        self.reason = reason
+    }
+}
+
 public struct CatalogRequest: Codable, Sendable, Equatable {
     public var requestID: String
     public var action: String
@@ -190,7 +212,8 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
     public var events: [CatalogEvent]?
     public var takes: [CatalogTake]?
     public var recommendation: CatalogTakeRecommendation?
-    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil) {
+    public var suggestedTakeGroups: [CatalogTakeGroupSuggestion]?
+    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil, suggestedTakeGroups: [CatalogTakeGroupSuggestion]? = nil) {
         self.requestID = requestID
         self.status = status
         self.message = message
@@ -200,5 +223,6 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
         self.events = events
         self.takes = takes
         self.recommendation = recommendation
+        self.suggestedTakeGroups = suggestedTakeGroups
     }
 }

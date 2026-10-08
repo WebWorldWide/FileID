@@ -1,5 +1,9 @@
 # FileID next version — implementation ledger
 
+## 2026-10-08 related-take proposal checkpoint
+
+IPC v1.11 and the Mac/Rust engines now propose related groups from current visual embeddings and nearby file creation dates among explicit search-result IDs. The Mac review window lets a user adopt a proposal before naming a group and its desired outcome. Exact copies, derivative exports, and already grouped files are excluded. These are uncalibrated **visual proposals**, not automatic detection of a hit, catch, gift, or other event. Next: rights-cleared positive/negative/uncertain group fixtures; calibrate visual similarity separately for each embedding model, measure misses from absent embeddings or unreliable file dates, move catalog-wide discovery to a durable background job, then connect dense timestamped outcome evidence and native GTK/WinUI review.
+
 Accepted direction: a local catalog connects files, people, events, temporal evidence, document passages, and derived versions. Develop and validate macOS first, then mirror each milestone into Windows and Linux. Preserve native interfaces, the existing palette, springs, and LavaLampBackground. No telemetry; inference is offline. User-initiated Hugging Face model downloads remain the only application network feature.
 
 ## Current implementation

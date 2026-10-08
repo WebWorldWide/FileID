@@ -26,6 +26,14 @@ enum CatalogTakes {
         case "listEvents":
             let events = try await database.pool.read { db in try list(db, query: request.query) }
             return CatalogResponse(requestID: request.requestID, status: "ok", events: events)
+        case "suggestTakeGroups":
+            guard let fileIDs = request.fileIDs else { throw CatalogStore.InvalidRequest() }
+            let groups = try await database.pool.read { db in
+                try CatalogTakeSuggestions.discover(db, fileIDs: fileIDs, limit: request.limit ?? 20)
+            }
+            return CatalogResponse(requestID: request.requestID, status: "ok",
+                                   message: groups.isEmpty ? "No related takes found among files with current visual embeddings and capture dates." : nil,
+                                   suggestedTakeGroups: groups)
         case "takeGroup":
             guard let eventID = request.eventID else { throw CatalogStore.InvalidRequest() }
             return try await database.pool.read { db in try group(db, eventID: eventID, requestID: request.requestID) }

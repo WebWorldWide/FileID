@@ -106,6 +106,22 @@ pub struct CatalogTakeRecommendation {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeGroupMember {
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeGroupSuggestion {
+    pub members: Vec<CatalogTakeGroupMember>,
+    pub similarity: f64,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogRequest {
@@ -161,6 +177,8 @@ pub struct CatalogResponse {
     pub takes: Option<Vec<CatalogTake>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<CatalogTakeRecommendation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_take_groups: Option<Vec<CatalogTakeGroupSuggestion>>,
 }
 
 #[cfg(test)]

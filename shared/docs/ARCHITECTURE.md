@@ -1,5 +1,9 @@
 # Architecture — cross-platform overview
 
+## Related-take proposals (IPC v1.11)
+
+`suggestTakeGroups` is a read-only catalog request scoped to explicit file IDs. Both engines inspect only current-model visual embeddings from image and video scan results, order candidates by file creation date, and compare each candidate to a bounded set of recent group anchors. Exact byte duplicates, cataloged derivatives, and members of saved groups are omitted. The response carries member paths and cosine similarity; it does not create events or score whether the user's desired outcome occurred. macOS presents proposals for review, then uses the existing `saveEvent` action only after the user supplies a title and goal. The 20-minute/0.90 proposal filters need rights-cleared calibration before catalog-wide jobs or automatic ranking.
+
 ## Best-take review catalog (IPC v1.10)
 
 Both engines use the existing v21 event, event-file, take-score, operation, and correction tables. Typed catalog actions create and edit groups, record user outcomes/preferences, and undo the last matching correction. Source revision checks stale scores after a file changes. Recommendation ranks a supported desired outcome before technical quality, returns ties, and abstains when evidence is incomplete or stale. The Mac Search & Moments window opens a native Best Takes review surface using catalog search hits as candidates. This is a manual review and ranking slice; automatic broad event grouping and model-backed outcome detection are still pending. The shared Rust implementation serves Linux and Windows clients; native port review UI is not yet implemented.

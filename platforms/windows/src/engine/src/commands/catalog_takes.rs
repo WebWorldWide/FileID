@@ -28,6 +28,14 @@ struct Snapshot {
 pub fn execute(conn: &mut Connection, request: &CatalogRequest, result: &mut CatalogResponse) -> Result<()> {
     match request.action.as_str() {
         "listEvents" => result.events = Some(list(conn, request.query.as_deref())?),
+        "suggestTakeGroups" => {
+            let file_ids = request.file_ids.as_deref().ok_or_else(|| anyhow::anyhow!("File IDs required"))?;
+            let groups = super::catalog_take_suggestions::discover(conn, file_ids, request.limit.unwrap_or(20))?;
+            if groups.is_empty() {
+                result.message = Some("No related takes found among files with current visual embeddings and capture dates.".into());
+            }
+            result.suggested_take_groups = Some(groups);
+        }
         "takeGroup" => {
             let id = event_id(request)?;
             group(conn, id, result)?;

@@ -63,6 +63,13 @@ public sealed record CatalogTakeRecommendation(
     string Status,
     IReadOnlyList<long> FileIDs,
     string Reason);
+
+public sealed record CatalogTakeGroupMember(long FileID, string Path);
+
+public sealed record CatalogTakeGroupSuggestion(
+    IReadOnlyList<CatalogTakeGroupMember> Members,
+    double Similarity,
+    string Reason);
 public sealed record CatalogRequest(
     string RequestID,
     string Action,
@@ -91,5 +98,6 @@ public sealed record CatalogResponse(
     IReadOnlyList<CatalogJob> Jobs,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogEvent>? Events = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTake>? Takes = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeRecommendation? Recommendation = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeRecommendation? Recommendation = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTakeGroupSuggestion>? SuggestedTakeGroups = null);
 
