@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Internal testing availability (2026-10-08, 13:08 CDT)
+
+FileID 0.1.1 (875) uploaded through Xcode and passed App Store Connect validation, but Apple had not exposed a build to TestFlight at the latest check. The existing group contains only the owner's Apple account and shows **No Builds Available**. Tester install and sandbox runtime acceptance remain open gates. All three unusable Developer API keys are revoked; zero active team keys remain.
+
 ## TestFlight build 875 checkpoint (2026-10-08)
 
 Xcode Organizer App Store Connect validation passed and uploaded signed FileID 0.1.1 (875) using the signed-in Apple team. The local installer is `platforms/apple/dist/FileID-0.1.1-875.pkg` (SHA-256 `886f10c6c944476e5ee281168915f72b4b51bf622dc01f149e44ef79410cdf27`). The previous 874 validation identified missing `LSApplicationCategoryType` and two root-only readable bundle files; both were corrected in packaging before build 875. TestFlight showed **No Builds** immediately after upload at 12:58 CDT, so processing and tester availability are open gates. This upload is from the PR #227 source, with exact-head/main CI still to be verified.

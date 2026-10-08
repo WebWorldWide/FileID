@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## Latest TestFlight state (2026-10-08, 13:08 CDT)
+
+Xcode uploaded build 0.1.1 (875), but [FileID Internal Testers](https://appstoreconnect.apple.com/teams/d850f9a5-cdeb-471d-8f22-da26d818f701/apps/6818813859/testflight/groups/08d0a98b-d192-4e1a-a9e4-da3756e89187) shows **1 tester, 0 builds, No Builds Available**. The sole tester is the owner, `adammnolle@gmail.com`. Refresh TestFlight for Apple processing; once build 875 reaches Complete, assign it to the internal group and verify the owner can install it. All three failed API-key attempts are revoked; zero active team keys remain. Xcode's signed-in account is the working upload route. Do not add other testers or claim availability prematurely.
+
 ## Verify TestFlight processing and land build 875 packaging fix (2026-10-08)
 
 Xcode Organizer validated and uploaded FileID 0.1.1 (875) to App Store Connect, but TestFlight still showed **No Builds** at 12:58 CDT. Check [FileID TestFlight](https://appstoreconnect.apple.com/teams/d850f9a5-cdeb-471d-8f22-da26d818f701/apps/6818813859/testflight) for processing completion, export compliance, and the existing FileID Internal Testers group. Do not describe the build as available to testers until the page confirms it. Package `platforms/apple/dist/FileID-0.1.1-875.pkg` is signed locally, SHA-256 `886f10c6c944476e5ee281168915f72b4b51bf622dc01f149e44ef79410cdf27`; the Xcode archive is under `~/Library/Developer/Xcode/Archives/2026-10-08/`. Finish PR #227 exact-head CI, merge to `main`, verify exact-main workflows, and remove its task branch. Keep the unrelated Store MSIX checkout. The replacement API key `6VXJ3PBDMS` has no accessible `.p8` and is unnecessary for Xcode upload; do not regenerate keys blindly.

@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-08 — Unused API key revoked; owner enrolled for TestFlight
+
+With the owner's action-time approval, revoked unusable team Developer key `6VXJ3PBDMS`; App Store Connect now shows **zero active team API keys** and three revoked upload attempts. Xcode's authenticated upload of build 875 succeeded independently of these keys. Added only `adammnolle@gmail.com` (the Account Holder/Admin) to the existing `FileID Internal Testers` group. The group shows **1 tester, 0 builds, No Builds Available** as of 13:08 CDT; Apple processing and build assignment remain open. No invite was sent to anyone else.
+
 ## 2026-10-08 — App Store validation and build 875 upload
 
 Xcode Organizer rejected build 874 because `LSApplicationCategoryType` was absent and the packaged `mlx.metallib` and embedded provisioning profile were mode 0600. `assemble_app.sh` now declares `public.app-category.productivity`; `testflight.sh` makes the bundle readable and traversable before signing. Signed build 875 (`platforms/apple/dist/FileID-0.1.1-875.pkg`, SHA-256 `886f10c6c944476e5ee281168915f72b4b51bf622dc01f149e44ef79410cdf27`) passes extracted-app strict code-signature, installer signature, category, and world-readability checks. Xcode Organizer's App Store Connect validation passed without errors. A local `.xcarchive` assembled with metadata-preserving `ditto` and matching FileID/FileIDEngine dSYMs uploaded successfully through Xcode's signed-in team account; Xcode shows build 875 as **Uploaded**. At 12:58 CDT App Store Connect TestFlight still displayed **No Builds**, so Apple processing, availability, and tester assignment remain to verify. No Adlon data or server volume was written. The unused replacement API key `6VXJ3PBDMS` remains active without an accessible `.p8`; do not generate another key to continue this upload path.
