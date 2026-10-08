@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Signed Mac package checkpoint (2026-10-08)
+
+PR #225 is merged at `4e3d708a0bcfa153714ddb3d772f9d52d8294fe1`. Exact-main package `platforms/apple/dist/FileID-0.1.1-867.pkg` passed installer and extracted-app signature checks and a real sandboxed internal-fixture scan/search. App Store Connect has no TestFlight build yet: its one-time API-key download was not delivered by the in-app browser. All eight exact-main CI workflows passed, including Adlon guest Linux/Windows jobs; see `AGENT_HANDOFF.md` for run IDs and upload recovery. This checkpoint is not a release or completion of the next-version gates.
+
 ## Next-version checkpoint (2026-10-08)
 
 The isolated Mac fixture now verifies native scan completion, timestamped manual chapter editing, document-content chat retrieval, and original-preserving photo enlargement/Undo. Swift and Rust suites, pinned Rust lint, and actual cross-engine catalog/chat/tool probes pass locally. This is a functional checkpoint, not release acceptance: model-backed accuracy, best takes, stabilization/enhancement/reframing, broad formats, native Linux/Windows execution, strict offline egress, protected-source write tracing, and the 100,000-file/16 GB performance targets remain open. The visual-model test requires explicit rights-clear frames and suitable available memory; default tests skip it. TestFlight has no uploaded build yet.
