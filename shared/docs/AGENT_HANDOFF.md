@@ -1,5 +1,9 @@
 # FileID next-version handoff — 2026-10-08
 
+## Current handoff: Xcode upload succeeded; TestFlight processing pending
+
+PR #227 contains the IPC v1.10 Mac-first Best Takes review slice and a Mac packaging correction discovered by Apple validation. Xcode Organizer validated and uploaded signed build 0.1.1 (875); its archive is `~/Library/Developer/Xcode/Archives/2026-10-08/FileID-0.1.1-875.xcarchive`, with matching app and engine dSYMs. The local `.pkg` is `platforms/apple/dist/FileID-0.1.1-875.pkg` (SHA-256 `886f10c6c944476e5ee281168915f72b4b51bf622dc01f149e44ef79410cdf27`). At 12:58 CDT [FileID TestFlight](https://appstoreconnect.apple.com/teams/d850f9a5-cdeb-471d-8f22-da26d818f701/apps/6818813859/testflight) still said **No Builds**; processing and internal tester assignment require verification. Xcode upload needs no API key or Transporter. Finish PR #227 CI, merge to `main`, verify exact-main CI, and delete its task branch. Never write to Adlon; leave the unrelated Store MSIX worktree/branch intact.
+
 ## Latest active handoff: Best Takes review and Apple upload key
 
 The current Mac-first slice adds IPC v1.10 group/take DTOs, manual goal and outcome review, recommendation with ties/abstention, persisted correction/Undo, and a native Mac Best Takes window. The shared Rust engine mirrors service behavior for Linux/Windows. This does **not** establish automatic best-take recognition or held-out accuracy. Check newest STATE/NEXT entries and exact-main CI before extending it. Next product work is goal-conditioned temporal evidence plus native GTK review UI, then held-out evaluation on internal rights-clear fixtures. Do not write to Adlon; preserve the unrelated Store MSIX checkout.

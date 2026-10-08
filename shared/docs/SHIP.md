@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## TestFlight build 875 checkpoint (2026-10-08)
+
+Xcode Organizer App Store Connect validation passed and uploaded signed FileID 0.1.1 (875) using the signed-in Apple team. The local installer is `platforms/apple/dist/FileID-0.1.1-875.pkg` (SHA-256 `886f10c6c944476e5ee281168915f72b4b51bf622dc01f149e44ef79410cdf27`). The previous 874 validation identified missing `LSApplicationCategoryType` and two root-only readable bundle files; both were corrected in packaging before build 875. TestFlight showed **No Builds** immediately after upload at 12:58 CDT, so processing and tester availability are open gates. This upload is from the PR #227 source, with exact-head/main CI still to be verified.
+
 ## Best-take review checkpoint (2026-10-08)
 
 Mac and shared Rust now support manual event groups, desired-outcome feedback, preference, correction/Undo, and honest recommendation abstention under IPC v1.10; Mac has a native review window. Automatic broad best-take detection, measured event accuracy, native GTK/WinUI review controls, and the remaining conversion/media/hardware gates are open. The 4B model fixture did not pass memory admission on the 16 GB Mac, so no recognition quality is claimed. Updated signed Mac package `FileID-0.1.1-874.pkg` passes installer and extracted-app signature checks; TestFlight still has no uploaded build because the replacement Apple team key's one-time download did not reach local storage.
