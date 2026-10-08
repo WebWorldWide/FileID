@@ -88,19 +88,21 @@ pub(super) fn discover(
     });
     Ok(finished.into_iter().take(limit).map(|group| CatalogTakeGroupSuggestion {
         members: group.members,
-        similarity: f64::from(group.lowest_similarity),
+        similarity: f64::from(group.lowest_similarity).min(1.0),
         reason: "Similar visual content and file dates. Review the files and desired outcome before saving.".into(),
     }).collect())
 }
 
 fn decode(blob: &[u8]) -> Option<Vec<f32>> {
     if blob.len() != DIMENSION * 4 { return None; }
-    let vector: Vec<f32> = blob.as_chunks::<4>().0.iter()
+    let mut vector: Vec<f32> = blob.as_chunks::<4>().0.iter()
         .map(|bytes| f32::from_le_bytes(*bytes))
         .collect();
     if !vector.iter().all(|value| value.is_finite()) { return None; }
     let norm: f64 = vector.iter().map(|value| f64::from(*value) * f64::from(*value)).sum();
     if (norm - 1.0).abs() > 0.02 { return None; }
+    let scale = norm.sqrt() as f32;
+    for value in &mut vector { *value /= scale; }
     Some(vector)
 }
 
@@ -130,8 +132,7 @@ mod tests {
                 params![id, format!("/internal/{id}.mov"), id, time, vec![hash]],
             ).unwrap();
         }
-        let side = (1.0_f32 - 0.95_f32 * 0.95_f32).sqrt();
-        for (id, first, second) in [(1, 1.0, 0.0), (2, 0.95, side), (3, 0.0, 1.0),
+        for (id, first, second) in [(1, 1.009, 0.0), (2, 1.009, 0.0), (3, 0.0, 1.0),
                                     (4, 1.0, 0.0), (5, 1.0, 0.0), (6, 1.0, 0.0), (7, 1.0, 0.0)] {
             conn.execute(
                 "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)",
@@ -143,6 +144,7 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].members.iter().map(|member| member.file_id).collect::<Vec<_>>(), vec![1, 2]);
         assert!(groups[0].similarity >= 0.90);
+        assert!(groups[0].similarity <= 1.0);
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_events", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 0);
         let request = serde_json::from_value(serde_json::json!({

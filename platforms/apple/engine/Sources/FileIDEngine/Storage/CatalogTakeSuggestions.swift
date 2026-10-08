@@ -38,7 +38,9 @@ enum CatalogTakeSuggestions {
         while let row = try rows.next() {
             let time: Double = row["created_at"]
             let blob: Data = row["embedding"]
-            guard time.isFinite, let vector = CLIPEmbeddingSpace.vector(from: blob) else { continue }
+            guard time.isFinite, let storedVector = CLIPEmbeddingSpace.vector(from: blob) else { continue }
+            let norm = sqrt(storedVector.reduce(0.0) { $0 + Double($1) * Double($1) })
+            let vector = storedVector.map { Float(Double($0) / norm) }
             let member = CatalogTakeGroupMember(fileID: row["id"], path: row["path_text"])
             let hash: Data? = row["content_hash"]
             if let hash, !seenHashes.insert(hash).inserted { continue }
@@ -72,7 +74,7 @@ enum CatalogTakeSuggestions {
             .prefix(limit)
             .map { group in
                 CatalogTakeGroupSuggestion(members: group.members,
-                                           similarity: Double(group.lowestSimilarity),
+                                           similarity: min(1, Double(group.lowestSimilarity)),
                                            reason: "Similar visual content and file dates. Review the files and desired outcome before saving.")
             }
     }
