@@ -32,7 +32,7 @@ permissions:
 jobs:
   build:
     name: Build app + engine (SwiftPM)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
 
     defaults:
@@ -43,8 +43,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Select Xcode
-        # MLX Swift LM 3.x requires Swift tools 6.2; macos-15 defaults to Xcode 16.4.
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+        # MLX Swift 0.32.3 requires Swift tools 6.3; Xcode 26.6 supplies Swift 6.3.
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
 
       - name: Swift toolchain info
         run: swift --version
@@ -173,7 +173,7 @@ jobs:
           # single `ready` event in stdout before shutdown.
           : | .build/release/FileIDEngine > engine.stdout 2> engine.stderr &
           ENGINE_PID=$!
-          # 30 s budget — macos-15 runners' cold-start of GRDB + lazy
+          # 30 s budget — macos-26 runners' cold-start of GRDB + lazy
           # MLX capability probe can stretch past the previous 15 s
           # ceiling on the first run after a cache miss.
           BUDGET=30

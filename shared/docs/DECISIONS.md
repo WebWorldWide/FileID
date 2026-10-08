@@ -3641,3 +3641,7 @@ The previous one-time `mlx.metallib` cache could survive an MLX dependency upgra
 ## 2026-10-08 — Pin hosted macOS CI to Xcode 26.3
 
 The `macos-15` GitHub runner's `/Applications/Xcode_16.app` is Xcode 16.0 / Swift tools 6.0, which cannot resolve MLX Swift LM 3.32.3 (tools 6.2), recent GRDB, or swift-crypto. Select the runner's installed Xcode 26.3 explicitly; it retains a macOS 15 deployment target while providing the required Swift toolchain. Fail if that path disappears instead of silently falling back to Swift 6.0. Keep local Xcode 27 validation as a separate hardware check.
+
+## 2026-10-08 — Correct hosted macOS CI to Xcode 26.6
+
+The Xcode 26.3 hosted attempt still failed: transitive MLX Swift 0.32.3 declares Swift tools 6.3, and Xcode 26.3 ships Swift 6.2. GitHub's macOS 26 image includes Xcode 26.6, which Apple documents as including Swift 6.3. Pin that image and toolchain, retaining the package's macOS 15 deployment target. This supersedes the Xcode 26.3 decision above; check exact-head CI before considering the change validated.
