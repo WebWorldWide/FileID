@@ -21,7 +21,7 @@ public enum FaceBBox {
     /// normalize + flip the Windows pixel/top-left form; they're ignored for the
     /// already-normalized macOS CSV form. Returns nil on a malformed string.
     public static func parseNormalized(
-        _ s: String, imageWidth: Int, imageHeight: Int
+        _ s: String, imageWidth: Int, imageHeight: Int, sourceOrientation: Int = 1
     ) -> (x: Double, y: Double, w: Double, h: Double)? {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return nil }
@@ -46,12 +46,30 @@ public enum FaceBBox {
                 sourceWidth = Double(imageWidth)
                 sourceHeight = Double(imageHeight)
             }
+            guard (1...8).contains(sourceOrientation) else { return nil }
+            if sourceOrientation != 1 && obj["sourceWidth"] == nil { return nil }
+            let x = px / sourceWidth
+            let y = py / sourceHeight
             let w = pw / sourceWidth
             let h = ph / sourceHeight
-            let x = px / sourceWidth
-            // top-left → bottom-left (macOS/Vision convention).
-            let yBottom = 1.0 - (py / sourceHeight) - h
-            return (x, yBottom, w, h)
+            if sourceOrientation == 1 { return (x, 1 - y - h, w, h) }
+            func oriented(_ x: Double, _ y: Double) -> (Double, Double) {
+                switch sourceOrientation {
+                case 2: return (1 - x, y)
+                case 3: return (1 - x, 1 - y)
+                case 4: return (x, 1 - y)
+                case 5: return (y, x)
+                case 6: return (1 - y, x)
+                case 7: return (1 - y, 1 - x)
+                case 8: return (y, 1 - x)
+                default: return (x, y)
+                }
+            }
+            let corners = [oriented(x,y),oriented(x+w,y),oriented(x,y+h),oriented(x+w,y+h)]
+            guard let minX = corners.map(\.0).min(), let maxX = corners.map(\.0).max(),
+                  let minY = corners.map(\.1).min(), let maxY = corners.map(\.1).max()
+            else { return nil }
+            return (minX, 1 - maxY, maxX - minX, maxY - minY)
         }
 
         // macOS CSV: normalized, bottom-left — passthrough (byte-identical to the

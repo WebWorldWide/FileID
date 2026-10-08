@@ -51,6 +51,8 @@ pub struct CatalogJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_mode: Option<String>,
     #[serde(rename = "requestID")]
     pub request_id: String,
     pub action: String,
@@ -89,4 +91,24 @@ pub struct CatalogResponse {
     pub hits: Vec<CatalogHit>,
     pub chapters: Vec<CatalogChapter>,
     pub jobs: Vec<CatalogJob>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CatalogRequest;
+
+    #[test]
+    fn moment_depth_round_trips_and_legacy_requests_keep_the_default() {
+        let request: CatalogRequest = serde_json::from_str(
+            r#"{"requestID":"moments","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"moments"}"#,
+        ).unwrap();
+        assert_eq!(request.timeline_mode.as_deref(), Some("moments"));
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(wire["timelineMode"], "moments");
+        let legacy: CatalogRequest = serde_json::from_str(
+            r#"{"requestID":"old","action":"enqueueTimeline","fileIDs":[1]}"#,
+        ).unwrap();
+        assert!(legacy.timeline_mode.is_none());
+        assert!(serde_json::to_value(legacy).unwrap().get("timelineMode").is_none());
+    }
 }

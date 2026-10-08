@@ -7,3 +7,7 @@ pub mod people;
 pub mod restructure;
 pub mod settings;
 mod util;
+
+mod tools;
+
+mod catalog;

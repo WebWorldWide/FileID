@@ -11,6 +11,7 @@ final class ToolsSession {
     var kind = "photo"
     var format = "png"
     var maxDimension = 4096
+    var allowUpscale = false
     var destination = ""
     var destinationBookmark: Data?
     var destinationAccessReady: Bool {
@@ -58,6 +59,12 @@ struct ToolsWorkbench: View {
                 if session.kind == "photo" { TextField("Maximum pixels", value: $session.maxDimension, format: .number).frame(width: 100) }
                 if session.kind == "video" { Picker("Resolution", selection: $session.maxDimension) { Text("720p · 1280 pixels").tag(1280); Text("1080p · 1920 pixels").tag(1920) } }
             }.disabled(!session.pending.isEmpty)
+            if session.kind == "photo" {
+                Toggle("Enlarge smaller photos to the maximum size", isOn: $session.allowUpscale)
+                    .disabled(!session.pending.isEmpty)
+                Text("Conventional resizing increases pixel dimensions; it does not recover missing detail.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Text(session.destination.isEmpty ? "No output folder selected" : session.destination).lineLimit(1).truncationMode(.middle)
                 Spacer()
@@ -69,7 +76,7 @@ struct ToolsWorkbench: View {
                 Button("Preview export") {
                     send(ToolRequest(requestID: UUID().uuidString, action: "preview",
                                      fileIDs: session.selection.sorted(), destination: session.destination,
-                                     recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension),
+                                     recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension, allowUpscale: session.kind == "photo" ? session.allowUpscale : nil),
                                      destinationBookmark: session.destinationBookmark))
                 }
                     .disabled(session.selection.isEmpty || session.destination.isEmpty || !session.destinationAccessReady
@@ -83,7 +90,7 @@ struct ToolsWorkbench: View {
                     send(ToolRequest(requestID: UUID().uuidString, action: "undo", destination: session.destination,
                                      operationID: session.operationID, destinationBookmark: session.destinationBookmark))
                 }
-                    .disabled(session.operationID == nil || !session.executed || !session.destinationAccessReady || !session.pending.isEmpty)
+                    .disabled(session.operationID == nil || !session.outputs.contains(where: { $0.state == "completed" }) || !session.destinationAccessReady || !session.pending.isEmpty)
                 if !session.pending.isEmpty { ProgressView().controlSize(.small) }
                 if session.pendingAction == "execute" {
                     Button("Cancel") { _ = engine.send(.toolRequest(request: ToolRequest(requestID: UUID().uuidString, action: "cancel", operationID: session.operationID))); session.message = "Stopping export…" }
@@ -106,6 +113,7 @@ struct ToolsWorkbench: View {
         .onChange(of: session.kind) { _, new in session.format = new == "photo" ? "png" : (new == "video" ? "mp4" : "json"); session.maxDimension = new == "video" ? 1920 : 4096; invalidate() }
         .onChange(of: session.format) { _, _ in invalidate() }
         .onChange(of: session.maxDimension) { _, _ in invalidate() }
+        .onChange(of: session.allowUpscale) { _, _ in invalidate() }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }
 
@@ -161,9 +169,9 @@ struct ToolsWorkbench: View {
         let action = session.pendingAction; session.pending = ""; session.pendingAction = ""
         session.message = response.message
         if action == "capabilities" { session.capabilities = response.capabilities; return }
-        if action == "history", response.status == "ok" { session.operationID = response.operationID; session.executed = response.outputs.contains { $0.state == "completed" } }
+        if action == "history", response.status == "ok" { session.operationID = response.operationID; session.executed = response.operationID != nil }
         if action == "preview", response.status == "ok" { session.operationID = response.operationID; session.executed = false }
-        if action == "execute" { session.executed = response.outputs.contains { $0.state == "completed" } }
+        if action == "execute" { session.executed = true }
         if action == "undo", response.status == "ok" { session.operationID = nil; session.executed = false }
         session.outputs = response.outputs
     }

@@ -22,6 +22,47 @@ struct MediaToolsTests {
         try await database.pool.write { db in try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?,1,100,0,'image','tiff')", arguments: [source.path]) }
         return (root, database, source)
     }
+    @Test func enlargementIsOptInAndPreservesOrientationOriginalAndUndo() async throws {
+        let (root, db, source) = try await fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = try MediaTools.hash(source)
+        let tools = MediaTools()
+        for flag: Bool? in [nil, false, true] {
+            let recipe = ToolRecipe(kind: "photo", format: "png", maxDimension: 64, allowUpscale: flag)
+            let preview = await tools.handle(ToolRequest(requestID: "p", action: "preview", fileIDs: [1], destination: root.path, recipe: recipe), database: db)
+            #expect(preview.status == "ok")
+            let result = await tools.handle(ToolRequest(requestID: "e", action: "execute", destination: root.path, operationID: preview.operationID), database: db)
+            #expect(result.status == "ok", "\(result.message)")
+            let output = URL(fileURLWithPath: try #require(result.outputs.first).outputPath)
+            let raster = try #require(CGImageSourceCreateWithURL(output as CFURL, nil))
+            let image = try #require(CGImageSourceCreateImageAtIndex(raster, 0, nil))
+            #expect(image.width == (flag == true ? 32 : 8))
+            #expect(image.height == (flag == true ? 64 : 16))
+            #expect(try MediaTools.hash(source) == original)
+            let undone = await tools.handle(ToolRequest(requestID: "u", action: "undo", destination: root.path, operationID: preview.operationID), database: db)
+            #expect(undone.status == "ok")
+            #expect(!FileManager.default.fileExists(atPath: output.path))
+            let history = await tools.handle(ToolRequest(requestID: "h", action: "history"), database: db)
+            #expect(history.operationID == preview.operationID)
+            #expect(history.outputs.first?.state == "undone")
+            #expect(history.outputs.first?.message.contains("Recoverable at") == true)
+        }
+    }
+
+    @Test func enlargementKeepsAspectBoundsAndRejectsOtherTools() throws {
+        let recipe = ToolRecipe(kind: "photo", format: "jpeg", maxDimension: 64, allowUpscale: true)
+        let wide = try MediaTools.photoRasterSize(width: 1024, height: 1, recipe: recipe)
+        #expect(wide.width == 64 && wide.height == 1)
+        let tall = try MediaTools.photoRasterSize(width: 1, height: 32, recipe: recipe)
+        #expect(tall.width == 2 && tall.height == 64)
+        #expect(!MediaTools.supports(ToolRecipe(kind: "photo", format: "png", maxDimension: 8193, allowUpscale: true)))
+        #expect(!MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, allowUpscale: true)))
+        #expect(!MediaTools.supports(ToolRecipe(kind: "chapters", format: "vtt", allowUpscale: true)))
+        #expect(throws: MediaTools.Failure.self) {
+            try MediaTools.photoRasterSize(width: 0, height: 16, recipe: recipe)
+        }
+    }
+
     @Test func conversionAppliesOrientationStripsMetadataAndSurvivesUndoReopen() async throws {
         let (root, db, source) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let original = try MediaTools.hash(source)

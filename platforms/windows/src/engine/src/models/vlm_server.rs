@@ -211,32 +211,16 @@ impl VlmServer {
     /// read from disk and inlined as a base64 data URI (the format
     /// `/v1/chat/completions` accepts for `image_url`).
     pub async fn complete(&self, image_path: &Path, prompt: &str, max_tokens: u32) -> Result<String> {
-        let bytes = read_image_bounded(image_path).await?;
-        let data_uri = format!(
-            "data:{};base64,{}",
-            image_mime(&bytes),
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        );
-        let body = serde_json::json!({
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_uri } }
-                ]
-            }],
-            // The OpenAI-compatible chat endpoint reads `max_tokens`; the native
-            // completion endpoint reads `n_predict`. Send BOTH so the token cap
-            // (80/40/30) is honored regardless of which the server build maps —
-            // without this the server ran to its default cap (long, slow, and a
-            // rename prompt could return a paragraph).
-            "max_tokens": max_tokens,
-            "n_predict": max_tokens,
-            "temperature": 0.0,
-            "stream": false
-        });
-        // reqwest is built without the `json` feature here, so serialize the
-        // body + parse the reply by hand via serde_json.
+        self.complete_sequence(&[image_path], prompt, max_tokens).await
+    }
+
+    pub async fn complete_sequence(
+        &self,
+        image_paths: &[&Path],
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String> {
+        let body = multimodal_body(image_paths, prompt, max_tokens).await?;
         let body_bytes = serde_json::to_vec(&body).context("encode VLM request body")?;
         let url = format!("{}/v1/chat/completions", self.base_url);
         let resp = self
@@ -284,13 +268,18 @@ async fn stop_child(child: &mut Child) {
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
 }
 
+#[cfg(test)]
 async fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
+    read_image_with_limit(path, MAX_VLM_ENCODED_BYTES).await
+}
+
+async fn read_image_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let safe_path = crate::platform::redact_path_for_log(path);
     let len = tokio::fs::metadata(path)
         .await
         .with_context(|| format!("stat image {safe_path}"))?
         .len();
-    if len > MAX_VLM_ENCODED_BYTES {
+    if len > limit {
         bail!(
             "image {} is {} bytes, exceeding the VLM encoded-input cap of {} bytes",
             safe_path,
@@ -302,17 +291,60 @@ async fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("open image {safe_path}"))?;
     let mut bytes = Vec::with_capacity(len as usize);
-    tokio::io::AsyncReadExt::take(&mut file, MAX_VLM_ENCODED_BYTES + 1)
+    tokio::io::AsyncReadExt::take(&mut file, limit + 1)
         .read_to_end(&mut bytes)
         .await
         .with_context(|| format!("read image {safe_path}"))?;
-    if bytes.len() as u64 > MAX_VLM_ENCODED_BYTES {
+    if bytes.len() as u64 > limit {
         bail!(
             "image {} grew beyond the VLM encoded-input cap while reading",
             safe_path
         );
     }
     Ok(bytes)
+}
+
+async fn multimodal_body(
+    image_paths: &[&Path],
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<serde_json::Value> {
+    if !(1..=8).contains(&image_paths.len())
+        || prompt.len() > 32_768
+        || !(1..=4096).contains(&max_tokens)
+    {
+        bail!("Invalid bounded visual-model request");
+    }
+    let mut total = 0u64;
+    for path in image_paths {
+        let metadata = tokio::fs::metadata(path).await.context("Read visual-frame size")?;
+        total = total.checked_add(metadata.len()).context("Visual-frame size overflow")?;
+        if metadata.len() == 0 || total > MAX_VLM_ENCODED_BYTES {
+            bail!("Visual frames are empty or exceed the aggregate encoded-input limit");
+        }
+    }
+    let mut remaining = MAX_VLM_ENCODED_BYTES;
+    let mut content = vec![serde_json::json!({"type": "text", "text": prompt})];
+    for path in image_paths {
+        let bytes = read_image_with_limit(path, remaining).await?;
+        if bytes.is_empty() {
+            bail!("A visual-model frame is empty");
+        }
+        remaining -= bytes.len() as u64;
+        let uri = format!(
+            "data:{};base64,{}",
+            image_mime(&bytes),
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        );
+        content.push(serde_json::json!({"type": "image_url", "image_url": {"url": uri}}));
+    }
+    Ok(serde_json::json!({
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_tokens,
+        "n_predict": max_tokens,
+        "temperature": 0.0,
+        "stream": false
+    }))
 }
 
 async fn read_response_bounded(resp: reqwest::Response) -> Result<String> {
@@ -368,6 +400,51 @@ fn image_mime(bytes: &[u8]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sequence_body_preserves_frame_order_and_generation_bound() {
+        let directory = std::env::temp_dir().join(format!("fileid-sequence-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let first = directory.join("first.jpg");
+        let second = directory.join("second.png");
+        let jpeg = [0xFF, 0xD8, 0xFF];
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        std::fs::write(&first, jpeg).unwrap();
+        std::fs::write(&second, png).unwrap();
+        let body = multimodal_body(&[&second, &first], "Frame times: 1, 2", 512).await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["text"], "Frame times: 1, 2");
+        assert_eq!(content[1]["image_url"]["url"], format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)));
+        assert_eq!(content[2]["image_url"]["url"], format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpeg)));
+        assert_eq!(body["max_tokens"], 512);
+        assert_eq!(body["n_predict"], 512);
+        assert_eq!(body["temperature"], 0.0);
+        assert_eq!(body["stream"], false);
+    }
+
+    #[tokio::test]
+    async fn invalid_sequence_requests_fail_before_reading_files() {
+        let missing = Path::new("missing-visual-frame.jpg");
+        assert!(multimodal_body(&[], "frames", 512).await.is_err());
+        assert!(multimodal_body(&[missing; 9], "frames", 512).await.is_err());
+        assert!(multimodal_body(&[missing], &"x".repeat(32_769), 512).await.is_err());
+        assert!(multimodal_body(&[missing], "frames", 0).await.is_err());
+        assert!(multimodal_body(&[missing], "frames", 4097).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn aggregate_sequence_limit_rejects_before_allocating_sparse_frames() {
+        let directory = std::env::temp_dir().join(format!("fileid-sequence-budget-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let first = directory.join("first.jpg");
+        let second = directory.join("second.jpg");
+        std::fs::File::create(&first).unwrap().set_len(MAX_VLM_ENCODED_BYTES).unwrap();
+        std::fs::write(&second, [1]).unwrap();
+        assert!(multimodal_body(&[&first, &second], "frames", 512).await.unwrap_err().to_string().contains("aggregate"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn bounded_image_reader_rejects_oversized_sparse_file() {

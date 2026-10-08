@@ -5,8 +5,8 @@ import Testing
 
 @Suite("Versioned face cache")
 struct FaceAnalysisCacheTests {
-    private func database() throws -> DatabaseQueue {
-        let queue = try DatabaseQueue()
+    private func database(path: String = ":memory:") throws -> DatabaseQueue {
+        let queue = try DatabaseQueue(path: path)
         try FileIDEngine.Database.migrator.migrate(queue)
         try queue.write { db in
             try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/portrait.png',1,100,10,0,'image','png')")
@@ -94,4 +94,75 @@ struct FaceAnalysisCacheTests {
             #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM catalog_embeddings") == 0)
         }
     }
+    @Test func durableFailureBackoffDoesNotStarveNewFaces() throws {
+        let queue = try database()
+        try queue.write { db in
+            try db.execute(sql: "INSERT INTO face_prints(id,file_id,print_data,bbox,person_id) VALUES(5,1,X'00','0.2,0.2,0.2,0.2',7)")
+            let input = try #require(FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 100).first)
+            try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: "model-a", reason: "no_embedding", now: 100)
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 159).map(\.id) == [5])
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 160).map(\.id) == [4])
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, afterFaceID: 4, now: 160).map(\.id) == [5])
+            try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: "model-a", reason: "no_embedding", now: 160)
+            #expect(try Double.fetchOne(db, sql: "SELECT retry_after FROM face_refresh_failures WHERE face_id=4") == 280)
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-b", limit: 1, now: 161).map(\.id) == [4])
+            #expect(try FaceAnalysisCache.persist(db, input: input, embedding: vector, modelVersion: "model-a"))
+            #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face_refresh_failures") == 0)
+            #expect(try Int.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id=4") == 7)
+        }
+    }
+
+    @Test func failureSnapshotCannotSuppressEditedOrExcludedFaces() throws {
+        let queue = try database()
+        try queue.write { db in
+            let input = try #require(FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1).first)
+            try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: "model-a", reason: "source_unavailable_or_changed", now: 100)
+            try db.execute(sql: "UPDATE face_prints SET bbox='0,0,0.5,0.5' WHERE id=4")
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 101).map(\.id) == [4])
+            try db.execute(sql: "DELETE FROM face_refresh_failures")
+            try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: "model-a", reason: "no_embedding", now: 101)
+            #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face_refresh_failures") == 0)
+            try db.execute(sql: "UPDATE face_prints SET excluded=1 WHERE id=4")
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 1000).isEmpty)
+        }
+    }
+
+    @Test func failureStateSurvivesReopeningTheDatabase() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("cache.sqlite").path
+        var queue: DatabaseQueue? = try database(path: path)
+        try #require(queue).write { db in
+            let input = try #require(FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 100).first)
+            try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: "model-a", reason: "no_embedding", now: 100)
+        }
+        queue = nil
+        let reopened = try DatabaseQueue(path: path)
+        try FileIDEngine.Database.migrator.migrate(reopened)
+        try reopened.read { db in
+            let deferred = try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 159)
+            let eligible = try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 160)
+            let name = try String.fetchOne(db, sql: "SELECT name FROM persons WHERE id=7")
+            #expect(deferred.isEmpty)
+            #expect(eligible.map(\.id) == [4])
+            #expect(name == "Confirmed Person")
+        }
+    }
+
+    @Test func malformedCurrentNamespaceVectorIsEligibleForRepair() throws {
+        let queue = try database()
+        try queue.write { db in
+            let input = try #require(FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1).first)
+            #expect(try FaceAnalysisCache.persist(db, input: input, embedding: vector, modelVersion: "model-a"))
+            var invalid = vector
+            invalid.replaceSubrange(0..<4, with: [0,0,192,127])
+            try db.execute(sql: "UPDATE face_prints SET arcface_embedding=? WHERE id=4", arguments: [invalid])
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1).map(\.id) == [4])
+            #expect(try FaceAnalysisCache.persist(db, input: input, embedding: vector, modelVersion: "model-a"))
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1).isEmpty)
+            #expect(try Int.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id=4") == 7)
+        }
+    }
+
 }

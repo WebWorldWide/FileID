@@ -1,5 +1,9 @@
 # Models — canonical registry
 
+## 2026-10-08 evaluation status
+
+The isolated macOS UI fixture and default native test run used no downloaded model weights. The registered visual-model evaluation tests require an explicit internal frame corpus and model cache; they skipped in this checkpoint. No candidate was promoted or quality claim changed. Keep the existing memory-admission and license gates when resuming model-backed assessment.
+
 FileID never ships model weights. Downloads are user-initiated, show progress and cancellation, and verify each static artifact's SHA256 before use; no download telemetry. `shared/models/manifest.json` is the canonical URL, pin, size, platform, and license record. The Windows compiled registry (`platforms/windows/src/engine/src/models/registry.rs`) is locked to it by `tests/manifest_consistency.rs`; MLX VLM repositories instead pin immutable revisions and resolve their files' hashes from that revision.
 
 ## macOS CLIP cache identity (2026-10-02)

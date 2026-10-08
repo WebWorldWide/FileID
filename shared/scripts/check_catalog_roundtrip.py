@@ -114,6 +114,7 @@ def main():
             vector = b"\x00\x00\x80\x3f" + bytes(127 * 4)
             database.execute("INSERT INTO face_prints(id,file_id,print_data,bbox,person_id,arcface_embedding,embedding_model,processing_version,source_revision) VALUES(4,2,X'00','0.1,0.1,0.2,0.2',7,?,'fixture-weight-hash','fixture-alignment','fixture-revision')", (vector,))
             database.execute("UPDATE catalog_observations SET user_edited=1,region_json='manual face marker' WHERE id='faceprint:4'")
+            database.execute("INSERT INTO face_refresh_failures(face_id,embedding_model,processing_version,source_revision,source_path,source_size,source_modified,bbox,attempts,retry_after,reason,updated_at) VALUES(4,'next-weight','next-processing','100:fixture','/internal/Portrait.jpg',100,10,'0.1,0.1,0.2,0.2',2,280,'no_embedding',160)")
         chapter = dict(id="gift", fileID=1, startSeconds=8.0, endSeconds=12.0, title="Gift Opening", summary="Grandma opens presents", sourceRevision="untrusted", modelVersion="untrusted", confidence=0.0, userEdited=False, stale=True)
         engine = Engine(args.swift_engine.resolve(), directory, swift=True)
         try:
@@ -139,6 +140,7 @@ def main():
             engine.close()
         with sqlite3.connect(directory / "FileID/fileid.sqlite") as database:
             assert database.execute("SELECT name FROM persons WHERE id=7").fetchone() == ("Confirmed Person",)
+            assert database.execute("SELECT embedding_model,processing_version,attempts,retry_after,reason FROM face_refresh_failures WHERE face_id=4").fetchone() == ("next-weight","next-processing",2,280.0,"no_embedding")
             assert database.execute("SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4").fetchone() == (7,"fixture-weight-hash","fixture-alignment","fixture-revision",512)
             assert database.execute("SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'").fetchone() == ("manual face marker",1,0)
             assert database.execute("SELECT model,dimension,vector FROM catalog_embeddings WHERE entity_id='faceprint:4'").fetchone() == ("fixture-weight-hash|fixture-alignment",128,vector)

@@ -4,8 +4,9 @@ public struct ToolRecipe: Codable, Sendable, Equatable {
     public var kind: String
     public var format: String
     public var maxDimension: Int
-    public init(kind: String, format: String, maxDimension: Int = 4096) {
-        self.kind = kind; self.format = format; self.maxDimension = maxDimension
+    public var allowUpscale: Bool?
+    public init(kind: String, format: String, maxDimension: Int = 4096, allowUpscale: Bool? = nil) {
+        self.kind = kind; self.format = format; self.maxDimension = maxDimension; self.allowUpscale = allowUpscale
     }
 }
 

@@ -148,6 +148,8 @@ public enum CatalogStore {
             for row in files {
                 results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
             }
+            results.append(contentsOf: try textEvidenceHits(db, table: "doc_fts", kind: "documentText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
+            results.append(contentsOf: try textEvidenceHits(db, table: "ocr_fts", kind: "ocrText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
         }
 
         let evidence = try Row.fetchAll(db, sql: """
@@ -187,6 +189,36 @@ public enum CatalogStore {
         }
         results.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds))
         return results
+    }
+
+    private static func textEvidenceHits(
+        _ db: GRDB.Database,
+        table: String,
+        kind: String,
+        match: String,
+        filter: String?,
+        peopleFilter: String?,
+        eventFilter: String?
+    ) throws -> [CatalogHit] {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT f.id,f.path_text,snippet(\(table),0,'','','…',16) AS excerpt
+            FROM \(table) JOIN files f ON f.id=\(table).rowid
+            WHERE f.failed=0 AND \(table) MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                UNION SELECT file_id FROM catalog_observations
+                  WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+              ))
+              AND (? IS NULL OR f.id IN (
+                SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+              ))
+            ORDER BY bm25(\(table)) LIMIT 100
+            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter])
+        return rows.map { row in
+            let fileID: Int64 = row["id"]
+            return CatalogHit(fileID: fileID, path: row["path_text"], kind: kind,
+                              text: row["excerpt"], evidenceID: "\(kind):\(fileID)")
+        }
     }
 
     private static func temporalEvidenceHits(

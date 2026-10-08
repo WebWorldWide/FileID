@@ -26,6 +26,9 @@ fn response(id: &str, status: &str, message: Option<String>) -> CatalogResponse 
 
 pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<CatalogResponse> {
     if request.request_id.is_empty() || request.request_id.chars().count() > 200 { bail!("Invalid catalog request") }
+    if request.timeline_mode.as_deref().is_some_and(|mode| !["sampled", "moments"].contains(&mode)) {
+        bail!("Invalid timeline analysis mode")
+    }
     let mut result = response(&request.request_id, "ok", None);
     match request.action.as_str() {
         "search" => {
@@ -179,6 +182,50 @@ pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String]) -> Result
             let mut hits = statement.query_map(params![quoted,filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:None,start_seconds:None,page:None }))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let mut statement = conn.prepare("SELECT f.id,f.path_text,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END,e.text,e.evidence_id,COALESCE(c.start_seconds,p.start_seconds),p.page FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER) LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' WHERE catalog_evidence_fts MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) AND (c.stale=0 OR p.stale=0) ORDER BY bm25(catalog_evidence_fts) LIMIT 100")?;
             let evidence = statement.query_map(params![quoted,filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:r.get(4)?,start_seconds:r.get(5)?,page:r.get(6)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            hits.extend(evidence);
-            Ok(hits)
+    hits.extend(evidence);
+    for (table, kind) in [("doc_fts", "documentText"), ("ocr_fts", "ocrText")] {
+        let sql = format!(
+            "SELECT f.id,f.path_text,snippet({table},0,'','','…',16) FROM {table} JOIN files f ON f.id={table}.rowid WHERE f.failed=0 AND {table} MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) ORDER BY bm25({table}) LIMIT 100"
+        );
+        let mut statement = conn.prepare(&sql)?;
+        let text_hits = statement.query_map(params![quoted, filter], |row| {
+            let file_id: i64 = row.get(0)?;
+            Ok(CatalogHit {
+                file_id,
+                path: row.get(1)?,
+                kind: kind.to_owned(),
+                text: row.get(2)?,
+                evidence_id: Some(format!("{kind}:{file_id}")),
+                start_seconds: None,
+                page: None,
+            })
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        hits.extend(text_hits);
+    }
+    Ok(hits)
+}
+
+#[cfg(test)]
+mod text_search_tests {
+    use super::*;
+
+    #[test]
+    fn extracted_document_and_ocr_text_are_catalog_evidence() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/internal/notes.txt',1,100,0,'doc','txt')", []).unwrap();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(2,'/internal/photo.jpg',2,100,0,'image','jpg')", []).unwrap();
+        conn.execute("INSERT INTO doc_text(file_id,text) VALUES(1,'Birthday gift opening with Alex')", []).unwrap();
+        conn.execute("INSERT INTO ocr_text(file_id,text) VALUES(2,'Invoice total 42 dollars')", []).unwrap();
+
+        let documents = search(&conn, "birthday gift", &[]).unwrap();
+        assert!(documents.iter().any(|hit| hit.file_id == 1 && hit.kind == "documentText" && hit.text.contains("Birthday gift")));
+        assert!(search(&conn, "birthday gift", &["video".to_owned()]).unwrap().is_empty());
+
+        let images = search(&conn, "invoice total", &[]).unwrap();
+        assert!(images.iter().any(|hit| hit.file_id == 2 && hit.kind == "ocrText" && hit.text.contains("Invoice total")));
+
+        conn.execute("UPDATE files SET failed=1 WHERE id=1", []).unwrap();
+        assert!(search(&conn, "birthday gift", &[]).unwrap().is_empty());
+    }
 }

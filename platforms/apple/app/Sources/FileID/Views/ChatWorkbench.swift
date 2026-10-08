@@ -48,7 +48,7 @@ struct ChatWorkbench: View {
                                 if FileManager.default.fileExists(atPath: url.path) {
                                     if let seconds = hit.startSeconds, ["mov", "mp4", "m4v", "mkv", "avi"].contains(url.pathExtension.lowercased()) {
                                         let next = AVPlayer(url: url)
-                                        next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+                                        next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
                                         player?.pause(); player = next
                                     } else { NSWorkspace.shared.open(url) }
                                 }
@@ -60,7 +60,7 @@ struct ChatWorkbench: View {
                     }
                 }.frame(minWidth: 330)
             }.frame(minHeight: 360)
-            if let player { VideoPlayer(player: player).frame(height: 180) }
+            if let player { NativeVideoPlayer(player: player).frame(height: 180) }
             Text(message).font(.callout).textSelection(.enabled)
             HStack {
                 TextField("Find birthday gift opening…", text: $input).textFieldStyle(.roundedBorder).onSubmit(send)

@@ -451,27 +451,7 @@ struct FaceClusteringMergeTests {
         #expect(repEmpty == nil, "a person with no surviving faces gets NULL, not a dangle")
     }
 
-    // F-C3-033 — a row that keeps failing extraction drops out of the pending
-    // window after the attempt budget, so it can't sit at the front of
-    // `ORDER BY id ASC LIMIT` forever and starve newer faces. A later success
-    // rehabilitates it (the skip is in-memory, never a DB exclusion).
-    @Test("a permanently-failing extraction row is skipped so newer rows progress")
-    func extractionStarvationSkip() async {
-        FaceClustering.resetExtractionFailuresForTesting()
-        defer { FaceClustering.resetExtractionFailuresForTesting() }
-        let fid: Int64 = 4242
-        #expect(!FaceClustering.permanentlyFailedExtractions().contains(fid))
-        FaceClustering.recordExtractionOutcomes(attempted: [fid], succeeded: [])
-        FaceClustering.recordExtractionOutcomes(attempted: [fid], succeeded: [])
-        #expect(!FaceClustering.permanentlyFailedExtractions().contains(fid),
-                "two misses is within the retry budget")
-        FaceClustering.recordExtractionOutcomes(attempted: [fid], succeeded: [])
-        #expect(FaceClustering.permanentlyFailedExtractions().contains(fid),
-                "past the budget the row is skipped from the window")
-        FaceClustering.recordExtractionOutcomes(attempted: [fid], succeeded: [fid])
-        #expect(!FaceClustering.permanentlyFailedExtractions().contains(fid),
-                "a later success rehabilitates the row")
-    }
+
 }
 
 @Suite("Exact face centroid threshold join")

@@ -61,7 +61,7 @@ public actor MediaTools {
             case "capabilities":
                 return ToolResponse(requestID: request.requestID, capabilities: Self.capabilities)
             case "history":
-                let id = try await database.pool.read { db in try String.fetchOne(db, sql: "SELECT id FROM catalog_operations WHERE json_extract(plan_json,'$.type')='export' AND state IN ('completed','failed') ORDER BY rowid DESC LIMIT 1") }
+                let id = try await database.pool.read { db in try String.fetchOne(db, sql: "SELECT id FROM catalog_operations WHERE json_extract(plan_json,'$.type')='export' AND state IN ('completed','failed','undone') ORDER BY rowid DESC LIMIT 1") }
                 guard let id else { return ToolResponse(requestID: request.requestID, message: "No completed export history.") }
                 let (_, receipts, _) = try await load(id, database: database)
                 return ToolResponse(requestID: request.requestID, message: "Last export operation.", operationID: id, outputs: receipts.map(\.output))
@@ -82,7 +82,7 @@ public actor MediaTools {
     }
 
     static var capabilities: [ToolCapability] {
-        [ToolCapability(id: "photo", available: true, inputFormats: ["png", "jpeg", "tiff", "heic"], outputFormats: ["png", "jpeg", "tiff"], detail: "Single-image conversion and bounded downsize. Orientation is applied; location and camera metadata are stripped. Output is 8-bit SDR; this is not AI enhancement. JPEG transparency is flattened onto white."),
+        [ToolCapability(id: "photo", available: true, inputFormats: ["png", "jpeg", "tiff", "heic"], outputFormats: ["png", "jpeg", "tiff"], detail: "Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected. Orientation is applied; location and camera metadata are stripped. Output is 8-bit SDR; this is not AI enhancement. JPEG transparency is flattened onto white."),
          ToolCapability(id: "chapters", available: true, inputFormats: ["catalog chapters"], outputFormats: ["json", "vtt"], detail: "Export non-stale chapter markers. WebVTT is a chapter cue list, not a speech transcript."),
          ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280 or 1920 pixels. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
          ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Stabilization, AI upscaling, and tracked reframing are not installed yet.")]
@@ -90,6 +90,7 @@ public actor MediaTools {
 
     static func supports(_ recipe: ToolRecipe) -> Bool {
         (1...8192).contains(recipe.maxDimension) &&
+        (recipe.allowUpscale != true || recipe.kind == "photo") &&
         ((recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(recipe.format)) ||
          (recipe.kind == "chapters" && ["json", "vtt"].contains(recipe.format)) ||
          (recipe.kind == "video" && recipe.format == "mp4" && [1280,1920].contains(recipe.maxDimension)))
@@ -299,14 +300,27 @@ public actor MediaTools {
               let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary), CGImageSourceGetCount(source) == 1 else { throw Failure(text: "Only supported single-image PNG, JPEG, TIFF, and HEIC inputs can be converted.") }
     }
 
+    static func photoRasterSize(width: Int, height: Int, recipe: ToolRecipe) throws -> (width: Int, height: Int) {
+        guard recipe.kind == "photo", supports(recipe), width > 0, height > 0 else {
+            throw Failure(text: "Unsupported photo size or recipe.")
+        }
+        let ratio = Double(recipe.maxDimension) / Double(max(width, height))
+        let scale = recipe.allowUpscale == true ? ratio : min(1, ratio)
+        return (max(1, min(recipe.maxDimension, Int((Double(width) * scale).rounded()))),
+                max(1, min(recipe.maxDimension, Int((Double(height) * scale).rounded()))))
+    }
+
     static func exportPhoto(source url: URL, output: URL, recipe: ToolRecipe) throws {
+        guard recipe.kind == "photo", supports(recipe) else { throw Failure(text: "Unsupported photo recipe.") }
         try validateImage(url)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceThumbnailMaxPixelSize: recipe.maxDimension] as CFDictionary) else { throw Failure(text: "The image could not be decoded.") }
+        let size = try photoRasterSize(width: image.width, height: image.height, recipe: recipe)
         let space = image.colorSpace?.model == .rgb ? image.colorSpace! : CGColorSpace(name: CGColorSpace.sRGB)!
-        guard let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw Failure(text: "Not enough memory to convert this image.") }
-        if recipe.format == "jpeg" { context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height)) }
-        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard let context = CGContext(data: nil, width: size.width, height: size.height, bitsPerComponent: 8, bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw Failure(text: "Not enough memory to convert this image.") }
+        if recipe.format == "jpeg" { context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: size.width, height: size.height)) }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
         let type = recipe.format == "jpeg" ? UTType.jpeg.identifier : recipe.format == "tiff" ? UTType.tiff.identifier : UTType.png.identifier
         guard let raster = context.makeImage(), let destination = CGImageDestinationCreateWithURL(output as CFURL, type as CFString, 1, nil) else { throw Failure(text: "The output codec is unavailable.") }
         CGImageDestinationAddImage(destination, raster, [kCGImageDestinationLossyCompressionQuality: 0.92, kCGImagePropertyOrientation: 1] as CFDictionary)

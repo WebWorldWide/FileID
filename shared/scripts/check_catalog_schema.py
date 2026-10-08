@@ -2,7 +2,7 @@
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[2]
-versions = [21,22,23]
+versions = [21,22,23,24]
 sqls = [(version,(root / f"shared/catalog/v{version}.sql").read_text()) for version in versions]
 swift = (root / "platforms/apple/engine/Sources/FileIDEngine/Storage/CatalogSchema.swift").read_text()
 expected = 'enum CatalogSchema {\n' + ''.join(f'    static let v{version} = #"""\n' + sql + '"""#\n' for version,sql in sqls) + '}\n'

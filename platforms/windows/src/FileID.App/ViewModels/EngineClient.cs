@@ -307,6 +307,18 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     }
 
     private RestructurePlan? _lastRestructurePlan;
+    private ToolResponse? _lastToolResponse;
+    public ToolResponse? LastToolResponse
+    {
+        get => _lastToolResponse;
+        private set => Set(ref _lastToolResponse, value);
+    }
+    private CatalogResponse? _lastCatalogResponse;
+    public CatalogResponse? LastCatalogResponse
+    {
+        get => _lastCatalogResponse;
+        private set => Set(ref _lastCatalogResponse, value);
+    }
     public RestructurePlan? LastRestructurePlan
     {
         get => _lastRestructurePlan;
@@ -1596,6 +1608,12 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         break;
                     case QueueStateEvent qs:
                         QueueState = qs.State;
+                        break;
+                    case ToolResponseEvent tools:
+                        LastToolResponse = tools.Response;
+                        break;
+                    case CatalogResponseEvent catalog:
+                        LastCatalogResponse = catalog.Response;
                         break;
                     case RestructurePlanEvent rp:
                         LastRestructurePlan = rp.Plan;

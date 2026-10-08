@@ -526,6 +526,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v23_vector_change_tracking") { db in
             try db.execute(sql: CatalogSchema.v23)
         }
+        m.registerMigration("v24_face_refresh_failures") { db in
+            try db.execute(sql: CatalogSchema.v24)
+        }
         return m
     }
 

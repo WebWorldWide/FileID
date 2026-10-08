@@ -617,7 +617,7 @@ struct PeopleView: View {
             icon: "person.crop.circle.badge.exclamationmark",
             title: "Face recognition needs a model",
             message: "FileID uses a small AI model to find and group faces in your photos.",
-            secondaryMessage: "Open Settings → AI Models. Pick the standard model (166 MB) or the lightweight model (13 MB)."
+            secondaryMessage: "Install the SFace model in Settings → AI Models to group detected faces."
         )
     }
 

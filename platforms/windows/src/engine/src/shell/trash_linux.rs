@@ -180,11 +180,11 @@ fn restore_path_at(path: &Path, receipt: &Path, data: &Path) -> Result<()> {
         if result != 0 {
             return Err(std::io::Error::last_os_error()).context("Could not restore file without overwriting destination");
         }
+        fs::remove_file(info_path).ok();
+        Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     bail!("Trash restore requires Linux renameat2");
-    fs::remove_file(info_path).ok();
-    Ok(())
 }
 
 fn trash_root_for_restore(path: &Path, data: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -198,6 +198,7 @@ fn trash_root_for_restore(path: &Path, data: &Path) -> Result<(PathBuf, PathBuf)
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn trash_and_restore_never_overwrite_and_preserve_bytes() {
         let root = std::env::temp_dir().join(format!("fileid-trash-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
@@ -216,6 +217,27 @@ mod tests {
         restore_path_at(&original, &receipt, &data).unwrap();
         assert_eq!(fs::read(&original).unwrap(), b"original");
         assert!(!receipt.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_restore_preserves_trashed_bytes_and_recovery_metadata() {
+        let root = std::env::temp_dir().join(format!("fileid-trash-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        let library = root.join("library");
+        fs::create_dir_all(&library).unwrap();
+        let original = library.join("source.txt");
+        fs::write(&original, b"original").unwrap();
+        let receipt = trash_path_at(&original, &data).unwrap();
+        let error = restore_path_at(&original, &receipt, &data).unwrap_err();
+        assert!(error.to_string().contains("Linux renameat2"));
+        assert!(!original.exists());
+        assert_eq!(fs::read(&receipt).unwrap(), b"original");
+        let metadata = receipt.parent().unwrap().parent().unwrap().join("info").join(
+            format!("{}.trashinfo", receipt.file_name().unwrap().to_string_lossy()),
+        );
+        assert!(metadata.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

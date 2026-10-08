@@ -4,6 +4,16 @@ import Testing
 
 @Suite("Isolated video worker")
 struct VideoFrameWorkerTests {
+    @Test func sequenceRejectsUnboundedAndDuplicateDestinationsBeforeReadingSource() async throws {
+        let duplicate = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDTimeline-\(UUID().uuidString).png")
+        let paths = String(decoding: try JSONEncoder().encode([duplicate.path, duplicate.path]), as: UTF8.self)
+        #expect(await VideoFrameWorker.runSequence(arguments: ["/missing/source.mov", "[0,1]", paths]) == 2)
+        #expect(!FileManager.default.fileExists(atPath: duplicate.path))
+        #expect(await VideoFrameWorker.runSequence(arguments: ["/missing/source.mov", "[0]", "[]"]) == 2)
+        #expect(await VideoFrameWorker.runSequence(arguments: ["/missing/source.mov", "[1,0]", paths]) == 2)
+        #expect(await VideoFrameWorker.runSequence(arguments: ["/missing/source.mov", String(repeating: "0", count: 1025), "[]"]) == 2)
+    }
+
     @Test func sweepsOnlyOldWorkerFrames() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

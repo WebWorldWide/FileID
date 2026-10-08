@@ -22,6 +22,9 @@ struct FileIDEngineMain {
         if CommandLine.arguments.dropFirst().first == "--sample-video" {
             exit(await VideoFrameWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
+        if CommandLine.arguments.dropFirst().first == "--sample-video-sequence" {
+            exit(await VideoFrameWorker.runSequence(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         if CommandLine.arguments.dropFirst().first == "--scan-video-signals" {
             exit(await VideoFrameWorker.runSignals(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
@@ -1897,6 +1900,9 @@ struct FileIDEngineMain {
                                 sess: session.id, error: "\(error)")
         }
         await coordinator.setPhase(finalPhase)
+        if let terminalProgress = await coordinator.snapshot() {
+            await sink.emit(.progress(terminalProgress))
+        }
         JSONLog.shared.info(ev: "scan_finished", sess: session.id,
                             extra: ["totalSeconds": AnyCodable(totalSeconds),
                                     "processed": AnyCodable(processed),

@@ -52,9 +52,7 @@ enum VideoFrameWorker {
                 let duration = await DeepAnalyze.loadVideoDurationSeconds(AVURLAsset(url: source), timeoutSeconds: 8), duration.isFinite, duration > 0 else { return 3 }
             let after = try attributes(source)
             guard before == after else { return 4 }
-            guard let output = CGImageDestinationCreateWithURL(destination as CFURL, "public.png" as CFString, 1, nil) else { return 3 }
-            CGImageDestinationAddImage(output, frame.image, nil)
-            guard CGImageDestinationFinalize(output) else { return 3 }
+            try writeFrame(frame.image, destination: destination)
             let metadata = VideoFrameMetadata(seconds: frame.seconds, duration: duration, size: after.size, modifiedAt: after.modified)
             try FileHandle.standardOutput.write(contentsOf: JSONEncoder().encode(metadata))
             return 0
@@ -123,11 +121,12 @@ enum VideoFrameWorker {
         }
         defer { monitor.cancel() }
         do {
-            guard arguments.count == 4, ["png", "jpeg", "tiff"].contains(arguments[1]), let dimension = Int(arguments[2]), (1...8192).contains(dimension) else { return 2 }
+            guard [4, 5].contains(arguments.count), ["png", "jpeg", "tiff"].contains(arguments[1]),
+                  (arguments.count == 4 || ["true", "false"].contains(arguments[4])), let dimension = Int(arguments[2]), (1...8192).contains(dimension) else { return 2 }
             let destination = URL(fileURLWithPath: arguments[3])
             try ReadOnlyLocations.requireSourceMutation(destination)
             guard !FileManager.default.fileExists(atPath: destination.path) else { return 2 }
-            try MediaTools.exportPhoto(source: URL(fileURLWithPath: arguments[0]), output: destination, recipe: ToolRecipe(kind: "photo", format: arguments[1], maxDimension: dimension))
+            try MediaTools.exportPhoto(source: URL(fileURLWithPath: arguments[0]), output: destination, recipe: ToolRecipe(kind: "photo", format: arguments[1], maxDimension: dimension, allowUpscale: arguments.count == 5 ? arguments[4] == "true" : nil))
             return 0
         } catch { return 3 }
     }
@@ -140,10 +139,91 @@ enum VideoFrameWorker {
         executable = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] ?? executable
         #endif
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["--export-photo", source.path, recipe.format, String(recipe.maxDimension), output.path]
+        process.arguments = ["--export-photo", source.path, recipe.format, String(recipe.maxDimension), output.path, recipe.allowUpscale == true ? "true" : "false"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         guard try await CancellableProcess.wait(process, timeoutSeconds: 30) == 0 else { throw MediaTools.Failure(text: "The photo worker could not convert this input. Check its format, animation, and readability.") }
+    }
+
+    private static func writeFrame(_ image: CGImage, destination: URL) throws {
+        let data = NSMutableData()
+        guard let output = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { throw WorkerFailure() }
+        CGImageDestinationAddImage(output, image, nil)
+        guard CGImageDestinationFinalize(output) else { throw WorkerFailure() }
+        try (data as Data).write(to: destination, options: .withoutOverwriting)
+    }
+
+    static func runSequence(arguments: [String]) async -> Int32 {
+        let parentPID = getppid()
+        let parentMonitor = Task.detached {
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
+                let parent = getppid()
+                if parent == 1 || parent != parentPID { kill(getpid(), SIGKILL); return }
+            }
+        }
+        defer { parentMonitor.cancel() }
+        var created: [URL] = []
+        var succeeded = false
+        defer { if !succeeded { for url in created { try? FileManager.default.removeItem(at: url) } } }
+        do {
+            guard arguments.count == 3, arguments[1].utf8.count <= 1024, arguments[2].utf8.count <= 32_768 else { return 2 }
+            let times = try JSONDecoder().decode([Double].self, from: Data(arguments[1].utf8))
+            let paths = try JSONDecoder().decode([String].self, from: Data(arguments[2].utf8))
+            guard (2...8).contains(times.count), paths.count == times.count, Set(paths).count == paths.count,
+                  times.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 21_600 }),
+                  zip(times, times.dropFirst()).allSatisfy({ $0 <= $1 }) else { return 2 }
+            let destinations = paths.map { URL(fileURLWithPath: $0) }
+            for destination in destinations {
+                try ReadOnlyLocations.requireWritable(destination)
+                guard !FileManager.default.fileExists(atPath: destination.path) else { return 2 }
+            }
+            let source = URL(fileURLWithPath: arguments[0])
+            let before = try attributes(source)
+            guard let duration = await DeepAnalyze.loadVideoDurationSeconds(AVURLAsset(url: source), timeoutSeconds: 8),
+                  duration.isFinite, duration > 0, times.allSatisfy({ $0 < duration }) else { return 3 }
+            var metadata: [VideoFrameMetadata] = []
+            for (seconds, destination) in zip(times, destinations) {
+                guard let frame = await DeepAnalyze.extractTimedVideoFrame(url: source, maxPixelSize: 256, requestedSeconds: seconds) else { return 3 }
+                try writeFrame(frame.image, destination: destination)
+                created.append(destination)
+                metadata.append(VideoFrameMetadata(seconds: frame.seconds, duration: duration, size: before.size, modifiedAt: before.modified))
+            }
+            guard try attributes(source) == before else { return 4 }
+            try FileHandle.standardOutput.write(contentsOf: JSONEncoder().encode(metadata))
+            succeeded = true
+            return 0
+        } catch { return 3 }
+    }
+
+    static func sampleSequence(source: URL, times: [Double]) async throws -> [Sample] {
+        guard (2...8).contains(times.count) else { throw WorkerFailure() }
+        sweepAbandonedFrames()
+        let destinations = times.map { _ in FileManager.default.temporaryDirectory.appendingPathComponent("FileIDTimeline-" + UUID().uuidString + ".png") }
+        for destination in destinations { try ReadOnlyLocations.requireWritable(destination) }
+        let output = Pipe()
+        let process = Process()
+        var executable = CommandLine.arguments[0]
+#if DEBUG
+        executable = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] ?? executable
+#endif
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["--sample-video-sequence", source.path,
+                             String(decoding: try JSONEncoder().encode(times), as: UTF8.self),
+                             String(decoding: try JSONEncoder().encode(destinations.map(\.path)), as: UTF8.self)]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            let status = try await CancellableProcess.wait(process, timeoutSeconds: 60)
+            if status == 4 { throw SourceRevisionChanged() }
+            guard status == 0, let data = try output.fileHandleForReading.read(upToCount: 16_384) else { throw WorkerFailure() }
+            let metadata = try JSONDecoder().decode([VideoFrameMetadata].self, from: data)
+            guard metadata.count == times.count, metadata.allSatisfy({ $0.seconds.isFinite && $0.seconds >= 0 && $0.duration.isFinite && $0.duration > 0 }) else { throw WorkerFailure() }
+            return zip(destinations, metadata).map { Sample(url: $0, metadata: $1) }
+        } catch {
+            for destination in destinations { try? FileManager.default.removeItem(at: destination) }
+            throw error
+        }
     }
 
     static func sample(source: URL, seconds: Double) async throws -> Sample {

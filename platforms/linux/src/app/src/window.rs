@@ -188,7 +188,9 @@ pub fn on_activate(app: &adw::Application) {
                 | EngineState::DeepAnalyzeFileDone(_)
                 | EngineState::DeepAnalyzeComplete(_)
                 | EngineState::RestructurePlan(_)
-                | EngineState::RestructureApplyResult(_)) {
+                | EngineState::RestructureApplyResult(_)
+                | EngineState::CatalogResponse(_)
+                | EngineState::ToolResponse(_)) {
                 continue;
             }
             let available = matches!(&state, EngineState::Ready | EngineState::ScanComplete(_) | EngineState::Error { .. });
@@ -216,7 +218,9 @@ pub fn on_activate(app: &adw::Application) {
                 | EngineState::DeepAnalyzeFileDone(_)
                 | EngineState::DeepAnalyzeComplete(_)
                 | EngineState::RestructurePlan(_)
-                | EngineState::RestructureApplyResult(_) => continue,
+                | EngineState::RestructureApplyResult(_)
+                | EngineState::CatalogResponse(_)
+                | EngineState::ToolResponse(_) => continue,
                 EngineState::Failed(message) => format!("Engine: {message}"),
                 EngineState::Exited => "Engine: exited".to_string(),
             };

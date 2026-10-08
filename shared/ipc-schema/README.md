@@ -12,6 +12,8 @@ JSON object **key order is not significant and is platform-dependent** (Swift ma
 
 ## Code generation
 
+IPC v1.8 adds optional `CatalogRequest.timelineMode` for `enqueueTimeline`: `sampled` preserves the existing fast mode; `moments` requests overlapping frame-sequence evidence. Omission remains compatible with older clients. A platform without the worker must return an explicit unsupported error. Swift, Rust, and C# mirror the field; Linux uses the Rust DTO. A successful window records sampled coverage, not proof of complete visual observation or absence of an event.
+
 Each platform's "generated" types currently live as hand-maintained files that a human keeps in sync with `ipc.schema.json`:
 
 | Platform | File |
@@ -53,3 +55,5 @@ Every payload field carrying user-content data (file paths, OCR text, EXIF) is l
 ### v1.6 native catalog retrieval
 
 Optional `searchMode` (`keyword`, `semantic`, `hybrid`), `queryVector` (512 finite normalized values), `embeddingModel` `limit` (1–100), and `resultScope` (`all`/`files`) extend existing catalog search requests. Native CLIP semantic requests use either a compatible vector/model pair or a file-ID seed; hybrid requests also need a nonempty query. Existing keyword requests remain valid. File scope deduplicates ranked moments before applying the result limit so a single video cannot crowd out the Library grid. Responses can return `indexing` while a local cache is prepared, `ok` with timestamp/page evidence, or an explicit `error`; callers must handle unavailable modes. Rust/C# mirror the fields, but PC visual execution is deferred and returns an explicit error rather than silently treating vectors as keywords. See ARCHITECTURE.md for snapshot/change-log behavior.
+
+IPC v1.9 adds optional `ToolRecipe.allowUpscale`. Omitted or false keeps photo downsizing behavior; true allows conventional enlargement to `maxDimension`. It is accepted only for photo recipes and does not request AI super-resolution. Swift, Rust, and C# mirror the optional field; Linux uses the Rust DTO.

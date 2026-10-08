@@ -12,6 +12,7 @@ struct IPCProtocolTests {
     func commandRoundTrip() throws {
         let commands: [IPCCommand.Payload] = [
             .grantFolderAccess(rootPath: "/Users/adam/photos", rootBookmark: Data([7, 8, 9])),
+            .catalogRequest(request: CatalogRequest(requestID: "moments", action: "enqueueTimeline", fileIDs: [1], timelineMode: "moments")),
             .startScan(rootPath: "/Users/adam/photos", rootBookmark: Data([1, 2, 3]),
                        rootDisplay: "/Users/adam/photos", rescan: false,
                        excludedPaths: ["/Users/adam/photos/.cache"]),
@@ -36,6 +37,20 @@ struct IPCProtocolTests {
             let originalPayloadJSON = try IPCCoder.encoder.encode(cmd.payload)
             let decodedPayloadJSON = try IPCCoder.encoder.encode(decoded.payload)
             #expect(originalPayloadJSON == decodedPayloadJSON)
+        }
+    }
+
+    @Test func photoEnlargementRecipesKeepLegacyAndExplicitFlags() throws {
+        let legacy = try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"photo","format":"png","maxDimension":64}"#.utf8))
+        #expect(legacy.allowUpscale == nil)
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        #expect(json["allowUpscale"] == nil)
+        for flag in [false, true] {
+            let recipe = ToolRecipe(kind: "photo", format: "png", maxDimension: 64, allowUpscale: flag)
+            #expect(try JSONDecoder().decode(ToolRecipe.self, from: JSONEncoder().encode(recipe)) == recipe)
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#.utf8))
         }
     }
 
