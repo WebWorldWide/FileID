@@ -76,7 +76,10 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     if (_disposed || (_generation == EngineClient.Instance.SpawnGeneration
-                        && EngineClient.Instance.State == EngineClient.LifecycleState.Ready)) return;
+                        && EngineClient.Instance.State == EngineClient.LifecycleState.Ready))
+                    {
+                        return;
+                    }
                     _requestID = null;
                     Invalidate();
                     Status.Text = "The engine stopped or restarted. Refresh tools; use Last export to check any interrupted operation.";
@@ -198,7 +201,10 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
             var result = await FolderPickerService.PickFolderAsync(hwnd);
             if (_disposed) return;
             if (result.Path != null) { _destination = result.Path; Destination.Text = result.Path; Invalidate(); }
-            else if (result.FailureReason != null) Status.Text = result.FailureReason;
+            else if (result.FailureReason != null)
+            {
+                Status.Text = result.FailureReason;
+            }
         });
 
     public void Dispose()

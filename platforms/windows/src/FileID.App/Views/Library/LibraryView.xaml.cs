@@ -42,8 +42,11 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             using var workbench = new ToolsWorkbench();
             var dialog = new ContentDialog
             {
-                XamlRoot = XamlRoot, Title = "File Tools", Content = workbench,
-                CloseButtonText = "Done", DefaultButton = ContentDialogButton.Close
+                XamlRoot = XamlRoot,
+                Title = "File Tools",
+                Content = workbench,
+                CloseButtonText = "Done",
+                DefaultButton = ContentDialogButton.Close
             };
             dialog.Resources["ContentDialogMaxWidth"] = 980d;
             await dialog.ShowAsync();

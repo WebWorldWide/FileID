@@ -68,7 +68,10 @@ public sealed partial class CatalogWorkbench : UserControl, IDisposable
                 {
                     if (_disposed || _requestID == null) return;
                     if (_requestGeneration == EngineClient.Instance.SpawnGeneration
-                        && EngineClient.Instance.State == EngineClient.LifecycleState.Ready) return;
+                        && EngineClient.Instance.State == EngineClient.LifecycleState.Ready)
+                    {
+                        return;
+                    }
                     _requestID = null;
                     SetBusy(false);
                     Status.Text = "The engine stopped or restarted. Refresh chapters before retrying an edit.";
