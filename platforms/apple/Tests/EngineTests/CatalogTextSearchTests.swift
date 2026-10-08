@@ -29,5 +29,12 @@ struct CatalogTextSearchTests {
             try CatalogStore.search($0, query: "invoice total")
         }
         #expect(imageHits.contains { $0.fileID == 2 && $0.kind == "ocrText" && $0.text.contains("Invoice total") })
+
+        try await database.pool.write { db in
+            try db.execute(sql: "UPDATE files SET failed=1 WHERE id=1")
+        }
+        #expect(try await database.pool.read {
+            try CatalogStore.search($0, query: "birthday gift")
+        }.isEmpty)
     }
 }

@@ -185,7 +185,7 @@ pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String]) -> Result
     hits.extend(evidence);
     for (table, kind) in [("doc_fts", "documentText"), ("ocr_fts", "ocrText")] {
         let sql = format!(
-            "SELECT f.id,f.path_text,snippet({table},0,'','','…',16) FROM {table} JOIN files f ON f.id={table}.rowid WHERE {table} MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) ORDER BY bm25({table}) LIMIT 100"
+            "SELECT f.id,f.path_text,snippet({table},0,'','','…',16) FROM {table} JOIN files f ON f.id={table}.rowid WHERE f.failed=0 AND {table} MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) ORDER BY bm25({table}) LIMIT 100"
         );
         let mut statement = conn.prepare(&sql)?;
         let text_hits = statement.query_map(params![quoted, filter], |row| {
@@ -224,5 +224,8 @@ mod text_search_tests {
 
         let images = search(&conn, "invoice total", &[]).unwrap();
         assert!(images.iter().any(|hit| hit.file_id == 2 && hit.kind == "ocrText" && hit.text.contains("Invoice total")));
+
+        conn.execute("UPDATE files SET failed=1 WHERE id=1", []).unwrap();
+        assert!(search(&conn, "birthday gift", &[]).unwrap().is_empty());
     }
 }
