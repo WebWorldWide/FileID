@@ -9,6 +9,8 @@ public enum CatalogStore {
             switch request.action {
             case "search":
                 return try await CatalogSearch.handle(request, database: database)
+            case "listEvents", "saveEvent", "deleteEvent", "undoEventEdit", "takeGroup", "setTakeFeedback", "undoTakeFeedback":
+                return try await CatalogTakes.handle(request, database: database)
             case "detail":
                 guard let fileID = request.fileID else { throw InvalidRequest() }
                 let chapters = try await database.pool.read { db in try Self.chapters(db, fileID: fileID) }

@@ -48,6 +48,64 @@ pub struct CatalogJob {
     pub updated_at: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogEvent {
+    pub id: String,
+    pub title: String,
+    pub goal: String,
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+    pub user_edited: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeFeedback {
+    #[serde(rename = "eventID")]
+    pub event_id: String,
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_score: Option<f64>,
+    pub preferred: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTake {
+    #[serde(rename = "eventID")]
+    pub event_id: String,
+    #[serde(rename = "fileID")]
+    pub file_id: i64,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
+    pub preferred: bool,
+    pub stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeRecommendation {
+    #[serde(rename = "eventID")]
+    pub event_id: String,
+    pub status: String,
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogRequest {
@@ -78,6 +136,12 @@ pub struct CatalogRequest {
     pub embedding_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<CatalogEvent>,
+    #[serde(rename = "eventID", default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_feedback: Option<CatalogTakeFeedback>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +155,12 @@ pub struct CatalogResponse {
     pub hits: Vec<CatalogHit>,
     pub chapters: Vec<CatalogChapter>,
     pub jobs: Vec<CatalogJob>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<CatalogEvent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes: Option<Vec<CatalogTake>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<CatalogTakeRecommendation>,
 }
 
 #[cfg(test)]

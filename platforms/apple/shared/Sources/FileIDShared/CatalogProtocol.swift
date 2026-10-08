@@ -67,6 +67,80 @@ public struct CatalogJob: Codable, Sendable, Equatable {
     }
 }
 
+public struct CatalogEvent: Codable, Sendable, Equatable {
+    public var id: String
+    public var title: String
+    public var goal: String
+    public var fileIDs: [Int64]
+    public var userEdited: Bool
+
+    public init(id: String, title: String, goal: String, fileIDs: [Int64], userEdited: Bool = true) {
+        self.id = id
+        self.title = title
+        self.goal = goal
+        self.fileIDs = fileIDs
+        self.userEdited = userEdited
+    }
+}
+
+public struct CatalogTakeFeedback: Codable, Sendable, Equatable {
+    public var eventID: String
+    public var fileID: Int64
+    public var outcomeScore: Double?
+    public var preferred: Bool
+
+    public init(eventID: String, fileID: Int64, outcomeScore: Double? = nil, preferred: Bool = false) {
+        self.eventID = eventID
+        self.fileID = fileID
+        self.outcomeScore = outcomeScore
+        self.preferred = preferred
+    }
+}
+
+public struct CatalogTake: Codable, Sendable, Equatable {
+    public var eventID: String
+    public var fileID: Int64
+    public var path: String
+    public var outcomeScore: Double?
+    public var qualityScore: Double?
+    public var confidence: Double?
+    public var explanation: String?
+    public var sourceRevision: String?
+    public var modelVersion: String?
+    public var preferred: Bool
+    public var stale: Bool
+
+    public init(eventID: String, fileID: Int64, path: String, outcomeScore: Double? = nil,
+                qualityScore: Double? = nil, confidence: Double? = nil, explanation: String? = nil,
+                sourceRevision: String? = nil, modelVersion: String? = nil, preferred: Bool = false, stale: Bool = false) {
+        self.eventID = eventID
+        self.fileID = fileID
+        self.path = path
+        self.outcomeScore = outcomeScore
+        self.qualityScore = qualityScore
+        self.confidence = confidence
+        self.explanation = explanation
+        self.sourceRevision = sourceRevision
+        self.modelVersion = modelVersion
+        self.preferred = preferred
+        self.stale = stale
+    }
+}
+
+public struct CatalogTakeRecommendation: Codable, Sendable, Equatable {
+    public var eventID: String
+    public var status: String
+    public var fileIDs: [Int64]
+    public var reason: String
+
+    public init(eventID: String, status: String, fileIDs: [Int64], reason: String) {
+        self.eventID = eventID
+        self.status = status
+        self.fileIDs = fileIDs
+        self.reason = reason
+    }
+}
+
 public struct CatalogRequest: Codable, Sendable, Equatable {
     public var requestID: String
     public var action: String
@@ -82,7 +156,10 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
     public var embeddingModel: String?
     public var limit: Int?
     public var timelineMode: String?
-    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, resultScope: String? = nil, timelineMode: String? = nil) {
+    public var event: CatalogEvent?
+    public var eventID: String?
+    public var takeFeedback: CatalogTakeFeedback?
+    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil) {
         self.requestID = requestID
         self.action = action
         self.query = query
@@ -97,6 +174,9 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
         self.embeddingModel = embeddingModel
         self.limit = limit
         self.timelineMode = timelineMode
+        self.event = event
+        self.eventID = eventID
+        self.takeFeedback = takeFeedback
     }
 }
 
@@ -107,12 +187,18 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
     public var hits: [CatalogHit]
     public var chapters: [CatalogChapter]
     public var jobs: [CatalogJob]
-    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = []) {
+    public var events: [CatalogEvent]?
+    public var takes: [CatalogTake]?
+    public var recommendation: CatalogTakeRecommendation?
+    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil) {
         self.requestID = requestID
         self.status = status
         self.message = message
         self.hits = hits
         self.chapters = chapters
         self.jobs = jobs
+        self.events = events
+        self.takes = takes
+        self.recommendation = recommendation
     }
 }

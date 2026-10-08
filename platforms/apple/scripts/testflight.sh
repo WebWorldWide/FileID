@@ -82,6 +82,7 @@ FILEID_BUILD_CONFIGURATION=release bash scripts/assemble_app.sh "$APP" "$VERSION
     exit 1
 }
 cp "$PROFILE" "$APP/Contents/embedded.provisionprofile"
+chmod -R a+rX "$APP"
 
 codesign --force --sign "$APP_IDENTITY" --timestamp "$APP/Contents/MacOS/mlx.metallib"
 codesign --force --sign "$APP_IDENTITY" --timestamp --options runtime \

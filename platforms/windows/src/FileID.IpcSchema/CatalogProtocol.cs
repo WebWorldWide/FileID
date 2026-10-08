@@ -35,6 +35,34 @@ public sealed record CatalogJob(
     double CreatedAt,
     double UpdatedAt);
 
+public sealed record CatalogEvent(
+    string Id,
+    string Title,
+    string Goal,
+    IReadOnlyList<long> FileIDs,
+    bool UserEdited);
+public sealed record CatalogTakeFeedback(
+    string EventID,
+    long FileID,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? OutcomeScore,
+    bool Preferred);
+public sealed record CatalogTake(
+    string EventID,
+    long FileID,
+    string Path,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? OutcomeScore,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? QualityScore,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Confidence,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Explanation,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? SourceRevision,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ModelVersion,
+    bool Preferred,
+    bool Stale);
+public sealed record CatalogTakeRecommendation(
+    string EventID,
+    string Status,
+    IReadOnlyList<long> FileIDs,
+    string Reason);
 public sealed record CatalogRequest(
     string RequestID,
     string Action,
@@ -49,7 +77,10 @@ public sealed record CatalogRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EmbeddingModel = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Limit = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ResultScope = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TimelineMode = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TimelineMode = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogEvent? Event = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EventID = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeFeedback? TakeFeedback = null);
 
 public sealed record CatalogResponse(
     string RequestID,
@@ -57,5 +88,8 @@ public sealed record CatalogResponse(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Message,
     IReadOnlyList<CatalogHit> Hits,
     IReadOnlyList<CatalogChapter> Chapters,
-    IReadOnlyList<CatalogJob> Jobs);
+    IReadOnlyList<CatalogJob> Jobs,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogEvent>? Events = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTake>? Takes = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeRecommendation? Recommendation = null);
 

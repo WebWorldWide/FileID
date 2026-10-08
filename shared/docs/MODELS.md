@@ -1,5 +1,9 @@
 # Models — canonical registry
 
+## 2026-10-08 opt-in moment-model evaluation
+
+The approved, verified Qwen3-VL 4B MLX fixture reached the existing `FileID.ModelMemoryAdmission` guard on the 16 GB M1 Pro and did not run inference. The Metal test-bundle path issue was diagnosed in TEST.md. No new weights, model promotion, latency result, or recognition-quality claim resulted; keep the memory guard and use an internal rights-clear corpus for a later measured run.
+
 ## 2026-10-08 evaluation status
 
 The isolated macOS UI fixture and default native test run used no downloaded model weights. The registered visual-model evaluation tests require an explicit internal frame corpus and model cache; they skipped in this checkpoint. No candidate was promoted or quality claim changed. Keep the existing memory-admission and license gates when resuming model-backed assessment.

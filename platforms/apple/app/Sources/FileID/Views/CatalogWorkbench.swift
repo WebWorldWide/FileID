@@ -21,6 +21,7 @@ struct CatalogWorkbench: View {
     @State private var editingID: String?
     @State private var refreshedTimelineJobs: Set<String> = []
     @State private var timelineMode = "sampled"
+    @State private var showingTakes = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -33,6 +34,7 @@ struct CatalogWorkbench: View {
                 TextField("Search names, descriptions, chapters, or sampled video frames", text: $query)
                     .textFieldStyle(.roundedBorder).onSubmit { search() }
                 Button("Search", action: search).disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Best Takes") { showingTakes = true }
                 Button("Refresh jobs") { send(CatalogRequest(requestID: UUID().uuidString, action: "jobs")) }
             }
             if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
@@ -147,6 +149,9 @@ struct CatalogWorkbench: View {
         }
         .padding(20).frame(minWidth: 900, minHeight: 680)
         .tint(Theme.gold)
+        .sheet(isPresented: $showingTakes) {
+            TakeWorkbench(engine: engine, candidates: hits)
+        }
         .task {
             while !Task.isCancelled {
                 _ = engine.send(.catalogRequest(request: CatalogRequest(requestID: UUID().uuidString, action: "jobs")))

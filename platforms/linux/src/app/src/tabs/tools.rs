@@ -287,6 +287,9 @@ fn send(ui: &Ui, action: &str) {
                 embedding_model: None,
                 limit: None,
                 timeline_mode: None,
+                event: None,
+                event_id: None,
+                take_feedback: None,
             },
         }))
     } else {
