@@ -1,5 +1,7 @@
 # Models — canonical registry
 
+IPC v1.11 related-take proposals reuse each platform's existing installed image/video CLIP embedding space (`CLIPEmbeddingSpace.modelID` on macOS, `mobileclip_s2` in the Rust engine). The same-model cosine is displayed as visual similarity, not an event-outcome probability. No weight, download, runtime, or license choice changed; threshold calibration remains a release task.
+
 ## 2026-10-08 opt-in moment-model evaluation
 
 The approved, verified Qwen3-VL 4B MLX fixture reached the existing `FileID.ModelMemoryAdmission` guard on the 16 GB M1 Pro and did not run inference. The Metal test-bundle path issue was diagnosed in TEST.md. No new weights, model promotion, latency result, or recognition-quality claim resulted; keep the memory guard and use an internal rights-clear corpus for a later measured run.

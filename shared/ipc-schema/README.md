@@ -1,5 +1,7 @@
 # IPC schema — canonical contract
 
+IPC v1.11 adds `suggestTakeGroups` to the catalog envelope and the optional `suggestedTakeGroups` response. Each proposal contains local file paths, an embedding cosine similarity, and a reason; it is read-only and never asserts that a requested event happened. The request requires a bounded `fileIDs` scope. Mac, Rust, and C# DTOs mirror the canonical schema.
+
 IPC v1.10 adds typed `CatalogEvent`, `CatalogTakeFeedback`, `CatalogTake`, and `CatalogTakeRecommendation` payloads and optional `events`, `takes`, and `recommendation` response fields. `listEvents`, `saveEvent`, `deleteEvent`, `undoEventEdit`, `takeGroup`, `setTakeFeedback`, and `undoTakeFeedback` use the existing catalog request/response envelope. Swift, Rust (Windows/Linux), and C# DTOs mirror the fields. Empty outcome evidence returns `insufficient`; it must not be presented as an automatically detected missed event.
 
 `ipc.schema.json` is the single source of truth for the wire protocol between the FileID app and the FileIDEngine. Every platform (macOS Swift, Windows Rust + C#, Linux) implements types that conform to it.

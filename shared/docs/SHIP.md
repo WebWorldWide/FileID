@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Related-take proposal checkpoint (2026-10-08)
+
+IPC v1.11 adds read-only visual grouping proposals among selected search results. Local Swift, pinned Rust, and GTK suites and strict Clippy pass; C# and hosted CI remain the merge gate. This is a usability step toward Best Takes, not the release target: no calibrated broad-event detection, catalog-wide grouping job, held-out eight-category ranking benchmark, or GTK/WinUI review UI exists yet. Apple still must expose uploaded macOS build 875 in TestFlight before installation or sandbox acceptance can be claimed. Keep the broader conversion, face, search, chat, privacy, hardware, and distribution gates in this file open.
+
 ## Internal testing availability (2026-10-08, 13:08 CDT)
 
 FileID 0.1.1 (875) uploaded through Xcode and passed App Store Connect validation, but Apple had not exposed a build to TestFlight at the latest check. The existing group contains only the owner's Apple account and shows **No Builds Available**. Tester install and sandbox runtime acceptance remain open gates. All three unusable Developer API keys are revoked; zero active team keys remain.

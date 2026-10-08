@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## Following IPC v1.11 related-take proposals
+
+Verify the latest GitHub `main` SHA and all exact-main workflows before claiming this checkpoint. The Mac window's “Find related takes” proposes groups only among current search hits. Do not describe it as event-outcome recognition. Next: collect rights-cleared attempts with positive, negative, and uncertain labels; measure grouping precision/recall separately for Mac CLIP and Rust MobileCLIP, including missing embeddings and unreliable file dates. Move full-library discovery into a durable, cancellable job with progress before enabling automatic catalog-wide groups. Connect goal-conditioned dense timeline evidence to take outcome scoring, then build native GTK/WinUI review surfaces. Continue checking App Store Connect for uploaded build 875; assign it to the existing owner-only internal group only when Apple exposes a processed build. Preserve Adlon's example-data volume as read-only and use internal-drive fixtures for changes.
+
 ## Latest TestFlight state (2026-10-08, 13:08 CDT)
 
 Xcode uploaded build 0.1.1 (875), but [FileID Internal Testers](https://appstoreconnect.apple.com/teams/d850f9a5-cdeb-471d-8f22-da26d818f701/apps/6818813859/testflight/groups/08d0a98b-d192-4e1a-a9e4-da3756e89187) shows **1 tester, 0 builds, No Builds Available**. The sole tester is the owner, `adammnolle@gmail.com`. Refresh TestFlight for Apple processing; once build 875 reaches Complete, assign it to the internal group and verify the owner can install it. All three failed API-key attempts are revoked; zero active team keys remain. Xcode's signed-in account is the working upload route. Do not add other testers or claim availability prematurely.

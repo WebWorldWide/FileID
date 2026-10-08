@@ -1,5 +1,9 @@
 # FileID next-version handoff — 2026-10-08
 
+## Related-take proposal follow-up
+
+IPC v1.11 adds `suggestTakeGroups` with Swift/Rust engines, C# mirror, and a Mac Best Takes review surface. It is read-only, scoped to current search results, and uses same-model image/video embeddings plus file dates; it neither discovers the user's desired outcome nor saves a group until the user names it. Local full Swift, pinned Rust, and GTK tests/strict Clippy passed. Confirm exact-head and exact-main GitHub CI for the latest commit before reporting green. Next agent should build held-out grouping/outcome fixtures, calibrate per-model thresholds, add durable library-wide discovery and goal-conditioned timestamped evidence, then native GTK/WinUI review. TestFlight build 875 was uploaded by Xcode but App Store Connect still displayed `No Builds` at the latest check; refresh the existing owner-only internal group and assign the build only after processing. Keep Adlon example data read-only, with all writable artifacts on internal storage.
+
 ## Most recent Apple state
 
 The owner-approved cleanup revoked unused team API key `6VXJ3PBDMS`; App Store Connect now lists zero active keys. `FileID Internal Testers` has only owner `adammnolle@gmail.com` enrolled. As of 13:08 CDT, it showed **1 tester, 0 builds, No Builds Available**. Build 875 was successfully uploaded by Xcode and is awaiting Apple processing. When it appears as Complete, assign it to that group and test installation. This supersedes the older active-key and zero-tester notes below. Continue exact-head/main CI and PR #227 merge work; Adlon remains read-only example data.

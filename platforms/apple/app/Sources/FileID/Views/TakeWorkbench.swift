@@ -11,6 +11,7 @@ struct TakeWorkbench: View {
     @State private var events: [CatalogEvent] = []
     @State private var selectedEvent: CatalogEvent?
     @State private var takes: [CatalogTake] = []
+    @State private var suggestedGroups: [CatalogTakeGroupSuggestion] = []
     @State private var recommendation: CatalogTakeRecommendation?
     @State private var title = ""
     @State private var goal = ""
@@ -33,6 +34,10 @@ struct TakeWorkbench: View {
             HStack {
                 Text("Best Takes").font(.title2.bold())
                 Spacer()
+                Button("Find related takes") {
+                    send("suggestTakeGroups", fileIDs: uniqueCandidates.map(\.fileID))
+                }
+                .disabled(uniqueCandidates.count < 2)
                 Button("New group") { newGroup() }
                 if let lastDeletedEventID {
                     Button("Undo delete") { send("undoEventEdit", eventID: lastDeletedEventID) }
@@ -84,6 +89,18 @@ struct TakeWorkbench: View {
                         }
                         Text("Select at least two files from the search results to make a group. Originals are never changed.")
                             .font(.caption).foregroundStyle(.secondary)
+                        if !suggestedGroups.isEmpty {
+                            Text("Possible groups from visual similarity and file dates. Check the files; this does not detect the desired outcome.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ForEach(suggestedGroups.indices, id: \.self) { index in
+                                let suggestion = suggestedGroups[index]
+                                RelatedTakeSuggestionRow(suggestion: suggestion) {
+                                    newGroup()
+                                    selectedIDs = Set(suggestion.members.map(\.fileID))
+                                    message = "Name this group and describe the outcome before saving."
+                                }
+                            }
+                        }
                         ForEach(uniqueCandidates, id: \.fileID) { hit in
                             Toggle(isOn: Binding(
                                 get: { selectedIDs.contains(hit.fileID) },
@@ -181,10 +198,10 @@ struct TakeWorkbench: View {
 
     private func load(_ eventID: String) { send("takeGroup", eventID: eventID) }
 
-    private func send(_ action: String, query: String? = nil, fileID: Int64? = nil, event: CatalogEvent? = nil,
+    private func send(_ action: String, query: String? = nil, fileID: Int64? = nil, fileIDs: [Int64]? = nil, event: CatalogEvent? = nil,
                       eventID: String? = nil, feedback: CatalogTakeFeedback? = nil) {
         let request = CatalogRequest(requestID: UUID().uuidString, action: action, query: query, fileID: fileID,
-                                     event: event, eventID: eventID, takeFeedback: feedback)
+                                     fileIDs: fileIDs, event: event, eventID: eventID, takeFeedback: feedback)
         pendingID = request.requestID
         pendingAction = action
         message = "Working…"
@@ -200,6 +217,9 @@ struct TakeWorkbench: View {
         guard response.status == "ok" else {
             if action == "deleteEvent" { lastDeletedEventID = nil }
             return
+        }
+        if action == "suggestTakeGroups" {
+            suggestedGroups = response.suggestedTakeGroups ?? []
         }
         if let events = response.events {
             if action == "takeGroup" || action == "saveEvent" || action == "setTakeFeedback" || action == "undoTakeFeedback" {
@@ -222,5 +242,26 @@ struct TakeWorkbench: View {
             if action == "undoEventEdit" { lastDeletedEventID = nil }
             send("listEvents", query: eventQuery)
         }
+    }
+}
+
+private struct RelatedTakeSuggestionRow: View {
+    let suggestion: CatalogTakeGroupSuggestion
+    let onReview: () -> Void
+
+    var body: some View {
+        let names = suggestion.members.map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: ", ")
+        let similarity = String(format: "%.2f", suggestion.similarity)
+        return HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(names).lineLimit(2)
+                Text("Visual similarity \(similarity) · \(suggestion.reason)")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Review group", action: onReview)
+        }
+        .padding(8)
+        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
     }
 }
