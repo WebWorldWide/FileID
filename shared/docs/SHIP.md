@@ -2,7 +2,7 @@
 
 ## Best-take review checkpoint (2026-10-08)
 
-Mac and shared Rust now support manual event groups, desired-outcome feedback, preference, correction/Undo, and honest recommendation abstention under IPC v1.10; Mac has a native review window. Automatic broad best-take detection, measured event accuracy, native GTK/WinUI review controls, and the remaining conversion/media/hardware gates are open. The 4B model fixture did not pass memory admission on the 16 GB Mac, so no recognition quality is claimed. TestFlight still has no uploaded build: the replacement Apple team key's one-time download did not reach local storage, despite a signed package and available signing assets.
+Mac and shared Rust now support manual event groups, desired-outcome feedback, preference, correction/Undo, and honest recommendation abstention under IPC v1.10; Mac has a native review window. Automatic broad best-take detection, measured event accuracy, native GTK/WinUI review controls, and the remaining conversion/media/hardware gates are open. The 4B model fixture did not pass memory admission on the 16 GB Mac, so no recognition quality is claimed. Updated signed Mac package `FileID-0.1.1-874.pkg` passes installer and extracted-app signature checks; TestFlight still has no uploaded build because the replacement Apple team key's one-time download did not reach local storage.
 
 ## Signed Mac package checkpoint (2026-10-08)
 
