@@ -1,5 +1,9 @@
 # FileID next version — implementation ledger
 
+## 2026-10-08 Mac video frame checkpoint
+
+IPC v1.12 and the native Mac Tools window now offer original, 9:16, 16:9, 1:1, and 4:5 H.264/AAC exports. AVFoundation fits the complete image and pads the remaining canvas, then reopens the new output to verify dimensions, aspect, streams, timing, and codec. Generated video with audio checks all four ratios and actual padding; preview/execute/Undo covers framed export. This supports social aspect versions without content loss, but does not satisfy subject-tracked auto-reframing, crop-safe-area previews, stabilization, neural upscaling, or portable video conversion. Keep those M5/release gates open.
+
 ## 2026-10-08 related-take proposal checkpoint
 
 IPC v1.11 and the Mac/Rust engines now propose related groups from current visual embeddings and nearby file creation dates among explicit search-result IDs. The Mac review window lets a user adopt a proposal before naming a group and its desired outcome. Exact copies, derivative exports, and already grouped files are excluded. These are uncalibrated **visual proposals**, not automatic detection of a hit, catch, gift, or other event. Next: rights-cleared positive/negative/uncertain group fixtures; calibrate visual similarity separately for each embedding model, measure misses from absent embeddings or unreliable file dates, move catalog-wide discovery to a durable background job, then connect dense timestamped outcome evidence and native GTK/WinUI review.

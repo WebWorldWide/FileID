@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-08 Mac video frame checkpoint
+
+Native Mac File Tools adds 9:16, 16:9, 1:1, and 4:5 fit-and-pad exports to existing H.264/AAC conversion, with source-preserving staged export/Undo and generated media validation. This is one production-capable format behavior, not the full auto-reframing request: tracked subject crop paths, safe areas, stabilization, AI photo/video enhancement, broader format fidelity, and portable video adapters remain release gates. The uploaded TestFlight build 875 predates this change; do not claim it contains framed export. Exact-head/main CI and packaged sandbox acceptance remain required.
+
 ## 2026-10-08 19:58 CDT release gate
 
 Xcode uploaded signed FileID 0.1.1 (875), but authenticated App Store Connect still shows **No Builds** in TestFlight and no selectable distribution build. Processing/ingestion and owner installation are unverified, so TestFlight is not ready. The App Review sign-in-required setting is saved off; the version is saved for manual release after any approval. Screenshots, product copy, support/review contact, content-rights/age data, and export-compliance classification need accurate completion before App Review. Do not submit or publish by inference. If the build remains absent 24 hours after its 12:53 CDT October 8 upload, follow Apple's build-processing support path. The next-version quality, hardware, model, and distribution gates below remain open; Adlon remains read-only example data.

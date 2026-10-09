@@ -8,6 +8,8 @@ pub struct ToolRecipe {
     pub max_dimension: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_upscale: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_aspect_ratio: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
