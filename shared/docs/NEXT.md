@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## After PR #232 merged — verify exact-main, then continue
+
+`main` reached `3df088db5ef1c73a4cc51c32a8e61ce5b07680e7` with Mac social-frame fit-and-pad export; 19 exact-PR-head checks passed, and eight merge-commit workflows are running. Confirm all eight exact-main results including Adlon Windows/Linux runner jobs before recording a green merge. The next feature is editable subject-tracked crop paths with safe-area and subject-loss preview, then portable video export parity. Fit-and-pad is already available but must not be described as tracked auto-reframing. Broader best-take outcome detection, video stabilization, AI upscaling, broad conversion formats, calibrated faces, and production acceptance remain open. Adlon is example data only and never a write target. Keep the unrelated `codex/store-msix` worktree for separate review.
+
+At 21:18 CDT October 8, authenticated TestFlight still showed **No Builds** despite Xcode's successful 12:53 CDT upload of 0.1.1 (875). Recheck before claiming installation; if still absent at 12:53 CDT October 9, use Apple's build-processing support path. Build 875 does not contain PR #232. Leave App Store release manual and prepare accurate metadata/compliance before submission. The compact 2B model remains experimental pending separate weight-download approval and evaluation.
+
 ## After macOS fit-and-pad video export
 
 IPC v1.12/Mac File Tools now export original, 9:16, 16:9, 1:1, and 4:5 H.264/AAC frames with the entire image fitted and padded. Verify exact-head and exact-main CI before calling the checkpoint merged; C# schema compilation and Linux-host GTK acceptance remain hosted gates. This does not implement subject tracking, smooth crop paths, social safe areas, stabilization, AI enhancement, or equivalent portable video export. Next: add an editable tracked-crop recipe and preview that measures subject loss, then port verified behavior to Linux and Windows. Keep all media fixtures and temporary files on internal storage, never Adlon. The earlier TestFlight build 875 remains a separate Apple processing gate; a future package from current source needs its own validation and upload.
