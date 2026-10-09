@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-08 evening validation checkpoint
+
+The compact macOS runtime and opt-in model candidate are merged at `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`. All eight exact-commit CI workflows passed, including Adlon Windows engine x64/ARM64 native/ARM64 cross-build. This is a development checkpoint, not the next-version release: the 2B model has no downloaded weights or inference benchmark, and many feature and hardware gates below remain open. App Store Connect still shows no TestFlight build after Xcode uploaded 0.1.1 (875); do not claim tester installation or sandbox acceptance until Apple exposes a processed build and it runs. Adlon remains read-only example data.
+
 ## Compact macOS VLM candidate (2026-10-08)
 
 The opt-in Qwen3.5 2B model and MLX Swift LM 3.32.3 runtime compile with the macOS app and engine. A revision-matched Metal library builds, and an isolated debug app/engine bundle launches. This does not clear the model release gate: run actual local inference on rights-cleared positive/negative/uncertain media, compare it with the incumbent on identical fixtures, measure memory and latency under background load, and validate packaged sandbox behavior. Keep it out of automatic recommendations until those results pass. No model weights are bundled, and Adlon remains read-only example data.

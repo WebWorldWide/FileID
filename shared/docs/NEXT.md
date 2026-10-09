@@ -1,5 +1,13 @@
 # NEXT — resume here
 
+## After 2026-10-08 merge checkpoint
+
+The compact macOS runtime PR #229 is merged at `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`. All eight exact-commit workflows are green, including Adlon Windows engine x64, ARM64 native, and ARM64 cross-build in run 37861135298. Do not modify `/Volumes/Adlon`; use it only as read-only example data. Keep the unrelated `codex/store-msix` worktree/branch for separate review.
+
+App Store Connect remained at “Submit a build to start testing” in an authenticated check about 19:20 CDT, despite Xcode's successful 12:53 CDT upload of 0.1.1 (875). No tester can install it yet. Recheck the existing FileID TestFlight page; assign the already-created owner-only internal group only when Apple exposes a processed build. If absent after 24 hours, escalate through Apple build-processing support. No active API upload key remains; Xcode uploaded through the developer account. Keep the opt-in Qwen3.5 2B candidate unpromoted until its separately approved download and rights-cleared memory, latency, and outcome evaluation are complete. Mac/Linux feature work remains higher priority than Windows hardware tuning while the user is away from that PC.
+
+Earlier entries below are retained as history; their PR, API-key, and CI status instructions are superseded by this entry.
+
 ## Compact macOS VLM follow-up
 
 Verify the latest exact-main GitHub SHA and workflows before relying on this checkpoint. The Qwen3.5 2B MLX model is an experimental manual picker option, not a new default. The owner was asked for a separate user-initiated 1.75 GB model download to an internal-drive cache because the earlier approval covered only Qwen3-VL 4B. If approved, use rights-cleared positive/negative/uncertain frames to measure actual load, memory, timestamped-event quality, and latency beside the incumbent; preserve memory admission and abstention. If approval is not given, leave the candidate unpromoted and continue independent Mac/Linux catalog, timeline, and conversion work. Do not write to Adlon. Current Swift tests and Rust manifest checks pass; verify no-wipe native launch and GitHub exact-head/main CI before marking this slice landed. TestFlight build 875 remains a separate Apple processing/assignment task.
