@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-08 19:58 CDT — App Store release safety and TestFlight checkpoint
+
+Authenticated App Store Connect shows **No Builds** for FileID TestFlight, and the macOS 1.0 distribution version has no selectable Build, despite Xcode Organizer's successful upload of signed 0.1.1 (875) at 12:53 CDT. The archive metadata matches `com.fileid.app`, Apple app ID `6818813859`, and the developer team in the App Store Connect app record. Apple's reason for the missing build is unknown; testers cannot install it yet. The existing internal group has only the owner. The 24-hour follow-up point is October 9 at 12:53 CDT; use Apple's build-processing support path if the build remains absent then.
+
+Cleared and saved the App Review **Sign-in required** checkbox; FileID has no account sign-in. Changed and saved the macOS 1.0 release choice from automatic to **Manually release this version**. Both values persisted after a reload. No review submission or public release was made. Product-page assets and several review/legal fields remain incomplete and require verified information. All unused team API keys remain revoked. No Adlon write occurred.
+
 ## 2026-10-08 evening — Compact Mac runtime merged; TestFlight processing open
 
 PR #229 merged as `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`, deleting its task branch. All eight exact-commit workflows passed: hosted macOS app, repository policy, Linux engine/CLI/TUI/GTK, Flatpak packaging, Windows .NET x64/ARM64, Windows Store package, six-target native tools, and Adlon Windows engine x64/ARM64 native/ARM64 cross-build. Local full 341-test Swift suite and fresh Metal-library app/engine launch passed before merge. No Qwen3.5 2B weights or inference were used. Authenticated App Store Connect TestFlight still said “Submit a build to start testing” about 19:20 CDT despite Xcode's 12:53 CDT upload of build 875, so internal testing is unavailable until Apple processing is visible. All unused App Store Connect API keys are revoked. No Adlon data writes occurred; caches and fixtures stayed on the internal drive.

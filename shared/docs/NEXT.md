@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## 2026-10-08 day-end priority
+
+Authenticated App Store Connect still displayed **No Builds** for FileID at 19:58 CDT, although Xcode reported successful upload of signed 0.1.1 (875) at 12:53 CDT. The macOS 1.0 distribution page likewise had no selectable build. Recheck [TestFlight](https://appstoreconnect.apple.com/teams/d850f9a5-cdeb-471d-8f22-da26d818f701/apps/6818813859/testflight) and, if still absent at 12:53 CDT October 9, contact Apple through its build-processing support guidance. Once it appears, assign it to the existing owner-only internal group and verify actual installation before claiming TestFlight availability. The App Review sign-in-required flag is saved off and release is saved as manual. Prepare accurate screenshots, metadata, review contact, and owner-reviewed legal/compliance answers before any App Review submission; do not auto-publish. All unused API keys are revoked; Xcode Apple ID upload worked.
+
+`main` was clean at `412a8130c482c844df9eb6b2a06ffa99110eb274` before this day-end documentation update. Eight exact-main checks passed, including Adlon-hosted Windows/Linux CI. Keep the unrelated divergent `codex/store-msix` branch/worktree for separate review. Continue Mac-first and Linux-parity next-version work from `NEXT_VERSION.md`, particularly durable library-wide take discovery and evidence-linked outcome ranking; current suggestions only compare current search hits. The 2B model has no downloaded weights or quality data, and its separate internal-drive download approval remains pending. Adlon is strictly read-only example data; keep all writes on internal storage.
+
 ## After 2026-10-08 merge checkpoint
 
 The compact macOS runtime PR #229 is merged at `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`. All eight exact-commit workflows are green, including Adlon Windows engine x64, ARM64 native, and ARM64 cross-build in run 37861135298. Do not modify `/Volumes/Adlon`; use it only as read-only example data. Keep the unrelated `codex/store-msix` worktree/branch for separate review.
