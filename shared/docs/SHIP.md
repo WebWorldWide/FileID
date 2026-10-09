@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-08 19:58 CDT release gate
+
+Xcode uploaded signed FileID 0.1.1 (875), but authenticated App Store Connect still shows **No Builds** in TestFlight and no selectable distribution build. Processing/ingestion and owner installation are unverified, so TestFlight is not ready. The App Review sign-in-required setting is saved off; the version is saved for manual release after any approval. Screenshots, product copy, support/review contact, content-rights/age data, and export-compliance classification need accurate completion before App Review. Do not submit or publish by inference. If the build remains absent 24 hours after its 12:53 CDT October 8 upload, follow Apple's build-processing support path. The next-version quality, hardware, model, and distribution gates below remain open; Adlon remains read-only example data.
+
 ## 2026-10-08 evening validation checkpoint
 
 The compact macOS runtime and opt-in model candidate are merged at `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`. All eight exact-commit CI workflows passed, including Adlon Windows engine x64/ARM64 native/ARM64 cross-build. This is a development checkpoint, not the next-version release: the 2B model has no downloaded weights or inference benchmark, and many feature and hardware gates below remain open. App Store Connect still shows no TestFlight build after Xcode uploaded 0.1.1 (875); do not claim tester installation or sandbox acceptance until Apple exposes a processed build and it runs. Adlon remains read-only example data.
