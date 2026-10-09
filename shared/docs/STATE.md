@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-08 evening — Compact Mac runtime merged; TestFlight processing open
+
+PR #229 merged as `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`, deleting its task branch. All eight exact-commit workflows passed: hosted macOS app, repository policy, Linux engine/CLI/TUI/GTK, Flatpak packaging, Windows .NET x64/ARM64, Windows Store package, six-target native tools, and Adlon Windows engine x64/ARM64 native/ARM64 cross-build. Local full 341-test Swift suite and fresh Metal-library app/engine launch passed before merge. No Qwen3.5 2B weights or inference were used. Authenticated App Store Connect TestFlight still said “Submit a build to start testing” about 19:20 CDT despite Xcode's 12:53 CDT upload of build 875, so internal testing is unavailable until Apple processing is visible. All unused App Store Connect API keys are revoked. No Adlon data writes occurred; caches and fixtures stayed on the internal drive.
+
 ## 2026-10-08 — Hosted Swift 6.3 toolchain correction
 
 The compact macOS vision PR #229 remains under CI review. The Xcode 26.3 hosted run failed during dependency resolution: MLX Swift 0.32.3 requires Swift tools 6.3, while Xcode 26.3 provides Swift 6.2. The macOS workflow now targets GitHub's macOS 26 image and explicitly selects Xcode 26.6, which Apple documents as including Swift 6.3. The bootstrap and runtime-egress policy checks passed for the prior PR head; full exact-head and exact-main CI remain to be verified after this workflow change. No new model weights were downloaded, and TestFlight build 875 remains unverified in App Store Connect.

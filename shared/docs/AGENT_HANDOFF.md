@@ -1,5 +1,13 @@
 # FileID next-version handoff — 2026-10-08
 
+## 2026-10-08 evening checkpoint — current source of truth
+
+PR #229 merged to `main` at `bec145e55f99bc0ad8ef72314150fcab72e7dfc6`; its task branch was deleted and the primary checkout is clean. All eight exact-merge-commit workflows passed: macOS app, repository policy, Linux engine/CLI/TUI/GTK, Flatpak, Windows .NET x64/ARM64, Windows Store package, native tools on six targets, and Windows engine x64/ARM64 native/ARM64 cross-build ([run 37861135298](https://github.com/WebWorldWide/FileID/actions/runs/37861135298)). Adlon remains read-only example data; its CI runners may build in their own runner workspaces. The unrelated `codex/store-msix` worktree is deliberately preserved because it contains divergent unmerged work; do not delete or merge it as part of this checkpoint.
+
+Xcode uploaded signed FileID 0.1.1 (875) successfully, but a fresh authenticated App Store Connect check still displayed “Submit a build to start testing” and no build at about 19:20 CDT. The owner-only internal group cannot install until Apple exposes a processed build. All unused API keys are revoked. Do not claim TestFlight availability. If the build remains absent 24 hours after the 12:53 CDT upload, use Apple's build-processing support path. The opt-in Qwen3.5 2B model has not been downloaded or evaluated; a separate rights-cleared 1.75 GB download approval is pending. Keep its recommendation status experimental.
+
+Sections below retain earlier session history; their branch, key, and CI status statements are superseded by this checkpoint.
+
 ## Latest checkpoint and next action
 
 PR #229 adds an opt-in compact Mac vision model and updated MLX runtime. The local Mac app/engine build, 341 Swift tests, policy tests, and a launch with a newly built revision-matched Metal library passed. The first hosted CI run used an old Xcode; the second used Xcode 26.3 but failed because transitive MLX Swift 0.32.3 requires Swift tools 6.3. The workflow now selects GitHub macOS 26 with Xcode 26.6. Wait for all checks on the exact PR head, then merge to main, wait for exact-main checks including Adlon-hosted Linux/Windows runners, and remove only this task branch. Keep the unrelated Store MSIX worktree intact. TestFlight build 875 was uploaded successfully but App Store Connect still displayed No Builds at the last check; verify processing before claiming testers can install. All unused App Store Connect API keys were revoked. Qwen3.5 2B weights have not been downloaded or evaluated; a separate 1.75 GB internal-drive download approval is pending. Keep Adlon strictly read-only.
