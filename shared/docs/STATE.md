@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-08 21:18 CDT — Social-frame export merged, release checks ongoing
+
+PR #232 merged to `main` at `3df088db5ef1c73a4cc51c32a8e61ce5b07680e7` after all 19 exact-head checks passed. The eight exact-main workflows started and are the remaining merge acceptance check. The Mac native worker, C# line-ending fix, reviewed runtime-egress digest, generated frame/audio tests, full local Swift suite, Mac release build, pinned Rust and Linux tests/Clippy, and cross-engine conversion/Undo round trip passed. A separate local landscape-to-vertical fixture reopened as 720×1280 H.264/AAC with two-second duration and visible picture/padding. App Store Connect still had no TestFlight build at 21:18 CDT; uploaded build 875 predates this merge. No Adlon write occurred.
+
 ## 2026-10-08 — Native Mac social-frame video export
 
 IPC v1.12 adds optional `ToolRecipe.videoAspectRatio` with source, 9:16, 16:9, 1:1, and 4:5. The Mac File Tools picker and isolated AVFoundation worker fit the full displayed source into the selected frame, pad unused space, and export a new H.264/AAC MP4 through the existing staged operation/Undo path. Output names include the selected frame. Reopen checks cover target aspect, source duration, streams, audio sync, codec, and dimensions. A generated portrait-with-tone fixture verifies all four frame ratios, audio/timing, source hash, and visible side padding in a horizontal export. The existing full preview/execute/Undo test now exercises 16:9. This is fit-and-pad, not subject-tracked reframing, stabilization, or AI enhancement. Linux/Windows DTOs mirror the schema; portable Rust tool execution explicitly rejects framed recipes until its video adapter exists. Mac engine/app build, focused Swift tests, Rust engine tests and pinned-toolchain Clippy, Linux tests/Clippy pass locally; C# awaits hosted checks. Adlon was not written.

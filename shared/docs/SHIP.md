@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-08 21:18 CDT merge/release checkpoint
+
+Mac fit-and-pad video export is merged in PR #232 at `3df088db5ef1c73a4cc51c32a8e61ce5b07680e7`; all 19 exact-head checks passed. Eight exact-main workflows are still pending, so merged-main CI is not yet certified. This is a partial next-version capability, with tracked reframing, stabilization, enhancement, portable video parity, and the remaining quality/hardware gates still open. App Store Connect still shows **No Builds** for TestFlight upload 875 at 21:18 CDT; tester installation, packaged acceptance of current source, metadata/compliance, and App Review remain unverified. Adlon is read-only example data.
+
 ## 2026-10-08 Mac video frame checkpoint
 
 Native Mac File Tools adds 9:16, 16:9, 1:1, and 4:5 fit-and-pad exports to existing H.264/AAC conversion, with source-preserving staged export/Undo and generated media validation. This is one production-capable format behavior, not the full auto-reframing request: tracked subject crop paths, safe areas, stabilization, AI photo/video enhancement, broader format fidelity, and portable video adapters remain release gates. The uploaded TestFlight build 875 predates this change; do not claim it contains framed export. Exact-head/main CI and packaged sandbox acceptance remain required.
