@@ -32,9 +32,13 @@ enum VideoConversionWorker {
         }
         defer { monitor.cancel() }
         do {
-            guard arguments.count == 4, ["probe", "export"].contains(arguments[0]),
+            guard (4...5).contains(arguments.count), ["probe", "export"].contains(arguments[0]),
                   let dimension = Int(arguments[2]), [1280,1920].contains(dimension) else {
                 throw MediaTools.Failure(text: "Choose a 1280 or 1920 pixel video export.")
+            }
+            let aspectRatio = arguments.count == 5 ? arguments[4] : "source"
+            guard ["source", "9:16", "16:9", "1:1", "4:5"].contains(aspectRatio) else {
+                throw MediaTools.Failure(text: "Choose a supported video frame.")
             }
             let source = URL(fileURLWithPath: arguments[1])
             let output = URL(fileURLWithPath: arguments[3])
@@ -49,14 +53,18 @@ enum VideoConversionWorker {
             guard let exporter = AVAssetExportSession(asset: asset, presetName: preset), exporter.supportedFileTypes.contains(.mp4) else {
                 throw MediaTools.Failure(text: "This video cannot use the selected native MP4 preset.")
             }
+            if aspectRatio != "source" {
+                exporter.videoComposition = try await fitComposition(asset: asset, dimension: dimension, aspectRatio: aspectRatio)
+            }
             if arguments[0] == "export" {
                 exporter.metadata = []
                 exporter.shouldOptimizeForNetworkUse = true
                 try await exporter.export(to: output, as: .mp4)
                 let after = try await inspect(AVURLAsset(url: output, options: [AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue, AVURLAssetOverrideMIMETypeKey: "video/mp4"]))
+                let expectedRatio = frameRatio(aspectRatio) ?? before.width / before.height
                 guard abs(after.duration - before.duration) <= 0.25, after.audioCount == before.audioCount,
                       after.codec == kCMVideoCodecType_H264, max(after.width, after.height) <= Double(dimension) + 2,
-                      abs(after.width / after.height - before.width / before.height) <= 0.02 else {
+                      abs(after.width / after.height - expectedRatio) <= 0.02 else {
                     throw MediaTools.Failure(text: "Export validation rejected changed timing, streams, codec or orientation.")
                 }
                 if before.audioCount == 1 {
@@ -78,6 +86,51 @@ enum VideoConversionWorker {
             if let data = try? JSONEncoder().encode(report) { try? FileHandle.standardOutput.write(contentsOf: data) }
             return 3
         }
+    }
+
+    private static func frameRatio(_ aspectRatio: String) -> Double? {
+        switch aspectRatio {
+        case "9:16": 9.0 / 16.0
+        case "16:9": 16.0 / 9.0
+        case "1:1": 1.0
+        case "4:5": 4.0 / 5.0
+        default: nil
+        }
+    }
+
+    private static func fitComposition(asset: AVURLAsset, dimension: Int, aspectRatio: String) async throws -> AVMutableVideoComposition {
+        guard let ratio = frameRatio(aspectRatio),
+              let video = try await asset.load(.tracks).first(where: { $0.mediaType == .video }) else {
+            throw MediaTools.Failure(text: "The requested video frame is unavailable.")
+        }
+        let size = try await video.load(.naturalSize)
+        let orientation = try await video.load(.preferredTransform)
+        let bounds = CGRect(origin: .zero, size: size).applying(orientation)
+        let longEdge = Double(dimension)
+        let canvas = ratio < 1
+            ? CGSize(width: (longEdge * ratio).rounded(), height: longEdge)
+            : CGSize(width: longEdge, height: (longEdge / ratio).rounded())
+        guard bounds.width > 0, bounds.height > 0, canvas.width > 0, canvas.height > 0 else {
+            throw MediaTools.Failure(text: "The video has invalid display dimensions.")
+        }
+        let scale = min(canvas.width / bounds.width, canvas.height / bounds.height)
+        let paddingX = (canvas.width - bounds.width * scale) / 2
+        let paddingY = (canvas.height - bounds.height * scale) / 2
+        let transform = orientation
+            .concatenating(CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY))
+            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            .concatenating(CGAffineTransform(translationX: paddingX, y: paddingY))
+        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: video)
+        layer.setTransform(transform, at: .zero)
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
+        instruction.layerInstructions = [layer]
+        let composition = AVMutableVideoComposition()
+        composition.renderSize = canvas
+        let nominalRate = try await video.load(.nominalFrameRate)
+        composition.frameDuration = CMTime(seconds: nominalRate.isFinite && nominalRate > 0 ? 1.0 / Double(nominalRate) : 1.0 / 30.0, preferredTimescale: 60_000)
+        composition.instructions = [instruction]
+        return composition
     }
 
     private static func inspect(_ asset: AVURLAsset) async throws -> Probe {
@@ -127,7 +180,8 @@ enum VideoConversionWorker {
     }
 
     static func request(source: URL, output: URL? = nil, recipe: ToolRecipe) async throws -> Probe {
-        guard recipe.kind == "video", recipe.format == "mp4", [1280,1920].contains(recipe.maxDimension) else {
+        guard recipe.kind == "video", recipe.format == "mp4", [1280,1920].contains(recipe.maxDimension),
+              ["source", "9:16", "16:9", "1:1", "4:5"].contains(recipe.videoAspectRatio ?? "source") else {
             throw MediaTools.Failure(text: "Unsupported video recipe.")
         }
         if let output { try ReadOnlyLocations.requireWritable(output) }
@@ -137,7 +191,7 @@ enum VideoConversionWorker {
         executable = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] ?? executable
         #endif
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["--convert-video", output == nil ? "probe" : "export", source.path, String(recipe.maxDimension), output?.path ?? "-"]
+        process.arguments = ["--convert-video", output == nil ? "probe" : "export", source.path, String(recipe.maxDimension), output?.path ?? "-", recipe.videoAspectRatio ?? "source"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice

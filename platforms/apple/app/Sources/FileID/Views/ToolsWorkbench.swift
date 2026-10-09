@@ -12,6 +12,7 @@ final class ToolsSession {
     var format = "png"
     var maxDimension = 4096
     var allowUpscale = false
+    var videoAspectRatio = "source"
     var destination = ""
     var destinationBookmark: Data?
     var destinationAccessReady: Bool {
@@ -65,6 +66,17 @@ struct ToolsWorkbench: View {
                 Text("Conventional resizing increases pixel dimensions; it does not recover missing detail.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if session.kind == "video" {
+                Picker("Frame", selection: $session.videoAspectRatio) {
+                    Text("Original").tag("source")
+                    Text("Vertical · 9:16").tag("9:16")
+                    Text("Horizontal · 16:9").tag("16:9")
+                    Text("Square · 1:1").tag("1:1")
+                    Text("Portrait · 4:5").tag("4:5")
+                }.disabled(!session.pending.isEmpty)
+                Text("Fits the full picture inside the selected frame; empty space is padded. Subject-tracked cropping is still in development.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Text(session.destination.isEmpty ? "No output folder selected" : session.destination).lineLimit(1).truncationMode(.middle)
                 Spacer()
@@ -76,7 +88,7 @@ struct ToolsWorkbench: View {
                 Button("Preview export") {
                     send(ToolRequest(requestID: UUID().uuidString, action: "preview",
                                      fileIDs: session.selection.sorted(), destination: session.destination,
-                                     recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension, allowUpscale: session.kind == "photo" ? session.allowUpscale : nil),
+                                     recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension, allowUpscale: session.kind == "photo" ? session.allowUpscale : nil, videoAspectRatio: session.kind == "video" ? session.videoAspectRatio : nil),
                                      destinationBookmark: session.destinationBookmark))
                 }
                     .disabled(session.selection.isEmpty || session.destination.isEmpty || !session.destinationAccessReady
@@ -114,6 +126,7 @@ struct ToolsWorkbench: View {
         .onChange(of: session.format) { _, _ in invalidate() }
         .onChange(of: session.maxDimension) { _, _ in invalidate() }
         .onChange(of: session.allowUpscale) { _, _ in invalidate() }
+        .onChange(of: session.videoAspectRatio) { _, _ in invalidate() }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }
 

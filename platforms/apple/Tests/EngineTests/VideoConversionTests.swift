@@ -28,7 +28,16 @@ struct VideoConversionTests {
             let pixels = try #require(buffer)
             CVPixelBufferLockBaseAddress(pixels, [])
             let base = try #require(CVPixelBufferGetBaseAddress(pixels))
-            memset(base, Int32(frame * 5), CVPixelBufferGetBytesPerRow(pixels) * 54)
+            for row in 0..<54 {
+                let line = base.advanced(by: row * CVPixelBufferGetBytesPerRow(pixels)).assumingMemoryBound(to: UInt8.self)
+                for column in 0..<96 {
+                    let offset = column * 4
+                    line[offset] = UInt8(frame * 5)
+                    line[offset + 1] = UInt8(frame * 5)
+                    line[offset + 2] = UInt8(frame * 5)
+                    line[offset + 3] = 255
+                }
+            }
             CVPixelBufferUnlockBaseAddress(pixels, [])
             #expect(adaptor.append(pixels, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)))
         }
@@ -109,15 +118,16 @@ struct VideoConversionTests {
             try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?,1,100,0,'video','mov')", arguments: [source.path])
         }
         let tools = MediaTools()
-        let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1280)
+        let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1280, videoAspectRatio: "16:9")
         let preview = await tools.handle(ToolRequest(requestID: "preview", action: "preview", fileIDs: [1], destination: root.path, recipe: recipe), database: database)
         #expect(preview.status == "ok", Comment(rawValue: preview.message))
         let id = try #require(preview.operationID)
         let exported = await tools.handle(ToolRequest(requestID: "execute", action: "execute", destination: root.path, operationID: id), database: database)
         #expect(exported.status == "ok", Comment(rawValue: exported.message))
         let output = URL(fileURLWithPath: try #require(exported.outputs.first).outputPath)
+        #expect(output.lastPathComponent.contains("16x9 Fit"))
         let probe = try await VideoConversionWorker.request(source: output, recipe: recipe)
-        #expect(probe.height > probe.width)
+        #expect(probe.width > probe.height)
         #expect(probe.audioCount == 0)
         #expect(abs(probe.duration - 1) < 0.1)
         #expect(try MediaTools.hash(source) == original)
@@ -126,6 +136,47 @@ struct VideoConversionTests {
         #expect(undone.status == "ok")
         #expect(!FileManager.default.fileExists(atPath: output.path))
         #expect(try MediaTools.hash(source) == original)
+    }
+
+    @Test func framedExportsPreservePictureTimingAndAudio() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = try await movieWithTone(in: root)
+        let original = try MediaTools.hash(source)
+        for (frame, ratio, dimension) in [("9:16", 9.0 / 16.0, 1280), ("16:9", 16.0 / 9.0, 1280),
+                                          ("1:1", 1.0, 1280), ("4:5", 4.0 / 5.0, 1280),
+                                          ("9:16", 9.0 / 16.0, 1920)] {
+            let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: dimension, videoAspectRatio: frame)
+            let output = root.appendingPathComponent(".FileIDExport-\(UUID().uuidString).part")
+            let result = try await VideoConversionWorker.request(source: source, output: output, recipe: recipe)
+            #expect(abs(result.width / result.height - ratio) < 0.02)
+            #expect(max(result.width, result.height) <= Double(dimension) + 2)
+            #expect(result.audioCount == 1 && result.audioCodec == kAudioFormatMPEG4AAC)
+            #expect(abs(result.duration - 1) < 0.1)
+            #expect(try MediaTools.hash(source) == original)
+            if frame == "16:9" {
+                let asset = AVURLAsset(url: output, options: [AVURLAssetOverrideMIMETypeKey: "video/mp4"])
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                let image = try generator.copyCGImage(at: CMTime(value: 15, timescale: 30), actualTime: nil)
+                let width = image.width
+                let height = image.height
+                var pixels = [UInt8](repeating: 0, count: width * height * 4)
+                let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+                    guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                                                  bitsPerComponent: 8, bytesPerRow: width * 4,
+                                                  space: CGColorSpaceCreateDeviceRGB(),
+                                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+                    return true
+                }
+                #expect(drawn)
+                let middle = height / 2
+                #expect(pixels[(middle * width + width / 2) * 4] > 25)
+                #expect(pixels[(middle * width + 5) * 4] < 15)
+            }
+        }
     }
 
     @Test func workerRejectsProtectedOutputBeforeSourceAccessAndRejectsBrokenInput() async throws {

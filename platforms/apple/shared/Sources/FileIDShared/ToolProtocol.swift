@@ -5,8 +5,9 @@ public struct ToolRecipe: Codable, Sendable, Equatable {
     public var format: String
     public var maxDimension: Int
     public var allowUpscale: Bool?
-    public init(kind: String, format: String, maxDimension: Int = 4096, allowUpscale: Bool? = nil) {
-        self.kind = kind; self.format = format; self.maxDimension = maxDimension; self.allowUpscale = allowUpscale
+    public var videoAspectRatio: String?
+    public init(kind: String, format: String, maxDimension: Int = 4096, allowUpscale: Bool? = nil, videoAspectRatio: String? = nil) {
+        self.kind = kind; self.format = format; self.maxDimension = maxDimension; self.allowUpscale = allowUpscale; self.videoAspectRatio = videoAspectRatio
     }
 }
 

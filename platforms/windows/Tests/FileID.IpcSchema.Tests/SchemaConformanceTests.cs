@@ -143,6 +143,20 @@ public class SchemaConformanceTests
         AssertNoErrors(errors);
     }
 
+    [Fact]
+    public void VideoFrameRecipe_UsesOptionalSchemaField()
+    {
+        var recipe = new ToolRecipe("video", "mp4", 1920, VideoAspectRatio: "9:16");
+        var payload = new ToolRequestCommand(new ToolRequest("frame", "preview", Recipe: recipe));
+        var line = IpcCoder.Encode(new IpcCommand("frame", payload));
+        var errors = new List<string>();
+        CheckTaggedPayload("IPCCommand", SchemaVariants("CommandPayload"), line, "frame", errors);
+        AssertNoErrors(errors);
+        using var document = JsonDocument.Parse(line);
+        var properties = document.RootElement.GetProperty("payload").GetProperty("toolRequest").GetProperty("request").GetProperty("recipe");
+        Assert.Equal("9:16", properties.GetProperty("videoAspectRatio").GetString());
+    }
+
     // ── Exemplars ────────────────────────────────────────────────────────
     // One fully-populated instance per variant, constructed exactly as the
     // app constructs them. Optional fields are set so the serialized keys

@@ -1,5 +1,9 @@
 # FileID next-version handoff — 2026-10-08
 
+## Mac video frame export — active branch checkpoint
+
+The current work adds IPC v1.12 `videoAspectRatio`, a native Mac File Tools frame picker, and isolated AVFoundation fit-and-pad exports for 9:16, 16:9, 1:1, and 4:5. The output is a new version with full source content visible, validated timing/audio/aspect, and Undo. Generated portrait-with-tone tests check all ratios and visible padding. Rust/Linux/C# DTOs mirror the field; portable execution rejects it until a video worker is implemented. This is not subject-tracked reframing or the full next-version release. Verify all exact-head checks, merge to main, verify exact-main checks, delete only this task branch. Preserve the unrelated `codex/store-msix` worktree. Adlon remains read-only. TestFlight build 875 predates these changes and remains absent in App Store Connect at the last authenticated check.
+
 ## Day-end checkpoint — 19:58 CDT
 
 `main` is clean at `412a8130c482c844df9eb6b2a06ffa99110eb274` before this handoff update. PR #229 and the subsequent handoff PR #230 are merged; all eight exact-main workflows passed, including the Adlon-hosted Windows/Linux runner jobs. Leave the unrelated divergent `codex/store-msix` branch/worktree for separate review. Never write to Adlon: app data, caches, test fixtures, temporary output, and exports belong on the internal drive; CI runner workspaces are separate from its example-data volume.

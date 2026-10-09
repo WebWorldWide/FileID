@@ -84,13 +84,15 @@ public actor MediaTools {
     static var capabilities: [ToolCapability] {
         [ToolCapability(id: "photo", available: true, inputFormats: ["png", "jpeg", "tiff", "heic"], outputFormats: ["png", "jpeg", "tiff"], detail: "Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected. Orientation is applied; location and camera metadata are stripped. Output is 8-bit SDR; this is not AI enhancement. JPEG transparency is flattened onto white."),
          ToolCapability(id: "chapters", available: true, inputFormats: ["catalog chapters"], outputFormats: ["json", "vtt"], detail: "Export non-stale chapter markers. WebVTT is a chapter cue list, not a speech transcript."),
-         ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280 or 1920 pixels. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
+         ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280 or 1920 pixels. Optional 9:16, 16:9, 1:1 or 4:5 frames fit the entire picture with padding. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
          ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Stabilization, AI upscaling, and tracked reframing are not installed yet.")]
     }
 
     static func supports(_ recipe: ToolRecipe) -> Bool {
         (1...8192).contains(recipe.maxDimension) &&
         (recipe.allowUpscale != true || recipe.kind == "photo") &&
+        (recipe.videoAspectRatio == nil || recipe.kind == "video") &&
+        (recipe.videoAspectRatio.map { ["source", "9:16", "16:9", "1:1", "4:5"].contains($0) } ?? true) &&
         ((recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(recipe.format)) ||
          (recipe.kind == "chapters" && ["json", "vtt"].contains(recipe.format)) ||
          (recipe.kind == "video" && recipe.format == "mp4" && [1280,1920].contains(recipe.maxDimension)))
@@ -139,7 +141,8 @@ public actor MediaTools {
             if recipe.kind == "photo" { try Self.validateImage(sourceURL) }
             if recipe.kind == "video" { _ = try await VideoConversionWorker.request(source: sourceURL, recipe: recipe) }
             let sourceHash = try Self.hash(sourceURL)
-            let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + (recipe.kind == "chapters" ? " - Chapters" : " - Export")
+            let frame = recipe.videoAspectRatio.flatMap { $0 == "source" ? nil : " - \($0.replacingOccurrences(of: ":", with: "x")) Fit" } ?? ""
+            let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + (recipe.kind == "chapters" ? " - Chapters" : " - Export\(frame)")
             let ext = recipe.format == "jpeg" ? "jpg" : recipe.format
             var index = 1
             var output: URL

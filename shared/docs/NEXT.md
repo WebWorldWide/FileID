@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## After macOS fit-and-pad video export
+
+IPC v1.12/Mac File Tools now export original, 9:16, 16:9, 1:1, and 4:5 H.264/AAC frames with the entire image fitted and padded. Verify exact-head and exact-main CI before calling the checkpoint merged; C# schema compilation and Linux-host GTK acceptance remain hosted gates. This does not implement subject tracking, smooth crop paths, social safe areas, stabilization, AI enhancement, or equivalent portable video export. Next: add an editable tracked-crop recipe and preview that measures subject loss, then port verified behavior to Linux and Windows. Keep all media fixtures and temporary files on internal storage, never Adlon. The earlier TestFlight build 875 remains a separate Apple processing gate; a future package from current source needs its own validation and upload.
+
 ## 2026-10-08 day-end priority
 
 Authenticated App Store Connect still displayed **No Builds** for FileID at 19:58 CDT, although Xcode reported successful upload of signed 0.1.1 (875) at 12:53 CDT. The macOS 1.0 distribution page likewise had no selectable build. Recheck [TestFlight](https://appstoreconnect.apple.com/teams/d850f9a5-cdeb-471d-8f22-da26d818f701/apps/6818813859/testflight) and, if still absent at 12:53 CDT October 9, contact Apple through its build-processing support guidance. Once it appears, assign it to the existing owner-only internal group and verify actual installation before claiming TestFlight availability. The App Review sign-in-required flag is saved off and release is saved as manual. Prepare accurate screenshots, metadata, review contact, and owner-reviewed legal/compliance answers before any App Review submission; do not auto-publish. All unused API keys are revoked; Xcode Apple ID upload worked.

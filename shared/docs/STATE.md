@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-08 — Native Mac social-frame video export
+
+IPC v1.12 adds optional `ToolRecipe.videoAspectRatio` with source, 9:16, 16:9, 1:1, and 4:5. The Mac File Tools picker and isolated AVFoundation worker fit the full displayed source into the selected frame, pad unused space, and export a new H.264/AAC MP4 through the existing staged operation/Undo path. Output names include the selected frame. Reopen checks cover target aspect, source duration, streams, audio sync, codec, and dimensions. A generated portrait-with-tone fixture verifies all four frame ratios, audio/timing, source hash, and visible side padding in a horizontal export. The existing full preview/execute/Undo test now exercises 16:9. This is fit-and-pad, not subject-tracked reframing, stabilization, or AI enhancement. Linux/Windows DTOs mirror the schema; portable Rust tool execution explicitly rejects framed recipes until its video adapter exists. Mac engine/app build, focused Swift tests, Rust engine tests and pinned-toolchain Clippy, Linux tests/Clippy pass locally; C# awaits hosted checks. Adlon was not written.
+
 ## 2026-10-08 19:58 CDT — App Store release safety and TestFlight checkpoint
 
 Authenticated App Store Connect shows **No Builds** for FileID TestFlight, and the macOS 1.0 distribution version has no selectable Build, despite Xcode Organizer's successful upload of signed 0.1.1 (875) at 12:53 CDT. The archive metadata matches `com.fileid.app`, Apple app ID `6818813859`, and the developer team in the App Store Connect app record. Apple's reason for the missing build is unknown; testers cannot install it yet. The existing internal group has only the owner. The 24-hour follow-up point is October 9 at 12:53 CDT; use Apple's build-processing support path if the build remains absent then.

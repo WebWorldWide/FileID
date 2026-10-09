@@ -43,14 +43,28 @@ struct IPCProtocolTests {
     @Test func photoEnlargementRecipesKeepLegacyAndExplicitFlags() throws {
         let legacy = try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"photo","format":"png","maxDimension":64}"#.utf8))
         #expect(legacy.allowUpscale == nil)
+        #expect(legacy.videoAspectRatio == nil)
         let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
         #expect(json["allowUpscale"] == nil)
+        #expect(json["videoAspectRatio"] == nil)
         for flag in [false, true] {
             let recipe = ToolRecipe(kind: "photo", format: "png", maxDimension: 64, allowUpscale: flag)
             #expect(try JSONDecoder().decode(ToolRecipe.self, from: JSONEncoder().encode(recipe)) == recipe)
         }
         #expect(throws: DecodingError.self) {
             try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#.utf8))
+        }
+    }
+
+    @Test func videoFrameRecipesRoundTripWithoutChangingLegacyExports() throws {
+        let legacy = try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"video","format":"mp4","maxDimension":1920}"#.utf8))
+        #expect(legacy.videoAspectRatio == nil)
+        for frame in ["source", "9:16", "16:9", "1:1", "4:5"] {
+            let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoAspectRatio: frame)
+            #expect(try JSONDecoder().decode(ToolRecipe.self, from: JSONEncoder().encode(recipe)) == recipe)
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":1}"#.utf8))
         }
     }
 
