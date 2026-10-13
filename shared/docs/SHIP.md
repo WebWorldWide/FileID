@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-13 platform integration checkpoint
+
+PR #238 consolidates the Store, Windows, Linux, and native Mac follow-ons. The separate source branches passed their Windows and Linux VM suites and the benchmark harness; combined hosted CI, signed-package runtime checks, and the release gates below remain open. The owner deferred macOS local verification. This checkpoint does not certify a production release.
+
 ## 2026-10-13 shared-engine and Store integration review
 
 PR #235 passed all 16 exact-head checks and merged into `main` at `347f7e64`; exact-main CI is pending. Store integration draft PR #238 targets `main`; Linux Rust/GTK, Windows .NET, and Windows Rust development suites pass, while hosted checks and native runtime acceptance remain open. Neither integration has signed cross-platform runtime acceptance. Production release still requires the native Store/Flatpak/Mac signed packages and legal, hardware, model, fidelity, performance, privacy, and crash-recovery gates listed below and in `NEXT_VERSION.md`.

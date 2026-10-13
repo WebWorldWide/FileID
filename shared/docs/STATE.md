@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 — Platform follow-ons consolidated for final review
+
+The Store integration branch now contains the reviewed Windows export owner, Linux People/Cleanup/Settings, and Mac motion/accessibility/benchmark commits. The source merge had documentation conflicts only, resolved by retaining each decision and validation record. PR #238 is the consolidated review target. Branch-specific VM results are recorded below; combined exact-head hosted CI and packaged platform acceptance are still open. This is a stopping point for feature development, not a production release claim.
+
 ## 2026-10-13 — Windows workbench completion under review
 
 The isolated `codex/windows-ui-integration` worktree ports the distinct Windows native UI checkpoint onto the current Store integration: durable export ownership across engine generations, capability-gated cancellation, history reconciliation, and catalog job action state. The native Windows solution builds with zero warnings; 54 IPC and 571 App tests pass in the Windows VM. This is still a draft integration, with packaged WinUI interaction and GPU/model behavior open.

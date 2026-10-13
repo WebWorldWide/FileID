@@ -1,5 +1,11 @@
 # NEXT — resume here
 
+## 2026-10-13 consolidation stopping point
+
+PR #238 now combines the reviewed Store work with the Windows, Linux, and native Mac follow-ons. The Windows VM solution build and 54 IPC/571 App tests, Linux VM strict Clippy and 49 GTK tests plus isolated D-Bus/Xvfb launch, and 16 catalog benchmark harness tests passed on their respective source branches. The combined exact-head hosted checks are still required before merging to `main`. Close the three follow-on PRs after confirming their commits are ancestors of #238, then merge #238 and verify exact-main CI. Review each older FileID branch before deleting it; preserve any unfinished code as reachable history and record what remains unimplemented.
+
+Production acceptance remains open for owner-deferred macOS signed packaging and interaction, signed Windows/Flatpak packages, physical GPU/model tests, 100,000-file throughput, privacy capture, media/legal review, and crash/restart recovery. Treat this as a source-integration checkpoint.
+
 ## 2026-10-13 Windows UI follow-on
 
 The Windows VM App suite passes (571 tests). Review export completion and cancel terminal behavior, then publish `codex/windows-ui-integration` as a draft PR. Keep the current video controls while integrating; confirm native packaged UI behavior on Windows before release acceptance.
