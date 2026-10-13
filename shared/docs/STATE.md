@@ -2,7 +2,7 @@
 
 ## 2026-10-13 — Store/parity integration in review after shared-engine draft
 
-PR #234 is merged on `main`; its exact-main workflows are still running. Draft PR #235 integrates the durable shared Rust index and scheduler; 13 of 16 exact-head checks currently pass and three Windows jobs remain active. The separate `codex/store-parity-integration` worktree is merging `codex/store-startup-and-listing` over that shared-engine head. It is not published or merged yet.
+PR #234 is merged on `main`; its exact-main workflows are still running. Draft PR #235 integrates the durable shared Rust index and scheduler; 13 of 16 exact-head checks currently pass and three Windows jobs remain active. Draft PR #236 merges `codex/store-startup-and-listing` over that shared-engine head; its hosted checks are pending.
 
 The merged Rust engine passes strict Linux Clippy and 611 library tests (8 deliberately ignored). GTK passes strict Clippy, 49 headless tests, and one real-engine Search/Tools/Chat workbench round trip under Xvfb. The disposable portable parity probe passes catalog index restore, export collision recovery, Undo, restructure Undo, restart, and a true cross-device export to `/dev/shm`. The native Windows solution builds with zero warnings; 54 IPC and 539 app tests pass. Windows Rust check and strict Clippy pass; library tests and native runtime interaction remain in progress. Repository-wide `.NET format --verify-no-changes` reports widespread existing line-ending and whitespace diagnostics across the mixed-format tree; that gate remains open. The Hugging Face-only runtime-egress gate passes; its 23 policy tests had one stale expected-inventory failure, whose corrected focused case passes. The Store branch's opt-in Microsoft/NVIDIA CUDA downloader was excluded to preserve the repository's stated egress rule. Settings now gives local CUDA runtime setup paths.
 
@@ -470,6 +470,11 @@ On `codex/store-startup-and-listing`, removed the Settings action that sent `lla
 
 The Store-installed 0.1.1.0 package still fails while loading `MainWindow` XAML; the checkout cannot reproduce Store package identity without installing a locally signed package. Store screenshots remain unprepared because the available UI automation exposed no native app windows.
 
+## 2026-10-13 19:34 UTC — Portable video merged; shared engine VM verification
+
+PR #234 passed all 18 exact-head checks and merged into `main` at `5a7ef8cb7962b67433bf6f715aa9f60a2246c02d`. The stacked shared-engine PR #235 was retargeted to `main`; the completed `codex/portable-video-export` branch was removed locally and remotely. Seven exact-main workflows started for the merge commit and are pending. No release acceptance follows from the merge.
+
+The shared-engine integration also passed Windows VM `cargo check --all-targets`, strict Clippy, and all 475 Rust library tests, including portable video/Undo, alongside the previously verified Linux 451-test and strict Clippy results. Hosted PR #235 exposed missing CLI/TUI/Linux dependency lock entries and the corresponding Flatpak source manifest; both are regenerated, verified, and pushed as follow-up commits. Current exact-head CI is still running. The older `parity/shared-engine` source branch remains until this integration lands. Three reviewed redundant or superseded remote refs have been removed; other distinct WIP branches remain under review.
 
 ## 2026-10-13 19:10 UTC — Shared Rust engine integration under review
 
