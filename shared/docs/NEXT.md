@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-13 final native-tools CI rerun
+
+The consolidated Linux ARM64 native-tools job exposed a CLI/TUI package version mismatch after passing tests, release builds, and binary privacy. The manifests and lockfiles now align with engine/Windows version 0.1.2. Confirm package assembly and all exact-head checks on the new PR #238 head before merging.
+
 ## 2026-10-13 consolidation stopping point
 
 PR #238 now combines the reviewed Store work with the Windows, Linux, and native Mac follow-ons. The Windows VM solution build and 54 IPC/571 App tests, Linux VM strict Clippy and 49 GTK tests plus isolated D-Bus/Xvfb launch, and 16 catalog benchmark harness tests passed on their respective source branches. The combined exact-head hosted checks are still required before merging to `main`. Close the three follow-on PRs after confirming their commits are ancestors of #238, then merge #238 and verify exact-main CI. Review each older FileID branch before deleting it; preserve any unfinished code as reachable history and record what remains unimplemented.

@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 — Native-tools release version aligned
+
+Consolidated PR #238's Linux ARM64 native-tools job passed Rust tests, release builds, and its three-binary privacy scan, then failed package assembly because the CLI and TUI manifests still declared 0.1.1 while `platforms/windows/VERSION` and the engine declared 0.1.2. Both manifests and their lockfile package entries now declare 0.1.2. Locked offline Cargo metadata and package-version preflight pass; exact-head CI must rerun.
+
 ## 2026-10-13 — Platform follow-ons consolidated for final review
 
 The Store integration branch now contains the reviewed Windows export owner, Linux People/Cleanup/Settings, and Mac motion/accessibility/benchmark commits. The source merge had documentation conflicts only, resolved by retaining each decision and validation record. PR #238 is the consolidated review target. Branch-specific VM results are recorded below; combined exact-head hosted CI and packaged platform acceptance are still open. This is a stopping point for feature development, not a production release claim.
