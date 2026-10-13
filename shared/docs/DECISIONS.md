@@ -3823,3 +3823,7 @@ Post-validation source review found a generic close-during-awaited-preparation/s
 ## 2026-10-13 — Keep CUDA runtimes local under the existing egress boundary
 
 The Store branch offered user-triggered Microsoft/NVIDIA CUDA runtime downloads and broadened the downloader host allowlist. The current root policy permits only user-initiated Hugging Face model downloads. Integrate the branch's local CUDA detection and verification, but keep the downloader and registry on the current Hugging Face-only transport. Settings shows local CUDA pack paths and verification rather than a download action. This supersedes the Store branch's earlier proposed CUDA download exception; a separate owner-approved policy change would be needed to reintroduce it.
+
+## 2026-10-13 — Pause decorative Mac motion by native window activity
+
+Use a local monotonic clock and native AppKit window activity notifications to suspend the existing SwiftUI LavaLamp and shimmer timelines when the window is inactive, hidden, or occluded, when Reduce Motion is enabled, or when the user pauses motion. Keep the gold visual language and native SwiftUI canvas. This avoids animating invisible windows and makes motion controllable without adding a dependency or telemetry. Verify source behavior on hosted Swift CI and later on the owner’s Mac.

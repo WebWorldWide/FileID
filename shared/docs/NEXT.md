@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-13 native parity follow-on
+
+Review and test the Mac motion/accessibility and reproducible benchmark changes on `codex/native-parity-integration`; publish a stacked draft PR after source verification. Continue reviewing the remaining FileID checkpoints, preserving each unique feature or recording why it is superseded before deleting the old branch. Hosted Swift checks can verify compilation; signed packaging and physical Mac interaction remain owner-deferred.
+
 ## 2026-10-13 current integration priority
 
 Finish draft PR #235's exact-head checks, merge it to `main` only after all pass, and verify exact-main CI. Then rebase or merge draft PR #236 (`codex/store-parity-integration`) on that main commit, finish native Windows Rust library tests and resolve the .NET format baseline, and run the GTK real-engine fixture plus policy gates on the final source. Resolve its exact-head failures and merge only after review. Continue auditing and integrating each remaining FileID branch before deleting it; keep unique unfinished work until it is integrated or explicitly superseded. Record the current results before changing these statuses.

@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 — Native parity follow-on under review
+
+The isolated `codex/native-parity-integration` worktree carries the older native Apple motion and accessibility checkpoint over Store PR #236 without rolling back newer engine or media work. It pauses decorative timelines when the window is inactive, Reduce Motion is on, or the user pauses them; it also improves spoken labels and text sizing for shared controls. The catalog benchmark follow-on records deterministic fixture identity, source and binary hashes, warm sample distributions, and host conditions. Its 16 harness tests pass. Hosted Swift compilation and on-device Mac interaction are still pending; the owner deferred local Mac testing. Remaining Linux/Windows UI, media, runtime, and branch checkpoints are still being reviewed.
+
 ## 2026-10-13 — Store/parity integration in review after shared-engine draft
 
 PR #234 is merged on `main`; its exact-main workflows are still running. Draft PR #235 integrates the durable shared Rust index and scheduler; 13 of 16 exact-head checks currently pass and three Windows jobs remain active. Draft PR #236 merges `codex/store-startup-and-listing` over that shared-engine head; its hosted checks are pending.
