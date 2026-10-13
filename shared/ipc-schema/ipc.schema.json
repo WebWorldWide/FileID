@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.12.0",
+  "version": "1.13.0",
 
   "$defs": {
     "IPCCommand": {
@@ -142,7 +142,9 @@
                 "modelKind":    { "type": "string" },
                 "skipExisting": { "type": "boolean", "description": "If true, skip files where vlm_description IS NOT NULL for this model." },
                 "tagsOnly":     { "type": "boolean", "description": "If true, run the fast tags-only pass (one VLM call/file) instead of full caption + smart-rename + tags. Used by the background auto-tag chain. Optional; defaults to false." },
-                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." }
+                "proposeRenames": { "type": "boolean", "description": "If true (default), the full manual pass also proposes smart filenames; set false for caption + tags without the rename VLM call. Ignored when tagsOnly is true." },
+                "fileIDs": { "type": ["array", "null"], "items": { "type": "integer", "minimum": 1 }, "maxItems": 100, "description": "Optional bounded explicit selection. Omitted or null means the whole library; an empty array means no selected files." },
+                "excludedFolders": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1, "maxLength": 32768 }, "maxItems": 100, "description": "Absolute local folder paths excluded from whole-library analysis. Ignored when fileIDs is present." }
               }
             }
           }
@@ -189,7 +191,11 @@
                   "category": { "type": "string" },
                   "tier": { "type": ["string", "null"] },
                   "confidence": { "type": "string" },
-                  "reason": { "type": ["string", "null"] }
+                  "reason": { "type": ["string", "null"] },
+                  "contentHash": { "type": ["string", "null"] },
+                  "sizeBytes": { "type": ["integer", "null"], "minimum": 0 },
+                  "fileRef": { "type": ["integer", "null"] },
+                  "modifiedAt": { "type": ["number", "null"] }
                 }
               } },
               "useSymlinks": { "type": "boolean" }
@@ -828,7 +834,11 @@
                   "category":    { "type": "string" },
                   "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." },
                   "confidence":  { "type": "string", "description": "Butler confidence band — auto / review / ask (RESTRUCTURE.md §6). Empty on older engines." },
-                  "reason":      { "type": ["string", "null"], "description": "Plain-language 'why filed here', shown in the drill-down." }
+                  "reason":      { "type": ["string", "null"], "description": "Plain-language 'why filed here', shown in the drill-down." },
+                  "contentHash": { "type": ["string", "null"] },
+                  "sizeBytes":   { "type": ["integer", "null"], "minimum": 0 },
+                  "fileRef":     { "type": ["integer", "null"] },
+                  "modifiedAt":  { "type": ["number", "null"] }
                 }
               } },
               "categoryCounts":        { "type": "array", "items": { "type": "object", "additionalProperties": false,

@@ -1089,6 +1089,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private void Cleanup()
     {
         var retiringGeneration = SpawnGeneration;
+        _workbenchRequests.FailGeneration(retiringGeneration);
+        if (ToolExecution.InvalidateGeneration(retiringGeneration)) PublishToolExecution();
+        if (ChatSend.InvalidateGeneration(retiringGeneration)) PublishChatSend();
         _healthWaiters.FailGeneration(retiringGeneration, new InvalidOperationException("The engine generation stopped."));
         RetireDeepAnalyzeGeneration(retiringGeneration);
         if (_scanStartSlot.ReleaseGeneration(SpawnGeneration) is { } scanStart)
@@ -1139,6 +1142,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     public void Dispose()
     {
+        _workbenchRequests.Dispose();
         Cleanup();
         _events.OnCompleted();
     }
@@ -1378,6 +1382,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             try
             {
+                ApplyWorkbenchResponse(ev.Payload, generation);
                 switch (ev.Payload)
                 {
                     case ReadyEvent r:

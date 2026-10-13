@@ -1,10 +1,12 @@
-# FileID -- icon asset generator.
+﻿# FileID -- icon asset generator.
 #
 # One-shot Windows-side asset pipeline:
 #   shared/docs/assets/FileID-Windows.png  (master, Windows-specific design)
 #     |
 #     +--> platforms/windows/src/FileID.App/Assets/FileID.ico  (multi-res .ico)
 #     +--> platforms/windows/src/FileID.App/Assets/Logo/FileID-{16,96,256}.png
+#     +--> platforms/windows/store/Assets/Square44x44Logo.png, Square150x150Logo.png, StoreLogo.png
+#     +--> website/assets/app-icon.png
 #     +--> platforms/windows/installer/FileID.Bundle/theme/logo.png  (130x102 letterboxed)
 #
 # Why FileID-Windows.png and not FileID-AppIcon.png? FileID-AppIcon.png
@@ -32,6 +34,8 @@ $RepoRoot    = Resolve-Path (Join-Path $ScriptDir "..\..\..")
 $Master      = Join-Path $RepoRoot "shared\docs\assets\FileID-Windows.png"
 $AssetsDir   = Join-Path $RepoRoot "platforms\windows\src\FileID.App\Assets"
 $LogoDir     = Join-Path $AssetsDir "Logo"
+$StoreAssetsDir = Join-Path $RepoRoot "platforms\windows\store\Assets"
+$WebsiteAssetsDir = Join-Path $RepoRoot "website\assets"
 $BundleTheme = Join-Path $RepoRoot "platforms\windows\installer\FileID.Bundle\theme"
 
 if (-not (Test-Path $Master)) {
@@ -41,17 +45,23 @@ if (-not (Test-Path $Master)) {
 
 New-Item -ItemType Directory -Force -Path $AssetsDir   | Out-Null
 New-Item -ItemType Directory -Force -Path $LogoDir     | Out-Null
+New-Item -ItemType Directory -Force -Path $StoreAssetsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $WebsiteAssetsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BundleTheme | Out-Null
 
 $IcoOut         = Join-Path $AssetsDir "FileID.ico"
 $Logo16         = Join-Path $LogoDir "FileID-16.png"
 $Logo96         = Join-Path $LogoDir "FileID-96.png"
 $Logo256        = Join-Path $LogoDir "FileID-256.png"
+$Store44        = Join-Path $StoreAssetsDir "Square44x44Logo.png"
+$Store150       = Join-Path $StoreAssetsDir "Square150x150Logo.png"
+$StoreLogo      = Join-Path $StoreAssetsDir "StoreLogo.png"
+$WebsiteIcon    = Join-Path $WebsiteAssetsDir "app-icon.png"
 $BundleLogo     = Join-Path $BundleTheme "logo.png"
 
 # Idempotency: skip if every output is newer than the master.
 $masterMtime = (Get-Item $Master).LastWriteTimeUtc
-$outputs = @($IcoOut, $Logo16, $Logo96, $Logo256, $BundleLogo)
+$outputs = @($IcoOut, $Logo16, $Logo96, $Logo256, $Store44, $Store150, $StoreLogo, $WebsiteIcon, $BundleLogo)
 $allUpToDate = $true
 foreach ($o in $outputs) {
     if (-not (Test-Path $o) -or (Get-Item $o).LastWriteTimeUtc -lt $masterMtime) {
@@ -101,7 +111,22 @@ try {
         } finally { $bmp.Dispose() }
     }
 
-    # --- Burn bundle logo (130x102 letterbox) -------------------------
+# --- Store + website icons -----------------------------------------
+Write-Host "Generating Store and website icons..." -ForegroundColor Cyan
+foreach ($pair in @(
+    @{ Size = 44; Out = $Store44 },
+    @{ Size = 150; Out = $Store150 },
+    @{ Size = 50; Out = $StoreLogo },
+    @{ Size = 1024; Out = $WebsiteIcon }
+)) {
+    $bmp = Resize-To $pair.Size
+    try {
+        Save-Png $bmp $pair.Out
+        Write-Host "  $($pair.Out)  ($($pair.Size)x$($pair.Size))" -ForegroundColor DarkGreen
+    } finally { $bmp.Dispose() }
+}
+
+# --- Burn bundle logo (130x102 letterbox) -------------------------
     Write-Host "Generating Burn theme logo (130x102 letterbox)..." -ForegroundColor Cyan
     $boxW = 130; $boxH = 102
     $bundleBmp = New-Object System.Drawing.Bitmap $boxW, $boxH

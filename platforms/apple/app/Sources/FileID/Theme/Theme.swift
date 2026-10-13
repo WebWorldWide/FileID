@@ -74,8 +74,9 @@ struct BadgePill: View {
 
     var body: some View {
         Text(label)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.caption.weight(.semibold))
             .foregroundStyle(color)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(Capsule().fill(color.opacity(0.15)))
@@ -99,18 +100,22 @@ struct SettingToggleRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.caption.bold())
+                Text(title)
+                    .font(.caption.bold())
+                    .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .accessibilityHidden(true)
             Spacer(minLength: 12)
-            Toggle("", isOn: $isOn)
+            Toggle(title, isOn: $isOn)
                 .toggleStyle(.switch)
                 .labelsHidden()
+                .accessibilityHint(Text(subtitle ?? ""))
                 .tint(Theme.gold)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -139,6 +144,7 @@ struct GoldButton: View {
 // .pickerStyle(.segmented) renders light and clashes with gold-on-dark.
 
 struct ThemedSegmentedControl: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var selection: String
     let options: [(tag: String, label: String)]
 
@@ -147,20 +153,35 @@ struct ThemedSegmentedControl: View {
             ForEach(options, id: \.tag) { opt in
                 let selected = selection == opt.tag
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { selection = opt.tag }
+                    selection = opt.tag
                 } label: {
-                    Text(opt.label)
-                        .font(.system(size: 12, weight: selected ? .bold : .medium))
-                        .foregroundStyle(selected ? Color.black : Color.primary.opacity(0.7))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule()
-                                .fill(selected ? Theme.gold : Color.white.opacity(0.08))
-                        )
-                        .contentShape(Capsule())
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark")
+                            .opacity(selected ? 1 : 0)
+                            .accessibilityHidden(true)
+                        Text(opt.label)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.system(size: 12, weight: selected ? .bold : .medium))
+                    .foregroundStyle(selected ? Color.black : Color.primary.opacity(0.7))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule()
+                            .fill(selected ? Theme.gold : Color.white.opacity(0.08))
+                    )
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(Text(opt.label))
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: selection)
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.animation = nil
+                transaction.disablesAnimations = true
             }
         }
         .padding(3)

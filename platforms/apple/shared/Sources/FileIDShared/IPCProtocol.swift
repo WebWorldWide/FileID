@@ -132,10 +132,19 @@ public struct RestructureMove: Codable, Sendable {
     public let confidence: String
     /// Plain-language "why filed here", shown in the drill-down.
     public let reason: String?
+    /// Plan-time source identity (schema 1.13.0). A plan is applied after an
+    /// arbitrary delay, so the engine re-checks these against the live file
+    /// before moving; the app must echo them back untouched.
+    public let contentHash: String?
+    public let sizeBytes: UInt64?
+    public let fileRef: UInt64?
+    public let modifiedAt: Double?
 
     public init(fileID: Int64, source: String, destination: String,
                 category: String, tier: String? = nil,
-                confidence: String = "", reason: String? = nil) {
+                confidence: String = "", reason: String? = nil,
+                contentHash: String? = nil, sizeBytes: UInt64? = nil,
+                fileRef: UInt64? = nil, modifiedAt: Double? = nil) {
         self.fileID = fileID
         self.source = source
         self.destination = destination
@@ -143,6 +152,10 @@ public struct RestructureMove: Codable, Sendable {
         self.tier = tier
         self.confidence = confidence
         self.reason = reason
+        self.contentHash = contentHash
+        self.sizeBytes = sizeBytes
+        self.fileRef = fileRef
+        self.modifiedAt = modifiedAt
     }
 
     /// Custom decode so a move emitted by a Windows engine that omits
@@ -159,6 +172,10 @@ public struct RestructureMove: Codable, Sendable {
         tier = try c.decodeIfPresent(String.self, forKey: .tier)
         confidence = try c.decodeIfPresent(String.self, forKey: .confidence) ?? ""
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        sizeBytes = try c.decodeIfPresent(UInt64.self, forKey: .sizeBytes)
+        fileRef = try c.decodeIfPresent(UInt64.self, forKey: .fileRef)
+        modifiedAt = try c.decodeIfPresent(Double.self, forKey: .modifiedAt)
     }
 }
 

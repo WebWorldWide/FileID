@@ -1,5 +1,42 @@
 # NEXT — resume here
 
+## 2026-10-13 after consolidation merge
+
+Confirm exact-main CI for the #238 merge commit, including the macOS schema conformance suite and Windows x64/ARM64-native engine tests fixed in the final head. `main` is the only branch; unintegrated checkpoint work is recoverable from `archive/2026-10-13/*` tags (see `BRANCH_AUDIT.md`). The `parity/completion-runtime` Linux llama.cpp/whisper.cpp source builder still needs dependency, license, provenance, and offline-policy review before extraction. Production gates below and in `SHIP.md` are unchanged.
+
+## 2026-10-13 final Linux engine CI rerun
+
+The consolidated Linux x64 suite exposed one test fixture that assumed `FILEID_MODELS_DIR` was set. The scratch-path correction and actual non-VLM verified-start case pass in the Linux VM. Confirm the complete Linux suite on the new PR #238 head.
+
+## 2026-10-13 final native-tools CI rerun
+
+The consolidated Linux ARM64 native-tools job exposed a CLI/TUI package version mismatch after passing tests, release builds, and binary privacy. The manifests and lockfiles now align with engine/Windows version 0.1.2. Confirm package assembly and all exact-head checks on the new PR #238 head before merging.
+
+## 2026-10-13 consolidation stopping point
+
+PR #238 now combines the reviewed Store work with the Windows, Linux, and native Mac follow-ons. The Windows VM solution build and 54 IPC/571 App tests, Linux VM strict Clippy and 49 GTK tests plus isolated D-Bus/Xvfb launch, and 16 catalog benchmark harness tests passed on their respective source branches. The combined exact-head hosted checks are still required before merging to `main`. Close the three follow-on PRs after confirming their commits are ancestors of #238, then merge #238 and verify exact-main CI. Review each older FileID branch before deleting it; preserve any unfinished code as reachable history and record what remains unimplemented.
+
+Production acceptance remains open for owner-deferred macOS signed packaging and interaction, signed Windows/Flatpak packages, physical GPU/model tests, 100,000-file throughput, privacy capture, media/legal review, and crash/restart recovery. Treat this as a source-integration checkpoint.
+
+## 2026-10-13 Windows UI follow-on
+
+The Windows VM App suite passes (571 tests). Review export completion and cancel terminal behavior, then publish `codex/windows-ui-integration` as a draft PR. Keep the current video controls while integrating; confirm native packaged UI behavior on Windows before release acceptance.
+
+## 2026-10-13 Linux native tab follow-on
+
+Strict Clippy, 49 GTK tests, and an isolated D-Bus/Xvfb real-engine launch pass for `codex/linux-ui-integration`; publish it for hosted review. Verify Settings optional-weight copy against the current model registry and retain the current Deep, Restructure, and Search/Tools/Chat workbenches.
+
+## 2026-10-13 native parity follow-on
+
+Review and test the Mac motion/accessibility and reproducible benchmark changes on `codex/native-parity-integration`; publish a stacked draft PR after source verification. Continue reviewing the remaining FileID checkpoints, preserving each unique feature or recording why it is superseded before deleting the old branch. Hosted Swift checks can verify compilation; signed packaging and physical Mac interaction remain owner-deferred.
+
+## 2026-10-13 current integration priority
+
+PR #238 must clear its hosted checks after the CLI/TUI restructure source-identity and lockfile fixes. Linux VM CLI/TUI checks and Windows Rust library tests pass. Confirm the focused CLI identity regression once its shared-target build completes.
+
+Confirm exact-main CI for merged PR #235 at `347f7e64`. Draft PR #238 (`codex/store-parity-integration`) targets `main`; resolve its restarted exact-head failures, the .NET format baseline, and native UI/runtime acceptance before merging. Linux and Windows Rust library/check/strict Clippy and the GTK real-engine fixture have passed on integration source. Continue auditing and integrating each remaining FileID branch before deleting it; keep unique unfinished work until it is integrated or explicitly superseded. Record the current results before changing these statuses.
+
+The Store branch's CUDA network download proposal conflicts with the root Hugging Face-only egress rule. Keep local CUDA runtime setup/verification and bundled GPU paths; no Microsoft/NVIDIA application download endpoints or broadened allowlist. A signed Store package, WinUI native runtime flow, and macOS local package remain required release checks. The owner deferred further local Mac testing. Physical GPU/ARM64 runs, 100,000-file benchmarks, offline capture, model quality, media licensing and codec review, crash/restart output reconciliation, and the remaining `NEXT_VERSION.md` milestones still block production acceptance.
 ## 2026-10-13 merged portable video; shared engine next
 
 `main` is `5a7ef8cb` after PR #234 passed 18 exact-head checks. Confirm all seven exact-main workflows for that commit before calling merged-main CI green. PR #235 (`codex/shared-engine-integration`) is the next reviewed merge: Linux 451 and Windows 475 Rust library tests and strict Clippy passed in VMs. Its approved `instant-distance` serialization feature, client lockfiles, and Flatpak source manifest are pushed. Check its newest exact-head CI, address failures, then merge to `main`, verify exact-main, and delete both the integration and now-superseded `parity/shared-engine` refs. Other distinct FileID WIP branches must be reviewed and integrated or shown superseded before deletion. Mac package testing remains deferred by the owner; do not infer production readiness from hosted builds.

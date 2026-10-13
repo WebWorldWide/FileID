@@ -1,5 +1,13 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-10-13 platform integration checkpoint
+
+PR #238 consolidates the Store, Windows, Linux, and native Mac follow-ons. The separate source branches passed their Windows and Linux VM suites and the benchmark harness; combined hosted CI, signed-package runtime checks, and the release gates below remain open. The owner deferred macOS local verification. This checkpoint does not certify a production release.
+
+## 2026-10-13 shared-engine and Store integration review
+
+PR #235 passed all 16 exact-head checks and merged into `main` at `347f7e64`; exact-main CI is pending. Store integration draft PR #238 targets `main`; Linux Rust/GTK, Windows .NET, and Windows Rust development suites pass, while hosted checks and native runtime acceptance remain open. Neither integration has signed cross-platform runtime acceptance. Production release still requires the native Store/Flatpak/Mac signed packages and legal, hardware, model, fidelity, performance, privacy, and crash-recovery gates listed below and in `NEXT_VERSION.md`.
+
 ## 2026-10-13 portable video development checkpoint
 
 Mac, Linux, and Windows now have source-preserving fit-and-pad H.264/AAC export paths, with native Linux/Windows File Tools controls for an available local media runtime. The pinned LGPL FFmpeg/OpenH264 Linux and Windows x64 development bundles rebuild from fresh verified source trees, carry source/license records, and pass binary privacy and staging checks. Native Mac Xcode suites and scratch app launch passed; signed package acceptance was deferred by the owner after SSH Keychain signing failed. Linux passed 420 engine and 38 GTK tests, strict Clippy, staged bundle and Xvfb startup; stop tests killed/reaped FFmpeg and removed a partial output, and a parent-death test stopped its child. Windows passed 444 Rust, 51 IPC, and 432 App tests, strict Clippy, a zero-warning WinUI solution build, generated video/padding and catalog export/Undo with the clean-source native runtime, engine IPC capability, and interactive app and File Tools startup. A Windows job-closure test stopped its child; the interactive check caught and fixed early capability-listener disposal. This is a development checkpoint, not a release-ready media package. Release requires signed per-platform distribution, LGPL and codec patent review, independent license audit, offline network capture, full engine-crash/restart recovery, held-out fidelity and performance checks, ARM64 coverage, physical GPU/NPU checks, complete native controls, exact-head/main CI, and the remaining `NEXT_VERSION.md` milestones. PR #234 merged into `main` at `5a7ef8cb` after 18 exact-head checks; exact-main and release acceptance remain open.

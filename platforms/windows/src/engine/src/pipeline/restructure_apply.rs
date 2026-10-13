@@ -147,14 +147,17 @@ impl RestructureApply {
                 tracing::info!(applied, failed, processed, total, "[RESTRUCTURE] apply progress");
             }
 
-            // B4/S6/S7: bind the move to the planned file identity. The
+            // B4/S6/S7 + audit P1: bind the move to the planned file identity. The
             // payload `source` is not authoritative on its own — re-read the
             // live DB row for `file_id` and require it still names this
-            // source. A stale plan (file renamed/moved/replaced since
-            // planning) is skipped so we never move the wrong bytes or stamp
-            // the row with a path that never held this file.
-            match current_path_in_db(&self.db_conn, m.file_id) {
-                Ok(Some(db_path)) if paths_equal(&db_path, &m.source) => {}
+            // source AND still carries the identity the plan recorded. A stale
+            // plan (file renamed/moved/replaced since planning) is skipped so we
+            // never move the wrong bytes or stamp the row with a path that never
+            // held this file. A file replaced at the same path is a DIFFERENT
+            // file: its filesystem identity changes even when the row and path
+            // do not.
+            match current_row(&self.db_conn, m.file_id) {
+                Ok(Some(row)) if plan_is_current(&row, m) => {}
                 _ => {
                     tracing::warn!(
                         file_id = m.file_id,
@@ -163,6 +166,17 @@ impl RestructureApply {
                     failed += 1;
                     continue;
                 }
+            }
+            // The row can be stale in the other direction: a replacement written
+            // at the same path without a rescan leaves the catalog untouched.
+            // Stat the source and require the recorded size + filesystem identity.
+            if !disk_matches_plan(m) {
+                tracing::warn!(
+                    file_id = m.file_id,
+                    "[RESTRUCTURE] skipping stale move: the file on disk is not the file the plan saw"
+                );
+                failed += 1;
+                continue;
             }
 
             let dest = PathBuf::from(&m.destination);
@@ -271,12 +285,7 @@ impl RestructureApply {
                         // Appended + periodically fsync'd so a crash on a later move
                         // can't lose this one's undoability. (R2 → crash-safe)
                         if let Some(j) = journal.as_mut() {
-                            Self::append_undo_entry(
-                                j,
-                                m.file_id,
-                                &final_dest.to_string_lossy(),
-                                &m.source,
-                            );
+                            Self::append_undo_entry(j, m, &final_dest.to_string_lossy(), &m.source);
                             undo_count += 1;
                             if undo_count % APPLY_PROGRESS_INTERVAL == 0 {
                                 let _ = j.flush();
@@ -363,12 +372,23 @@ impl RestructureApply {
 
     /// Append one inverse-move entry (NDJSON) to the open journal — the same
     /// on-disk format `read_undo_journal` parses: `{file_id, from, to}` per line.
-    fn append_undo_entry(j: &mut BufWriter<File>, file_id: i64, from: &str, to: &str) {
-        let line = serde_json::json!({ "file_id": file_id, "from": from, "to": to }).to_string();
+    /// The plan-time identity travels with it so an undo run re-checks the same
+    /// file identity instead of trusting the path alone. (audit P1)
+    fn append_undo_entry(j: &mut BufWriter<File>, m: &RestructureMove, from: &str, to: &str) {
+        let line = serde_json::json!({
+            "file_id": m.file_id,
+            "from": from,
+            "to": to,
+            "content_hash": m.content_hash,
+            "size_bytes": m.size_bytes,
+            "file_ref": m.file_ref,
+            "modified_at": m.modified_at,
+        })
+        .to_string();
         let _ = writeln!(j, "{line}");
     }
 
-    fn read_undo_journal() -> Vec<(i64, String, String)> {
+    fn read_undo_journal() -> Vec<RestructureMove> {
         let Some(path) = Self::undo_journal_path() else {
             return Vec::new();
         };
@@ -378,11 +398,19 @@ impl RestructureApply {
         text.lines()
             .filter_map(|line| {
                 let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                Some((
-                    v.get("file_id")?.as_i64()?,
-                    v.get("from")?.as_str()?.to_string(),
-                    v.get("to")?.as_str()?.to_string(),
-                ))
+                Some(RestructureMove {
+                    file_id: v.get("file_id")?.as_i64()?,
+                    source: v.get("from")?.as_str()?.to_string(),
+                    destination: v.get("to")?.as_str()?.to_string(),
+                    category: String::new(),
+                    tier: None,
+                    confidence: String::new(),
+                    reason: None,
+                    content_hash: v.get("content_hash").and_then(|x| x.as_str()).map(String::from),
+                    size_bytes: v.get("size_bytes").and_then(|x| x.as_u64()),
+                    file_ref: v.get("file_ref").and_then(|x| x.as_u64()),
+                    modified_at: v.get("modified_at").and_then(|x| x.as_f64()),
+                })
             })
             .collect()
     }
@@ -392,22 +420,10 @@ impl RestructureApply {
     /// safety applies), then clear the journal so a run can't be undone twice.
     /// (RESTRUCTURE.md §6 reversibility)
     pub fn undo_last(&self) -> Result<RestructureApplyResult> {
-        let entries = Self::read_undo_journal();
-        if entries.is_empty() {
+        let inverse = Self::read_undo_journal();
+        if inverse.is_empty() {
             return Ok(RestructureApplyResult { applied: 0, failed: 0, privilege_error: None });
         }
-        let inverse: Vec<RestructureMove> = entries
-            .iter()
-            .map(|(file_id, from, to)| RestructureMove {
-                file_id: *file_id,
-                source: from.clone(),
-                destination: to.clone(),
-                category: String::new(),
-                tier: None,
-                confidence: String::new(),
-                reason: None,
-            })
-            .collect();
         // record_undo:false so the undo's own moves DON'T overwrite the journal — a
         // cancelled undo must leave the original intact so the user can re-run it and
         // put the REMAINING files back (already-restored ones stale-skip on the
@@ -419,7 +435,7 @@ impl RestructureApply {
             }
             // Reversibility completeness: undo shouldn't leave the orphan empty group
             // folders apply created. Best-effort, deepest-first.
-            Self::cleanup_empty_dirs(&entries, &self.library_root);
+            Self::cleanup_empty_dirs(&inverse, &self.library_root);
         }
         Ok(result)
     }
@@ -429,11 +445,11 @@ impl RestructureApply {
     /// never at risk; we additionally stay strictly inside the library root and never
     /// touch the root itself. Deepest-first so nested empties fully collapse.
     /// Best-effort. (R2 → reversibility completeness)
-    fn cleanup_empty_dirs(entries: &[(i64, String, String)], root: &Path) {
+    fn cleanup_empty_dirs(entries: &[RestructureMove], root: &Path) {
         if crate::util::read_only::require_writable(root).is_err() { return; }
         let mut dirs: Vec<&Path> = entries
             .iter()
-            .filter_map(|(_, from, _)| Path::new(from).parent())
+            .filter_map(|m| Path::new(&m.source).parent())
             .collect();
         dirs.sort_unstable();
         dirs.dedup();
@@ -601,14 +617,92 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     Ok(())
 }
 
-/// B4: the current `path_text` the DB holds for `file_id`, or None if the row
-/// is gone. The single authoritative source for what `file_id` actually names.
-fn current_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64) -> Result<Option<String>> {
+/// The live catalog row for a planned move: what `file_id` names right now, plus
+/// the identity columns the plan was built from.
+#[derive(Debug)]
+struct LiveRow {
+    path: String,
+    content_hash: Option<String>,
+    size_bytes: u64,
+    file_ref: Option<u64>,
+    modified_at: f64,
+}
+
+fn current_row(conn: &Arc<Mutex<Connection>>, file_id: i64) -> Result<Option<LiveRow>> {
     let conn = conn.lock();
-    let mut stmt = conn.prepare_cached("SELECT path_text FROM files WHERE id = ?1")?;
-    stmt.query_row(params![file_id], |row| row.get::<_, String>(0))
-        .optional()
-        .context("DB SELECT files.path_text")
+    let mut stmt = conn.prepare_cached(
+        "SELECT path_text, content_hash, size_bytes, file_ref, modified_at FROM files WHERE id = ?1",
+    )?;
+    stmt.query_row(params![file_id], |row| {
+        Ok(LiveRow {
+            path: row.get(0)?,
+            content_hash: row
+                .get::<_, Option<Vec<u8>>>(1)?
+                .map(hex::encode),
+            size_bytes: row.get::<_, Option<u64>>(2)?.unwrap_or(0),
+            file_ref: row.get::<_, Option<u64>>(3)?,
+            modified_at: row.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+        })
+    })
+    .optional()
+    .context("DB SELECT files row for restructure apply")
+}
+
+/// Audit P1: a plan is a snapshot taken at plan time and applied after an
+/// arbitrary delay, so `source` alone is not authoritative. Every identity field
+/// the plan recorded must still match the live row; a move from an older client
+/// that recorded nothing falls back to the path-only check.
+fn plan_is_current(row: &LiveRow, m: &RestructureMove) -> bool {
+    if !paths_equal(&row.path, &m.source) {
+        return false;
+    }
+    if let Some(h) = &m.content_hash {
+        if row.content_hash.as_deref() != Some(h.as_str()) {
+            return false;
+        }
+    }
+    if let Some(s) = m.size_bytes {
+        if row.size_bytes != s {
+            return false;
+        }
+    }
+    if let Some(r) = m.file_ref {
+        if row.file_ref != Some(r) {
+            return false;
+        }
+    }
+    if let Some(t) = m.modified_at {
+        if (row.modified_at - t).abs() > 1.0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// The other half of audit P1: a replacement file written at the same path is a
+/// different file even when the catalog row is untouched, because the filesystem
+/// identity changes. One stat per move — no content re-read — so a 100k-move
+/// apply stays cheap while a swapped payload can never be moved under a stale plan.
+fn disk_matches_plan(m: &RestructureMove) -> bool {
+    if m.size_bytes.is_none() && m.file_ref.is_none() {
+        return true;
+    }
+    let src = Path::new(&m.source);
+    let meta = match std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(src)) {
+        Ok(meta) => meta,
+        Err(_) => return false,
+    };
+    if let Some(s) = m.size_bytes {
+        if meta.len() != s {
+            return false;
+        }
+    }
+    if let Some(r) = m.file_ref {
+        if crate::platform::file_ref(src) != Some(r) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Path equality that tolerates separator/case differences. Fast path is a
@@ -929,6 +1023,10 @@ mod tests {
             tier: None,
             confidence: String::new(),
             reason: None,
+            content_hash: None,
+            size_bytes: None,
+            file_ref: None,
+            modified_at: None,
         }
     }
 
@@ -939,6 +1037,108 @@ mod tests {
             params![id, path],
         )
         .unwrap();
+    }
+
+    /// Audit P1 (2026-10-05): a plan is a snapshot. If the file at `source` is
+    /// REPLACED — same path, same catalog row, different bytes and a different
+    /// filesystem identity — the old plan must not move the replacement. The
+    /// path-only check passes in that case, so the move is bound to the identity
+    /// the plan recorded instead.
+    #[test]
+    fn apply_skips_move_when_the_file_at_source_was_replaced() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-replaced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("plan.jpg");
+        std::fs::write(&src, b"ORIGINAL").unwrap();
+        let meta = std::fs::metadata(&src).unwrap();
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let ref_at_plan = crate::platform::file_ref(&src).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, modified_at, kind, extension, failed, content_hash, file_ref) \
+             VALUES (?1, ?2, 0, ?3, 0.0, ?4, 'image', 'jpg', 0, ?5, ?6)",
+            params![1, src.to_string_lossy(), size, mtime, b"hash-a".as_slice(), ref_at_plan],
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        // The plan was built from the ORIGINAL file. The user then replaced the
+        // payload at the same path without rescanning; the catalog row still names
+        // the same path, so a path-only check would happily move the wrong bytes.
+        let mut planned = move_fixture(1, &src.to_string_lossy(), &root.join("Sorted").join("plan.jpg").to_string_lossy());
+        planned.content_hash = Some("686173682d61".to_string());
+        planned.size_bytes = Some(size);
+        planned.file_ref = Some(ref_at_plan);
+        planned.modified_at = Some(mtime);
+
+        std::fs::remove_file(&src).unwrap();
+        std::fs::write(&src, b"REPLACEMENT-PAYLOAD-DIFFERENT").unwrap();
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let res = apply.apply(&[planned]).unwrap();
+
+        assert_eq!(res.applied, 0, "a replaced file must not be moved under a stale plan");
+        assert_eq!(res.failed, 1);
+        assert_eq!(std::fs::read(&src).unwrap(), b"REPLACEMENT-PAYLOAD-DIFFERENT");
+        assert!(!root.join("Sorted").join("plan.jpg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The identity check must not reject the normal case: the plan's recorded
+    /// identity still matches both the live row and the file on disk.
+    #[test]
+    fn apply_moves_when_the_recorded_identity_still_matches() {
+        let root = std::env::temp_dir().join(format!("fileid-apply-current-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let src = root.join("plan.jpg");
+        std::fs::write(&src, b"ORIGINAL").unwrap();
+        let meta = std::fs::metadata(&src).unwrap();
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let ref_at_plan = crate::platform::file_ref(&src).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, modified_at, kind, extension, failed, content_hash, file_ref) \
+             VALUES (?1, ?2, 0, ?3, 0.0, ?4, 'image', 'jpg', 0, ?5, ?6)",
+            params![1, src.to_string_lossy(), size, mtime, b"hash-a".as_slice(), ref_at_plan],
+        )
+        .unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let mut planned = move_fixture(1, &src.to_string_lossy(), &root.join("Sorted").join("plan.jpg").to_string_lossy());
+        planned.content_hash = Some("686173682d61".to_string());
+        planned.size_bytes = Some(size);
+        planned.file_ref = Some(ref_at_plan);
+        planned.modified_at = Some(mtime);
+
+        let apply = RestructureApply::new(db, root.clone(), false);
+        let res = apply.apply(&[planned]).unwrap();
+
+        assert_eq!(res.failed, 0, "a current plan must still apply: {res:?}");
+        assert_eq!(res.applied, 1);
+        assert!(!src.exists());
+        assert_eq!(
+            std::fs::read(root.join("Sorted").join("plan.jpg")).unwrap(),
+            b"ORIGINAL"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// B3: two distinct sources sharing a basename, funnelled to the same

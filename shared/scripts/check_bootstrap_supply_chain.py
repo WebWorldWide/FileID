@@ -31,6 +31,7 @@ DOWNLOAD_EXEC_ALLOWLIST = {
     "shared/scripts/build_ffmpeg_lgpl_windows_x64.sh",
 }
 REVIEWED_SHELL_SCRIPT_SHA256 = {
+    "platforms/linux/src/app/tests/native_launch_smoke.sh": "6350484466b32dd622e79ca01a4fb1dfa2f3ab0fb8b26cb4031eda00e5415d55",
     "build.sh": "aff5ad0d97076413c8ec88dafb81965dfd07e67ce435f05f4a70045d1310cf46",
     "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
     "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",

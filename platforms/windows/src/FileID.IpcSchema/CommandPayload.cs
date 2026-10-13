@@ -57,7 +57,9 @@ public sealed record DeepAnalyzeAllCommand(
     string ModelKind,
     bool SkipExisting,
     bool TagsOnly = false,
-    bool ProposeRenames = true) : CommandPayload;
+    bool ProposeRenames = true,
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long>? FileIDs = null,
+    System.Collections.Generic.IReadOnlyList<string>? ExcludedFolders = null) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 
@@ -90,7 +92,14 @@ public sealed record RestructureMove(
     /// (RESTRUCTURE.md §6). Empty on older engines.</summary>
     string Confidence = "",
     /// <summary>Plain-language "why filed here", shown in the drill-down.</summary>
-    string? Reason = null);
+    string? Reason = null,
+    /// <summary>Plan-time source identity (schema 1.13.0). The engine re-checks
+    /// these against the live file before moving, so the app must echo them
+    /// back untouched in applyRestructure.</summary>
+    string? ContentHash = null,
+    ulong? SizeBytes = null,
+    ulong? FileRef = null,
+    double? ModifiedAt = null);
 
 public sealed record ApplyTagsCommand(
     [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds,

@@ -55,7 +55,6 @@ pub enum FileKind {
     Pdf,
     Doc,
     Audio,
-    #[allow(dead_code)]
     Model,
     Other,
 }

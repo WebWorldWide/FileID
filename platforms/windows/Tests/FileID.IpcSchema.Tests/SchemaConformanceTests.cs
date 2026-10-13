@@ -39,6 +39,7 @@ public class SchemaConformanceTests
     private static readonly long[] _examplePersonIds = { 1, 2 };
     private static readonly long[] _exampleFaceIds = { 10, 11, 12 };
     private static readonly string[] _exampleSkippedStages = { "ocr" };
+    private static readonly string[] _exampleExcludedFolders = { "/generated/private" };
     private static readonly float[] _embedding512 = new float[512];
 
     [Fact]
@@ -181,7 +182,7 @@ public class SchemaConformanceTests
         new VerifyCudaPackCommand(),
         new DeepAnalyzeFileCommand(42, "qwen2_5_vl_7b"),
         new DeepAnalyzeFolderCommand(@"C:\Users\adam\Pictures\2024", "qwen2_5_vl_7b"),
-        new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true, ProposeRenames: true),
+        new DeepAnalyzeAllCommand("qwen2_5_vl_7b", SkipExisting: true, TagsOnly: true, ProposeRenames: true, FileIDs: _exampleFileIds, ExcludedFolders: _exampleExcludedFolders),
         new DeepAnalyzeCancelCommand(),
         new PrewarmModelCommand("clip_text"),
         new CancelPrewarmCommand("clip_text"),

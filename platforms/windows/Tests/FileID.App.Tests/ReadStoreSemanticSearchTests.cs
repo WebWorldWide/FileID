@@ -1,4 +1,4 @@
-// Equivalence test for ReadStore.SemanticSearchAsync's bounded top-K scan.
+﻿// Equivalence test for ReadStore.SemanticSearchAsync's bounded top-K scan.
 //
 // The perf change made the loop materialize a FileRow only for rows the heap
 // retains (instead of for every embedding row). This guards that the change is
