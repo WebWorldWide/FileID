@@ -260,7 +260,7 @@ pub fn on_activate(app: &adw::Application) {
     let rx = engine.borrow_mut().spawn();
     glib::MainContext::default().spawn_local(clone!(
         #[weak] status_label, #[weak] start_btn, #[weak] pages,
-        #[strong] selected_folder, #[strong] can_scan, #[strong] scan_active, #[strong] paused, #[strong] scan_terminal,
+        #[strong] selected_folder, #[strong] can_scan, #[strong] scan_active, #[strong] paused, #[strong] scan_terminal, #[strong] engine,
         #[weak] pause_btn, #[weak] cancel_btn,
         async move {
         while let Ok(state) = rx.recv().await {
@@ -294,8 +294,9 @@ pub fn on_activate(app: &adw::Application) {
                 EngineState::Error { kind, .. } if kind == "models_not_installed" => scan_active.set(false),
                 _ => {}
             }
-            pause_btn.set_sensitive(scan_active.get()); cancel_btn.set_sensitive(scan_active.get());
-            let available = !scan_active.get() && matches!(&state, EngineState::Ready | EngineState::ScanComplete(_) | EngineState::ScanPhase(_) | EngineState::Error { .. });
+            let ready = engine.borrow().is_ready();
+            pause_btn.set_sensitive(ready && scan_active.get()); cancel_btn.set_sensitive(ready && scan_active.get());
+            let available = ready && !scan_active.get();
             let label = match state {
                 EngineState::Spawning => "Engine: spawning…".to_string(),
                 EngineState::Ready => "Engine: ready".to_string(),

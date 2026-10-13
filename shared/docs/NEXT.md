@@ -4,6 +4,10 @@
 
 The Windows VM App suite passes (571 tests). Review export completion and cancel terminal behavior, then publish `codex/windows-ui-integration` as a draft PR. Keep the current video controls while integrating; confirm native packaged UI behavior on Windows before release acceptance.
 
+## 2026-10-13 Linux native tab follow-on
+
+Strict Clippy, 49 GTK tests, and an isolated D-Bus/Xvfb real-engine launch pass for `codex/linux-ui-integration`; publish it for hosted review. Verify Settings optional-weight copy against the current model registry and retain the current Deep, Restructure, and Search/Tools/Chat workbenches.
+
 ## 2026-10-13 current integration priority
 
 PR #238 must clear its hosted checks after the CLI/TUI restructure source-identity and lockfile fixes. Linux VM CLI/TUI checks and Windows Rust library tests pass. Confirm the focused CLI identity regression once its shared-target build completes.

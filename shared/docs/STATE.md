@@ -4,6 +4,10 @@
 
 The isolated `codex/windows-ui-integration` worktree ports the distinct Windows native UI checkpoint onto the current Store integration: durable export ownership across engine generations, capability-gated cancellation, history reconciliation, and catalog job action state. The native Windows solution builds with zero warnings; 54 IPC and 571 App tests pass in the Windows VM. This is still a draft integration, with packaged WinUI interaction and GPU/model behavior open.
 
+## 2026-10-13 — Linux native tab parity under review
+
+The isolated `codex/linux-ui-integration` worktree ports compatible People, Cleanup, Settings, and engine-readiness refinements from the older `parity/linux-ui` checkpoint onto the current GTK app. The older timeline workbench and startup fixture referenced a removed native runtime module and stale IPC fields, so the current workbench is retained. Linux VM GTK compilation, strict Clippy, and 49 tests pass (1 intentionally ignored). A real GTK plus engine launch passed under Xvfb with an isolated D-Bus session; the inherited desktop bus did not create the fixture database, so the bus condition is part of the smoke receipt. Settings offers optional pinned HF weights with explicit backend-unavailable messaging; no new downloader or network endpoint is added.
+
 ## 2026-10-13 — Store/parity integration in review after shared-engine draft
 
 Hosted PR #236 exposed CLI/TUI restructure builders that still used the older shared-engine record shape. The CLI now reads the planned source identity and smart name from the catalog, carries identity into its serialized apply plan, and tests those fields. The TUI preview reads the smart name. The script digest and CLI/TUI lockfile inventory are also updated. Linux VM CLI and TUI source checks pass. A first separate-target CLI test attempt exhausted scratch disk; generated build targets were removed, and the focused test is rerunning with the shared cache. Windows VM Rust library tests pass (625, with 8 deliberately ignored).

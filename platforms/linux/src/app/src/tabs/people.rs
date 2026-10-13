@@ -29,8 +29,8 @@ use gtk::glib;
 
 use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
-    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload,
-    MergeClustersPayload, RenamePersonPayload,
+    BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
+    RenamePersonPayload,
 };
 
 const CARD_THUMB_PX: i32 = 256;
@@ -352,7 +352,6 @@ fn classify_rename_terminal(result: &BulkActionResult, person_id: i64) -> Rename
     classify_person_terminal(result, "renamePerson", person_id)
 }
 
-
 struct Ui {
     engine: Rc<RefCell<EngineClient>>,
 
@@ -427,7 +426,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .visible(false)
         .css_classes(["dim-label"])
         .build();
-
 
     let bulk_label = gtk::Label::builder()
         .label("")
@@ -631,7 +629,11 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                 result.face_count,
                                 plural(result.face_count as i64),
                                 result.person_count,
-                                if result.person_count == 1 { "person" } else { "people" },
+                                if result.person_count == 1 {
+                                    "person"
+                                } else {
+                                    "people"
+                                },
                             ),
                         );
                         reload(&ui);
@@ -739,7 +741,8 @@ fn refresh_view(ui: &Rc<Ui>) {
     };
     let all_hidden = !has_persons && ui.hidden_unknown.get() > 0;
     if all_hidden {
-        ui.count_label.set_text(&format!("{} marked unknown", ui.hidden_unknown.get()));
+        ui.count_label
+            .set_text(&format!("{} marked unknown", ui.hidden_unknown.get()));
     } else {
         ui.count_label.set_text(&count_text);
     }
@@ -751,17 +754,17 @@ fn refresh_view(ui: &Rc<Ui>) {
     ui.group_button.set_visible(!all_hidden);
     if all_hidden {
         ui.no_clusters_page.set_title("All people are hidden");
-        ui.no_clusters_page.set_description(
-            Some("These people were marked unknown. Use Show them below to review their photos."),
-        );
+        ui.no_clusters_page.set_description(Some(
+            "These people were marked unknown. Use Show them below to review their photos.",
+        ));
     } else {
         ui.no_clusters_page.set_title(&format!(
             "{total_faces} face{} detected — ready to group",
             plural(total_faces),
         ));
-        ui.no_clusters_page.set_description(
-            Some("Click Group photos by face to create one card per person. Open a card to add a name."),
-        );
+        ui.no_clusters_page.set_description(Some(
+            "Click Group photos by face to create one card per person. Open a card to add a name.",
+        ));
     }
 
     let can_start_clustering = ui.face_clustering.borrow().can_start();
@@ -805,7 +808,10 @@ fn count_line(persons: &[PersonRow], total_faces: i64, clustering: bool) -> Stri
         return if clustering {
             format!("{total_faces} face{} · clustering…", plural(total_faces))
         } else {
-            format!("{total_faces} face{} · not grouped yet", plural(total_faces))
+            format!(
+                "{total_faces} face{} · not grouped yet",
+                plural(total_faces)
+            )
         };
     }
     let people = if p == 1 { "person" } else { "people" };
@@ -1415,7 +1421,9 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             if !begin_person_action(&ui, "renamePerson") {
                 lifecycle.reset();
                 show_person_dialog_error(
-                    &ui, &error_label, "Another person rename is still saving.".to_string(),
+                    &ui,
+                    &error_label,
+                    "Another person rename is still saving.".to_string(),
                 );
                 return;
             }
@@ -1429,17 +1437,32 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             };
             let events = ui.engine.borrow_mut().subscribe();
             set_person_dialog_busy(
-                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, true,
+                &group,
+                &unknown_check,
+                &done_btn,
+                &mark_btn,
+                &discard_btn,
+                true,
             );
-            let sent = ui.engine.borrow_mut().send(CommandPayload::RenamePerson(payload));
+            let sent = ui
+                .engine
+                .borrow_mut()
+                .send(CommandPayload::RenamePerson(payload));
             if let Err(error) = sent {
                 finish_person_action(&ui, "renamePerson");
                 lifecycle.reset();
                 set_person_dialog_busy(
-                    &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                    &group,
+                    &unknown_check,
+                    &done_btn,
+                    &mark_btn,
+                    &discard_btn,
+                    false,
                 );
                 show_person_dialog_error(
-                    &ui, &error_label, format!("Couldn't save person: {error}"),
+                    &ui,
+                    &error_label,
+                    format!("Couldn't save person: {error}"),
                 );
                 return;
             }
@@ -1472,8 +1495,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                     finish_person_action(&ui, "renamePerson");
                                     lifecycle.reset();
                                     set_person_dialog_busy(
-                                        &group, &unknown_check, &done_btn, &mark_btn,
-                                        &discard_btn, false,
+                                        &group,
+                                        &unknown_check,
+                                        &done_btn,
+                                        &mark_btn,
+                                        &discard_btn,
+                                        false,
                                     );
                                     let detail = result
                                         .messages
@@ -1495,7 +1522,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                             finish_person_action(&ui, "renamePerson");
                             lifecycle.reset();
                             set_person_dialog_busy(
-                                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                                &group,
+                                &unknown_check,
+                                &done_btn,
+                                &mark_btn,
+                                &discard_btn,
+                                false,
                             );
                             show_person_dialog_error(
                                 &ui,
@@ -1512,10 +1544,16 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                     finish_person_action(&ui, "renamePerson");
                     lifecycle.reset();
                     set_person_dialog_busy(
-                        &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                        &group,
+                        &unknown_check,
+                        &done_btn,
+                        &mark_btn,
+                        &discard_btn,
+                        false,
                     );
                     show_person_dialog_error(
-                        &ui, &error_label,
+                        &ui,
+                        &error_label,
                         "Couldn't save person: the engine connection closed.".to_string(),
                     );
                 }
@@ -1552,28 +1590,44 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
             if !begin_person_action(&ui, "markPersonsAsUnknown") {
                 lifecycle.reset();
                 show_person_dialog_error(
-                    &ui, &error_label,
+                    &ui,
+                    &error_label,
                     "Another Mark Unknown action is still saving.".to_string(),
                 );
                 return;
             }
             let events = ui.engine.borrow_mut().subscribe();
             set_person_dialog_busy(
-                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, true,
+                &group,
+                &unknown_check,
+                &done_btn,
+                &mark_btn,
+                &discard_btn,
+                true,
             );
-            let sent = ui.engine.borrow_mut().send(
-                CommandPayload::MarkPersonsAsUnknown(MarkPersonsAsUnknownPayload {
-                    person_ids: vec![pid],
-                }),
-            );
+            let sent = ui
+                .engine
+                .borrow_mut()
+                .send(CommandPayload::MarkPersonsAsUnknown(
+                    MarkPersonsAsUnknownPayload {
+                        person_ids: vec![pid],
+                    },
+                ));
             if let Err(error) = sent {
                 finish_person_action(&ui, "markPersonsAsUnknown");
                 lifecycle.reset();
                 set_person_dialog_busy(
-                    &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                    &group,
+                    &unknown_check,
+                    &done_btn,
+                    &mark_btn,
+                    &discard_btn,
+                    false,
                 );
                 show_person_dialog_error(
-                    &ui, &error_label, format!("Couldn't mark as unknown: {error}"),
+                    &ui,
+                    &error_label,
+                    format!("Couldn't mark as unknown: {error}"),
                 );
                 return;
             }
@@ -1606,8 +1660,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                     finish_person_action(&ui, "markPersonsAsUnknown");
                                     lifecycle.reset();
                                     set_person_dialog_busy(
-                                        &group, &unknown_check, &done_btn, &mark_btn,
-                                        &discard_btn, false,
+                                        &group,
+                                        &unknown_check,
+                                        &done_btn,
+                                        &mark_btn,
+                                        &discard_btn,
+                                        false,
                                     );
                                     let message = result
                                         .messages
@@ -1630,10 +1688,16 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                             finish_person_action(&ui, "markPersonsAsUnknown");
                             lifecycle.reset();
                             set_person_dialog_busy(
-                                &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                                &group,
+                                &unknown_check,
+                                &done_btn,
+                                &mark_btn,
+                                &discard_btn,
+                                false,
                             );
                             show_person_dialog_error(
-                                &ui, &error_label,
+                                &ui,
+                                &error_label,
                                 "Couldn't mark as unknown: the engine exited.".to_string(),
                             );
                             handled = true;
@@ -1646,10 +1710,16 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                     finish_person_action(&ui, "markPersonsAsUnknown");
                     lifecycle.reset();
                     set_person_dialog_busy(
-                        &group, &unknown_check, &done_btn, &mark_btn, &discard_btn, false,
+                        &group,
+                        &unknown_check,
+                        &done_btn,
+                        &mark_btn,
+                        &discard_btn,
+                        false,
                     );
                     show_person_dialog_error(
-                        &ui, &error_label,
+                        &ui,
+                        &error_label,
                         "Couldn't mark as unknown: the engine connection closed.".to_string(),
                     );
                 }
@@ -1697,7 +1767,6 @@ fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
         .build();
     vbox.append(&pic);
     vbox.append(&name);
-
 
     let (thumbnail_path, thumbnail_bbox) =
         face_thumbnail_source(Some(face.face_id), &face.path, face.bbox.as_deref());
@@ -1858,7 +1927,8 @@ fn on_suggest_clicked(ui: &Rc<Ui>, btn: &gtk::Button) {
                 }
                 Ok(EngineEvent::Exited) | Err(_) => break Vec::new(),
                 Ok(EngineEvent::Error { kind, message, .. })
-                    if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" => {
+                    if kind == "find_merge_suggestions_failed" || kind == "db_unavailable" =>
+                {
                     set_status(&ui, format!("Couldn't find merge suggestions: {message}"));
                     btn.set_sensitive(true);
                     btn.set_label("Suggest merges");
@@ -2272,7 +2342,11 @@ fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<Decode
             rgba.push(if channels == 4 { pixel[3] } else { 255 });
         }
     }
-    Some(DecodedImage { width: width as u32, height: height as u32, rgba })
+    Some(DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    })
 }
 
 fn crop_to_bbox(full: &gtk::gdk_pixbuf::Pixbuf, bbox: &str) -> Option<gtk::gdk_pixbuf::Pixbuf> {
@@ -2360,7 +2434,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "fileid-people-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let db_path = dir.join("people.sqlite");
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();
@@ -2384,7 +2461,10 @@ mod tests {
         assert_eq!(snapshot.all_with_faces.len(), 2);
         let named = &snapshot.all_with_faces[0];
         assert_eq!(named.first_name.as_deref(), Some("Ada"));
-        assert_eq!((named.file_count, named.face_count, named.rep_face_id), (1, 2, Some(1)));
+        assert_eq!(
+            (named.file_count, named.face_count, named.rep_face_id),
+            (1, 2, Some(1))
+        );
         assert_eq!(snapshot.all_with_faces[1].id, 2);
         drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
