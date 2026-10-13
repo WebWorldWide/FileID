@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 — Missing-model fixture isolated from runner environment
+
+Consolidated Linux x64 CI passed 609 engine tests but one model-provenance test panicked because it unwrapped an unset `FILEID_MODELS_DIR`. The missing-weights fixture now uses generated scratch paths and verifies the typed refusal without ambient environment state. The separate actual verified-start test still rejects a non-VLM model before native loading. Both focused tests pass in the Linux VM; rerun the complete exact-head suite.
+
 ## 2026-10-13 — Native-tools release version aligned
 
 Consolidated PR #238's Linux ARM64 native-tools job passed Rust tests, release builds, and its three-binary privacy scan, then failed package assembly because the CLI and TUI manifests still declared 0.1.1 while `platforms/windows/VERSION` and the engine declared 0.1.2. Both manifests and their lockfile package entries now declare 0.1.2. Locked offline Cargo metadata and package-version preflight pass; exact-head CI must rerun.

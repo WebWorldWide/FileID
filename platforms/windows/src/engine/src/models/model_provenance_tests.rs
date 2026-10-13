@@ -90,13 +90,14 @@ async fn model_provenance_abandoned_worker_retains_actual_host_charge_until_end(
 }
 #[tokio::test]
 async fn model_provenance_actual_registry_rejects_non_vlm_without_loading_or_download() {
-    let error=verify_installed("bge_text",Arc::new(AtomicBool::new(false))).await.unwrap_err();assert!(error.downcast_ref::<HostAdmissionError>().is_some());assert!(format!("{error:#}").contains("Unknown caption/text"));
+    let error=super::super::vlm_server::VlmServer::start_verified("bge_text",&Arc::new(AtomicBool::new(false))).await.err().unwrap();assert!(error.downcast_ref::<HostAdmissionError>().is_some());assert!(format!("{error:#}").contains("Unknown caption/text"));
 }
 #[tokio::test]
-async fn model_provenance_actual_verified_start_missing_weights_stops_before_runtime_probe() {
-    let root=root();let models=std::env::var_os("FILEID_MODELS_DIR").unwrap();assert_eq!(std::fs::read_dir(&models).unwrap().count(),0);
-    let error=super::super::vlm_server::VlmServer::start_verified("qwen3_vl_4b",&Arc::new(AtomicBool::new(false))).await.err().unwrap();assert!(error.downcast_ref::<HostAdmissionError>().is_some());assert!(format!("{error:#}").contains("Installed model is missing"));
-    assert_eq!(std::fs::read_dir(models).unwrap().count(),0);receipt(&root,serde_json::json!({"actualVerifiedStartMissingWeightsTyped":true,"runtimeProbeReached":false,"noDownloadOrModelLoad":true}));
+async fn model_provenance_missing_generated_weights_stops_before_runtime_probe() {
+    let root=root();let mut entries=files(&root);
+    for entry in &mut entries {entry.dest=root.join("missing").join(entry.dest.file_name().unwrap());}
+    let error=verify(entries,scheduler()).await.err().unwrap();assert!(error.downcast_ref::<HostAdmissionError>().is_some());assert!(format!("{error:#}").contains("Installed model is missing"));
+    assert!(!root.join("missing").exists());receipt(&root,serde_json::json!({"generatedMissingWeightsTyped":true,"runtimeProbeReached":false,"noDownloadOrModelLoad":true}));
 }
 #[test]
 fn model_provenance_actual_persistent_consumer_uses_verified_paths_before_start_admission() {

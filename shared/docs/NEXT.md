@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-13 final Linux engine CI rerun
+
+The consolidated Linux x64 suite exposed one test fixture that assumed `FILEID_MODELS_DIR` was set. The scratch-path correction and actual non-VLM verified-start case pass in the Linux VM. Confirm the complete Linux suite on the new PR #238 head.
+
 ## 2026-10-13 final native-tools CI rerun
 
 The consolidated Linux ARM64 native-tools job exposed a CLI/TUI package version mismatch after passing tests, release builds, and binary privacy. The manifests and lockfiles now align with engine/Windows version 0.1.2. Confirm package assembly and all exact-head checks on the new PR #238 head before merging.
