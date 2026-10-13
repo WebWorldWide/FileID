@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -133,7 +134,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "4dca8812ea40edb2a39925693db2d8496d264b59557d42ecbf216aaff221e59a",
   "platforms/windows/src/engine/src/commands/video_export.rs": "c65a0407fc6d80780cc42174a908cdea1fffbdb61a21f1341b7cb8ba98cf065c",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "b681e22dd5a9276b64371add52bc62917c68e60071cbb9cb0e720c14d86f9ba0",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "2b718da30cc9385b8938f5421beb98f45d49b0dffc1176a4f742034d8ecf3a9f",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "b8e45303e32653766b44ab240b829f665f413071c9f1206286211cd0bee69277",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "820c7428acee9b0aba5d4a60812e70e117c34bd5ea340c875c215e32d23752e7",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
@@ -167,7 +168,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/restructure.rs": "9db9d9bff7250b001cc269dfa435bbc53986ad165b66e84bc20f3e2e3a232e89",
   "platforms/windows/src/engine/src/commands/trash.rs": "196629996b04c3d6c8db3cc76936a5e3af73905cecdd7ee95bf33eaf368091fa",
   "platforms/windows/src/engine/src/downloader.rs": "3ec3a3da33b8b42eff58676e378b6268809dceb24b29385c305604f7e060263a",
-  "platforms/windows/src/engine/src/main.rs": "1c05b8925b900807112f57af99d40e36f71a0f37bd6770b37bfb9ba4d72b37f1",
+  "platforms/windows/src/engine/src/main.rs": "89430cb8b12f385b86102cfd723da8c520590a0dc3550b0686c25d04b2193d3c",
   "platforms/windows/src/engine/src/models/runtime.rs": "554fb40628ffd8653c8466ebae2a7e648e68ee3dfae99fa2a59b70b528c971b5",
   "platforms/windows/src/engine/src/models/vlm.rs": "feab915808a35c9bebfab4cb77399b5a7a086fe1e0d4f3506a2c102c2e736e73",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "076dc47e332edab60d64bd0de13dfc13c607e610691848dc00bf7ed620bf1595",
@@ -749,6 +750,33 @@ def _file_entry_blocks(text: str) -> tuple[list[str], list[str]]:
     return blocks, failures
 
 
+CATALOG_FILE_ENTRY_URL = _normalized("url: file.url.clone()")
+CATALOG_URL_RE = re.compile(r"^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/resolve/([0-9a-f]{40})/([^?#]+)$")
+
+
+def catalog_urls_checked(catalog: Path) -> tuple[list[str], set[str]]:
+    """Every catalog download must be an immutable Hugging Face file URL in
+    the entry's own repository and revision, with a SHA256 pin."""
+    failures: list[str] = []
+    urls: set[str] = set()
+    try:
+        document = json.loads(catalog.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f"{catalog}: unreadable model catalog ({error})"], urls
+    for entry in document.get("entries", []):
+        for item in entry.get("files", []):
+            url = item.get("url", "")
+            match = CATALOG_URL_RE.match(url)
+            if not match or match.group(1) != entry.get("repo") or match.group(2) != entry.get("revision") or ".." in match.group(3):
+                failures.append(f"{catalog}: {entry.get('id')}: catalog URL is not an immutable file in its own repository: {url}")
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256") or "")):
+                failures.append(f"{catalog}: {entry.get('id')}: catalog file is not SHA256-pinned: {url}")
+                continue
+            urls.add(url)
+    return failures, urls
+
+
 def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[str]]:
     failures: list[str] = []
     registry_text = _without_comments(
@@ -757,8 +785,14 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
     urls: set[str] = set()
     blocks, block_failures = _file_entry_blocks(registry_text)
     failures.extend(f"{registry}: {failure}" for failure in block_failures)
+    catalog_constructions = 0
     for index, block in enumerate(blocks, 1):
         matches = re.findall(r'\burl:\s*"(https?://[^"\\]+)"', block)
+        # The one reviewed catalog construction takes its URL from
+        # shared/models/catalog.json, whose URLs are verified below.
+        if not matches and CATALOG_FILE_ENTRY_URL in _normalized(block):
+            catalog_constructions += 1
+            continue
         if len(matches) != 1:
             failures.append(
                 f"{registry}: FileEntry construction {index} must contain exactly one literal http(s) url field"
@@ -767,6 +801,12 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
         urls.add(matches[0])
     if not blocks or not urls:
         failures.append(f"{registry}: no production FileEntry URL constructions found")
+    if catalog_constructions > 1:
+        failures.append(f"{registry}: only one catalog-backed FileEntry construction is reviewed")
+    if catalog_constructions:
+        catalog_failures, catalog_urls = catalog_urls_checked(registry.parents[6] / "shared" / "models" / "catalog.json")
+        failures.extend(catalog_failures)
+        urls |= catalog_urls
 
     downloader_text = _without_comments(downloader.read_text(encoding="utf-8"))
     downloader_structure = _mask_comments_and_strings(downloader_text)
