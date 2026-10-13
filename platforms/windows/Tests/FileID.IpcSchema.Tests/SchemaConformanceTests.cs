@@ -36,6 +36,7 @@ public class SchemaConformanceTests
     // Hoisted constant arrays (CA1861) shared by the exemplars.
     private static readonly long[] _exampleFileIds = { 1, 2, 3 };
     private static readonly string[] _exampleTags = { "hawaii", "sunset" };
+    private static readonly string[] _exampleTunedArguments = { "-ngl", "99" };
     private static readonly long[] _examplePersonIds = { 1, 2 };
     private static readonly long[] _exampleFaceIds = { 10, 11, 12 };
     private static readonly string[] _exampleSkippedStages = { "ocr" };
@@ -224,7 +225,7 @@ public class SchemaConformanceTests
         {
             new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",
                 "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true,
-                new ModelBenchmark("2026-10-13T22:00:00Z", "x86_64 · 16 GB · RTX 2060 6 GB", 3.2, 900, 55, 1.4, 2.6, 0.95, 0.8, new[] { "-ngl", "99" })),
+                new ModelBenchmark("2026-10-13T22:00:00Z", "x86_64 · 16 GB · RTX 2060 6 GB", 3.2, 900, 55, 1.4, 2.6, 0.95, 0.8, _exampleTunedArguments)),
         })),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),

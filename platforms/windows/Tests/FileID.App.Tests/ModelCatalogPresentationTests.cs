@@ -6,10 +6,13 @@ namespace FileID.App.Tests;
 
 public sealed class ModelCatalogPresentationTests
 {
+    private static readonly string[] TunedArguments = { "-t", "4" };
+    private static readonly string[] ExpectedOrder = { "fast", "slow", "curated", "tiny", "big" };
+
     private static ModelCatalogItem Model(string id, bool fits, string status, double resident, double? rate, bool installed = false) =>
         new(id, id, "family", $"org/{id}", "vision", "gguf", "Q4_K_M", "Apache-2.0", false, null, 2_000_000_000, resident,
             "small", status, true, installed || rate is not null, fits,
-            rate is { } r ? new ModelBenchmark("t", "h", 2.0, null, r, 1.5, 2.4, 0.5, 0.8, new[] { "-t", "4" }) : null);
+            rate is { } r ? new ModelBenchmark("t", "h", 2.0, null, r, 1.5, 2.4, 0.5, 0.8, TunedArguments) : null);
 
     [Fact]
     public void MeasuredModelsLeadThenCuratedThenSmallest()
@@ -23,7 +26,7 @@ public sealed class ModelCatalogPresentationTests
             Model("tiny", true, "candidate", 1, null),
             Model("huge", false, "candidate", 60, null),
         };
-        Assert.Equal(new[] { "fast", "slow", "curated", "tiny", "big" }, ModelCatalogPresentation.Visible(models, onlyFit: true).Select(m => m.Id));
+        Assert.Equal(ExpectedOrder, ModelCatalogPresentation.Visible(models, onlyFit: true).Select(m => m.Id));
         Assert.Equal(6, ModelCatalogPresentation.Visible(models, onlyFit: false).Count);
     }
 
