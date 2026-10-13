@@ -55,9 +55,9 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
     SEMA.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_HTTP_REQUESTS)))
 }
 
-/// Hosts FileID permits user-initiated model downloads from HF and its CDN only.
-/// Suffix-match with a leading dot for subdomains so
-/// "evilhuggingface.co" never matches ".huggingface.co". Used BOTH to gate the
+/// User-triggered downloads are limited to model sources on HF and the exact
+/// official CUDA runtime sources reviewed in `check_runtime_egress.py`. Suffix-
+/// match with a leading dot so look-alike domains never match. Used BOTH to gate the
 /// INITIAL request URL (`download_url_allowed`, enforced in `download_simple` /
 /// `download_parallel`) and to constrain redirect hops (the reqwest redirect
 /// policy in `build_shared_client`) — so the egress invariant is a runtime
@@ -65,6 +65,9 @@ fn http_semaphore() -> &'static Arc<tokio::sync::Semaphore> {
 const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
     "huggingface.co",
     "hf.co",
+    "github.com",
+    "githubusercontent.com",
+    "developer.download.nvidia.com",
 ];
 
 /// True iff `url` parses, is https, and its host is on (or a subdomain of) the
@@ -143,8 +146,8 @@ pub fn fail_closed_client() -> Arc<reqwest::Client> {
 }
 
 pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
-    // Restrict redirects to Hugging Face and its CDN. reqwest's default follows up to
-    // 10 redirects to ANY host — an on-path attacker could bounce a 302 chain to
+    // Restrict redirects to reviewed model/runtime hosts. reqwest's default
+    // follows up to 10 redirects to ANY host — an on-path attacker could bounce a 302 chain to
     // an off-allowlist host, dodging the source-URL allowlist that only checks
     // the ORIGINAL URL. Suffix-match with a leading dot for subdomains so
     // "evilhuggingface.co" never matches ".huggingface.co".
@@ -1448,15 +1451,19 @@ mod tests {
             "huggingface.co",
             "cdn-lfs.huggingface.co",
             "hf.co",
+            "github.com",
+            "objects.githubusercontent.com",
+            "developer.download.nvidia.com",
         ] {
             assert!(download_url_allowed(&https(host)), "{host} should pass");
         }
         // Off-allowlist + look-alike hosts are refused.
         for host in [
-            "evilhuggingface.co",
             "example.com",
-            "github.com",
-            "objects.githubusercontent.com",
+            "evilhuggingface.co",
+            "evilgithub.com",
+            "github.com.attacker.example",
+            "developer.download.nvidia.com.attacker.example",
             "developer.nvidia.com",
         ] {
             assert!(!download_url_allowed(&https(host)), "{host} should be refused");

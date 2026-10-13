@@ -24,6 +24,8 @@ mod paths;
 mod pipeline;
 mod platform;
 mod scan_session;
+mod catalog_index;
+mod resource_scheduler;
 mod shell;
 mod util;
 
@@ -316,6 +318,8 @@ async fn async_main() -> Result<()> {
 
     let dispatch_sink = sink.clone();
     let dispatch_shutdown = shutdown.clone();
+    let catalog_index = db_conn.as_ref().map(|writer| catalog_index::CatalogIndex::new(writer.clone(), db_path.clone(), db_path.with_extension("visual-index")));
+    let dispatch_catalog_index = catalog_index.clone();
     let dispatch_db = db_conn.clone();
 
     // Active scan coordinator. None when no scan is running; populated by
@@ -410,6 +414,7 @@ async fn async_main() -> Result<()> {
                                 &dispatch_sink,
                                 &dispatch_shutdown,
                                 dispatch_db.as_ref(),
+                                dispatch_catalog_index.as_ref(),
                                 &dispatch_db_path,
                                 &dispatch_scan_state,
                                 &dispatch_deep_cancel,
@@ -456,6 +461,7 @@ async fn async_main() -> Result<()> {
     // sidecars. On failure, surface to the sink before teardown so the
     // app's next launch can warn about stale-read. Capture into a local
     // so the mutex guard drops before any await on the sink.
+    if let Some(index) = catalog_index { index.close(); }
     let checkpoint_outcome = db_conn.as_ref().map(|conn_arc| {
         let guard = conn_arc.lock();
         db::checkpoint_truncate(&guard)
@@ -686,6 +692,7 @@ async fn handle_line(
     sink: &Sink,
     shutdown: &Arc<Notify>,
     db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
+    catalog_index: Option<&Arc<catalog_index::CatalogIndex>>,
     db_path: &std::path::Path,
     scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
@@ -736,7 +743,8 @@ async fn handle_line(
         CommandPayload::CatalogRequest(payload) => {
             let sink = sink.clone();
             let database = db.cloned();
-            tokio::spawn(async move { commands::catalog::handle(sink, database, payload.request).await; });
+            let index = catalog_index.cloned();
+            tokio::spawn(async move { commands::catalog::handle(sink, database, index, payload.request).await; });
         }
         CommandPayload::HealthCheck(payload) => {
             let response = if payload.is_valid() {

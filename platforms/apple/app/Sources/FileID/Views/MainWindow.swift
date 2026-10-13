@@ -6,6 +6,7 @@ struct MainWindow: View {
     @State private var catalogPresented = false
     @Environment(\.openWindow) private var openWindow
     @State private var chatPresented = false
+    @State private var atmospherePaused = false
     let engine: EngineClient
     @State private var store = ReadStore()
     @AppStorage("activeTabRawValue") private var activeTabRaw: String = Tab.library.rawValue
@@ -56,7 +57,7 @@ struct MainWindow: View {
 
     var body: some View {
         ZStack {
-            LavaLampBackground()
+            LavaLampBackground(paused: atmospherePaused)
                 .ignoresSafeArea()
             HStack(spacing: 0) {
                 if sidebarVisible {
@@ -79,6 +80,12 @@ struct MainWindow: View {
             }
             .accentColor(Theme.gold)
         .toolbar {
+            Button { atmospherePaused.toggle() } label: {
+                Label(atmospherePaused ? "Resume Background Motion" : "Pause Background Motion",
+                      systemImage: atmospherePaused ? "play.circle" : "pause.circle")
+            }
+            .help(atmospherePaused ? "Resume background motion when the window is active and Reduce Motion is off" : "Pause background motion")
+            .accessibilityValue(atmospherePaused ? "Paused" : "Automatic")
             Button { chatPresented = true } label: { Label("Chat", systemImage: "bubble.left.and.bubble.right") }.keyboardShortcut("k", modifiers: .command)
             Button { openWindow(id: "file-tools") } label: { Label("File Tools", systemImage: "wand.and.stars") }
             Button { catalogPresented = true } label: { Label("Search & Moments", systemImage: "sparkle.magnifyingglass") }
@@ -136,6 +143,7 @@ struct MainWindow: View {
                     .allowsHitTesting(false)
             }
         }
+        .environment(\.atmospherePaused, atmospherePaused)
         .onDrop(of: [.fileURL], isTargeted: $isDragHovering) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in

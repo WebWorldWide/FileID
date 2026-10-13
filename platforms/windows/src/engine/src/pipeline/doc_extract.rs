@@ -21,6 +21,10 @@ pub(crate) const MAX_TEXT_BYTES: usize = 256 * 1024;
 /// `take()` on the reader (defends against a lying header).
 const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Bound total ZIP data expanded while extracting one document. Per-member
+/// limits alone let many individually small slides form a ZIP bomb.
+const MAX_TOTAL_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
+
 /// C1: cap on the number of glob-matched members iterated (e.g. `ppt/slides/`
 /// slide parts). A crafted .pptx can list millions of `slideN.xml` entries; even
 /// with the per-member byte cap, sorting + parsing every one of them burns
@@ -154,8 +158,8 @@ fn extract_zip_xml_inner<R: Read + Seek>(
             Ok(e) => e,
             Err(_) => continue,
         };
-        let xml = match read_member_bounded(&mut entry) {
-            Some(x) => x,
+        let xml = match read_member_bounded(&mut entry, MAX_MEMBER_BYTES) {
+            Some((x, _)) => x,
             None => continue,
         };
         if !out.is_empty() {
@@ -173,12 +177,15 @@ fn extract_zip_xml_inner<R: Read + Seek>(
 /// so a zip bomb (a member that decompresses to gigabytes) can never be fully
 /// materialized — `take()` stops after the cap of DECOMPRESSED output. Lossy
 /// UTF-8 (the bytes=Some / read_plain paths already are).
-fn read_member_bounded(entry: impl Read) -> Option<String> {
+fn read_member_bounded(entry: impl Read, limit: u64) -> Option<(String, u64)> {
     let mut buf = Vec::new();
-    if entry.take(MAX_MEMBER_BYTES).read_to_end(&mut buf).is_err() {
+    if entry.take(limit).read_to_end(&mut buf).is_err() {
         return None;
     }
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    Some((
+        String::from_utf8_lossy(&buf).into_owned(),
+        buf.len() as u64,
+    ))
 }
 
 /// Pull text out of every member whose name starts with `prefix` and ends
@@ -207,6 +214,17 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
     suffix: &str,
     target_elems: &[&str],
 ) -> Result<String> {
+    extract_zip_xml_glob_inner_with_budget(reader, path, prefix, suffix, target_elems)
+        .map(|(text, _)| text)
+}
+
+fn extract_zip_xml_glob_inner_with_budget<R: Read + Seek>(
+    reader: R,
+    path: &Path,
+    prefix: &str,
+    suffix: &str,
+    target_elems: &[&str],
+) -> Result<(String, u64)> {
     let mut zip =
         zip::ZipArchive::new(reader).with_context(|| format!("zip open {}", path.display()))?;
     // Collect only the glob-matched members, hard-capped at MAX_GLOB_MEMBERS so a
@@ -220,15 +238,22 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
         .collect();
     names.sort();
     let mut out = String::new();
+    let mut total_member_bytes = 0_u64;
     for name in &names {
+        let remaining = MAX_TOTAL_MEMBER_BYTES.saturating_sub(total_member_bytes);
+        if remaining == 0 {
+            break;
+        }
         let mut entry = match zip.by_name(name) {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let xml = match read_member_bounded(&mut entry) {
+        let limit = MAX_MEMBER_BYTES.min(remaining);
+        let (xml, bytes_read) = match read_member_bounded(&mut entry, limit) {
             Some(x) => x,
             None => continue,
         };
+        total_member_bytes += bytes_read;
         if !out.is_empty() {
             out.push('\n');
         }
@@ -237,7 +262,7 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
             break;
         }
     }
-    Ok(out)
+    Ok((out, total_member_bytes))
 }
 
 /// Walk `xml` with quick-xml's pull parser, accumulating text from every
@@ -426,6 +451,39 @@ mod tests {
             "member iteration must stop at MAX_GLOB_MEMBERS, processed {processed}"
         );
         assert!(out.len() < MAX_TEXT_BYTES, "byte cap must not have masked the count cap");
+    }
+
+    #[test]
+    fn pptx_total_decompressed_member_bytes_are_capped() {
+        let mut payload = vec![b' '; MAX_MEMBER_BYTES as usize];
+        payload[..3].copy_from_slice(b"<p>");
+        let closing_tag_start = payload.len() - 4;
+        payload[closing_tag_start..].copy_from_slice(b"</p>");
+        let mut buf = Vec::new();
+        {
+            use std::io::Write;
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for i in 0..5 {
+                zw.start_file::<_, ()>(format!("ppt/slides/slide{i}.xml"), opts)
+                    .unwrap();
+                zw.write_all(&payload).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+
+        let (text, expanded) = extract_zip_xml_glob_inner_with_budget(
+            Cursor::new(&buf),
+            Path::new("bomb.pptx"),
+            "ppt/slides/slide",
+            ".xml",
+            &["a:t"],
+        )
+        .unwrap();
+
+        assert_eq!(expanded, MAX_TOTAL_MEMBER_BYTES);
+        assert!(text.is_empty());
     }
 
     #[test]

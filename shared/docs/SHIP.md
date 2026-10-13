@@ -1,5 +1,9 @@
 # FileID — Ship readiness (v1.0)
 
+## Windows CUDA status (2026-10-05)
+
+Optional CUDA 12.4/cuDNN 9 runtime provisioning is implemented with user-triggered downloads, vendor-term acceptance, exact-source egress checks, and SHA256-pinned archives. Validation on the current dev GeForce RTX 5080 (16 GB VRAM) remains open; do not claim CUDA acceleration is verified until scanning and Deep Analyze have both been exercised on this hardware. The Store package-identity XAML startup failure and authentic listing screenshots also remain open release gates. No promo video is included in the listing work.
+
 ## Mac TestFlight scaffold (2026-10-03)
 
 `com.fileid.app` and macOS App Store Connect record `6818813859` are registered; internal TestFlight group `FileID Internal Testers` exists with no testers/builds and automatic distribution disabled. Dedicated sandbox entitlements, separate persistent app and implicit-scope IPC bookmarks with bounded engine access leases, app-container model cache, and `platforms/apple/scripts/testflight.sh` are implemented. The local Mac App Store profile and Apple Distribution / Mac Installer Distribution identities are installed, and a signed package passed strict deep verification and installer signature checks. Apple’s API-access acknowledgment is accepted. A team API key—which Apple grants access to every app—is pending owner confirmation. No build has been uploaded, no testers have been added, and sandbox runtime acceptance is open. See `NEXT.md` and `AGENT_HANDOFF.md` for exact continuation.
@@ -51,8 +55,9 @@ across the macOS GRDB and Windows rusqlite stores).
 These hold for every shipped feature, on every platform.
 
 - **No telemetry, ever.** No analytics, no crash reporting, no update pings, no
-  download instrumentation. The only network egress is user-initiated model
-  downloads from `huggingface.co`. CI scans the shipped binaries for telemetry
+  download instrumentation. Network egress is user-initiated model downloads
+  from `huggingface.co` plus exact SHA-256-pinned Microsoft/NVIDIA CUDA runtime
+  archives; those optional downloads require NVIDIA terms acceptance. CI scans the shipped binaries for telemetry
   strings as a release blocker. See [`PRIVACY.md`](PRIVACY.md).
 - **Apache-2.0.** Root `LICENSE`. Every weight FileID downloads by default is
   Apache-2.0 or MIT — no non-commercial or research-only models in the core
@@ -143,11 +148,7 @@ source-URL scans are hard release blockers — no exceptions.
 - **`macos.yml`**: `swift build` (app + engine), `swift test`, source-URL
   allowlist, telemetry-string scan, engine startup smoke.
 
-Dev verifies headlessly in the agent environment (`cargo clippy`/`test`,
-`dotnet build`/`test`/`format`); on-hardware verification runs on an RTX 2060
-against the `G:\TrueNAS` corpus via `platforms/windows/build/iterate.ps1` +
-`build/scan_assertions.py` (asserts file count, low failure rate, RAM++/CLIP tags
-present, 128-d/512-byte SFace prints, person clusters formed).
+Dev verifies headlessly in the agent environment (`cargo clippy`/`test`, `dotnet build`/`test`/`format`). The current Windows dev box is Ryzen 9 9900X, 64 GB RAM, RTX 5080 (16 GB), Windows 11 Pro build 26300. Run on-hardware verification on this system with `platforms/windows/build/iterate.ps1 -Corpus <path>` + `build/scan_assertions.py`; the former `G:\TrueNAS` corpus is not mounted. Record GPU/provider and corpus details with each result.
 
 ## Remaining to v1.0
 
