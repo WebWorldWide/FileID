@@ -12,6 +12,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private readonly ListView _hits = new() { Height = 220, SelectionMode = ListViewSelectionMode.Multiple };
     private readonly ListView _chapters = new() { Height = 140 };
     private readonly ListView _jobs = new() { Height = 150 };
+    private readonly ComboBox _timelineMode = new() { ItemsSource = new[] { "Quick samples", "Significant moments" }, SelectedIndex = 0, Width = 200 };
     private readonly TextBox _title = new() { PlaceholderText = "Chapter title", MaxLength = 200 };
     private readonly TextBox _summary = new() { PlaceholderText = "Description", MaxLength = 4000 };
     private readonly NumberBox _start = new() { Header = "Start seconds", Value = 0, Minimum = 0, Width = 160 };
@@ -35,8 +36,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         Inputs.Children.Add(Row(_query, _mode, ActionButton("Search", SearchAsync), ActionButton("Search keyword", ct => SearchAsync("keyword", ct))));
         Inputs.Children.Add(Text("Keyword works without a model. Hybrid and semantic search require a real installed CLIP text model and matching engine index; unavailable models or indexing are reported explicitly. Search keyword is always available as a fallback. Sparse sampled frames are unverified and can miss brief events."));
         Inputs.Children.Add(_hits);
-        Inputs.Children.Add(Row(ActionButton("Analyze selected timelines / generate chapters", EnqueueTimelineAsync), ActionButton("Refresh selected chapters", RefreshDetailAsync)));
-        Inputs.Children.Add(Text("Select multiple evidence rows to enqueue their unique catalog files. Load a local model in Deep Analyze first. Timeline workers sample video and transcribe available speech; model/runtime/media failures are reported in jobs, not treated as completion."));
+        Inputs.Children.Add(Row(_timelineMode, ActionButton("Analyze selected timelines / generate chapters", EnqueueTimelineAsync), ActionButton("Refresh selected chapters", RefreshDetailAsync)));
+        Inputs.Children.Add(Text("Select video rows to enqueue their unique catalog files. Install a local visual model in Deep Analyze first; nothing is downloaded automatically. Quick samples caption one moment per ten seconds; significant moments also examine overlapping four-second frame sequences and take longer. Speech transcription is not yet available on Windows. Model, runtime and media failures are reported in jobs, not treated as completion."));
         Inputs.Children.Add(_evidence);
         Inputs.Children.Add(_coverage);
         Inputs.Children.Add(Text("Chapters · stale markers remain visible; draft suggestions from sparse samples require review."));
@@ -156,7 +157,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     }
     private async Task EnqueueTimelineAsync(CancellationToken ct)
     {
-        var request = CatalogJobActions.TimelineRequest(_hits.SelectedItems.Cast<HitItem>().Select(item => item.Hit));
+        var mode = _timelineMode.SelectedIndex == 1 ? "moments" : "sampled";
+        var request = CatalogJobActions.TimelineRequest(_hits.SelectedItems.Cast<HitItem>().Select(item => item.Hit), mode);
         var revision = Interlocked.Increment(ref _jobsRevision);
         var response = await Engine.CatalogAsync(request, ct);
         await UI(() =>

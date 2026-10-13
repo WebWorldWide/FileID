@@ -9,14 +9,20 @@ internal static class CatalogJobActions
     public static bool CanResume(string? kind, string? state) => kind is "catalogIndex" or "timelineSample" && state is "paused" or "failed" or "cancelled";
 
     public static IReadOnlyList<long> TimelineFileIDs(IEnumerable<CatalogHit> hits) => hits.Select(hit => hit.FileID).Distinct().Order().ToArray();
-    public static CatalogRequest TimelineRequest(IEnumerable<CatalogHit> hits)
+    public static CatalogRequest TimelineRequest(IEnumerable<CatalogHit> hits, string? timelineMode = null) =>
+        TimelineRequest(TimelineFileIDs(hits), timelineMode);
+    private static CatalogRequest TimelineRequest(IReadOnlyList<long> ids, string? timelineMode)
     {
-        var ids = TimelineFileIDs(hits);
-        if (ids.Count is < 1 or > 10000) throw new InvalidOperationException("Select 1–10000 catalog files for timeline analysis.");
-        return new CatalogRequest(Guid.NewGuid().ToString(), "enqueueTimeline", null, null, null, null, null, ids);
+        if (ids.Count is < 1 or > 1000) throw new InvalidOperationException("Select 1–1000 catalog videos for timeline analysis.");
+        if (timelineMode is not (null or "sampled" or "moments")) throw new InvalidOperationException("Unknown timeline analysis mode.");
+        return new CatalogRequest(Guid.NewGuid().ToString(), "enqueueTimeline", null, null, null, null, null, ids, TimelineMode: timelineMode);
     }
     public static CatalogRequest ControlRequest(string action, CatalogJob job)
     {
+        // The engine resumes only paused timeline jobs; a failed or cancelled
+        // one is retried as a fresh job over the same files, as on macOS.
+        if (action == "resumeJob" && job.Kind == "timelineSample" && job.State is "failed" or "cancelled")
+            return TimelineRequest(job.FileIDs.Distinct().Order().ToArray(), null);
         var allowed = action switch
         {
             "pauseJob" => CanPause(job.State),

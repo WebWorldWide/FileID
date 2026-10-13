@@ -1,0 +1,176 @@
+use super::*;
+
+fn database() -> Connection {
+    let conn = Connection::open_in_memory().unwrap();
+    crate::db::migrations::apply(&conn).unwrap();
+    conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/party.mov',1,100,10,0,'video','mov')", []).unwrap();
+    conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(2,'/internal/cake.jpg',2,100,10,0,'image','jpg')", []).unwrap();
+    conn
+}
+
+fn request(value: serde_json::Value) -> CatalogRequest {
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
+    let mut conn = database();
+    let ok = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1,1],"timelineMode":"moments"}));
+    let (id, response) = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), true).unwrap();
+    assert_eq!(response.status, "ok");
+    assert!(response.message.unwrap().contains("speech transcription is not yet available"));
+    assert_eq!(response.jobs.len(), 1);
+    let (kind, ids, recipe, state): (String, String, String, String) = conn
+        .query_row("SELECT kind,file_ids_json,recipe_json,state FROM catalog_jobs WHERE id=?1", [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap();
+    assert_eq!((kind.as_str(), ids.as_str(), state.as_str()), (JOB_KIND, "[1]", "queued"));
+    let recipe: Recipe = serde_json::from_str(&recipe).unwrap();
+    assert_eq!(recipe.model_kind, "qwen3_vl_4b");
+    assert_eq!(recipe.timeline_mode.as_deref(), Some("moments"));
+
+    let photo = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[2]}));
+    assert!(enqueue(&mut conn, &photo, Some("qwen3_vl_4b"), true).is_err());
+    let empty = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[]}));
+    assert!(enqueue(&mut conn, &empty, Some("qwen3_vl_4b"), true).is_err());
+    let mode = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"dense"}));
+    assert!(enqueue(&mut conn, &mode, Some("qwen3_vl_4b"), true).is_err());
+    let no_model = enqueue(&mut conn, &ok, None, true).unwrap_err().to_string();
+    assert!(no_model.contains("No model will be downloaded"));
+    let no_ffmpeg = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), false).unwrap_err().to_string();
+    assert!(no_ffmpeg.contains("FFmpeg"));
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_jobs", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn recovery_pauses_interrupted_timeline_jobs_only() {
+    let conn = database();
+    for (id, kind, state) in [("a", JOB_KIND, "running"), ("b", JOB_KIND, "queued"), ("c", JOB_KIND, "completed"), ("d", "catalogIndex", "running")] {
+        conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,created_at,updated_at) VALUES(?1,?2,'[1]','{}',?3,0,0)", params![id, kind, state]).unwrap();
+    }
+    recover(&conn).unwrap();
+    let states: Vec<String> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|id| conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| r.get(0)).unwrap())
+        .collect();
+    assert_eq!(states, ["paused", "paused", "completed", "running"]);
+    assert!(is_timeline_job(&conn, "a").unwrap());
+    assert!(!is_timeline_job(&conn, "d").unwrap());
+    assert!(!is_timeline_job(&conn, "missing").unwrap());
+}
+
+#[test]
+fn start_claims_only_queued_jobs_and_resumes_from_checkpoint() {
+    let mut conn = database();
+    let (id, _) = enqueue(&mut conn, &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1]})), Some("qwen3_vl_4b"), true).unwrap();
+    conn.execute("UPDATE catalog_jobs SET checkpoint_json='1' WHERE id=?1", [&id]).unwrap();
+    let job = start(&conn, &id).unwrap().unwrap();
+    assert_eq!((job.ids.as_slice(), job.index), (&[1][..], 1));
+    assert!(require_running(&conn, &id).is_ok());
+    assert!(start(&conn, &id).unwrap().is_none());
+    conn.execute("UPDATE catalog_jobs SET state='paused' WHERE id=?1", [&id]).unwrap();
+    assert!(require_running(&conn, &id).unwrap_err().is::<Interrupted>());
+}
+
+#[test]
+fn resume_is_allowed_for_timeline_jobs_through_catalog_actions() {
+    let mut conn = database();
+    let (id, _) = enqueue(&mut conn, &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1]})), Some("qwen3_vl_4b"), true).unwrap();
+    let pause = request(serde_json::json!({"requestID":"p","action":"pauseJob","jobID":id}));
+    assert_eq!(super::super::catalog::execute(&mut conn, &pause).unwrap().jobs[0].state, "paused");
+    let resume = request(serde_json::json!({"requestID":"p","action":"resumeJob","jobID":id}));
+    assert_eq!(super::super::catalog::execute(&mut conn, &resume).unwrap().jobs[0].state, "queued");
+    conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,created_at,updated_at) VALUES('other','unknownKind','[]','{}','paused',0,0)", []).unwrap();
+    let foreign = request(serde_json::json!({"requestID":"p","action":"resumeJob","jobID":"other"}));
+    assert!(super::super::catalog::execute(&mut conn, &foreign).is_err());
+}
+
+#[test]
+fn chapter_suggestions_replace_drafts_but_keep_user_edits() {
+    let conn = database();
+    let source = Source { path: PathBuf::from("/nonexistent"), size: 100, modified: Some(10.0), revision: revision(&conn, 1).unwrap() };
+    let texts = ["Birthday cake with candles on table", "Birthday cake candles burning on table", "Children playing soccer in park", "Children kicking soccer ball in park"];
+    for (index, text) in texts.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,1,?2,?2,?3,?4,'frame-v',0)",
+            params![format!("p{index}"), index as f64 * 10.0, text, source.revision],
+        )
+        .unwrap();
+    }
+    let stale = CatalogChapter {
+        id: "old-draft".into(), file_id: 1, start_seconds: 0.0, end_seconds: 1.0, title: "Old".into(), summary: String::new(),
+        source_revision: source.revision.clone(), model_version: format!("{}frame-v", analysis::CHAPTER_SUGGESTION_PREFIX), confidence: 0.2, user_edited: false, stale: false,
+    };
+    upsert_chapter(&conn, &stale).unwrap();
+    let edited_id = format!("timeline-suggestion:1:20000:{}", source.revision);
+    let edited = CatalogChapter { id: edited_id.clone(), title: "Soccer (renamed)".into(), user_edited: true, model_version: "user".into(), ..stale.clone() };
+    upsert_chapter(&conn, &edited).unwrap();
+
+    // The source file is absent, so persistence must refuse rather than write.
+    assert!(persist_chapter_suggestions(&conn, 1, &source, "frame-v", 40.0).is_err());
+
+    let titles = |conn: &Connection| -> Vec<String> {
+        let mut statement = conn.prepare("SELECT title FROM catalog_chapters WHERE file_id=1 ORDER BY start_seconds,id").unwrap();
+        statement.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(titles(&conn), ["Old", "Soccer (renamed)"]);
+}
+
+#[test]
+fn chapter_suggestions_persist_when_source_is_unchanged() {
+    let directory = std::env::temp_dir().join(format!("fileid-timeline-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("party.mov");
+    std::fs::write(&path, vec![0u8; 100]).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let conn = database();
+    conn.execute("UPDATE files SET path_text=?1,modified_at=?2 WHERE id=1", params![path.to_str().unwrap(), modified]).unwrap();
+    let source = Source::load(&conn, 1).unwrap();
+    source.verify(&conn, 1).unwrap();
+    let texts = ["Birthday cake with candles on table", "Birthday cake candles burning on table", "Children playing soccer in park", "Children kicking soccer ball in park"];
+    for (index, text) in texts.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,1,?2,?2,?3,?4,'frame-v',0)",
+            params![format!("p{index}"), index as f64 * 10.0, text, source.revision],
+        )
+        .unwrap();
+    }
+    persist_chapter_suggestions(&conn, 1, &source, "frame-v", 40.0).unwrap();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_chapters WHERE file_id=1 AND user_edited=0", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 2);
+    let hits: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_evidence_fts WHERE catalog_evidence_fts MATCH 'soccer' AND kind='chapter'", [], |r| r.get(0)).unwrap();
+    assert_eq!(hits, 1);
+    std::fs::write(&path, vec![1u8; 101]).unwrap();
+    assert!(source.verify(&conn, 1).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Runs only where the vetted FFmpeg runtime is staged (FILEID_FFMPEG_DIR).
+#[test]
+fn vetted_runtime_decodes_signals_and_frames_for_analysis() {
+    if !video_export::available() {
+        eprintln!("vetted FFmpeg runtime not staged; skipping");
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("fileid-timeline-media-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("fixture.mp4");
+    video_export::generate_test_video(&source);
+    let cancel = AtomicBool::new(false);
+    let probe = video_export::analysis_probe(&source, &cancel).unwrap();
+    assert!((probe.duration - 2.0).abs() < 0.2);
+    assert_eq!((probe.width, probe.height), (180, 320));
+    let signals = video_export::signal_frames(&source, 0.0, probe.duration, &cancel).unwrap();
+    assert!((2..=3).contains(&signals.len()));
+    assert!(signals.iter().all(|(_, pixels)| pixels.len() == analysis::SIGNAL_WIDTH * analysis::SIGNAL_HEIGHT));
+    let size = video_export::fitted_size(probe.width, probe.height, 128);
+    assert_eq!(size, (72, 128));
+    let rgb = video_export::frame_rgb(&source, 1.0, size.0, size.1, &cancel).unwrap();
+    assert_eq!(rgb.len(), 72 * 128 * 3);
+    let jpeg = directory.join("frame.jpg");
+    write_jpeg(&jpeg, rgb, size.0, size.1).unwrap();
+    assert_eq!(image::image_dimensions(&jpeg).unwrap(), size);
+    cancel.store(true, Ordering::Release);
+    assert!(video_export::signal_frames(&source, 0.0, probe.duration, &cancel).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}

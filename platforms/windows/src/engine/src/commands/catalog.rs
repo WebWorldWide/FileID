@@ -7,30 +7,54 @@ use std::sync::Arc;
 
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, index: Option<Arc<crate::catalog_index::CatalogIndex>>, request: CatalogRequest) {
     let request_id = request.request_id.clone();
+    let action = request.action.clone();
+    let job_id = request.job_id.clone();
+    let scheduler = database.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let Some(database) = database else { bail!("The catalog database is unavailable") };
-        if let Some(index) = index {
-            if request.action == "search" { return index.search(&request); }
-            if ["pauseJob","resumeJob","cancelJob"].contains(&request.action.as_str()) && request.job_id.as_deref() == Some(crate::catalog_index::CatalogIndex::job_id().as_str()) {
-                if request.request_id.is_empty() || request.request_id.chars().count() > 200 { bail!("Invalid catalog request") }
-                index.control(&request)?;
-                let mut result = response(&request.request_id, "ok", None);
-                result.jobs = jobs(&database.lock())?;
-                return Ok(result);
-            }
+        if request.action == "enqueueTimeline" {
+            let Some(database) = database else { bail!("The catalog database is unavailable") };
+            let (model, ffmpeg) = (super::timeline::installed_model(), super::video_export::available());
+            let (id, response) = super::timeline::enqueue(&mut database.lock(), &request, model, ffmpeg)?;
+            return Ok((response, Some(id)));
         }
-        let mut conn = database.lock();
-        execute(&mut conn, &request)
+        execute_with_index(database, index, request).map(|response| (response, None))
     }).await;
     let response = match result {
-        Ok(Ok(response)) => response,
+        Ok(Ok((response, queued))) => {
+            if let Some(database) = scheduler {
+                let resumed = action == "resumeJob" && job_id.as_deref().is_some_and(|id| super::timeline::is_timeline_job(&database.lock(), id).unwrap_or(false));
+                if let Some(id) = queued.or(if resumed { job_id.clone() } else { None }) {
+                    super::timeline::schedule(id, sink.clone(), database);
+                }
+            }
+            if ["pauseJob", "cancelJob"].contains(&action.as_str()) {
+                if let Some(id) = job_id.as_deref() { super::timeline::interrupt(id); }
+            }
+            response
+        }
         Ok(Err(error)) => response(&request_id, "error", Some(error.to_string())),
         Err(error) => response(&request_id, "error", Some(error.to_string())),
     };
     sink.send(IpcEvent { t: chrono::Utc::now(), payload: EventPayload::CatalogResponse(Wrap::new(response)) }).await;
 }
 
-fn response(id: &str, status: &str, message: Option<String>) -> CatalogResponse {
+fn execute_with_index(database: Option<Arc<Mutex<Connection>>>, index: Option<Arc<crate::catalog_index::CatalogIndex>>, request: CatalogRequest) -> Result<CatalogResponse> {
+    let Some(database) = database else { bail!("The catalog database is unavailable") };
+    if let Some(index) = index {
+        if request.action == "search" { return index.search(&request); }
+        if ["pauseJob","resumeJob","cancelJob"].contains(&request.action.as_str()) && request.job_id.as_deref() == Some(crate::catalog_index::CatalogIndex::job_id().as_str()) {
+            if request.request_id.is_empty() || request.request_id.chars().count() > 200 { bail!("Invalid catalog request") }
+            index.control(&request)?;
+            let mut result = response(&request.request_id, "ok", None);
+            result.jobs = jobs(&database.lock())?;
+            return Ok(result);
+        }
+    }
+    let mut conn = database.lock();
+    execute(&mut conn, &request)
+}
+
+pub(crate) fn response(id: &str, status: &str, message: Option<String>) -> CatalogResponse {
     CatalogResponse { request_id: id.into(), status: status.into(), message, hits: vec![], chapters: vec![], jobs: vec![], events: None, takes: None, recommendation: None, suggested_take_groups: None }
 }
 
@@ -98,13 +122,16 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             let tx = conn.transaction()?;
             let current: String = tx.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r|r.get(0))?;
             if !["queued","running","paused"].contains(&current.as_str()) || (request.action=="resumeJob" && current!="paused") { bail!("This job cannot make that transition") }
-            if request.action == "resumeJob" { bail!("The timeline worker is not yet available in this engine") }
+            if request.action == "resumeJob" && !super::timeline::is_timeline_job(&tx, id)? { bail!("This engine cannot resume that job") }
             let target = match request.action.as_str() {"pauseJob"=>"paused","resumeJob"=>"queued",_=>"cancelled"};
             tx.execute("UPDATE catalog_jobs SET state=?1,updated_at=?2 WHERE id=?3", params![target,chrono::Utc::now().timestamp_millis() as f64/1000.0,id])?;
             tx.commit()?;
             result.jobs = jobs(conn)?;
         }
-        "enqueueTimeline" => bail!("Automatic timeline analysis is not yet available in this engine"),
+        "enqueueTimeline" => {
+            let (model, ffmpeg) = (super::timeline::installed_model(), super::video_export::available());
+            return Ok(super::timeline::enqueue(conn, request, model, ffmpeg)?.1);
+        }
         "listEvents" | "suggestTakeGroups" | "saveEvent" | "deleteEvent" | "undoEventEdit" | "takeGroup" | "setTakeFeedback" | "undoTakeFeedback" => {
             crate::commands::catalog_takes::execute(conn, request, &mut result)?;
         }
