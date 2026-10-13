@@ -23,8 +23,8 @@ const LOCAL_MODELS: [(&str, &str, &str); 4] = [
     ),
     (
         "qwen2_5_vl_7b",
-        "Qwen2.5-VL-7B · optional weights; native AI unavailable",
-        "Approved Apache-2.0 visual weights. Install pinned GGUF + projector on request only. Deep AI, timeline generation and model summaries remain unavailable with this backend; downloading weights does not enable them.",
+        "Qwen2.5-VL-7B · optional weights; needs a llama.cpp runtime",
+        "Approved Apache-2.0 visual weights. Install pinned GGUF + projector on request only. Deep Analyze and timeline analysis use them when a llama-server runtime is available; downloading weights alone does not provide one.",
     ),
     (
         "whisper",
@@ -383,7 +383,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             .build(),
     );
     root.append(&gtk::Label::builder()
-        .label("Library uses CLIP and face models. Native Deep AI, timeline generation and model-backed Chat remain unavailable with this backend. Nothing is downloaded unless you press Install. Installed means pinned SHA-256 verified weights, not backend availability or a ready inference runtime. Restricted models are not offered by this Linux picker.")
+        .label("Library uses CLIP and face models. Deep Analyze and timeline analysis need a llama.cpp runtime (llama-server), which Linux packages do not bundle yet; point FILEID_LLAMA_SERVER at a local build to use them. Model-backed Chat remains unavailable. Nothing is downloaded unless you press Install. Installed means pinned SHA-256 verified weights, not a ready inference runtime.")
         .xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let connection = gtk::Label::builder()
         .label(if engine.borrow().is_ready() {
@@ -403,6 +403,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             row
         })
         .collect();
+    root.append(&super::model_catalog::build(engine.clone()));
     let rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {

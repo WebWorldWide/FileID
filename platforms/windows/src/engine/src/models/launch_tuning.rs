@@ -98,6 +98,9 @@ pub fn save_in(path: &Path, profile: Profile) -> Result<()> {
     let mut store = read(path);
     store.profiles.retain(|p| !(p.model == profile.model && p.hardware == profile.hardware));
     store.profiles.push(profile);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let staged = path.with_extension("json.tmp");
     std::fs::write(&staged, serde_json::to_vec_pretty(&store)?)?;
     std::fs::rename(staged, path)?;

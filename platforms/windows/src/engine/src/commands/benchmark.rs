@@ -22,13 +22,16 @@ pub async fn handle(sink: Sink, payload: BenchmarkModelPayload) {
         return finish(&sink, &payload, "error", Some("benchmarkModel needs a valid request ID and model kind.".into()), None).await;
     }
     let cancel = Arc::new(AtomicBool::new(false));
-    {
+    let claimed = {
         let mut slot = running().lock();
-        if slot.is_some() {
-            drop(slot);
-            return finish(&sink, &payload, "error", Some("Another benchmark is already running.".into()), None).await;
+        let free = slot.is_none();
+        if free {
+            *slot = Some(cancel.clone());
         }
-        *slot = Some(cancel.clone());
+        free
+    };
+    if !claimed {
+        return finish(&sink, &payload, "error", Some("Another benchmark is already running.".into()), None).await;
     }
     let progress_sink = sink.clone();
     let (request_id, model_kind) = (payload.request_id.clone(), payload.model_kind.clone());

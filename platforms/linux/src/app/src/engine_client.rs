@@ -42,6 +42,9 @@ pub enum EngineState {
     BulkActionResult(fileid_engine::ipc::BulkActionResult),
     MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
     ModelDownloadProgress(ModelDownloadProgress),
+    ModelCatalog(fileid_engine::ipc::ModelCatalog),
+    BenchmarkProgress(fileid_engine::ipc::BenchmarkProgress),
+    BenchmarkResult(fileid_engine::ipc::BenchmarkResult),
     Error { kind: String, message: String, model_kind: Option<String> },
     Failed(String),
     Exited,
@@ -185,6 +188,25 @@ impl EngineClient {
         self.send(CommandPayload::PrewarmModel(PrewarmModelPayload {
             model_kind: model_kind.to_owned(),
         }))
+    }
+
+    pub fn list_models(&mut self, request_id: &str, role: Option<&str>) -> Result<()> {
+        self.send(CommandPayload::ListModels(fileid_engine::ipc::ListModelsPayload {
+            request_id: request_id.to_owned(),
+            role: role.map(str::to_owned),
+        }))
+    }
+
+    pub fn benchmark_model(&mut self, request_id: &str, model_kind: &str, tune: bool) -> Result<()> {
+        self.send(CommandPayload::BenchmarkModel(fileid_engine::ipc::BenchmarkModelPayload {
+            request_id: request_id.to_owned(),
+            model_kind: model_kind.to_owned(),
+            tune,
+        }))
+    }
+
+    pub fn cancel_benchmark(&mut self) -> Result<()> {
+        self.send(CommandPayload::CancelBenchmark(fileid_engine::ipc::Empty {}))
     }
 
     pub fn cancel_prewarm(&mut self, model_kind: &str) -> Result<()> {
@@ -419,6 +441,9 @@ fn drain_engine_stdout(
             EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
             EventPayload::ModelDownloadProgress(progress) =>
                 EngineState::ModelDownloadProgress(progress.inner),
+            EventPayload::ModelCatalog(catalog) => EngineState::ModelCatalog(catalog.inner),
+            EventPayload::BenchmarkProgress(progress) => EngineState::BenchmarkProgress(progress.inner),
+            EventPayload::BenchmarkResult(result) => EngineState::BenchmarkResult(result.inner),
             EventPayload::Error(error) => match error.inner.kind.as_str() {
                 "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
                 "face_clustering_busy" => EngineState::FaceClusteringBusy(error.inner.message),

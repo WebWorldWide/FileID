@@ -82,6 +82,7 @@ async fn measure_scores_probes_structured_output_and_timings() {
     assert!(process.pid().is_some());
     tokio::time::timeout(Duration::from_secs(5), async { while !marker.exists() { tokio::task::yield_now().await; } }).await.unwrap();
     lease.retain_memory();
+    drop(lease);
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = VlmServer { last_timings: parking_lot::Mutex::new(None), process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler: s.clone(), cancel: Arc::new(AtomicBool::new(false)), request_gate: tokio::sync::Mutex::new(()) };

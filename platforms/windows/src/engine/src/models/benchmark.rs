@@ -302,6 +302,9 @@ pub fn save_in(path: &Path, result: StoredBenchmark) -> Result<()> {
     let mut results = load_in(path);
     results.retain(|r| !(r.model == result.model && r.hardware == result.hardware));
     results.push(result);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let staged = path.with_extension("json.tmp");
     std::fs::write(&staged, serde_json::to_vec_pretty(&Store { results })?)?;
     std::fs::rename(staged, path)?;

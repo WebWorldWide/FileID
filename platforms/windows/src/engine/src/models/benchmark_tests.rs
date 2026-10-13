@@ -51,7 +51,7 @@ fn summary_reports_rates_and_omits_unmeasured_fields() {
         peak_resident_bytes: 0,
     };
     let summary = summarize(&measurement, "test-hardware", Some(vec!["-ngl".into(), "0".into()]));
-    assert_eq!(summary.load_seconds, 3.46);
+    assert!((summary.load_seconds - 3.46).abs() < 1e-9);
     assert_eq!(summary.prompt_tokens_per_second, Some(900.0));
     assert_eq!(summary.generated_tokens_per_second, Some(50.0));
     assert_eq!(summary.seconds_per_image, Some(2.0));
@@ -86,8 +86,7 @@ async fn tuning_keeps_fastest_identical_output_only() {
 #[test]
 fn stored_results_round_trip_per_model_and_hardware() {
     let directory = std::env::temp_dir().join(format!("fileid-bench-store-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("model-benchmarks.json");
+    let path = directory.join("first-run").join("model-benchmarks.json");
     let benchmark = summarize(&Measurement { load_seconds: 1.0, ..Measurement::default() }, "h1", None);
     save_in(&path, StoredBenchmark { model: "m".into(), hardware: "h1".into(), benchmark: benchmark.clone() }).unwrap();
     save_in(&path, StoredBenchmark { model: "m".into(), hardware: "h2".into(), benchmark: benchmark.clone() }).unwrap();
