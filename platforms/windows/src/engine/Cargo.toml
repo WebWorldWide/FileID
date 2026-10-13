@@ -5,7 +5,7 @@ name = "fileid-engine"
 # script (no new deps) and exposes its own version via CARGO_PKG_VERSION
 # (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
 # cross-checks this literal against VERSION and fails the build on drift.
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
@@ -105,7 +105,7 @@ crossbeam-channel = "0.5"
 # CLIP/BGE semantic search above ~10 k vectors, where brute-force cosine
 # becomes the bottleneck. No C/C++ build dep (rejected `usearch` for that
 # reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
-instant-distance = "0.6"
+instant-distance = { version = "0.6", features = ["with-serde"] }
 rayon = "1.12"
 
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,

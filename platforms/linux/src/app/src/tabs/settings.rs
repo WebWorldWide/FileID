@@ -1,4 +1,3 @@
-// Only the two model bundles required by the Linux scan preflight are exposed.
 // The shared engine owns downloads, SHA-256 verification, and keyed sentinels.
 
 use std::cell::{Cell, RefCell};
@@ -11,7 +10,7 @@ use gtk::glib;
 use crate::engine_client::{EngineClient, EngineState};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
-const SCAN_MODELS: [(&str, &str, &str); 2] = [
+const LOCAL_MODELS: [(&str, &str, &str); 4] = [
     (
         "mobileclip_s2",
         "CLIP image encoder",
@@ -20,7 +19,17 @@ const SCAN_MODELS: [(&str, &str, &str); 2] = [
     (
         "arcface",
         "Face detection + recognition",
-        "YuNet and SFace models needed by the scan pipeline. Face browsing is not yet available in the Linux UI.",
+        "YuNet and SFace models needed by the scan pipeline. Face browsing uses the local indexed library.",
+    ),
+    (
+        "qwen2_5_vl_7b",
+        "Qwen2.5-VL-7B · optional weights; native AI unavailable",
+        "Approved Apache-2.0 visual weights. Install pinned GGUF + projector on request only. Deep AI, timeline generation and model summaries remain unavailable with this backend; downloading weights does not enable them.",
+    ),
+    (
+        "whisper",
+        "Whisper base · optional weights; speech generation unavailable",
+        "Pinned MIT speech weights. Timeline speech generation remains unavailable with this backend regardless of FILEID_WHISPER_CLI or FFmpeg configuration. No runtime is downloaded here.",
     ),
 ];
 
@@ -52,29 +61,73 @@ impl ModelRow {
         let transfer = self.transfer.borrow();
         let (status, action, can_install, show_progress, fraction, show_cancel) = match &*transfer {
             Transfer::Checking { after_download } => (
-                if *after_download { "Verifying SHA-256 and pinned revision…" } else { "Checking installed files…" }.to_owned(),
-                "Install", false, *after_download, 1.0, false,
+                if *after_download {
+                    "Verifying SHA-256 and pinned revision…"
+                } else {
+                    "Checking installed files…"
+                }
+                .to_owned(),
+                "Install",
+                false,
+                *after_download,
+                1.0,
+                false,
             ),
-            Transfer::Missing => ("Not installed".to_owned(), "Install", self.engine_ready.get(), false, 0.0, false),
-            Transfer::Downloading { fraction, message } => (
-                message.clone(), "Install", false, true, *fraction, true,
+            Transfer::Missing => (
+                "Not installed".to_owned(),
+                "Install",
+                self.engine_ready.get(),
+                false,
+                0.0,
+                false,
             ),
-            Transfer::Cancelling => ("Cancelling download…".to_owned(), "Install", false, true, self.progress.fraction(), true),
+            Transfer::Downloading { fraction, message } => {
+                (message.clone(), "Install", false, true, *fraction, true)
+            }
+            Transfer::Cancelling => (
+                "Cancelling download…".to_owned(),
+                "Install",
+                false,
+                true,
+                self.progress.fraction(),
+                true,
+            ),
             Transfer::Installed => (
-                "Installed · SHA-256 verified against pinned files".to_owned(), "Verify again", true, false, 1.0, false,
+                "Installed · SHA-256 verified against pinned files".to_owned(),
+                "Verify again",
+                true,
+                false,
+                1.0,
+                false,
             ),
-            Transfer::Cancelled => ("Download cancelled; partial files can be resumed.".to_owned(), "Retry", self.engine_ready.get(), false, 0.0, false),
-            Transfer::Failed(message) => (message.clone(), "Retry", self.engine_ready.get() && self.model.is_some(), false, 0.0, false),
+            Transfer::Cancelled => (
+                "Download cancelled; partial files can be resumed.".to_owned(),
+                "Retry",
+                self.engine_ready.get(),
+                false,
+                0.0,
+                false,
+            ),
+            Transfer::Failed(message) => (
+                message.clone(),
+                "Retry",
+                self.engine_ready.get() && self.model.is_some(),
+                false,
+                0.0,
+                false,
+            ),
         };
         self.status.set_label(&status);
         self.status.set_tooltip_text(Some(&status));
         match &*transfer {
-            Transfer::Downloading { fraction, .. } if *fraction > 0.0 =>
-                self.progress.set_text(Some(&format!("{:.0}%", fraction * 100.0))),
+            Transfer::Downloading { fraction, .. } if *fraction > 0.0 => self
+                .progress
+                .set_text(Some(&format!("{:.0}%", fraction * 100.0))),
             Transfer::Downloading { .. } => self.progress.set_text(Some("Queued")),
             Transfer::Cancelling => self.progress.set_text(Some("Cancelling")),
-            Transfer::Checking { after_download: true } =>
-                self.progress.set_text(Some("Verifying")),
+            Transfer::Checking {
+                after_download: true,
+            } => self.progress.set_text(Some("Verifying")),
             _ => self.progress.set_text(None),
         }
         self.progress.set_show_text(show_progress);
@@ -84,12 +137,14 @@ impl ModelRow {
         self.install.set_visible(!show_progress);
         self.install.set_sensitive(can_install);
         self.cancel.set_visible(show_cancel);
-        self.cancel.set_sensitive(!matches!(&*transfer, Transfer::Cancelling));
+        self.cancel
+            .set_sensitive(!matches!(&*transfer, Transfer::Cancelling));
     }
 
     fn check_installed(self: &Rc<Self>, after_download: bool) {
         let Some(model) = self.model.clone() else {
-            *self.transfer.borrow_mut() = Transfer::Failed("Model registry is unavailable on this device.".to_owned());
+            *self.transfer.borrow_mut() =
+                Transfer::Failed("Model registry is unavailable on this device.".to_owned());
             self.render();
             return;
         };
@@ -118,28 +173,54 @@ impl ModelRow {
     }
 
     fn install(self: &Rc<Self>) {
-        if !self.engine_ready.get() || self.model.is_none() { return; }
+        if !self.engine_ready.get() || self.model.is_none() {
+            return;
+        }
         if matches!(*self.transfer.borrow(), Transfer::Installed) {
             self.check_installed(false);
             return;
         }
-        if !matches!(*self.transfer.borrow(), Transfer::Missing | Transfer::Cancelled | Transfer::Failed(_)) { return; }
-        let result = self.engine.upgrade()
+        if !matches!(
+            *self.transfer.borrow(),
+            Transfer::Missing | Transfer::Cancelled | Transfer::Failed(_)
+        ) {
+            return;
+        }
+        let result = self
+            .engine
+            .upgrade()
             .ok_or_else(|| "Engine is no longer available.".to_owned())
-            .and_then(|engine| engine.borrow_mut().prewarm_model(self.kind).map_err(|err| err.to_string()));
+            .and_then(|engine| {
+                engine
+                    .borrow_mut()
+                    .prewarm_model(self.kind)
+                    .map_err(|err| err.to_string())
+            });
         self.revision.set(self.revision.get().wrapping_add(1));
         *self.transfer.borrow_mut() = match result {
-            Ok(()) => Transfer::Downloading { fraction: 0.0, message: "Queued — waiting for engine…".to_owned() },
+            Ok(()) => Transfer::Downloading {
+                fraction: 0.0,
+                message: "Queued — waiting for engine…".to_owned(),
+            },
             Err(err) => Transfer::Failed(format!("Could not start download: {err}")),
         };
         self.render();
     }
 
     fn cancel(&self) {
-        if !matches!(*self.transfer.borrow(), Transfer::Downloading { .. }) { return; }
-        let result = self.engine.upgrade()
+        if !matches!(*self.transfer.borrow(), Transfer::Downloading { .. }) {
+            return;
+        }
+        let result = self
+            .engine
+            .upgrade()
             .ok_or_else(|| "Engine is no longer available.".to_owned())
-            .and_then(|engine| engine.borrow_mut().cancel_prewarm(self.kind).map_err(|err| err.to_string()));
+            .and_then(|engine| {
+                engine
+                    .borrow_mut()
+                    .cancel_prewarm(self.kind)
+                    .map_err(|err| err.to_string())
+            });
         *self.transfer.borrow_mut() = match result {
             Ok(()) => Transfer::Cancelling,
             Err(err) => Transfer::Failed(format!("Could not cancel download: {err}")),
@@ -148,15 +229,26 @@ impl ModelRow {
     }
 
     fn on_progress(self: &Rc<Self>, progress: &fileid_engine::ipc::ModelDownloadProgress) {
-        if progress.model_kind != self.kind { return; }
+        if progress.model_kind != self.kind {
+            return;
+        }
         if progress.fraction >= 1.0 {
             self.check_installed(true);
             return;
         }
-        if matches!(*self.transfer.borrow(), Transfer::Cancelling) { return; }
+        if matches!(*self.transfer.borrow(), Transfer::Cancelling) {
+            return;
+        }
         self.revision.set(self.revision.get().wrapping_add(1));
-        let fraction = if progress.fraction.is_finite() { progress.fraction.clamp(0.0, 0.999) } else { 0.0 };
-        *self.transfer.borrow_mut() = Transfer::Downloading { fraction, message: progress.message.clone() };
+        let fraction = if progress.fraction.is_finite() {
+            progress.fraction.clamp(0.0, 0.999)
+        } else {
+            0.0
+        };
+        *self.transfer.borrow_mut() = Transfer::Downloading {
+            fraction,
+            message: progress.message.clone(),
+        };
         self.render();
     }
 
@@ -192,23 +284,49 @@ fn build_model_row(
         .margin_end(16)
         .css_classes(["fileid-glass"])
         .build();
-    let heading = gtk::Label::builder().label(title).xalign(0.0).css_classes(["heading"]).build();
+    let heading = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
     card.append(&heading);
-    card.append(&gtk::Label::builder().label(description).xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
+    card.append(
+        &gtk::Label::builder()
+            .label(description)
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label"])
+            .build(),
+    );
     let detail = match &model {
         Some(model) => {
             let bytes: u64 = model.files.iter().map(|file| file.approx_bytes).sum();
-            format!("{} · {} files · about {} MB · pinned downloads from huggingface.co", kind, model.files.len(), bytes / 1_048_576)
+            format!(
+                "{} · {} files · about {} MB · pinned downloads from huggingface.co",
+                kind,
+                model.files.len(),
+                bytes / 1_048_576
+            )
         }
         None => format!("{kind} · model directory unavailable"),
     };
-    card.append(&gtk::Label::builder().label(&detail).xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
+    card.append(
+        &gtk::Label::builder()
+            .label(&detail)
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label"])
+            .build(),
+    );
     let status = gtk::Label::builder().xalign(0.0).wrap(true).build();
     card.append(&status);
     let progress = gtk::ProgressBar::new();
     progress.set_visible(false);
     card.append(&progress);
-    let actions = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(8).build();
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
     let install = gtk::Button::with_label("Install");
     install.add_css_class("suggested-action");
     actions.append(&install);
@@ -220,9 +338,11 @@ fn build_model_row(
         kind,
         model,
         engine: Rc::downgrade(engine),
-        engine_ready: Cell::new(false),
+        engine_ready: Cell::new(engine.borrow().is_ready()),
         revision: Cell::new(0),
-        transfer: RefCell::new(Transfer::Checking { after_download: false }),
+        transfer: RefCell::new(Transfer::Checking {
+            after_download: false,
+        }),
         status,
         progress,
         install: install.clone(),
@@ -230,11 +350,15 @@ fn build_model_row(
     });
     let weak = Rc::downgrade(&row);
     install.connect_clicked(move |_| {
-        if let Some(row) = weak.upgrade() { row.install(); }
+        if let Some(row) = weak.upgrade() {
+            row.install();
+        }
     });
     let weak = Rc::downgrade(&row);
     cancel.connect_clicked(move |_| {
-        if let Some(row) = weak.upgrade() { row.cancel(); }
+        if let Some(row) = weak.upgrade() {
+            row.cancel();
+        }
     });
     row.render();
     row.check_installed(false);
@@ -251,17 +375,50 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .margin_end(18)
         .css_classes(["fileid-tab"])
         .build();
-    root.append(&gtk::Label::builder().label("Scan models").xalign(0.0).css_classes(["title-1"]).build());
+    root.append(
+        &gtk::Label::builder()
+            .label("Local models and runtimes")
+            .xalign(0.0)
+            .css_classes(["title-1"])
+            .build(),
+    );
     root.append(&gtk::Label::builder()
-        .label("The Library scan requires these two local model bundles. Nothing is downloaded unless you press Install. The engine verifies each file against its pinned SHA-256 before marking the bundle installed. No Deep Analyze models are offered on Linux.")
+        .label("Library uses CLIP and face models. Native Deep AI, timeline generation and model-backed Chat remain unavailable with this backend. Nothing is downloaded unless you press Install. Installed means pinned SHA-256 verified weights, not backend availability or a ready inference runtime. Restricted models are not offered by this Linux picker.")
         .xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
-    let connection = gtk::Label::builder().label("Engine: starting…").xalign(0.0).css_classes(["dim-label"]).build();
+    root.append(
+        &gtk::Label::builder()
+            .label("Native runtime configuration")
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build(),
+    );
+    root.append(&gtk::Label::builder().label("Optional executable configuration below is information only. These ELF/header checks do not attest the actual backend loader, version, provenance, license or model execution, and do not enable native AI. Invalid optional paths do not block ordinary Library or Settings startup. FileID does not bundle or download FFmpeg/ffprobe here.").xalign(0.0).wrap(true).build());
+    root.append(
+        &gtk::Label::builder()
+            .label(crate::native_runtime::summary())
+            .xalign(0.0)
+            .wrap(true)
+            .selectable(true)
+            .build(),
+    );
+    let connection = gtk::Label::builder()
+        .label(if engine.borrow().is_ready() {
+            "Engine: ready"
+        } else {
+            "Engine: starting…"
+        })
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
     root.append(&connection);
-    let rows: Vec<Rc<ModelRow>> = SCAN_MODELS.iter().map(|(kind, title, description)| {
-        let (card, row) = build_model_row(kind, title, description, &engine);
-        root.append(&card);
-        row
-    }).collect();
+    let rows: Vec<Rc<ModelRow>> = LOCAL_MODELS
+        .iter()
+        .map(|(kind, title, description)| {
+            let (card, row) = build_model_row(kind, title, description, &engine);
+            root.append(&card);
+            row
+        })
+        .collect();
     let rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(async move {
         while let Ok(event) = rx.recv().await {
@@ -275,7 +432,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                 }
                 EngineState::Error { kind, message, model_kind: Some(model_kind) } => {
                     for row in &rows {
-                        if row.kind == model_kind { row.on_error(kind, message); }
+                        if row.kind == model_kind && matches!(*row.transfer.borrow(), Transfer::Downloading { .. } | Transfer::Cancelling) { row.on_error(kind, message); }
                     }
                 }
                 EngineState::Failed(message) => {
@@ -289,11 +446,17 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         }
                     }
                 }
+                EngineState::Exited => {
+                    connection.set_label("Engine exited. Restart FileID before installing models.");
+                    for row in &rows { row.engine_ready.set(false); row.render(); }
+                }
                 _ => {}
             }
         }
     });
-    let scroll = gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
     scroll.set_child(Some(&root));
     scroll.upcast()
 }

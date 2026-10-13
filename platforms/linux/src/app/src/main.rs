@@ -7,6 +7,7 @@
 // engine subprocess, and presents the main window.
 
 mod engine_client;
+mod native_runtime;
 mod spring;
 mod tabs;
 mod window;
@@ -27,9 +28,7 @@ fn main() -> glib::ExitCode {
         .with_target(false)
         .init();
 
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
 
     app.connect_startup(|_| {
         load_brand_css();

@@ -367,6 +367,19 @@ pub struct RestructureMove {
     /// Plain-language "why filed here" shown in the drill-down. None when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Plan-time source identity. A plan is a snapshot taken at plan time and
+    /// applied after an arbitrary delay, so `source` alone is not authoritative:
+    /// a file replaced at the same path is a DIFFERENT file. Apply re-checks the
+    /// live DB row and stats the file on disk against these before moving.
+    /// (audit P1 — stale plan could move a replacement file)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_ref: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1268,6 +1281,10 @@ mod tests {
                     tier: Some("Anchor".into()),
                     confidence: "auto".into(),
                     reason: Some("Photo from 2024".into()),
+                    content_hash: None,
+                    size_bytes: None,
+                    file_ref: None,
+                    modified_at: None,
                 }],
                 use_symlinks: false,
             }),

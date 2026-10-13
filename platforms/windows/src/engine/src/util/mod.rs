@@ -7,6 +7,7 @@ pub mod content_hash;
 pub(crate) mod elevation;
 pub(crate) mod hmac;
 pub(crate) mod hnsw_index;
+pub(crate) mod file_move;
 pub(crate) mod keywords;
 pub mod path_safety;
 pub mod read_only;

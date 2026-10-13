@@ -38,16 +38,17 @@ pub fn execute(conn: &mut Connection, request: &ChatRequest) -> Result<ChatRespo
         "send" => {
             let text = request.text.as_deref().unwrap_or_default();
             if text.trim().is_empty() || text.chars().count()>2000 { bail!("A message of at most 2000 characters is required") }
+            let (people, events) = super::catalog_retrieval::known(conn)?;
             let previous = {
                 let mut statement = conn.prepare("SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=?1 AND role='user' ORDER BY rowid DESC LIMIT 20) ORDER BY rowid")?;
                 let messages = statement.query_map([&request.conversation_id], |r| r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-                messages.iter().fold(None, |previous,text| Some(super::chat_search::SearchPlan::resolve(text,previous.as_ref())))
+                messages.iter().fold(None, |previous,text| Some(super::chat_search::SearchPlan::resolve_known(text,previous.as_ref(), &people, &events)))
             };
-            let plan = super::chat_search::SearchPlan::resolve(text,previous.as_ref());
-            response.hits = super::catalog::search(conn,&plan.query,&plan.kinds)?;
+            let plan = super::chat_search::SearchPlan::resolve_known(text,previous.as_ref(), &people, &events);
+            response.hits = super::catalog_retrieval::search(conn,&plan.query,&plan.kinds,&plan.person_ids,&plan.event_ids,plan.time_seconds)?;
             let scope = if plan.query.is_empty() { "all catalog files".to_owned() } else { format!("“{}”",plan.query) };
             let filter = if plan.kinds.is_empty() { String::new() } else { format!(" ({})",plan.kinds.join(", ")) };
-            response.message = if plan.query.is_empty() && plan.kinds.is_empty() {
+            response.message = if plan.query.is_empty() && plan.kinds.is_empty() && plan.person_ids.is_empty() && plan.event_ids.is_empty() && plan.time_seconds.is_none() {
                 "Add a subject or a media type such as videos or photos. No search was run.".into()
             } else if response.hits.is_empty() {
                 format!("No keyword matches for {scope}{filter}. Try names or a few descriptive terms. Unanalyzed files may still contain the requested event.")
