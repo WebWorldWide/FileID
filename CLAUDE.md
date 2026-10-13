@@ -9,7 +9,7 @@ FileID/
 ├── platforms/
 │   ├── apple/      ← macOS — Swift / SwiftUI / MLX / GRDB
 │   ├── windows/    ← Windows — Rust engine ('fileid-engine') + WinUI 3 / .NET 8
-│   └── linux/      ← deferred; engine is cross-platform-clean, UI port unstarted
+│   └── linux/      ← Rust engine + native GTK4 / libadwaita app
 ├── shared/
 │   ├── ipc-schema/ ← canonical IPC contract (JSON Schema → Swift/Rust/C# DTOs)
 │   ├── docs/       ← cross-platform docs (see Persistence files)
@@ -18,18 +18,19 @@ FileID/
 └── README.md
 ```
 
-Both apps are feature-complete across six tabs (Library · People · Cleanup · Deep Analyze · Restructure · Settings). macOS remains the **visual + behavioral reference**; Windows currently leads on the commercial-clean model stack (merged, CI-green) with the macOS mirror in progress.
+All three desktop apps implement six tabs (Library · People · Cleanup · Deep Analyze · Restructure · Settings) plus the Search & Moments, File Tools and Chat workbenches. macOS remains the **visual + behavioral reference**. The shared Rust engine (`platforms/windows/src/engine`) serves Windows, Linux, the CLI and the TUI; native hardware, packaging, signing and hosted-CI release gates are tracked in `shared/docs/NEXT.md` and `shared/docs/SHIP.md`.
 
 ## Per-platform dev guides
 
 Read the one for the work in front of you:
 - `platforms/windows/CLAUDE.md` — Rust engine, WinUI 3, ONNX Runtime (DirectML/CUDA/…), llama.cpp.
 - `platforms/apple/CLAUDE.md` — Swift engine + SwiftUI app, MLX, GRDB.
+- `platforms/linux/CLAUDE.md` — Rust engine client, GTK4/libadwaita, and Linux packaging.
 
 ## Cross-platform principles (apply everywhere)
 
 - **No telemetry, ever.** No analytics, crash-reporting, update pings, or download instrumentation. The only network egress is user-initiated model downloads from `huggingface.co`. CI scans every shipped binary for telemetry strings as a release blocker. Never propose a feature that violates this.
-- **Commercial-clean, Apache-2.0.** The project is Apache-2.0 (root `LICENSE`); every default model weight is permissively licensed (Apache-2.0 / MIT) so the app can be open-sourced *and* commercialized. No non-commercial weights in the shipped set. New models go through `shared/docs/MODELS.md` with the license vetted.
+- **Commercial-clean, Apache-2.0.** The project is Apache-2.0 (root `LICENSE`); every default model weight is permissively licensed (Apache-2.0 / MIT) so the app can be open-sourced *and* commercialized. No non-commercial weights may ship or be offered. Optional models under separately accepted terms (Gemma) stay opt-in with their terms shown at install. New models go through `shared/docs/MODELS.md` with the license vetted.
 - **Performance is a feature.** Match or beat the macOS pipeline (≥140 files/s on comparable mid-tier hardware). Use the GPU/NPU when present; degrade gracefully to CPU.
 - **The IPC contract is the contract.** Anything new lands in `shared/ipc-schema/ipc.schema.json` first; the per-platform DTOs mirror it. Schema drift = build break.
 - **macOS is the visual reference; ports are 1:1.** Same palette (gold `#FFCC00`, lavender `#B19BCE`, cyan `#A0E2EA`, pink `#F2A6C0`), same springs (response 0.35–0.4 / dampingFraction 0.78–0.8), same `LavaLampBackground`. Native primitives per platform — never web tech.
