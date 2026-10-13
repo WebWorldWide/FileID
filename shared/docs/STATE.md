@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 19:10 UTC — Shared Rust engine integration under review
+
+An isolated `codex/shared-engine-integration` worktree merges the older `parity/shared-engine` checkpoint into the portable-video branch without changing PR #234's head. The merge retains current catalog chapter/text search and video File Tools fields, adds the branch's persistent visual catalog index and shared resource scheduler, and enables the approved `instant-distance` serialization feature with MIT/Apache-2.0 `serde-big-array` 0.5.1. Linux VM source compilation, strict Clippy, and 451 Rust library tests pass; Rust formatting, runtime-egress, and bootstrap supply-chain gates pass. Windows build/runtime, broader cross-platform integration, hosted CI, and release acceptance remain open.
+
 ## 2026-10-13 18:53 UTC — GitHub draft review and policy repair
 
 Committed and pushed portable video checkpoint `f97bba79` to `codex/portable-video-export` and opened draft PR #234. The first hosted action-pins job found the new FFmpeg builder scripts absent from the repository's reviewed shell inventory and a stale digest for Linux staging. The reviewed script digests and explicit builder allowance now pass all 18 local bootstrap-policy tests and the direct gate. The runtime-egress test's exact role inventory also needed the already reviewed video-worker entry; its focused inventory test and direct gate pass. This policy repair is a separate follow-up commit. Other hosted jobs are still running; no merge or release acceptance is claimed.

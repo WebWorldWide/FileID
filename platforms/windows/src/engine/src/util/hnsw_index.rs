@@ -15,7 +15,7 @@ use instant_distance::{Builder, HnswMap, Point, Search};
 use std::sync::OnceLock;
 
 /// Owned f32 embedding; `Point` implements squared-L2 over the vector.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Embedding(pub(crate) Vec<f32>);
 
 impl Point for Embedding {
@@ -33,6 +33,10 @@ impl Point for Embedding {
 /// Build an HNSW index from `(embedding, value)` pairs. `value` is whatever
 /// the caller wants to recover at search time (e.g. a `file_id` or `face_id`).
 pub(crate) fn build<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>) -> HnswMap<Embedding, V> {
+    build_with_search_limit(points, 100)
+}
+
+pub(crate) fn build_with_search_limit<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>, limit: usize) -> HnswMap<Embedding, V> {
     let (embeds, values): (Vec<_>, Vec<_>) =
         points.into_iter().map(|(e, v)| (Embedding(e), v)).unzip();
     // Fixed seed: instant-distance's Builder::default() seeds its layer-shuffle
@@ -45,7 +49,7 @@ pub(crate) fn build<V: Clone + Send + Sync>(points: Vec<(Vec<f32>, V)>) -> HnswM
     static BUILDER_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     let pool = BUILDER_POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1)
         .build().expect("HNSW construction worker must be available"));
-    pool.install(|| Builder::default().seed(0xF11E_1D00).build(embeds, values))
+    pool.install(|| Builder::default().ef_search(limit).seed(0xF11E_1D00).build(embeds, values))
 }
 
 /// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a

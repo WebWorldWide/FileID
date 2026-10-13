@@ -105,7 +105,7 @@ crossbeam-channel = "0.5"
 # CLIP/BGE semantic search above ~10 k vectors, where brute-force cosine
 # becomes the bottleneck. No C/C++ build dep (rejected `usearch` for that
 # reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
-instant-distance = "0.6"
+instant-distance = { version = "0.6", features = ["with-serde"] }
 rayon = "1.12"
 
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,

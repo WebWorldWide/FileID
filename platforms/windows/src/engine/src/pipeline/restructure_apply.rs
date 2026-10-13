@@ -554,16 +554,24 @@ fn make_symlink(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
 
 #[cfg(not(windows))]
 fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
-    if std::fs::rename(src, dst).is_ok() {
-        return Ok(());
+    crate::util::file_move::move_no_clobber(Path::new(src), dst, || Ok(()))
+        .map_err(|error| ApplyError::Other(error.into()))
+}
+
+#[cfg(test)]
+fn portable_move_file(
+    src: &Path,
+    dst: &Path,
+    link_source: impl Fn(&Path, &Path) -> std::io::Result<()>,
+    remove_source: impl Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    struct Io<L,R>(L,R);
+    impl<L,R> crate::util::file_move::MoveFileIo for Io<L,R>
+    where L: Fn(&Path,&Path)->std::io::Result<()>, R: Fn(&Path)->std::io::Result<()> {
+        fn link_source(&self, from:&Path, to:&Path)->std::io::Result<()> { (self.0)(from,to) }
+        fn remove_source(&self, path:&Path)->std::io::Result<()> { (self.1)(path) }
     }
-    match std::fs::copy(src, dst) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(src);
-            Ok(())
-        }
-        Err(e) => Err(ApplyError::Other(anyhow::Error::from(e))),
-    }
+    crate::util::file_move::move_with_io(src,dst,&Io(link_source,remove_source),||Ok(()))
 }
 
 #[cfg(not(windows))]
@@ -1024,5 +1032,51 @@ mod tests {
         assert!(real.exists(), "the real file must be untouched");
         assert!(!root.join("Sorted").join("x.jpg").exists());
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod portable_move_tests {
+    use super::*;
+    fn fixture() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let directory = std::env::temp_dir().join(format!("fileid-portable-move-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let src=directory.join("source"); let dst=directory.join("destination");
+        std::fs::write(&src,b"source bytes").unwrap(); (directory,src,dst)
+    }
+    #[test]
+    fn publication_never_overwrites_and_removal_failure_is_not_success() {
+        for copy in [false,true] {
+            let (directory,src,dst)=fixture();
+            std::fs::write(&dst,b"occupied").unwrap();
+            let result=portable_move_file(&src,&dst,|from,to| if copy { Err(std::io::ErrorKind::CrossesDevices.into()) } else { std::fs::hard_link(from,to) }, |path| std::fs::remove_file(path));
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&src).unwrap(),b"source bytes"); assert_eq!(std::fs::read(&dst).unwrap(),b"occupied");
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(),2);
+            std::fs::remove_file(&dst).unwrap();
+            let result=portable_move_file(&src,&dst,|from,to| if copy { Err(std::io::ErrorKind::CrossesDevices.into()) } else { std::fs::hard_link(from,to) }, |_| Err(std::io::ErrorKind::PermissionDenied.into()));
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&src).unwrap(),b"source bytes"); assert_eq!(std::fs::read(&dst).unwrap(),b"source bytes");
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(),2);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+    #[test]
+    fn same_device_and_cross_device_fallback_preserve_bytes() {
+        for copy in [false,true] {
+            let (directory,src,dst)=fixture();
+            portable_move_file(&src,&dst,|from,to| if copy { Err(std::io::ErrorKind::CrossesDevices.into()) } else { std::fs::hard_link(from,to) }, |path| std::fs::remove_file(path)).unwrap();
+            assert!(!src.exists()); assert_eq!(std::fs::read(&dst).unwrap(),b"source bytes");
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(),1);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+    #[test]
+    fn destination_race_is_rejected_and_nonfiles_are_preserved() {
+        let (directory,src,dst)=fixture();
+        let result=portable_move_file(&src,&dst,|from,to| { std::fs::write(to,b"racing destination")?; std::fs::hard_link(from,to) }, |path| std::fs::remove_file(path));
+        assert!(result.is_err()); assert_eq!(std::fs::read(&src).unwrap(),b"source bytes"); assert_eq!(std::fs::read(&dst).unwrap(),b"racing destination");
+        assert!(portable_move_file(&directory,&dst,|from,to| std::fs::hard_link(from,to), |path| std::fs::remove_file(path)).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
