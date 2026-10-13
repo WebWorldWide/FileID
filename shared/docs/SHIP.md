@@ -2,7 +2,7 @@
 
 ## 2026-10-13 shared-engine and Store integration review
 
-PR #234 is merged; exact-main CI is still running. Draft PR #235 has 13 exact-head checks passing and three in progress. The Store/parity integration is an unpublished worktree with Linux Rust/GTK and Windows .NET development tests passing, and Windows Rust check/strict Clippy passing, while Windows Rust library tests and hosted checks remain open. Neither branch has signed cross-platform runtime acceptance. Production release still requires the native Store/Flatpak/Mac signed packages and legal, hardware, model, fidelity, performance, privacy, and crash-recovery gates listed below and in `NEXT_VERSION.md`.
+PR #235 passed all 16 exact-head checks and merged into `main` at `347f7e64`; exact-main CI is pending. Store integration draft PR #238 targets `main`; Linux Rust/GTK, Windows .NET, and Windows Rust development suites pass, while hosted checks and native runtime acceptance remain open. Neither integration has signed cross-platform runtime acceptance. Production release still requires the native Store/Flatpak/Mac signed packages and legal, hardware, model, fidelity, performance, privacy, and crash-recovery gates listed below and in `NEXT_VERSION.md`.
 
 ## 2026-10-13 portable video development checkpoint
 
