@@ -22,6 +22,7 @@
 #   pwsh build/build-all.ps1 -SkipEngine        # WinUI-only iteration
 #   pwsh build/build-all.ps1 -SkipApp           # Engine-only iteration
 #   pwsh build/build-all.ps1 -RunTests          # cargo test + dotnet test
+#   pwsh build/build-all.ps1 -MediaDir C:\absolute\path\to\media  # verified x64 development video runtime
 #
 # Failure modes the script catches and explains (instead of leaking a
 # raw stack trace):
@@ -75,11 +76,19 @@ param(
     # + parallel codegen, ~40-60% faster) and dotnet runs with explicit
     # `-m` (max-CPU). Use for inner-loop iteration; ship builds use plain
     # -Release for fat LTO.
-    [switch]$Fast
+    [switch]$Fast,
+    [string]$MediaDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
+if ($MediaDir -and $Arm64) {
+    throw 'The approved portable media development runtime is Windows x64 only.'
+}
+if ($MediaDir -and $SkipEngine) {
+    throw 'Build the engine when staging the portable media runtime.'
+}
 
 # -Wipe and -WipeDbOnly are mutually exclusive: one is "nuke everything",
 # the other is "touch only the SQLite triplet". Combining them is ambiguous.
@@ -360,6 +369,11 @@ if (-not $SkipEngine) {
     }
 }
 
+if ($MediaDir) {
+    $stageMedia = Join-Path $ScriptDir 'stage-media.ps1'
+    & $stageMedia -SourceDir $MediaDir -DestinationRoot $StagingDir
+}
+
 # --- 4. App build -----------------------------------------------------------
 if (-not $SkipApp) {
     if ($restoreJob) {
@@ -429,6 +443,9 @@ if (-not $SkipApp) {
                 Copy-Item -LiteralPath $script:RuntimeDlls[$name] -Destination (Join-Path $AppOutDir $name) -Force
                 Write-Host "  $name colocated with FileID.exe" -ForegroundColor Green
             }
+        }
+        if ($MediaDir) {
+            & $stageMedia -SourceDir $MediaDir -DestinationRoot $AppOutDir
         }
     }
 

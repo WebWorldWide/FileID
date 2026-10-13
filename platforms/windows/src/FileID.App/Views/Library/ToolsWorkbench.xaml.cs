@@ -18,6 +18,7 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
     private string? _operationID;
     private bool _executed;
     private bool _hasUndo;
+    private bool _cancelRequested;
     private bool _disposed;
     private bool _initialized;
 
@@ -27,7 +28,6 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
         _initialized = true;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         Loaded += (_, _) => Send("capabilities");
-        Unloaded += (_, _) => Dispose();
         SetBusy(false);
     }
 
@@ -36,6 +36,7 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
         if (_disposed || _requestID != null) return;
         var requestID = Guid.NewGuid().ToString();
         _requestID = requestID;
+        _cancelRequested = false;
         _generation = EngineClient.Instance.SpawnGeneration;
         _action = action;
         SetBusy(true);
@@ -114,6 +115,7 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
         if (!Accepts(response.RequestID)) return;
         var action = _action;
         _requestID = null;
+        _cancelRequested = false;
         Status.Text = response.Message;
         if (action == "capabilities" && response.Status == "ok")
         {
@@ -143,6 +145,7 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
     {
         if (!_initialized || _requestID != null) return;
         _operationID = null;
+        _cancelRequested = false;
         _executed = false;
         _hasUndo = false;
         Outputs.Items.Clear();
@@ -152,8 +155,11 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
     private ToolRecipe? Recipe()
     {
         if (Kind.SelectedItem is not ComboBoxItem { Tag: ToolCapability capability } || Format.SelectedItem is not string format) return null;
-        if (!double.IsFinite(Dimension.Value) || Dimension.Value != Math.Truncate(Dimension.Value) || Dimension.Value < 1 || Dimension.Value > 8192) return null;
-        return new ToolRecipe(capability.Id, format, (uint)Dimension.Value, capability.Id == "photo" ? Enlarge.IsOn : null);
+        if (capability.Id != "video" && (!double.IsFinite(Dimension.Value) || Dimension.Value != Math.Truncate(Dimension.Value) || Dimension.Value < 1 || Dimension.Value > 8192)) return null;
+        var dimension = capability.Id == "video" ? VideoResolution.SelectedIndex switch { 0 => 1280u, 1 => 1920u, _ => 0u } : (uint)Dimension.Value;
+        if (dimension == 0 || (capability.Id == "video" && VideoFrame.SelectedItem is not ComboBoxItem)) return null;
+        return new ToolRecipe(capability.Id, format, dimension, capability.Id == "photo" ? Enlarge.IsOn : null,
+            capability.Id == "video" ? (VideoFrame.SelectedItem as ComboBoxItem)?.Tag as string : null);
     }
 
     private void SetBusy(bool busy)
@@ -161,9 +167,12 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
         Query.IsEnabled = Search.IsEnabled = Refresh.IsEnabled = Hits.IsEnabled = Choose.IsEnabled = Kind.IsEnabled = Format.IsEnabled = !busy;
         Dimension.IsEnabled = !busy && Kind.SelectedItem is ComboBoxItem { Tag: ToolCapability { Id: "photo" } };
         Enlarge.IsEnabled = Dimension.IsEnabled;
+        VideoResolution.IsEnabled = VideoFrame.IsEnabled = !busy && Kind.SelectedItem is ComboBoxItem { Tag: ToolCapability { Id: "video" } };
         History.IsEnabled = !busy;
         Preview.IsEnabled = !busy && Hits.SelectedItems.Count > 0 && _destination != null && Recipe() != null;
         Export.IsEnabled = !busy && _operationID != null && !_executed;
+        Cancel.IsEnabled = busy && _action == "execute" && _operationID != null && !_cancelRequested
+            && Kind.SelectedItem is ComboBoxItem { Tag: ToolCapability { Id: "video" } };
         Undo.IsEnabled = !busy && _operationID != null && _hasUndo;
     }
 
@@ -172,11 +181,34 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
     private void OnHistory(object sender, RoutedEventArgs args) => Send("history");
     private void OnPreview(object sender, RoutedEventArgs args) { if (Recipe() is { } recipe) Send("preview", recipe); }
     private void OnExport(object sender, RoutedEventArgs args) => Send("execute");
+    private async void OnCancel(object sender, RoutedEventArgs args)
+    {
+        if (_disposed || _action != "execute" || _requestID == null || _operationID == null || _cancelRequested) return;
+        _cancelRequested = true;
+        SetBusy(true);
+        Status.Text = "Stopping the current video worker…";
+        try
+        {
+            await EngineClient.Instance.SendCommandAsync(new ToolRequestCommand(
+                new ToolRequest(Guid.NewGuid().ToString(), "cancel", OperationID: _operationID)));
+        }
+        catch (Exception)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (_disposed || _requestID == null) return;
+                _cancelRequested = false;
+                SetBusy(true);
+                Status.Text = "The stop request did not reach the engine. Try again.";
+            });
+        }
+    }
     private void OnUndo(object sender, RoutedEventArgs args) => Send("undo");
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs args) => Invalidate();
     private void OnFormatChanged(object sender, SelectionChangedEventArgs args) => Invalidate();
     private void OnDimensionChanged(NumberBox sender, NumberBoxValueChangedEventArgs args) => Invalidate();
     private void OnEnlargeChanged(object sender, RoutedEventArgs args) => Invalidate();
+    private void OnVideoChanged(object sender, SelectionChangedEventArgs args) => Invalidate();
 
     private void OnKindChanged(object sender, SelectionChangedEventArgs args)
     {
@@ -189,6 +221,7 @@ public sealed partial class ToolsWorkbench : UserControl, IDisposable
             Detail.Text = capability.Detail;
             Enlarge.Visibility = capability.Id == "photo" ? Visibility.Visible : Visibility.Collapsed;
             Dimension.Visibility = capability.Id == "photo" ? Visibility.Visible : Visibility.Collapsed;
+            VideoOptions.Visibility = capability.Id == "video" ? Visibility.Visible : Visibility.Collapsed;
         }
         Invalidate();
     }

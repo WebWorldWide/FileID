@@ -7,7 +7,39 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashSet, fs::{self, File, OpenOptions}, io::{Read, Write, Seek, SeekFrom}, path::Path, sync::Arc};
+use std::{collections::{HashMap, HashSet}, fs::{self, File, OpenOptions}, io::{Read, Write, Seek, SeekFrom}, path::Path, sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}}};
+
+static ACTIVE_EXPORTS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+
+fn active_exports() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    ACTIVE_EXPORTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct ActiveExport(String);
+
+impl ActiveExport {
+    fn register(id: &str, cancelled: Arc<AtomicBool>) -> Result<Self> {
+        let mut active = active_exports().lock();
+        if active.contains_key(id) { bail!("This export is already running") }
+        active.insert(id.to_owned(), cancelled);
+        Ok(Self(id.to_owned()))
+    }
+}
+
+impl Drop for ActiveExport {
+    fn drop(&mut self) { active_exports().lock().remove(&self.0); }
+}
+
+fn cancel_active(request: &ToolRequest) -> Result<ToolResponse> {
+    if request.request_id.is_empty() || request.request_id.chars().count() > 200 { bail!("Invalid tools request") }
+    let id = request.operation_id.as_deref().context("Choose a running export")?;
+    let active = active_exports().lock();
+    let cancelled = active.get(id).context("No running export matches this request")?;
+    cancelled.store(true, Ordering::Release);
+    let mut response = response(&request.request_id, "ok", "Stopping the current video worker. Completed exports remain recoverable.");
+    response.operation_id = Some(id.to_owned());
+    Ok(response)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -31,6 +63,14 @@ struct Receipt {
 
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: ToolRequest) {
     let id = request.request_id.clone();
+    if request.action == "cancel" {
+        let response = match cancel_active(&request) {
+            Ok(response) => response,
+            Err(error) => response(&id, "error", &error.to_string()),
+        };
+        sink.send(IpcEvent::now(EventPayload::ToolResponse(Wrap::new(response)))).await;
+        return;
+    }
     let result = tokio::task::spawn_blocking(move || {
         let db = database.context("The catalog database is unavailable")?;
         let mut conn = db.lock();
@@ -49,15 +89,17 @@ fn response(id: &str, status: &str, message: &str) -> ToolResponse {
 fn capabilities() -> Vec<ToolCapability> {
     vec![ToolCapability{id:"photo".into(),available:true,input_formats:vec!["png".into(),"jpeg".into()],output_formats:vec!["png".into(),"jpeg".into(),"tiff".into()],detail:"Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected; this does not recover missing detail. EXIF orientation is applied. Camera/location metadata is stripped; inputs with embedded ICC profiles are rejected until color-managed conversion is available. Output is 8-bit SDR. JPEG transparency is flattened onto white. HEIC/TIFF inputs are not yet supported on this adapter.".into()},
     ToolCapability{id:"chapters".into(),available:true,input_formats:vec!["catalog chapters".into()],output_formats:vec!["json".into(),"vtt".into()],detail:"Export current chapter markers. WebVTT is a chapter cue list, not speech subtitles.".into()},
-    ToolCapability{id:"video".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Native video export is currently macOS-only; the portable worker is not available.".into()},
+    ToolCapability{id:"video".into(),available:super::video_export::available(),input_formats:vec!["mp4".into(),"mov".into(),"m4v".into()],output_formats:vec!["mp4".into()],detail:"Vetted local FFmpeg/OpenH264 runtime exports 1280 or 1920 pixel H.264/AAC MP4. Source, 9:16, 16:9, 1:1 and 4:5 frames fit the entire image with padding. SDR only; one video and at most one audio stream. Originals are preserved.".into()},
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
 }
 fn supports(recipe: &ToolRecipe) -> bool {
     (1..=8192).contains(&recipe.max_dimension) &&
     (recipe.allow_upscale != Some(true) || recipe.kind=="photo") &&
-    recipe.video_aspect_ratio.is_none() &&
+    (recipe.video_aspect_ratio.is_none() || recipe.kind=="video") &&
     ((recipe.kind=="photo" && ["png","jpeg","tiff"].contains(&recipe.format.as_str())) ||
-     (recipe.kind=="chapters" && ["json","vtt"].contains(&recipe.format.as_str())))
+     (recipe.kind=="chapters" && ["json","vtt"].contains(&recipe.format.as_str())) ||
+     (recipe.kind=="video" && recipe.format=="mp4" && [1280,1920].contains(&recipe.max_dimension) &&
+      ["source","9:16","16:9","1:1","4:5"].contains(&recipe.video_aspect_ratio.as_deref().unwrap_or("source")) && super::video_export::available()))
 }
 fn hash(path: &Path) -> Result<String> {
     let metadata=fs::symlink_metadata(path)?;
@@ -99,15 +141,17 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
                 let source_path=Path::new(&source);
                 let chapters=super::catalog::chapters(conn,file_id)?.into_iter().filter(|c|!c.stale).collect::<Vec<_>>();
                 if recipe.kind=="chapters" && chapters.is_empty(){bail!("A selected file has no current chapter markers")}
-                if recipe.kind=="photo" {validate_image(source_path)?;}
                 let source_hash=hash(source_path)?;
+                if recipe.kind=="photo" {validate_image(source_path)?;}
+                if recipe.kind=="video" {super::video_export::probe(source_path)?;}
                 let stem=source_path.file_stem().and_then(|s|s.to_str()).context("Invalid source name")?.chars().take(50).collect::<String>();
                 let label=if recipe.kind=="chapters" {"Chapters"} else {"Export"};
+                let frame=if recipe.kind=="video" {recipe.video_aspect_ratio.as_deref().filter(|value| *value!="source").map(|value|format!(" - {} Fit",value.replace(':',"x"))).unwrap_or_default()} else {String::new()};
                 let ext=if recipe.format=="jpeg" {"jpg"} else {&recipe.format};
                 let mut index=1;
                 let output=loop {
                     let suffix=if index==1 {String::new()} else {format!(" ({index})")};
-                    let output=destination.join(format!("{stem} - {label}{suffix}.{ext}"));
+                    let output=destination.join(format!("{stem} - {label}{frame}{suffix}.{ext}"));
                     read_only::require_source_mutation(&output)?;
                     index+=1;
                     let key=output.file_name().context("Invalid output name")?.to_string_lossy().to_lowercase();
@@ -119,26 +163,32 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
             let id=uuid::Uuid::new_v4().to_string();
             conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,serde_json::to_string(&plan)?,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?;
             result.outputs=plan.items.into_iter().map(|i|i.output).collect(); result.operation_id=Some(id);
-            result.message="Creates new files. Originals are preserved; photo outputs strip private metadata and normalize to 8-bit SDR.".into();
+            result.message="Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into();
         }
         "execute"=> {
             let id=request.operation_id.as_deref().context("Preview an export first")?;
             let (mut plan,previous,state)=load(conn,id)?;
             if !supports(&plan.recipe) {bail!("This export recipe is unavailable on this platform")}
             if state!="preview" || !previous.is_empty() {bail!("This plan was already executed. Preview a fresh plan")}
+            let cancelled=(plan.recipe.kind=="video").then(|| Arc::new(AtomicBool::new(false)));
+            let _active=cancelled.as_ref().map(|flag|ActiveExport::register(id,flag.clone())).transpose()?;
             for item in &plan.items {
+                if cancelled.as_ref().is_some_and(|flag|flag.load(Ordering::Acquire)) {bail!("Export cancelled before publication")}
                 if plan.recipe.kind=="chapters" {
                     let current=super::catalog::chapters(conn,item.output.file_id)?.into_iter().filter(|c|!c.stale).collect::<Vec<_>>();
                     if serde_json::to_value(&current)? != serde_json::to_value(&item.chapters)? {bail!("Chapter markers changed after preview. Preview again")}
                 }
                 let output=Path::new(&item.output.output_path); read_only::require_source_mutation(output)?;
                 if hash(Path::new(&item.output.source_path))?!=item.source_hash {bail!("A source changed after preview. Preview again")}
+                if plan.recipe.kind=="video" {super::video_export::probe(Path::new(&item.output.source_path))?;}
                 if output.exists() {bail!("An output name is occupied. Preview again")}
             }
+            if cancelled.as_ref().is_some_and(|flag|flag.load(Ordering::Acquire)) {bail!("Export cancelled before publication")}
             conn.execute("UPDATE catalog_operations SET state='running' WHERE id=?1",[id])?;
             let mut receipts=vec![];
             let run=(||->Result<()> {
                 for item in plan.items.clone() {
+                    if cancelled.as_ref().is_some_and(|flag|flag.load(Ordering::Acquire)) {bail!("Export cancelled before publication")}
                     let output=Path::new(&item.output.output_path); let source=Path::new(&item.output.source_path);
                     let stage=output.parent().context("Invalid output folder")?.join(format!(".FileIDExport-{}.part",uuid::Uuid::new_v4()));
                     read_only::require_writable(&stage)?;
@@ -147,24 +197,35 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
                     let mut file=OpenOptions::new().write(true).create_new(true).open(&stage)?;
                     let prepared=(||->Result<()> {
                         if plan.recipe.kind=="photo" {export_photo(source,&mut file,&plan.recipe)?;}
-                        else {file.write_all(&export_chapters(&item.chapters,&plan.recipe.format)?)?;}
+                        else if plan.recipe.kind=="video" {
+                            let before=super::video_export::probe(source)?;
+                            super::video_export::export(source,&file,&plan.recipe,&before,cancelled.as_deref().context("Missing video cancellation state")?)?;
+                        } else {file.write_all(&export_chapters(&item.chapters,&plan.recipe.format)?)?;}
                         file.sync_all()?; drop(file);
                         if plan.recipe.kind=="photo" {
                             let decoder=ImageReader::open(&stage)?.with_guessed_format()?.into_decoder()?;
                             let decoded=DynamicImage::from_decoder(decoder)?;
                             if decoded.width()==0 || decoded.height()==0 || decoded.width().max(decoded.height())>plan.recipe.max_dimension {bail!("Output validation failed")}
                         }
+                        if plan.recipe.kind=="video" {
+                            let before=super::video_export::probe(source)?;
+                            let after=super::video_export::probe_stage(&stage)?;
+                            super::video_export::verify(&before,&after,&plan.recipe)?;
+                        }
                         if hash(source)?!=item.source_hash {bail!("A source changed during export; its output was not published")}
+                        if cancelled.as_ref().is_some_and(|flag|flag.load(Ordering::Acquire)) {bail!("Export cancelled before publication")}
                         let digest=hash(&stage)?;
                         let mut receipt=Receipt{output:item.output.clone(),hash:digest,derived_id:None,recovery_path:None};
                         receipt.output.message="Prepared output; review this path after interrupted publication.".into();
                         receipts.push(receipt); persist(conn,id,&receipts,"running")?;
-                        read_only::require_writable(output)?; fs::hard_link(&stage,output)?;
+                        read_only::require_writable(output)?;
+                        if cancelled.as_ref().is_some_and(|flag|flag.load(Ordering::Acquire)) {bail!("Export cancelled before publication")}
+                        fs::hard_link(&stage,output)?;
                         let last=receipts.last_mut().context("Missing export receipt")?;
                         last.output.state="completed".into(); last.output.message="Original preserved.".into();
                         let metadata=output.metadata()?;
                         let modified=metadata.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_secs_f64();
-                        let kind=if plan.recipe.kind=="photo" {"image"} else {"doc"};
+                        let kind=match plan.recipe.kind.as_str() {"photo"=>"image","video"=>"video",_=>"doc"};
                         let tx=conn.transaction()?;
                         tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
                         let derived=tx.last_insert_rowid();
@@ -179,7 +240,7 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
             match run { Ok(())=>{persist(conn,id,&receipts,"completed")?;result.message="Export complete. Undo moves unchanged exports into internal recovery storage.".into();}, Err(error)=>{persist(conn,id,&receipts,"failed")?;result.status="error".into();result.message=error.to_string();} }
             result.operation_id=Some(id.into()); result.outputs=receipts.into_iter().map(|r|r.output).collect();
         }
-        "cancel"=>bail!("Export cancellation is not yet available in this adapter; it does not isolate image decoders in workers"),
+        "cancel"=>return cancel_active(request),
         "undo"=> {
             let id=request.operation_id.as_deref().context("Choose an export operation")?;
             let (_,mut receipts,state)=load(conn,id)?;
@@ -289,6 +350,20 @@ mod tests {
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
  fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None,destination_bookmark:None}}
     #[test]
+    fn cancel_targets_only_the_registered_video_operation() {
+        let id=uuid::Uuid::new_v4().to_string();
+        let cancelled=Arc::new(AtomicBool::new(false));
+        let active=ActiveExport::register(&id,cancelled.clone()).unwrap();
+        assert!(ActiveExport::register(&id,Arc::new(AtomicBool::new(false))).is_err());
+        assert!(cancel_active(&action(Some(uuid::Uuid::new_v4().to_string()),"cancel")).is_err());
+        assert!(!cancelled.load(Ordering::Acquire));
+        let result=cancel_active(&action(Some(id.clone()),"cancel")).unwrap();
+        assert_eq!(result.operation_id.as_deref(),Some(id.as_str()));
+        assert!(cancelled.load(Ordering::Acquire));
+        drop(active);
+        assert!(cancel_active(&action(Some(id),"cancel")).is_err());
+    }
+    #[test]
     fn enlargement_is_opt_in_preserves_sources_and_undo() {
         let mut fixture=Fixture::new();
         let original=hash(&fixture.source).unwrap();
@@ -325,7 +400,7 @@ mod tests {
         }
         let framed:ToolRecipe=serde_json::from_str(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":"9:16"}"#).unwrap();
         assert_eq!(framed.video_aspect_ratio.as_deref(),Some("9:16"));
-        assert!(!supports(&framed));
+        assert_eq!(supports(&framed),super::super::video_export::available());
         assert!(serde_json::from_str::<ToolRecipe>(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":1}"#).is_err());
     }
     #[test]
@@ -336,7 +411,7 @@ mod tests {
         let id=preview.operation_id.clone().unwrap();
         fixture.conn.execute("UPDATE catalog_operations SET plan_json=json_set(plan_json,'$.recipe.kind','video','$.recipe.format','mp4','$.recipe.maxDimension',1280) WHERE id=?1",[&id]).unwrap();
         let error=execute(&mut fixture.conn,&action(Some(id.clone()),"execute")).unwrap_err();
-        assert!(error.to_string().contains("unavailable on this platform"));
+        assert!(error.to_string().contains("unavailable on this platform") || error.to_string().contains("Video inputs must be"));
         assert_eq!(fixture.conn.query_row("SELECT state FROM catalog_operations WHERE id=?1",[&id],|r|r.get::<_,String>(0)).unwrap(),"preview");
         assert!(!Path::new(&preview.outputs[0].output_path).exists());
         assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
@@ -352,6 +427,99 @@ mod tests {
         let history=execute(&mut fixture.conn,&action(None,"history")).unwrap();assert_eq!(history.operation_id,preview.operation_id);
         let undone=execute(&mut fixture.conn,&action(preview.operation_id,"undo")).unwrap();assert_eq!(undone.outputs[0].state,"undone");assert!(!output.exists());assert_eq!(hash(&fixture.source).unwrap(),original);
         assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+    #[test]
+    fn video_preview_execute_and_undo_keep_original_and_recovery() {
+        if std::env::var_os("FILEID_FFMPEG_DIR").is_none() { return; }
+        let mut fixture=Fixture::new();
+        let source=fixture.root.join("Portrait.mp4");
+        super::super::video_export::generate_test_video(&source);
+        fixture.conn.execute("UPDATE files SET path_text=?1,kind='video',extension='mp4' WHERE id=1",[source.to_str().unwrap()]).unwrap();
+        let original=hash(&source).unwrap();
+        let mut request=fixture.request("mp4");
+        request.recipe=Some(ToolRecipe{kind:"video".into(),format:"mp4".into(),max_dimension:1280,
+            allow_upscale:None,video_aspect_ratio:Some("16:9".into())});
+        let preview=execute(&mut fixture.conn,&request).unwrap();
+        assert!(preview.outputs[0].output_path.contains("16x9 Fit"));
+        let exported=execute(&mut fixture.conn,&action(preview.operation_id.clone(),"execute")).unwrap();
+        assert_eq!(exported.status,"ok","{}",exported.message);
+        let output=std::path::PathBuf::from(&exported.outputs[0].output_path);
+        let inspected=super::super::video_export::probe(&output).unwrap();
+        assert_eq!((inspected.width,inspected.height),(1280,720));
+        assert_eq!(inspected.audio_count,1);
+        assert_eq!(hash(&source).unwrap(),original);
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        let undone=execute(&mut fixture.conn,&action(preview.operation_id,"undo")).unwrap();
+        assert_eq!(undone.outputs[0].state,"undone");
+        assert!(!output.exists());
+        assert_eq!(hash(&source).unwrap(),original);
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+    #[test]
+    fn cancelled_video_never_publishes_or_changes_original() {
+        if std::env::var_os("FILEID_FFMPEG_DIR").is_none() { return; }
+        let mut fixture=Fixture::new();
+        let source=fixture.root.join("Portrait.mp4");
+        super::super::video_export::generate_test_video(&source);
+        fixture.conn.execute("UPDATE files SET path_text=?1,kind='video',extension='mp4' WHERE id=1",[source.to_str().unwrap()]).unwrap();
+        let original=hash(&source).unwrap();
+        let mut request=fixture.request("mp4");
+        request.recipe=Some(ToolRecipe{kind:"video".into(),format:"mp4".into(),max_dimension:1280,
+            allow_upscale:None,video_aspect_ratio:Some("16:9".into())});
+        let preview=execute(&mut fixture.conn,&request).unwrap();
+        let id=preview.operation_id.clone().unwrap();
+        let canceller=std::thread::spawn(move || {
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            loop {
+                if cancel_active(&action(Some(id.clone()),"cancel")).is_ok() { break; }
+                assert!(std::time::Instant::now()<deadline,"export was never registered");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        let result=execute(&mut fixture.conn,&action(preview.operation_id,"execute"));
+        canceller.join().unwrap();
+        let message=match result { Ok(response)=>response.message, Err(error)=>error.to_string() };
+        assert!(message.contains("cancelled"),"{message}");
+        assert!(!Path::new(&preview.outputs[0].output_path).exists());
+        assert_eq!(hash(&source).unwrap(),original);
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().filter_map(|entry|entry.ok()).filter(|entry|entry.file_name().to_string_lossy().starts_with(".FileIDExport-")).count(),0);
+    }
+    #[test]
+    fn cancelled_staged_video_removes_partial_output() {
+        if std::env::var_os("FILEID_FFMPEG_DIR").is_none() { return; }
+        let mut fixture=Fixture::new();
+        let source=fixture.root.join("Portrait.mp4");
+        super::super::video_export::generate_test_video(&source);
+        fixture.conn.execute("UPDATE files SET path_text=?1,kind='video',extension='mp4' WHERE id=1",[source.to_str().unwrap()]).unwrap();
+        let original=hash(&source).unwrap();
+        let mut request=fixture.request("mp4");
+        request.recipe=Some(ToolRecipe{kind:"video".into(),format:"mp4".into(),max_dimension:1920,
+            allow_upscale:None,video_aspect_ratio:Some("16:9".into())});
+        let preview=execute(&mut fixture.conn,&request).unwrap();
+        let id=preview.operation_id.clone().unwrap();
+        let root=fixture.root.clone();
+        let canceller=std::thread::spawn(move || {
+            let deadline=std::time::Instant::now()+std::time::Duration::from_secs(5);
+            loop {
+                let staged=fs::read_dir(&root).unwrap().filter_map(|entry|entry.ok())
+                    .any(|entry|entry.file_name().to_string_lossy().starts_with(".FileIDExport-"));
+                if staged {
+                    cancel_active(&action(Some(id.clone()),"cancel")).unwrap();
+                    break;
+                }
+                assert!(std::time::Instant::now()<deadline,"export never staged an output");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        let result=execute(&mut fixture.conn,&action(preview.operation_id,"execute"));
+        canceller.join().unwrap();
+        let response=result.unwrap();
+        assert_eq!(response.status,"error");
+        assert!(response.message.contains("cancelled"));
+        assert!(!Path::new(&preview.outputs[0].output_path).exists());
+        assert_eq!(hash(&source).unwrap(),original);
+        assert_eq!(fs::read_dir(&fixture.root).unwrap().filter_map(|entry|entry.ok()).filter(|entry|entry.file_name().to_string_lossy().starts_with(".FileIDExport-")).count(),0);
     }
     #[test]
     fn execution_rejects_changed_sources_and_occupied_outputs() {

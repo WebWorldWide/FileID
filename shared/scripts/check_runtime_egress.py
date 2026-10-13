@@ -74,6 +74,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/models/vlm_server.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
     "platforms/windows/src/engine/src/commands/bulk.rs",
+    "platforms/windows/src/engine/src/commands/video_export.rs",
     "platforms/windows/src/engine/src/main.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
     "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
@@ -126,6 +127,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
+  "platforms/windows/src/engine/src/commands/video_export.rs": "c65a0407fc6d80780cc42174a908cdea1fffbdb61a21f1341b7cb8ba98cf065c",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "b681e22dd5a9276b64371add52bc62917c68e60071cbb9cb0e720c14d86f9ba0",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "2b718da30cc9385b8938f5421beb98f45d49b0dffc1176a4f742034d8ecf3a9f",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "820c7428acee9b0aba5d4a60812e70e117c34bd5ea340c875c215e32d23752e7",
