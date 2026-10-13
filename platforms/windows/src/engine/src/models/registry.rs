@@ -338,7 +338,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
 
             // Executable runtimes are shipped in the signed application package. Only
     // model weights remain in the downloader registry.
-    "whisper" => {
+        "whisper" => {
         let model_dir = models_root.join("whisper");
         LookupResult::Found(Model {
             id: "whisper",
@@ -426,18 +426,105 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── Per-vendor accelerated runtimes (CUDA EP / OpenVINO EP / QNN EP)
-        // are deliberately NOT downloaded by the engine: each requires a
-        // vendor-specific SDK whose redistribution terms (Qualcomm AI Hub
-        // auth, OpenVINO redist guidance, NVIDIA CUDA toolkit) put it
-        // outside the "publicly downloadable for an open-source app" line.
-        // The engine still uses these EPs when their DLLs are on the system
-        // search path: CUDA via the user's system CUDA toolkit (probed in
-        // runtime::system_cuda_toolkit_dir); OpenVINO when the user
-        // installs Intel's redistributable; QNN on Snapdragon devices that
-        // ship the QNN runtime. Per-model `_int8`/`_qnn` variants follow
-        // the same rule — `models::variants` picks them up if dropped into
-        // the model dir by hand, and falls back to the fp32 graph otherwise.
+        // ── Optional CUDA runtimes. These downloads happen only after an
+        // explicit install action and an NVIDIA license-acceptance prompt.
+        // NVIDIA's CUDA redistributable manifest supplies immutable versions,
+        // sizes, and SHA256 pins for each runtime archive.
+        "cudnn_runtime_x64" => {
+            let dir = models_root.join("cudnn");
+            LookupResult::Found(Model {
+                id: "cudnn_runtime_x64",
+                display_name: "NVIDIA cuDNN runtime",
+                files: vec![FileEntry {
+                    url: "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip".into(),
+                    dest: dir.join("cudnn-runtime.zip"),
+                    sha256: Some("3a4cecc8b6d6aa7f6777620e6f2c129b76be635357c4506f2c4ccdbe0e2a1641".into()),
+                    approx_bytes: 430_000_000,
+                }],
+            })
+        }
+        "ort_cuda_x64" => {
+            let dir = models_root.join("packs").join("cuda");
+            LookupResult::Found(Model {
+                id: "ort_cuda_x64",
+                display_name: "ONNX Runtime CUDA pack",
+                files: vec![
+                    FileEntry {
+                        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip".into(),
+                        dest: dir.join("ort-cuda.zip"),
+                        sha256: Some("5b5241716b2628c1ab5e79ee620be767531021149ee68f30fc46c16263fb94dd".into()),
+                        approx_bytes: 312_700_000,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.99-archive.zip".into(),
+                        dest: dir.join("cuda-cudart.zip"),
+                        sha256: Some("1034ca43da4afbc79f69269cc60dc081de631e1c0d229d60f045d9516409317a".into()),
+                        approx_bytes: 2_474_121,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.99-archive.zip".into(),
+                        dest: dir.join("cuda-nvrtc.zip"),
+                        sha256: Some("807c060bbe5175d325d3334fd64fd73d01741a99c65a7460dda74588defdde2a".into()),
+                        approx_bytes: 101_920_164,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.99-archive.zip".into(),
+                        dest: dir.join("cuda-nvtx.zip"),
+                        sha256: Some("3c594eabcfe76082f8b315c33e4af9e175af3cd4306a130f71bba5eac576eab2".into()),
+                        approx_bytes: 65_854,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.2.65-archive.zip".into(),
+                        dest: dir.join("lib-cublas.zip"),
+                        sha256: Some("4229d2b590e4382e1b36651dde644e04c5a8664f99f53bb43dca967982a84f58".into()),
+                        approx_bytes: 391_101_865,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libcufft/windows-x86_64/libcufft-windows-x86_64-11.2.0.44-archive.zip".into(),
+                        dest: dir.join("lib-cufft.zip"),
+                        sha256: Some("265761bc01bd1453a0c4f7427dbc301ee1a68cde57fd8b48ee1fc238ebe827d8".into()),
+                        approx_bytes: 209_047_123,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.5.119-archive.zip".into(),
+                        dest: dir.join("lib-curand.zip"),
+                        sha256: Some("f7c76fcc64112309a26d7725d3357e89be2cf2ac69ed90e5653f290ed8e39078".into()),
+                        approx_bytes: 55_087_995,
+                    },
+                    FileEntry {
+                        url: "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libnvjitlink/windows-x86_64/libnvjitlink-windows-x86_64-12.4.99-archive.zip".into(),
+                        dest: dir.join("lib-nvjitlink.zip"),
+                        sha256: Some("f558101a44a35311ddc7bf0cddff601b341bb70278d443148599a5742ffe5623".into()),
+                        approx_bytes: 91_520_359,
+                    },
+                ],
+            })
+        }
+        "llama_runtime_cuda_x64" => {
+            let dir = models_root.join("llama.cpp-cuda");
+            LookupResult::Found(Model {
+                id: "llama_runtime_cuda_x64",
+                display_name: "llama.cpp CUDA runtime",
+                files: vec![
+                    FileEntry {
+                        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-cuda-12.4-x64.zip".into(),
+                        dest: dir.join("llama-runtime.zip"),
+                        sha256: Some("61280c0e77da6422e0c07e9c930a48903d403cd6f577fe330c1bf94cb7495889".into()),
+                        approx_bytes: 259_875_510,
+                    },
+                    FileEntry {
+                        url: "https://github.com/ggml-org/llama.cpp/releases/download/b9254/cudart-llama-bin-win-cuda-12.4-x64.zip".into(),
+                        dest: dir.join("cudart.zip"),
+                        sha256: Some("8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6".into()),
+                        approx_bytes: 391_443_627,
+                    },
+                ],
+            })
+        }
+
+        // CUDA packs above are explicit opt-in downloads from Microsoft and
+        // NVIDIA; the app records acceptance of the applicable NVIDIA terms.
+        // OpenVINO and QNN remain vendor/system-provided.
         _ => LookupResult::Unknown,
     }
 }
@@ -539,6 +626,13 @@ fn runtime_required_names(name: &str) -> Option<&'static [&'static [&'static str
             &["mtmd.dll", "libmtmd.so", "libmtmd.dylib"],
         ]),
         "cudart.zip" => Some(&[&["cudart64_12.dll"], &["cublas64_12.dll"]]),
+        "cuda-cudart.zip" => Some(&[&["cudart64_12.dll"]]),
+        "cuda-nvrtc.zip" => Some(&[&["nvrtc64_120_0.dll"]]),
+        "cuda-nvtx.zip" => Some(&[&["nvToolsExt64_1.dll"]]),
+        "lib-cublas.zip" => Some(&[&["cublas64_12.dll"], &["cublasLt64_12.dll"]]),
+        "lib-cufft.zip" => Some(&[&["cufft64_11.dll"]]),
+        "lib-curand.zip" => Some(&[&["curand64_10.dll"]]),
+        "lib-nvjitlink.zip" => Some(&[&["nvJitLink_120_0.dll"]]),
         "whisper-runtime.zip" => Some(&[&["main.exe", "whisper-cli.exe", "whisper-cli"]]),
         "cudnn-runtime.zip" => Some(&[&["cudnn64_9.dll"]]),
         "ort-cuda.zip" => Some(&[
@@ -660,9 +754,8 @@ mod tests {
     /// false-fail.
     #[test]
     fn all_model_urls_are_huggingface() {
-        // NOTE: the runtime/EP packs are intentionally NOT all on HF — cuDNN is
-        // on NVIDIA's CDN, llama + ort_cuda are on github (all CI-allowlisted).
-        // ort_openvino IS on HF, so it belongs here for real coverage.
+        // CUDA runtimes are tested separately because they use official
+        // Microsoft/NVIDIA sources after explicit license acceptance.
         let kinds = [
             "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
             "florence2", "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
@@ -678,6 +771,42 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn cuda_runtimes_are_registered_and_every_archive_is_pinned() {
+        for kind in ["cudnn_runtime_x64", "ort_cuda_x64", "llama_runtime_cuda_x64"] {
+            let LookupResult::Found(model) = lookup_full(kind) else {
+                panic!("{kind} is missing from the CUDA runtime registry");
+            };
+            assert!(!model.files.is_empty(), "{kind} has no runtime files");
+            for file in model.files {
+                assert!(file.sha256.as_deref().is_some_and(|hash| hash.len() == 64),
+                    "{kind} has an unpinned artifact: {}", file.url);
+                assert!(
+                    file.url.starts_with("https://github.com/")
+                        || file.url.starts_with("https://developer.download.nvidia.com/"),
+                    "{kind} escaped official CUDA sources: {}", file.url
+                );
+            }
+        }
+        let LookupResult::Found(cuda) = lookup_full("ort_cuda_x64") else { unreachable!() };
+        assert_eq!(cuda.files.len(), 8, "CUDA EP needs matched ORT and all CUDA 12.4 DLL sets");
+        for archive in [
+            "ort-cuda.zip",
+            "cuda-cudart.zip",
+            "cuda-nvrtc.zip",
+            "cuda-nvtx.zip",
+            "lib-cublas.zip",
+            "lib-cufft.zip",
+            "lib-curand.zip",
+            "lib-nvjitlink.zip",
+        ] {
+            assert!(
+                runtime_required_names(archive).is_some(),
+                "CUDA archive {archive} must be attested after extraction"
+            );
         }
     }
 

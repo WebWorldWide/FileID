@@ -45,6 +45,32 @@
     <!-- ─── Brushes ───────────────────────────────────────────────────── -->
     <SolidColorBrush x:Key="GoldBrush"     Color="{StaticResource GoldColor}" />
     <SolidColorBrush x:Key="GoldDimBrush"  Color="{StaticResource GoldDimColor}" />
+
+    <!-- WinUI ToggleSwitch templates derive their on-state from these accent
+         resources. Keep the system-native controls on FileID gold as well. -->
+    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#FFFFCC00" />
+    <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#FFFFD633" />
+    <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#FFE6B800" />
+    <SolidColorBrush x:Key="AccentFillColorDisabledBrush" Color="#66FFCC00" />
+    <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FF141414" />
+    <SolidColorBrush x:Key="TextOnAccentFillColorDisabledBrush" Color="#FF777777" />
+
+    <!-- Keep every native ToggleSwitch on-state in FileID gold, including
+         hover, pressed, and disabled states. WinUI reads these theme keys
+         from the application resource dictionaries. -->
+    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#FFFFCC00" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#FFFFD633" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#FFE6B800" />
+    <SolidColorBrush x:Key="ToggleSwitchFillOnDisabled" Color="#66FFCC00" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOn" Color="#FFFFCC00" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOnPointerOver" Color="#FFFFD633" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOnPressed" Color="#FFE6B800" />
+    <SolidColorBrush x:Key="ToggleSwitchStrokeOnDisabled" Color="#66FFCC00" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#FF141414" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#FF141414" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="#FF141414" />
+    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnDisabled" Color="#FF777777" />
+
     <SolidColorBrush x:Key="AiBrush"       Color="{StaticResource AiColor}" />
     <SolidColorBrush x:Key="InfoBrush"     Color="{StaticResource InfoColor}" />
     <SolidColorBrush x:Key="DelightBrush"  Color="{StaticResource DelightColor}" />

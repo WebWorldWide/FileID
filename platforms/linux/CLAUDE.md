@@ -1,5 +1,11 @@
 # FileID — Linux platform
 
+## Portable feature status (2026-10-10)
+
+The reviewed local parity slice compiles all six tabs and adds Search & Moments, chapter corrections/Undo, catalog-index jobs, supported File Tools and evidence Chat. Restructure uses current-contract planning and accepted Apply/Undo; Tools Undo is enabled after integrated disposable-file safety probes and WSL cross-device export recovery. Deep Analyze reviews stored captions only and explicitly lacks inference. Native Linux/aarch64, real-model/GPU scans and large-library/UI acceptance remain unverified; portable timeline/speech/chapter generation, model-backed chat and isolated interruptible video/conversion workers remain open.
+
+Parent WSL checks passed strict app/engine Clippy, 37 app tests, shared engine tests, explicitly run real-engine GTK/Xvfb workbench interactions and entrypoint smoke. Changed parity files pass targeted rustfmt; whole-app formatting still reports existing main/spring/Cleanup/People/Settings formatting. Use `shared/scripts/check_portable_parity.py --engine <binary>` for synthetic disposable index/mutation probes, not a model-quality or latency claim.
+
 Targeting Linux x86_64 and aarch64 with the canonical macOS app as the 1:1 feature reference. The current GTK app has been exercised under x86_64 WSL/Xvfb, not verified on native Linux hardware or aarch64.
 
 This file covers the Linux code under `platforms/linux/`. For the macOS reference see `platforms/apple/CLAUDE.md`. For the Windows sibling see `platforms/windows/CLAUDE.md`. For cross-platform contracts see `shared/`.
@@ -22,11 +28,15 @@ platforms/linux/
 │       ├── Cargo.toml
 │       └── src/
 │           ├── main.rs             # GTK app entrypoint
-│           ├── window.rs           # Library / People / Settings navigation
+│           ├── window.rs           # six-tab navigation and reachable workbenches
 │           ├── engine_client.rs    # shared engine child process, typed NDJSON IPC
 │           └── tabs/
 │               ├── library.rs      # wired Library
 │               ├── people.rs       # wired indexed People, engine IPC mutations
+│               ├── cleanup.rs      # exact/similar duplicates and Trash
+│               ├── deep_analyze.rs # existing-caption review; inference unavailable
+│               ├── restructure.rs  # current-contract plan / Apply / Undo
+│               ├── workbenches.rs  # Search & Moments / File Tools / Chat
 │               └── settings.rs     # wired required scan-model Settings
 ├── data/                            # XDG desktop entry, AppStream metadata, icon
 └── build/
@@ -57,7 +67,7 @@ The root `./build.sh -linux` delegates to `platforms/linux/build/build.sh`, whic
 
 For isolated staging, set `FILEID_LINUX_DIST_DIR` to a new absolute directory; `CARGO_TARGET_DIR` likewise keeps Cargo artifacts outside the repository.
 
-The compiled UI wires Library, Cleanup, People, and required-model Settings. Library has native folder picking, scan status, filename/tag/text search, kind filtering, and image thumbnails/preview. Cleanup uses read-only SQLite queries and full-file SHA-256 for exact duplicates, indexed perceptual hashes for similar images, typed engine IPC for user-confirmed Trash/restore, and the no-overwrite Linux XDG Trash implementation. People reads indexed faces from the shared engine's SQLite DB, displays face crops and photo details, and saves names, unknown status, and merges via engine IPC. All-hidden people remain reviewable with Show them. Face reassignment is hidden because the shared engine has no `reassignFace` contract. Deep Analyze and Restructure are not wired or compiled.
+The compiled UI wires Library, People, Cleanup, Deep Analyze caption review, Restructure, and required-model Settings, plus reachable Search & Moments, File Tools, and evidence Chat. Library has native folder picking, scan status, filename/tag/text search, kind filtering, and image thumbnails/preview. Cleanup uses read-only SQLite queries and full-file SHA-256 for exact duplicates, indexed perceptual hashes for similar images, typed engine IPC for user-confirmed Trash/restore, and the no-overwrite Linux XDG Trash implementation. People reads indexed faces from the shared engine's SQLite DB, displays face crops and photo details, and saves names, unknown status, and merges via engine IPC. All-hidden people remain reviewable with Show them. Face reassignment is hidden because the shared engine has no `reassignFace` contract. Deep Analyze does not invoke inference; Restructure previews current-contract plans and supports confirmed Apply/Undo. Paged/Sankey plans and cancellation affordances remain unfinished.
 
 Settings offers only `mobileclip_s2` (CLIP image encoder) and `arcface` (YuNet + SFace): user-initiated prewarm/cancel, progress, error/retry, and Installed status gated on pinned SHA256 verification. There is no startup download. Missing-model scan errors open Settings. Offline fake-engine interaction exercised model progress/cancellation, but no real weight download, verified installed-bundle UI state, or inference-backed scan has run. Native Linux VLM runtime/download/inference, video thumbnails, Flatpak, and AppImage remain unsupported.
 
