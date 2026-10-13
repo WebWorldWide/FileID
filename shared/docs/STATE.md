@@ -2,7 +2,7 @@
 
 ## 2026-10-13 — Linux native tab parity under review
 
-The isolated `codex/linux-ui-integration` worktree ports compatible People, Cleanup, Settings, and engine-readiness refinements from the older `parity/linux-ui` checkpoint onto the current GTK app. The older timeline workbench and startup fixture referenced a removed native runtime module and stale IPC fields, so the current workbench is retained. Linux VM GTK compilation and 49 tests pass (1 intentionally ignored); strict Clippy and a native launch smoke are still pending. Settings offers optional pinned HF weights with explicit backend-unavailable messaging; no new downloader or network endpoint is added.
+The isolated `codex/linux-ui-integration` worktree ports compatible People, Cleanup, Settings, and engine-readiness refinements from the older `parity/linux-ui` checkpoint onto the current GTK app. The older timeline workbench and startup fixture referenced a removed native runtime module and stale IPC fields, so the current workbench is retained. Linux VM GTK compilation, strict Clippy, and 49 tests pass (1 intentionally ignored). A real GTK plus engine launch passed under Xvfb with an isolated D-Bus session; the inherited desktop bus did not create the fixture database, so the bus condition is part of the smoke receipt. Settings offers optional pinned HF weights with explicit backend-unavailable messaging; no new downloader or network endpoint is added.
 
 ## 2026-10-13 — Store/parity integration in review after shared-engine draft
 

@@ -2,7 +2,7 @@
 
 ## 2026-10-13 Linux native tab follow-on
 
-Finish strict Clippy and a real GTK launch for `codex/linux-ui-integration`, then publish it for hosted review. Verify Settings optional-weight copy against the current model registry and retain the current Deep, Restructure, and Search/Tools/Chat workbenches.
+Strict Clippy, 49 GTK tests, and an isolated D-Bus/Xvfb real-engine launch pass for `codex/linux-ui-integration`; publish it for hosted review. Verify Settings optional-weight copy against the current model registry and retain the current Deep, Restructure, and Search/Tools/Chat workbenches.
 
 ## 2026-10-13 current integration priority
 
