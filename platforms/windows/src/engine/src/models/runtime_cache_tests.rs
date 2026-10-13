@@ -1,6 +1,6 @@
 use super::*;
 use std::sync::atomic::AtomicU64;
-fn root()->PathBuf{static NEXT:AtomicU64=AtomicU64::new(0);let p=std::env::temp_dir().join(format!("fileid-runtime-key-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));std::fs::create_dir(&p).unwrap();println!("Generated runtime key state retained: {}",p.display());p}
+fn root()->PathBuf{static NEXT:AtomicU64=AtomicU64::new(0);let p=std::env::temp_dir().join(format!("fileid-runtime-key-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));std::fs::create_dir(&p).unwrap();let p=crate::util::path_safety::strip_extended_length(&std::fs::canonicalize(&p).unwrap());println!("Generated runtime key state retained: {}",p.display());p}
 fn flag()->Arc<AtomicBool>{Arc::new(AtomicBool::new(false))}
 #[tokio::test]
 async fn resident_runtime_key_hashes_actual_bytes_and_detects_same_length_change(){let r=root();let p=r.join("metadata-only-runtime");std::fs::write(&p,vec![1;20000]).unwrap();let a=capture_paths(vec![p.clone()],flag()).await.unwrap();assert_eq!(a,capture_paths(vec![p.clone()],flag()).await.unwrap());std::fs::write(&p,vec![2;20000]).unwrap();let b=capture_paths(vec![p],flag()).await.unwrap();assert_ne!(a,b);std::fs::write(r.join("receipt.json"),b"{\"fingerprintedBytesNotExecuted\":true,\"sameLengthMutationDetected\":true}").unwrap();}
