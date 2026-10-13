@@ -58,7 +58,8 @@ Things that are **out of scope**:
   this is known, documented, and tracked in
   [`shared/docs/SHIP.md`](shared/docs/SHIP.md)
 - Vulnerabilities in third-party model weights or in tools you supply on `PATH`
-  (`llama-mtmd-cli`, `tesseract`, `ffmpeg`, HEIC converters). These sit inside
-  your local trust boundary — report those upstream.
+  (`llama-mtmd-cli`, `tesseract`, external `ffmpeg`, HEIC converters). These sit
+  inside your local trust boundary — report those upstream. FileID's own bundled
+  FFmpeg runtime and its staging controls remain in scope.
 - An attacker who already has code execution as your user account, or
   administrator/root on the machine
