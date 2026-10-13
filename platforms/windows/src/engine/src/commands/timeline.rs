@@ -15,6 +15,7 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -46,6 +47,22 @@ impl std::fmt::Display for Interrupted {
     }
 }
 impl std::error::Error for Interrupted {}
+
+/// The visual model the worker consults. The resident VLM lease is the real
+/// implementation; tests substitute a scripted model to exercise the worker.
+pub(crate) trait FrameModel: Sync {
+    fn caption(&self, image: &Path, prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send;
+    fn sequence(&self, images: &[&Path], prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send;
+}
+
+impl FrameModel for ResidentLease {
+    fn caption(&self, image: &Path, prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        self.complete_with_cancel(image, prompt, tokens, cancel)
+    }
+    fn sequence(&self, images: &[&Path], prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        self.complete_sequence_with_cancel(images, prompt, tokens, cancel)
+    }
+}
 
 fn source_changed() -> anyhow::Error {
     anyhow!("The source changed during analysis. Rescan it before continuing.")
@@ -343,10 +360,10 @@ async fn decode_jpeg(source: &Path, seconds: f64, size: (u32, u32), output: Path
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process(
+async fn process<M: FrameModel>(
     id: &str,
     job: &Job,
-    lease: &ResidentLease,
+    model: &M,
     frames: &Path,
     cancel: &Arc<AtomicBool>,
     sink: &Sink,
@@ -381,7 +398,7 @@ async fn process(
                 continue;
             }
             let frame = decode_jpeg(&source.path, seconds.min((duration - 0.05).max(0.0)), size, frames.join(format!("{}.jpg", analysis::millis(seconds))), cancel).await?;
-            let caption = lease.complete_with_cancel(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone()).await;
+            let caption = model.caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone()).await;
             let _ = std::fs::remove_file(&frame);
             let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
             let caption = caption.trim();
@@ -399,7 +416,7 @@ async fn process(
         }
 
         if job.recipe.timeline_mode.as_deref() == Some("moments") {
-            analyze_moments(id, file_id, &source, duration, &signals, size, version, (index, total), lease, frames, cancel, sink, database).await?;
+            analyze_moments(id, file_id, &source, duration, &signals, size, version, (index, total), model, frames, cancel, sink, database).await?;
         }
         require_running(&database.lock(), id)?;
         persist_chapter_suggestions(&database.lock(), file_id, &source, version, duration)?;
@@ -442,7 +459,7 @@ async fn scan_signals(id: &str, file_id: i64, source: &Source, duration: f64, ca
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn analyze_moments(
+async fn analyze_moments<M: FrameModel>(
     id: &str,
     file_id: i64,
     source: &Source,
@@ -451,7 +468,7 @@ async fn analyze_moments(
     size: (u32, u32),
     frame_version: &str,
     (file_index, total_files): (usize, usize),
-    lease: &ResidentLease,
+    model: &M,
     frames: &Path,
     cancel: &Arc<AtomicBool>,
     sink: &Sink,
@@ -493,7 +510,7 @@ async fn analyze_moments(
             }
             let kept: Vec<f64> = distinct.iter().map(|&i| times[i]).collect();
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-            let raw = lease.complete_sequence_with_cancel(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone()).await;
+            let raw = model.sequence(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone()).await;
             remove_all(&paths);
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
             let moments = analysis::parse_moments(&raw, kept.len())?;

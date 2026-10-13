@@ -1,4 +1,5 @@
 use super::*;
+use crate::ipc::sink::Sink;
 
 fn database() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
@@ -172,5 +173,141 @@ fn vetted_runtime_decodes_signals_and_frames_for_analysis() {
     assert_eq!(image::image_dimensions(&jpeg).unwrap(), size);
     cancel.store(true, Ordering::Release);
     assert!(video_export::signal_frames(&source, 0.0, probe.duration, &cancel).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+/// Scripted stand-in for the resident VLM: deterministic captions, a fixed
+/// moment answer, and an optional pause request after N caption calls.
+struct ScriptedModel {
+    captions: Vec<&'static str>,
+    calls: std::sync::atomic::AtomicUsize,
+    sequences: std::sync::atomic::AtomicUsize,
+    pause_after: Option<(usize, Arc<Mutex<Connection>>, String)>,
+}
+
+impl FrameModel for ScriptedModel {
+    fn caption(&self, image: &Path, _: &str, _: u32, _: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let readable = image::image_dimensions(image).is_ok();
+        if let Some((after, database, id)) = &self.pause_after {
+            if call + 1 == *after {
+                database.lock().execute("UPDATE catalog_jobs SET state='paused' WHERE id=?1", [id]).unwrap();
+            }
+        }
+        let text = self.captions[call % self.captions.len()].to_owned();
+        async move { if readable { Ok(text) } else { Err(anyhow!("frame was not a decodable image")) } }
+    }
+    fn sequence(&self, images: &[&Path], _: &str, _: u32, _: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        self.sequences.fetch_add(1, Ordering::SeqCst);
+        let readable = images.len() >= 2 && images.iter().all(|path| image::image_dimensions(path).is_ok());
+        async move {
+            if !readable { bail!("sequence frames were not decodable images") }
+            Ok("```json\n{\"moments\":[{\"title\":\"Ball thrown\",\"summary\":\"A ball leaves a hand.\",\"firstFrame\":1,\"lastFrame\":2}]}\n```".to_owned())
+        }
+    }
+}
+
+fn scripted(captions: Vec<&'static str>, pause_after: Option<(usize, Arc<Mutex<Connection>>, String)>) -> ScriptedModel {
+    ScriptedModel { captions, calls: 0.into(), sequences: 0.into(), pause_after }
+}
+
+fn media_fixture(lavfi: &str) -> Option<(PathBuf, Arc<Mutex<Connection>>)> {
+    if !video_export::available() {
+        eprintln!("vetted FFmpeg runtime not staged; skipping");
+        return None;
+    }
+    let directory = std::env::temp_dir().join(format!("fileid-timeline-e2e-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("clip.mp4");
+    video_export::generate_silent_test_video(&path, lavfi);
+    let metadata = std::fs::metadata(&path).unwrap();
+    let modified = metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let conn = Connection::open_in_memory().unwrap();
+    crate::db::migrations::apply(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,?2,?3,0,'video','mp4')",
+        params![path.to_str().unwrap(), metadata.len() as i64, modified],
+    )
+    .unwrap();
+    Some((directory, Arc::new(Mutex::new(conn))))
+}
+
+fn count(database: &Arc<Mutex<Connection>>, sql: &str) -> i64 {
+    database.lock().query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[tokio::test]
+async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
+    // A still picture has no change peaks, so samples land on exact interval
+    // boundaries: 0, 10, 20 and 30 seconds.
+    let Some((directory, database)) = media_fixture("color=c=gray:size=64x36:rate=5:duration=35") else { return };
+    let (id, _) = enqueue(&mut database.lock(), &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1]})), Some("qwen3_vl_4b"), true).unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let frames = directory.join("frames");
+    let captions = vec![
+        "Birthday cake with candles on table",
+        "Birthday cake candles burning on table",
+        "Children playing soccer in park",
+        "Children kicking soccer ball in park",
+    ];
+
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let pausing = scripted(captions.clone(), Some((2, database.clone(), id.clone())));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let first = process(&id, &job, &pausing, &frames, &cancel, &sink, &database).await;
+    assert!(first.unwrap_err().is::<Interrupted>(), "pausing must interrupt, not fail");
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE confidence=0"), 1, "only the frame finished before the pause is kept");
+
+    database.lock().execute("UPDATE catalog_jobs SET state='queued' WHERE id=?1", [&id]).unwrap();
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let resumed = scripted(captions[1..].to_vec(), None);
+    process(&id, &job, &resumed, &frames, &cancel, &sink, &database).await.unwrap();
+    assert_eq!(resumed.calls.load(Ordering::SeqCst), 3, "evidence captured before the pause is reused");
+    assert_eq!(resumed.sequences.load(Ordering::SeqCst), 0, "sampled mode never runs moment windows");
+
+    let samples: Vec<f64> = {
+        let conn = database.lock();
+        let mut statement = conn.prepare("SELECT start_seconds FROM catalog_passages WHERE file_id=1 ORDER BY start_seconds").unwrap();
+        statement.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(samples.len(), 4);
+    assert!(samples.iter().zip([0.0, 10.0, 20.0, 30.0]).all(|(actual, expected)| (actual - expected).abs() < 1e-9));
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_chapters WHERE file_id=1 AND model_version LIKE 'timeline-chapter-suggestion-v1/%'"), 2);
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_coverage WHERE file_id=1 AND model_version='visual-change-signal-v1' AND status='sampled'"), 1);
+    assert!(count(&database, "SELECT COUNT(*) FROM catalog_evidence_fts WHERE catalog_evidence_fts MATCH 'soccer'") >= 2);
+    assert!(std::fs::read_dir(&frames).unwrap().next().is_none(), "temporary frames are removed");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
+    let Some((directory, database)) = media_fixture("testsrc2=size=64x36:rate=5:duration=6") else { return };
+    let (id, _) = enqueue(&mut database.lock(), &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"moments"})), Some("qwen3_vl_4b"), true).unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let frames = directory.join("frames");
+    let revision = revision(&database.lock(), 1).unwrap();
+    let edited_id = format!("{}0", analysis::moment_prefix(1, &revision, 3.0));
+    let edited = CatalogChapter {
+        id: edited_id.clone(), file_id: 1, start_seconds: 3.0, end_seconds: 4.0, title: "Grandpa's throw".into(), summary: String::new(),
+        source_revision: revision.clone(), model_version: "user".into(), confidence: 1.0, user_edited: true, stale: false,
+    };
+    upsert_chapter(&database.lock(), &edited).unwrap();
+
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let model = scripted(vec!["A ball in a yard"], None);
+    process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database).await.unwrap();
+    assert_eq!(model.sequences.load(Ordering::SeqCst), 2, "a six-second clip has two overlapping windows");
+    let moments = count(&database, "SELECT COUNT(*) FROM catalog_chapters WHERE file_id=1 AND model_version LIKE 'timeline-moment-sequence-v1/%' AND user_edited=0");
+    assert_eq!(moments, 1, "the edited window keeps the user's chapter instead of a draft");
+    let title: String = database.lock().query_row("SELECT title FROM catalog_chapters WHERE id=?1", [&edited_id], |r| r.get(0)).unwrap();
+    assert_eq!(title, "Grandpa's throw");
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_coverage WHERE file_id=1 AND id LIKE 'moment-window:%' AND status='sampled'"), 2);
+
+    let path: String = database.lock().query_row("SELECT path_text FROM files WHERE id=1", [], |r| r.get(0)).unwrap();
+    std::fs::write(&path, b"replaced").unwrap();
+    database.lock().execute("UPDATE catalog_jobs SET state='queued',checkpoint_json='0' WHERE id=?1", [&id]).unwrap();
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let error = process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database).await.unwrap_err();
+    assert!(error.to_string().contains("source changed"));
     std::fs::remove_dir_all(directory).unwrap();
 }

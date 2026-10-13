@@ -421,6 +421,19 @@ pub(crate) fn frame_rgb(source: &Path, seconds: f64, width: u32, height: u32, ca
     Ok(data)
 }
 
+/// Silent clip from a lavfi source such as `testsrc2=size=64x36:rate=5:duration=6`.
+#[cfg(test)]
+pub(super) fn generate_silent_test_video(source: &Path, lavfi: &str) {
+    let runtime = runtime().unwrap();
+    let status = command(&runtime.ffmpeg).unwrap()
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", lavfi])
+        .args(["-c:v", "libopenh264", "-b:v", "200k", "-y"])
+        .arg(source)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .status().unwrap();
+    assert!(status.success(), "could not create the silent video test fixture");
+}
+
 #[cfg(test)]
 pub(super) fn generate_test_video(source: &Path) {
     let runtime = runtime().unwrap();
