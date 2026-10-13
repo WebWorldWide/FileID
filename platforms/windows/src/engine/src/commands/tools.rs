@@ -27,6 +27,8 @@ struct Receipt {
     derived_id: Option<i64>,
     #[serde(default, skip_serializing_if="Option::is_none")]
     recovery_path: Option<String>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    recovery_published: Option<bool>,
 }
 
 pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: ToolRequest) {
@@ -75,6 +77,12 @@ fn load(conn:&Connection,id:&str)->Result<(Plan,Vec<Receipt>,String)> {
 }
 
 pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> {
+    execute_with_move(conn,request,|source,target,published| crate::util::file_move::move_no_clobber(source,target,published))
+}
+fn execute_with_move(
+    conn:&mut Connection,request:&ToolRequest,
+    mut move_file:impl FnMut(&Path,&Path,&mut dyn FnMut()->std::io::Result<()>)->std::io::Result<()>,
+)->Result<ToolResponse> {
     if request.request_id.is_empty() || request.request_id.chars().count()>200 {bail!("Invalid tools request")}
     let mut result=response(&request.request_id,"ok","");
     match request.action.as_str() {
@@ -154,7 +162,7 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
                         }
                         if hash(source)?!=item.source_hash {bail!("A source changed during export; its output was not published")}
                         let digest=hash(&stage)?;
-                        let mut receipt=Receipt{output:item.output.clone(),hash:digest,derived_id:None,recovery_path:None};
+                        let mut receipt=Receipt{output:item.output.clone(),hash:digest,derived_id:None,recovery_path:None,recovery_published:None};
                         receipt.output.message="Prepared output; review this path after interrupted publication.".into();
                         receipts.push(receipt); persist(conn,id,&receipts,"running")?;
                         read_only::require_writable(output)?; fs::hard_link(&stage,output)?;
@@ -184,7 +192,14 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
             for receipt in &receipts {
                 if receipt.output.state!="completed" {continue}
                 let source=Path::new(&receipt.output.output_path);read_only::require_source_mutation(source)?;
-                if !source.exists() && receipt.recovery_path.as_deref().is_some_and(|p|Path::new(p).is_file()) {continue}
+                if let Some(path)=receipt.recovery_path.as_deref() {
+                    let recovery=Path::new(path);
+                    if receipt.recovery_published==Some(true) && recovery.is_file() {
+                        if hash(recovery)?!=receipt.hash {bail!("Recovery output was edited; Undo leaves it untouched")}
+                        if !source.exists() {continue}
+                    }
+                }
+                if !source.exists() {bail!("The export is missing and no verified owned recovery is available. Undo leaves the operation unchanged")}
                 if hash(source)?!=receipt.hash {bail!("An export was edited. Undo leaves all remaining exports untouched")}
             }
             if !["completed","failed"].contains(&state.as_str()) {bail!("This operation cannot be undone")}
@@ -197,7 +212,12 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
                 read_only::require_source_mutation(&source)?;
                 if let Some(path)=receipts[index].recovery_path.clone() {
                     let recovery=Path::new(&path);read_only::require_writable(recovery)?;
-                    if !source.exists() && recovery.is_file() && hash(recovery)?==receipts[index].hash {
+                    if recovery.is_file() && receipts[index].recovery_published==Some(true) {
+                        if hash(recovery)?!=receipts[index].hash {bail!("Recovery output was edited; Undo leaves it untouched")}
+                        if source.exists() {
+                            if hash(&source)?!=receipts[index].hash {bail!("An export was edited. Undo leaves it untouched")}
+                            fs::remove_file(&source)?;
+                        }
                         if let Some(derived)=receipts[index].derived_id {conn.execute("DELETE FROM files WHERE id=?1",[derived])?;}
                         receipts[index].output.state="undone".into(); receipts[index].output.message=format!("Recoverable at {path}");persist(conn,id,&receipts,&state)?;continue;
                     }
@@ -205,9 +225,19 @@ pub fn execute(conn:&mut Connection,request:&ToolRequest)->Result<ToolResponse> 
                 if hash(&source)?!=receipts[index].hash {bail!("An export was edited. Undo leaves it untouched")}
                 let target=directory.join(format!("{index}-{}",source.file_name().context("Invalid export path")?.to_string_lossy()));
                 read_only::require_writable(&target)?;
-                if target.exists() {bail!("Recovery path is occupied")}
-                receipts[index].recovery_path=Some(target.to_string_lossy().into_owned()); persist(conn,id,&receipts,&state)?;
-                fs::rename(&source,&target)?;
+                receipts[index].recovery_path=Some(target.to_string_lossy().into_owned());
+                receipts[index].recovery_published=Some(false); persist(conn,id,&receipts,&state)?;
+                let expected=receipts[index].hash.clone();
+                let mut published=|| -> std::io::Result<()> {
+                    receipts[index].recovery_published=Some(true);
+                    receipts[index].output.message="Undo recovery published; export removal is pending.".into();
+                    persist(conn,id,&receipts,&state).map_err(std::io::Error::other)?;
+                    if hash(&source).map_err(std::io::Error::other)?!=expected || hash(&target).map_err(std::io::Error::other)?!=expected {
+                        return Err(std::io::Error::other("Export changed during Undo; both paths were preserved"));
+                    }
+                    Ok(())
+                };
+                move_file(&source,&target,&mut published)?;
                 if let Some(derived)=receipts[index].derived_id {conn.execute("DELETE FROM files WHERE id=?1",[derived])?;}
                 receipts[index].output.state="undone".into(); receipts[index].output.message=format!("Recoverable at {}",target.display()); persist(conn,id,&receipts,&state)?;
             }
@@ -282,6 +312,10 @@ mod tests {
             Self{root,source,conn}
         }
  fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16}),operation_id:None,destination_bookmark:None}}
+        fn reopen(&mut self) {
+            let conn=std::mem::replace(&mut self.conn,Connection::open_in_memory().unwrap());
+            conn.close().unwrap(); self.conn=crate::db::open_writer(&self.root.join("catalog.sqlite")).unwrap();
+        }
     }
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
  fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None,destination_bookmark:None}}
@@ -332,6 +366,135 @@ mod tests {
         recover(&fixture.conn).unwrap();let deadline=std::time::Instant::now()+std::time::Duration::from_secs(6);
         while stage.exists() && std::time::Instant::now()<deadline {std::thread::sleep(std::time::Duration::from_millis(50));}
         assert!(!stage.exists());assert!(unrelated.exists());assert_eq!(hash(&fixture.source).unwrap(),original);
+    }
+
+    struct CrossDeviceUndo { copy_error:bool, delete_error:bool, cleanup_error:bool }
+    impl crate::util::file_move::MoveFileIo for CrossDeviceUndo {
+        fn link_source(&self,_:&Path,_:&Path)->std::io::Result<()> {Err(std::io::ErrorKind::CrossesDevices.into())}
+        fn copy(&self,source:&mut File,target:&mut File)->std::io::Result<u64> {
+            if self.copy_error {Err(std::io::ErrorKind::StorageFull.into())} else {std::io::copy(source,target)}
+        }
+        fn remove_source(&self,path:&Path)->std::io::Result<()> {
+            if self.delete_error {Err(std::io::ErrorKind::PermissionDenied.into())} else {fs::remove_file(path)}
+        }
+        fn remove_stage(&self,path:&Path)->std::io::Result<()> {
+            if self.cleanup_error {Err(std::io::ErrorKind::PermissionDenied.into())} else {fs::remove_file(path)}
+        }
+    }
+    fn exported_fixture()->(Fixture,String,std::path::PathBuf) {
+        let mut fixture=Fixture::new(); let request=fixture.request("png");
+        let preview=execute(&mut fixture.conn,&request).unwrap(); let id=preview.operation_id.unwrap();
+        let exported=execute(&mut fixture.conn,&action(Some(id.clone()),"execute")).unwrap();
+        (fixture,id,std::path::PathBuf::from(&exported.outputs[0].output_path))
+    }
+    #[test]
+    fn undo_publication_race_cannot_clobber_even_identical_unowned_bytes() {
+        for identical in [false,true] {
+            let (mut fixture,id,output)=exported_fixture(); let bytes=fs::read(&output).unwrap(); let original=hash(&fixture.source).unwrap();
+            let result=execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| {
+                fs::write(target,if identical {bytes.as_slice()} else {b"racing occupant"})?;
+                crate::util::file_move::move_no_clobber(source,target,published)
+            });
+            assert!(result.is_err()); assert_eq!(fs::read(&output).unwrap(),bytes);
+            let (_,receipts,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed"); assert_eq!(receipts[0].recovery_published,Some(false));
+            let derived=receipts[0].derived_id.unwrap();
+            let target=Path::new(receipts[0].recovery_path.as_deref().unwrap());
+            assert_eq!(fs::read(target).unwrap(),if identical {bytes.as_slice()} else {b"racing occupant"});
+            assert!(execute(&mut fixture.conn,&action(Some(id.clone()),"undo")).is_err()); assert!(output.exists());
+            assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+            fs::remove_file(&output).unwrap(); fixture.reopen();
+            assert!(execute(&mut fixture.conn,&action(Some(id.clone()),"undo")).is_err());
+            let (_,after,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed");
+            assert_eq!(after[0].output.state,"completed"); assert_eq!(after[0].recovery_published,Some(false));
+            assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets WHERE original_id=1 AND derived_id=?1",[derived],|row|row.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM files WHERE id=?1",[derived],|row|row.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(fs::read(target).unwrap(),if identical {bytes.as_slice()} else {b"racing occupant"});
+            assert_eq!(hash(&fixture.source).unwrap(),original);
+        }
+    }
+    #[test]
+    fn undo_legacy_missing_marker_cannot_adopt_unowned_identical_recovery() {
+        let (mut fixture,id,output)=exported_fixture(); let bytes=fs::read(&output).unwrap(); let original=hash(&fixture.source).unwrap();
+        assert!(execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| {
+            fs::write(target,&bytes)?; crate::util::file_move::move_no_clobber(source,target,published)
+        }).is_err());
+        let (_,mut receipts,state)=load(&fixture.conn,&id).unwrap(); let derived=receipts[0].derived_id.unwrap();
+        let recovery=std::path::PathBuf::from(receipts[0].recovery_path.as_deref().unwrap());
+        receipts[0].recovery_published=None; persist(&fixture.conn,&id,&receipts,&state).unwrap();
+        let inverse:String=fixture.conn.query_row("SELECT inverse_json FROM catalog_operations WHERE id=?1",[&id],|row|row.get(0)).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&inverse).unwrap()[0].get("recoveryPublished").is_none());
+        fs::remove_file(&output).unwrap(); fixture.reopen();
+        assert!(execute(&mut fixture.conn,&action(Some(id.clone()),"undo")).unwrap_err().to_string().contains("verified owned recovery"));
+        let (_,after,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed"); assert_eq!(after[0].output.state,"completed");
+        assert_eq!(after[0].recovery_published,None); assert_eq!(fs::read(&recovery).unwrap(),bytes);
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets WHERE original_id=1 AND derived_id=?1",[derived],|row|row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM files WHERE id=?1",[derived],|row|row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(hash(&fixture.source).unwrap(),original);
+    }
+    #[test]
+    fn undo_verified_owned_missing_source_recovers_after_restart() {
+        let (mut fixture,id,output)=exported_fixture(); let bytes=fs::read(&output).unwrap(); let original=hash(&fixture.source).unwrap();
+        assert!(execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| {
+            crate::util::file_move::move_no_clobber(source,target,published)?;
+            Err(std::io::Error::other("Simulated interruption after file movement"))
+        }).is_err());
+        let (_,receipts,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed"); assert_eq!(receipts[0].recovery_published,Some(true));
+        let recovery=std::path::PathBuf::from(receipts[0].recovery_path.as_deref().unwrap());
+        assert!(!output.exists()); assert_eq!(fs::read(&recovery).unwrap(),bytes); fixture.reopen();
+        let result=execute(&mut fixture.conn,&action(Some(id.clone()),"undo")).unwrap(); assert_eq!(result.outputs[0].state,"undone");
+        assert_eq!(load(&fixture.conn,&id).unwrap().2,"undone"); assert_eq!(fs::read(&recovery).unwrap(),bytes);
+        assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(hash(&fixture.source).unwrap(),original);
+    }
+    #[test]
+    fn undo_revalidates_source_after_publication_and_keeps_changed_bytes() {
+        let (mut fixture,id,output)=exported_fixture(); let original=hash(&fixture.source).unwrap();
+        let result=execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| {
+            fs::write(source,b"edited during undo")?;
+            crate::util::file_move::move_no_clobber(source,target,published)
+        });
+        assert!(result.is_err()); assert_eq!(fs::read(&output).unwrap(),b"edited during undo");
+        let (_,receipts,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed"); assert_eq!(receipts[0].recovery_published,Some(true));
+        assert_eq!(fs::read(receipts[0].recovery_path.as_deref().unwrap()).unwrap(),b"edited during undo");
+        assert!(execute(&mut fixture.conn,&action(Some(id),"undo")).is_err());
+        assert_eq!(hash(&fixture.source).unwrap(),original);
+    }
+    #[test]
+    fn undo_cross_device_copy_error_preserves_receipt_source_and_retry() {
+        let (mut fixture,id,output)=exported_fixture(); let bytes=fs::read(&output).unwrap(); let original=hash(&fixture.source).unwrap();
+        let io=CrossDeviceUndo {copy_error:true,delete_error:false,cleanup_error:false};
+        assert!(execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| crate::util::file_move::move_with_io(source,target,&io,published)).is_err());
+        let (_,receipts,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed"); assert_eq!(receipts[0].recovery_published,Some(false));
+        assert!(!Path::new(receipts[0].recovery_path.as_deref().unwrap()).exists()); assert_eq!(fs::read(&output).unwrap(),bytes);
+        assert_eq!(execute(&mut fixture.conn,&action(Some(id),"undo")).unwrap().outputs[0].state,"undone");
+        assert!(!output.exists()); assert_eq!(hash(&fixture.source).unwrap(),original);
+    }
+    #[test]
+    fn undo_published_receipts_recover_after_restart_and_cleanup_or_unlink_failure() {
+        for cleanup in [false,true] {
+            let (mut fixture,id,output)=exported_fixture(); let bytes=fs::read(&output).unwrap(); let original=hash(&fixture.source).unwrap();
+            let io=CrossDeviceUndo {copy_error:false,delete_error:!cleanup,cleanup_error:cleanup};
+            assert!(execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| crate::util::file_move::move_with_io(source,target,&io,published)).is_err());
+            let (_,receipts,state)=load(&fixture.conn,&id).unwrap(); assert_eq!(state,"completed"); assert_eq!(receipts[0].output.state,"completed"); assert_eq!(receipts[0].recovery_published,Some(true));
+            let recovery=std::path::PathBuf::from(receipts[0].recovery_path.as_deref().unwrap());
+            assert_eq!(fs::read(&output).unwrap(),bytes); assert_eq!(fs::read(&recovery).unwrap(),bytes);
+            assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+            let conn=std::mem::replace(&mut fixture.conn,Connection::open_in_memory().unwrap()); conn.close().unwrap(); fixture.conn=crate::db::open_writer(&fixture.root.join("catalog.sqlite")).unwrap();
+            let result=execute(&mut fixture.conn,&action(Some(id),"undo")).unwrap(); assert_eq!(result.outputs[0].state,"undone");
+            assert!(!output.exists()); assert_eq!(fs::read(&recovery).unwrap(),bytes);
+            assert_eq!(fixture.conn.query_row("SELECT COUNT(*) FROM catalog_assets",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+            assert_eq!(hash(&fixture.source).unwrap(),original);
+        }
+    }
+    #[test]
+    fn undo_changed_published_recovery_is_not_deleted_or_claimed_complete() {
+        let (mut fixture,id,output)=exported_fixture(); let bytes=fs::read(&output).unwrap();
+        let io=CrossDeviceUndo {copy_error:false,delete_error:true,cleanup_error:false};
+        assert!(execute_with_move(&mut fixture.conn,&action(Some(id.clone()),"undo"),|source,target,published| crate::util::file_move::move_with_io(source,target,&io,published)).is_err());
+        let (_,receipts,_)=load(&fixture.conn,&id).unwrap(); let recovery=Path::new(receipts[0].recovery_path.as_deref().unwrap()); fs::write(recovery,b"edited recovery").unwrap();
+        assert!(execute(&mut fixture.conn,&action(Some(id.clone()),"undo")).is_err());
+        assert_eq!(fs::read(&output).unwrap(),bytes); assert_eq!(fs::read(recovery).unwrap(),b"edited recovery");
+        assert_eq!(load(&fixture.conn,&id).unwrap().1[0].output.state,"completed");
     }
 
     #[test]

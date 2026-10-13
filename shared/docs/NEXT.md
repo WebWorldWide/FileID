@@ -1,12 +1,37 @@
+## Latest continuation — Windows/Linux feature parity (2026-10-10)
+
+The reviewed catalog/search/index-job and native-workbench slice is integrated locally, preserving existing Store/runtime/restructure edits. No commit or push was requested. Read the newest `STATE.md` entry and `NEXT_VERSION.md` before continuing; earlier Mac-first port deferrals below are historical, not a reason to discard this integrated work.
+
+1. Continue the actual macOS timeline/speech/chapter-generation and model-backed chat implementations into the shared engine and native ports. GTK Deep Analyze currently reviews stored captions only; it must not pretend inference is available. Keep unsupported video/tool capabilities explicit.
+2. Add isolated, interruptible conversion/video workers and complete model/decoder/GPU/NPU accounting, fairness and cancellation. HNSW phases are cooperative between phases, not preemptible within graph operations; benchmark graph restore/rebuild and warm hybrid retrieval on 100,000 files before claiming latency targets.
+3. Validate real embedding acquisition/model identity, native WinUI interaction, Linux hardware/aarch64 and output fidelity on approved fixtures. `check_portable_parity.py --engine <binary>` covers only disposable catalogs/files and synthetic vectors; cross-device acceptance used WSL `/dev/shm` exports. Tools Undo and GTK Restructure Apply/Undo are enabled after shared-backend safety checks. Conservative legacy recovery still needs manual review rather than inferred ownership.
+4. Keep the prior Windows Store/CUDA release work below open. Headless builds/tests do not prove package startup, provider execution or release readiness. When the owner requests committing/pushing, land the reviewed changes on a branch, rerun exact-head GitHub CI, then merge; do not publish the dirty checkout as an already accepted release.
+5. Whole-app Linux formatting still reports existing main/spring/Cleanup/People/Settings formatting; the parity files pass targeted rustfmt. Keep any unrelated formatting cleanup separate from this feature integration.
+
+Parent checks passed: Windows build/format and 502 app + 49 IPC tests; Windows/WSL strict engine Clippy and tests; GTK app tests, real-engine Xvfb workbenches and entrypoint smoke; portable safety/index probes; strict egress and 24 policy tests. Logs are `%TEMP%/fileid-parity-integrated-*.log`. Original-edit backups and component patches are `%TEMP%/fileid-parity-integration-20261010`; isolated lanes are `../FileID-parity-worktrees/{engine,windows,linux}`.
+
+## Earlier owner request — Store startup and CUDA validation (2026-10-05)
+
+Windows release audit is still in progress. Read [`WINDOWS_AUDIT_2026-10-05.md`](WINDOWS_AUDIT_2026-10-05.md) first. Finish the managed security scan (currently discovery 0/399); fix the confirmed restructure stale-plan source identity gap and add a regression; verify a Store-identity package launch without replacing the installed Store app; remove the temporary diagnostic certificate/private key through the supported Windows certificate-management path; obtain owner acceptance of NVIDIA/cuDNN upstream terms before any runtime download; then run GPU/corpus, App Certification Kit, exact-head GitHub CI, and Partner Center listing checks. Keep the demo video excluded. Current headless Rust and .NET checks pass, but this is not a release-ready sign-off.
+
+The Store-installed 0.1.1.0 app still fails in `MainWindow.InitializeComponent()` with a generic XAML parse exception. Reproduce the package-only failure and identify the missing resource before calling FileID ready. Release logging captures `XamlResourceReferenceFailed`. Optional CUDA runtime packs install only after an explicit user action and license acceptance, from exact SHA256-pinned Microsoft/NVIDIA URLs. Verify ORT CUDA scanning and CUDA Deep Analyze on this system’s RTX 5080; users must install the matching runtime and restart the engine before CUDA scanning can activate. The old `G:\TrueNAS` corpus is not mounted; supply a representative copy using `iterate.ps1 -Corpus <path>`. Later dated RTX 2060 and `G:\TrueNAS` entries record the former machine or historical measurements; use this current profile when carrying out open hardware checks. The Store build continues to use its bundled Vulkan Deep Analyze runtime by default. The listing still needs authentic screenshots after the package launch issue is fixed. Do not use the promo-video draft. The public product site is `https://fileid.webworldwide.online/`.
+
+
 # NEXT — resume here
 
-## Current owner request — Windows Store release (2026-10-03)
+## Earlier owner request — Windows Store update (2026-10-05)
+
+The owner reports FileID has Store approval, and this PC has `AdamNolle.FileID` version `0.1.1.0` installed. Partner Center was not reverified during this turn because the browser is at Microsoft sign-in. After fetching, this checkout and `origin/main` match at `754f8b0b69b0e04ac6764cff01fa34d136ebb8ad`; all 18 workflow checks for that commit completed successfully. GitHub's combined status endpoint still returns `pending` without status contexts.
+
+The installed Store package still crashes while loading `MainWindow` XAML (`Microsoft.UI.Xaml.dll`, `0xC000027B`). The local unpackaged Release build reached engine-ready and a Settings binding event, but this does not validate Store package identity. Continue with package-specific diagnosis; do not call the update ready until a fixed `0.1.2.0` MSIX is tested and the App Certification Kit report is reviewed. Then capture genuine screens for Library, People, Cleanup, Deep Analyze, Restructure, and Settings (the current listing draft has one), verify CUDA scan and Deep Analyze on the RTX 5080 using a copied corpus, and rerun release gates. `G:\TrueNAS` is absent. Keep the promo-video draft out of the listing.
+
+## Historical Store handoff — 2026-10-03
 
 PR [#213](https://github.com/WebWorldWide/FileID/pull/213) prepared the Store package path and merged to `main` at `a11cbd09284b7e8305f298baf502473a3ed2b392`. PR [#219](https://github.com/WebWorldWide/FileID/pull/219) raises the Windows Store package to `0.1.1.0`; its exact-head Store workflow [37160912487](https://github.com/WebWorldWide/FileID/actions/runs/37160912487) built and verified `FileID-0.1.1-x64.msix` for identity `AdamNolle.FileID`. SHA-256: `99b8661db9fec40d375cf1f55d06d0acfe18699683d7adc6c211030983216aba`. The Windows app, Linux, Linux packaging, repository policy, Store package, and native tools CI workflows passed on that head. The Windows engine x64 test is still running.
 
 Main advanced after PR #219 was opened, producing documentation conflicts in `NEXT.md` and `STATE.md`. Merge the latest main update and rerun exact-head CI before merging the PR. The Partner Center product `9PC8HSD86887`, submission `1152921505702035520`, has complete pricing, properties, IARC 12+ / ESRB Teen age ratings, and English listing; automatic publication after certification is selected. It still contains only the validated `0.1.0.0` package. A stale duplicate upload was canceled. The verified `0.1.1.0` artifact remains to upload and validate, then submit for certification. WACK and on-hardware model/GPU acceptance remain unverified. Do not modify Adlon example data.
 
-## Active priority — macOS first (2026-10-03)
+## Historical priority — macOS first (2026-10-03)
 
 Continue the accepted next-version plan on macOS. The Windows app packaging job currently skips `FileID.App.Tests`; hosted discovery run [37161178829](https://github.com/WebWorldWide/FileID/actions/runs/37161178829) exposed 157 existing test compilation errors against current app APIs. Repair that suite on the owner's PC without exclusions. Latest `main` is `a11cbd09284b7e8305f298baf502473a3ed2b392`. Read the newest `STATE.md` and `AGENT_HANDOFF.md` entries for CI status and exact continuation.
 
@@ -16,7 +41,7 @@ Local TestFlight signing is provisioned and the package passed strict signature 
 
 The App Store build path uses scoped source/output bookmarks, a sandbox-inheriting helper, container-local model weights, and `platforms/apple/scripts/testflight.sh`. App ID `com.fileid.app`, App Store Connect record `6818813859`, and the empty `FileID Internal Testers` group exist. The Mac App Store profile and app/installer signing identities are installed locally, and the signed package passed strict verification. API access is enabled, but creation of a non-expiring team key with access to every app is awaiting owner confirmation. If approved, store its one-time `.p8` only in protected local storage, upload the validated package, wait for Apple processing, then validate sandboxed scan/export/model-download behavior. No testers have been invited. Keep signing material out of Git and Adlon.
 
-## Next Mac increment — make timeline coverage reliable
+## Prior Mac increment — make timeline coverage reliable
 
 The current timeline samples one frame every ten seconds. It now creates clearly labeled low-confidence draft chapters only when a changed caption is supported by the following sample, and stores timestamped on-device speech passages from overlapping chunks. These signals do not establish that every event occurred or did not occur. Next add shot/activity proposals, dense candidate analysis, face tracks, and explicit visual/audio coverage through long recordings and chunk boundaries. Add fixtures for brief actions, overlaps, scene boundaries, and events that cross chunks.
 
@@ -325,7 +350,7 @@ What remains is NOT findable by more static rounds — it needs hardware, a GUI,
   guard, suggestions-sheet-no-force-open, preview/thumbnail `.task(id:)` re-fire, CLIP install/cancel,
   pipeline-strip floor on wipe-vs-clear). Schema v13 face-verification anchors still need a Mac to
   exercise the write path.
-- **Windows:** `iterate.ps1` on the RTX 2060 / `G:\TrueNAS`; confirm the WinUI-runtime fixes (the 3
+- **Windows:** run `iterate.ps1 -Corpus <path>` on the current RTX 5080 against an available copied corpus; confirm the WinUI-runtime fixes (the 3
   ViewModel generation-guards, the bulk re-entrancy guards, the thumbnail-CTS single-owner dispose,
   DeepAnalyze once-per-FileDone + cancel-stops-batch, the off-UI-thread IPC encode + wipe deletes,
   the O(N²)→O(N) selection coalesce, the pipeline-strip ReseedFloorFromDb). Per-vendor NPU (AMD/Intel/

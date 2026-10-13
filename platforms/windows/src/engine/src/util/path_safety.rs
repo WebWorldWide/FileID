@@ -209,8 +209,14 @@ pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
 /// delete), trims trailing dots/spaces, suffixes Windows reserved basenames,
 /// caps length, and never returns empty. (PAR-69 / PAR-96)
 pub fn safe_filename_component(raw: &str) -> String {
+    safe_filename_component_max(raw, 200)
+}
+
+/// Same sanitization with a caller-supplied scalar cap. macOS `componentSafe(_:maxLength:)`
+/// takes 16 for a filename extension, so a long extension must be capped separately from
+/// the 200-scalar stem cap — capping the whole `stem.ext` blob cut the suffix off.
+pub fn safe_filename_component_max(raw: &str, max_len: usize) -> String {
     const ILLEGAL: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-    const MAX_LEN: usize = 200;
     const RESERVED: &[&str] = &[
         "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
         "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
@@ -225,8 +231,8 @@ pub fn safe_filename_component(raw: &str) -> String {
         }
     }
     // Cap by Unicode scalar count (matches Swift's unicodeScalars.prefix).
-    if out.chars().count() > MAX_LEN {
-        out = out.chars().take(MAX_LEN).collect();
+    if out.chars().count() > max_len {
+        out = out.chars().take(max_len).collect();
     }
     // Windows strips trailing dots/spaces; do it ourselves so the name is stable.
     while matches!(out.chars().last(), Some('.' | ' ')) {

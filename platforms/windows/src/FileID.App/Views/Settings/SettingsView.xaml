@@ -358,13 +358,8 @@
                                    Text="Persisted across launches. Takes effect on the next scan (already-loaded models keep their EP)." />
                     </StackPanel>
 
-                    <!-- NVIDIA acceleration. Only visible on
-                         NVIDIA hardware. Two affordances:
-                         (1) Install the CUDA-flavored llama.cpp for Deep Analyze
-                             (works on any modern NVIDIA driver; no separate cuDNN).
-                         (2) Direct user to NVIDIA's official cuDNN download to
-                             unlock the CUDA ORT EP for scanning. Both honest
-                             paths; nothing hidden. -->
+                    <!-- NVIDIA acceleration controls for the optional CUDA
+                         execution provider used by scanning. -->
                     <StackPanel x:Name="NvidiaAccelerationSection"
                                 Visibility="Collapsed"
                                 Spacing="10">
@@ -374,55 +369,47 @@
                                    FontWeight="SemiBold"
                                    CharacterSpacing="40" />
 
-                        <!-- Row 1: CUDA llama.cpp for Deep Analyze. -->
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   TextWrapping="Wrap"
+                                   Text="CUDA is optional and installs only when you choose it. Downloads come directly from Microsoft and NVIDIA after their license terms are shown." />
+
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="CUDA llama.cpp for Deep Analyze"
+                                <TextBlock Text="CUDA for Deep Analyze"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                 <TextBlock x:Name="CudaLlamaStatusText"
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
-                                           Text="~200 MB download. Runs Deep Analyze 15-25% faster than the default Vulkan build. No separate cuDNN required."/>
+                                           Text="Optional CUDA llama.cpp runtime (~650 MB). Deep Analyze prefers it on NVIDIA GPUs; Vulkan remains available as fallback."/>
                             </StackPanel>
                             <Button Grid.Column="1"
                                     x:Name="InstallCudaLlamaButton"
                                     Content="Install"
                                     Click="OnInstallCudaLlamaClicked"
-                                    AutomationProperties.Name="Install CUDA llama.cpp for Deep Analyze"
-                                    ToolTipService.ToolTip="Downloads llama-bXXXX-bin-win-cuda-cu12.4-x64.zip from github.com/ggml-org/llama.cpp/releases." />
+                                    AutomationProperties.Name="Install CUDA runtime for Deep Analyze"
+                                    ToolTipService.ToolTip="Downloads the pinned CUDA-enabled llama.cpp runtime from its official release after NVIDIA CUDA terms are accepted." />
                         </Grid>
 
-                        <!-- Auto-install toggle. On by default — the CUDA
-                             llama.cpp prewarm fires silently when an NVIDIA
-                             GPU is detected on the first launch. Users who
-                             prefer the Vulkan build (smaller, identical UX)
-                             can opt out here. -->
-                        <ToggleSwitch x:Name="AutoInstallCudaToggle"
-                                      Header="Auto-install CUDA acceleration"
-                                      OffContent="Off — leave Deep Analyze on Vulkan"
-                                      OnContent="On — install CUDA llama.cpp on first launch"
-                                      IsOn="True"
-                                      Toggled="OnAutoInstallCudaToggled" />
-
-                        <!-- Row 2: cuDNN for scanning ORT EP. -->
+                        <!-- Matched ONNX Runtime + CUDA dependencies for scan inference. -->
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="cuDNN for scanning (CUDA EP)"
+                                <TextBlock Text="CUDA for scanning"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"/>
                                 <TextBlock x:Name="CudnnStatusText"
                                            Style="{StaticResource CaptionTextBlockStyle}"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                            TextWrapping="Wrap"
-                                           Text="Install NVIDIA cuDNN to unlock the CUDA execution provider for scanning (10-15% faster than DirectML on RTX-class GPUs). FileID can't redistribute cuDNN — get it from NVIDIA's developer site." />
+                                           Text="Install the matched ONNX Runtime CUDA provider, CUDA 12.4 runtime, and cuDNN 9.5 (~1.6 GB total). FileID uses CUDA after the engine restarts; speed depends on your GPU and workload." />
                                 <!-- diagnostics line populated after a Verify install
                                      click when the engine reports cuDNN absent. Explains
                                      *why* (missing cudart64, wrong directory, etc.). -->
@@ -434,24 +421,15 @@
                                            Margin="0,4,0,0" />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                                <!-- Opt-in in-app cuDNN install via the
-                                     engine's registry entry. Fetches the ~430 MB
-                                     redistributable directly from NVIDIA's
-                                     public CDN (no developer-portal login,
-                                     no manual install). -->
                                 <Button x:Name="InstallCudnnButton"
-                                        Content="Install"
+                                        Content="Install CUDA"
                                         Click="OnInstallCudnnClicked"
-                                        AutomationProperties.Name="Install CUDA pack for scanning (cuDNN + ORT CUDA provider)"
-                                        ToolTipService.ToolTip="Downloads cuDNN ~430 MB from NVIDIA's public CDN and registers it for the ORT CUDA EP. DirectML works fine without this — only install if you want the 10-15% scanning speedup." />
-                                <!-- re-probe after manual install. Engine doesn't
-                                     restart; just re-runs the DLL probe and emits a
-                                     hardwareReprobed event so the card flips to ✓ when
-                                     the user finishes installing cuDNN. -->
+                                        AutomationProperties.Name="Install CUDA runtime for scanning"
+                                        ToolTipService.ToolTip="Downloads the pinned Microsoft ONNX Runtime GPU build and CUDA 12.4/cuDNN files from official sources after showing applicable NVIDIA terms." />
                                 <Button x:Name="VerifyCudnnButton"
                                         Content="Verify install"
                                         Click="OnVerifyCudnnClicked"
-                                        ToolTipService.ToolTip="Re-probe cuDNN after manually installing it from NVIDIA's site." />
+                                        ToolTipService.ToolTip="Re-probe installed CUDA files and report whether the scan engine can select CUDA." />
                             </StackPanel>
                         </Grid>
 
