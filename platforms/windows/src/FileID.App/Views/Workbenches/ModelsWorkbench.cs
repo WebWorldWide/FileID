@@ -1,4 +1,6 @@
+using System.ComponentModel;
 using FileID.IpcSchema;
+using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -34,10 +36,13 @@ internal sealed class ModelsWorkbench : WorkbenchPanel
 
     protected override void OnClosed() => Engine.PropertyChanged -= OnEngineChanged;
 
-    private void OnEngineChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(EngineClient.BenchmarkProgress) && Engine.BenchmarkProgress is { } p)
-            DispatcherQueue.TryEnqueue(() => Status.Text = $"Benchmarking {p.ModelKind} · {p.Phase} {p.Completed}/{p.Total}");
+        DebugLog.SafeRun("ModelsWorkbench.OnEngineChanged", () =>
+        {
+            if (e.PropertyName == nameof(EngineClient.BenchmarkProgress) && Engine.BenchmarkProgress is { } p)
+                DispatcherQueue.TryEnqueue(() => Status.Text = $"Benchmarking {p.ModelKind} · {p.Phase} {p.Completed}/{p.Total}");
+        });
     }
 
     private string Role => ModelCatalogPresentation.Roles[Math.Max(0, _role.SelectedIndex)].Role;
