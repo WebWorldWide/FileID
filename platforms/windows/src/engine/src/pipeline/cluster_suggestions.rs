@@ -105,12 +105,9 @@ pub async fn verify_pair_async(
     right_crop: &Path,
     cancel: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<PairVerdict> {
-    let (gguf, mmproj) = vlm::find_weights(model_kind).ok_or_else(|| {
-        anyhow::anyhow!(
-            "VLM weights not installed for model_kind={model_kind}; \
-             install from Settings → Local AI before verifying pairs"
-        )
-    })?;
+    let verified = runner.verified_weights(model_kind, cancel.clone()).await?;
+    let (gguf, mmproj) = verified.paths();
+    let (gguf, mmproj) = (gguf.to_owned(), mmproj.to_owned());
 
     let composite = compose_pair_jpeg(left_crop, right_crop)?;
     let req = CaptionRequest {

@@ -67,18 +67,32 @@ pub async fn analyze_file(
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     face_names: &[String],
+    on_token: impl FnMut(&str),
+) -> anyhow::Result<AnalyzeOutcome> {
+    analyze_file_scoped(db, runner, file_id, model_kind, mode, cancel, face_names, on_token, None).await
+}
+
+pub(crate) async fn analyze_file_scoped(
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    runner: &crate::models::vlm::VlmRunner,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    face_names: &[String],
     mut on_token: impl FnMut(&str),
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
 
     let started = std::time::Instant::now();
 
-    // Resolve weights for this model_kind.
-    let (gguf, mmproj) = vlm::find_weights(model_kind)
-        .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
+    let verified = runner.verified_weights(model_kind, cancel.clone()).await?;
+    let (gguf, mmproj) = verified.paths();
+    let (gguf, mmproj) = (gguf.to_owned(), mmproj.to_owned());
 
     // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
-    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id, scope).await?;
     // Guard cleans the temp frame on any exit, including the `?`/bail paths
     // below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
@@ -171,6 +185,7 @@ pub async fn analyze_file(
 pub(crate) async fn rasterize_for_vlm(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     file_id: i64,
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<(std::path::PathBuf, Option<std::path::PathBuf>)> {
     let (path_text, kind): (String, String) = {
         let conn = db.lock();
@@ -181,6 +196,11 @@ pub(crate) async fn rasterize_for_vlm(
         )?
     };
     let source_path = std::path::PathBuf::from(&path_text);
+    let source_path = match scope {
+        Some(scope) => scope.source_path(file_id, &source_path)?
+            .ok_or(crate::commands::deep_scope::ScopeError::ExcludedTarget)?,
+        None => source_path,
+    };
     if !source_path.exists() {
         anyhow::bail!("source file missing: {}", source_path.display());
     }
@@ -332,6 +352,7 @@ fn persist_vlm_results(
 /// known-good code path) instead of producing zero tags.
 pub(crate) async fn vlm_server_payload_ok(
     server: &crate::models::vlm_server::VlmServer,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     let test_img = std::env::temp_dir().join(format!(
         "fileid-vlm-selftest-{}.jpg",
@@ -346,34 +367,17 @@ pub(crate) async fn vlm_server_payload_ok(
     ))
     .save_with_format(&test_img, image::ImageFormat::Jpeg)
     .map_err(|e| anyhow::anyhow!("write VLM self-test image: {e}"))?;
-    let result = server.complete(&test_img, "Reply with: ok", 1).await;
+    let result = server.complete_with_cancel(&test_img, "Reply with: ok", 1, cancel.clone()).await;
     let _ = std::fs::remove_file(&test_img);
     result.map(|_| ())
 }
 
-/// Poll the cancel flag until it's set. Raced against an in-flight VLM request
-/// so a user cancel abandons the request promptly. (audit E4)
-async fn wait_cancelled(cancel: &std::sync::atomic::AtomicBool) {
-    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-/// Run one `server.complete` but bail the moment the cancel flag flips, instead
-/// of blocking up to the client's (300 s) timeout. Dropping the losing branch's
-/// future cancels the underlying reqwest request. (audit E4)
 async fn complete_cancellable(
     server: &crate::models::vlm_server::VlmServer,
-    image: &std::path::Path,
-    prompt: &str,
-    max_tokens: u32,
-    cancel: &std::sync::atomic::AtomicBool,
+    image: &std::path::Path, prompt: &str, max_tokens: u32,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<String> {
-    tokio::select! {
-        biased;
-        _ = wait_cancelled(cancel) => anyhow::bail!("cancelled"),
-        r = server.complete(image, prompt, max_tokens) => r,
-    }
+    server.complete_with_cancel(image, prompt, max_tokens, cancel.clone()).await
 }
 
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
@@ -393,10 +397,11 @@ pub(crate) async fn analyze_file_via_server(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     face_names: &[String],
     mut on_token: impl FnMut(&str),
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
     let started = std::time::Instant::now();
-    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id, scope).await?;
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);

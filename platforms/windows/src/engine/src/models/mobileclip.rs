@@ -36,6 +36,7 @@ impl MobileClipImage {
         if !path.exists() {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
+        super::clip_space::verify(path, "mobileclip_s2", 0)?;
         let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
@@ -115,6 +116,7 @@ impl MobileClipImage {
             .context("extract MobileCLIP output as f32")?;
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
+        if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
         Ok(emb)
     }
 
@@ -181,12 +183,14 @@ impl MobileClipImage {
                 data.len()
             );
         }
+        if total != batch * super::clip_space::DIMENSION { anyhow::bail!("Invalid CLIP image output dimension") }
         let embed_dim = total / batch;
         let mut out = Vec::with_capacity(batch);
         for b in 0..batch {
             let start = b * embed_dim;
             let mut emb: Vec<f32> = data[start..start + embed_dim].to_vec();
             l2_normalize(&mut emb);
+            if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
             out.push(emb);
         }
         Ok(out)

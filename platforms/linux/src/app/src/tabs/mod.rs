@@ -5,3 +5,11 @@ pub mod library;
 pub mod people;
 pub mod settings;
 mod util;
+
+pub mod deep_analyze;
+pub mod restructure;
+mod workbench_state;
+pub mod workbenches;
+
+#[cfg(test)]
+mod native_workbench_tests;

@@ -20,6 +20,7 @@
 
 pub mod bge_text;
 pub mod clip_text;
+pub mod clip_space;
 pub mod clip_tokenizer;
 pub mod ep_guard;
 pub mod mobileclip;
@@ -36,6 +37,14 @@ pub mod variants;
 pub mod yunet;
 pub mod vlm;
 pub mod vlm_server;
+pub(crate) mod native_process;
+pub(crate) mod native_admission;
+pub(crate) mod native_probe;
+pub(crate) mod native_runtime;
+pub(crate) mod model_provenance;
+pub(crate) mod model_job;
+pub(crate) mod runtime_cache;
+pub(crate) mod resident_service;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;

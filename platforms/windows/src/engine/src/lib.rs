@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 pub mod commands;
+pub mod catalog_index;
 pub mod coordinator;
 pub mod db;
 pub mod downloader;
@@ -23,5 +24,6 @@ pub mod paths;
 pub mod pipeline;
 pub mod platform;
 pub mod scan_session;
+pub mod resource_scheduler;
 pub mod shell;
 pub mod util;

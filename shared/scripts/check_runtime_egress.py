@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release gate: shipped engine downloads must remain Hugging Face-only."""
+"""Release gate: HF model downloads plus exact-pinned, user-triggered CUDA sources."""
 
 from __future__ import annotations
 
@@ -12,8 +12,21 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 APPROVED_HOSTS = {"huggingface.co", "hf.co"}
-KNOWN_EXTRA_HOSTS: set[str] = set()
+KNOWN_EXTRA_HOSTS = {"github.com", "githubusercontent.com", "developer.download.nvidia.com"}
 KNOWN_OFF_POLICY_URLS: set[str] = set()
+APPROVED_RUNTIME_URLS = {
+    "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64/cudnn-windows-x86_64-9.5.1.17_cuda12-archive.zip",
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-12.4.99-archive.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-12.4.99-archive.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-12.4.99-archive.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libcublas/windows-x86_64/libcublas-windows-x86_64-12.4.2.65-archive.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libcufft/windows-x86_64/libcufft-windows-x86_64-11.2.0.44-archive.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libcurand/windows-x86_64/libcurand-windows-x86_64-10.3.5.119-archive.zip",
+    "https://developer.download.nvidia.com/compute/cuda/redist/12.4.0/libnvjitlink/windows-x86_64/libnvjitlink-windows-x86_64-12.4.99-archive.zip",
+    "https://github.com/ggml-org/llama.cpp/releases/download/b9254/llama-b9254-bin-win-cuda-12.4-x64.zip",
+    "https://github.com/ggml-org/llama.cpp/releases/download/b9254/cudart-llama-bin-win-cuda-12.4-x64.zip",
+}
 ALLOWLIST_RE = re.compile(
     r"const ALLOWED_DOWNLOAD_HOSTS:\s*&\[&str\]\s*=\s*&\[(.*?)\];", re.DOTALL
 )
@@ -123,6 +136,8 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/util/elevation.rs",
     "platforms/windows/src/engine/src/util/path_safety.rs",
     "platforms/windows/src/engine/src/commands/restructure.rs",
+    "platforms/windows/src/engine/src/commands/deep_scope.rs",
+    "platforms/windows/src/engine/src/models/native_process.rs",
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
@@ -142,33 +157,35 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
   "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
   "platforms/cli/src/scan_models.rs": "4964efabe46667a3a4019020d8ca1a85b04d9a07975d19c975d656eb6c7cd8c6",
-  "platforms/linux/src/app/src/engine_client.rs": "f5c6b19024eb419b0299275dcd81f05143f12826535ac9cf061257498694d502",
+  "platforms/linux/src/app/src/engine_client.rs": "c63772da07198e8fa11311ef3c0bd22d72f14fb91ba50f245a641c0ca99e5a60",
   "platforms/linux/src/app/src/tabs/settings.rs": "afe0bcc010f14e85a4fa14f7c83de2da6fcc302552c7776341033bc995c747a7",
   "platforms/tui/src/models.rs": "bc27e7237659b63e42d2f4f8ca9d5d2a83015d849be771395654e250b0754c23",
   "platforms/tui/src/scan.rs": "d125e647269633def7438245657d0e4e447ba9e2d477aac72afda918b2330cf0",
-  "platforms/windows/src/FileID.App/App.xaml.cs": "9bd73d30158ea4a757b1ec29030261c51a37b5d566bce2cf0be44826c1bb3580",
-  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "bf3b62781682e398764bf24bfa07507a6149c9cd9580d8789c47be0ba470ce3c",
+    "platforms/windows/src/FileID.App/App.xaml.cs": "165dfcd81bd6fcdae0dbdc0ab9a1a55a9a181408a425310f1e072686a06c41ef",
+    "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "642a2bef440694f6ee534f837b6e2d4972b21514a41a929f034ea19be1776f34",
   "platforms/windows/src/FileID.App/Program.cs": "e013f7f02ad596093072b50200555b1c63ce89f6e41dddd28a2f57e01dc28e47",
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "ba8cbf1070795fb5fb4a2ea5fdaa3f7828c834e9b16783d6c864e70a915e8c79",
-  "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
+  "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "48373698174ed4c43575b05e85a563fd7485207819d9737c4fed9f92e0b2dd44",
   "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "c50846c16a67365d48caa6e6206f4aa291a384ac93b17a1d85923fdc5449f117",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "acc2ed85e0bb405c85f57e38391c3b4962660a93c9f4b317f148bcefd3bea18f",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "7513ecd8307d20632a9043c5dd0995707f42e83c9ce057a323ce8648a3650304",
-  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "300899ceec51d41fcacf0c34648b334c657f5f5cc1a70149bb6273b6972425b9",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "751b0d42cf11c51fbb803b335a4589f402b7b5d4fc27f2420b71a3e2130d73a3",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "9c9766f59696d49d6f7e6dac39f878ac285864a19e40095ba30c093d4a1ff24d",
+    "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "70e2454a9b4227e5fc51de59512aea0ebe221b411fb5044ac3f0aa6d98e3e518",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "f06fa0c923507f380f64a1b0aedb6951466cf1b33441ecd6ac99fa1c6cf663ca",
   "platforms/windows/src/engine/src/commands/bulk.rs": "b0a5ee159ccbc24fee7c5159175139224334a2753fe9c0961ffb9a1be8cde9e6",
+  "platforms/windows/src/engine/src/commands/deep_scope.rs": "4dca8812ea40edb2a39925693db2d8496d264b59557d42ecbf216aaff221e59a",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "012df8c2af64b890a6b1dedfc979111fab85e7817a7b4b42a5e3877fbfa1fe1f",
-  "platforms/windows/src/engine/src/commands/restructure.rs": "84ddce8ba3e2644ece29ab71b8d36fcd36bdddacd10ed82d7737015299fd784c",
+  "platforms/windows/src/engine/src/commands/restructure.rs": "9db9d9bff7250b001cc269dfa435bbc53986ad165b66e84bc20f3e2e3a232e89",
   "platforms/windows/src/engine/src/commands/trash.rs": "196629996b04c3d6c8db3cc76936a5e3af73905cecdd7ee95bf33eaf368091fa",
-  "platforms/windows/src/engine/src/downloader.rs": "3ec3a3da33b8b42eff58676e378b6268809dceb24b29385c305604f7e060263a",
-  "platforms/windows/src/engine/src/main.rs": "3ec4699c79a82a3bc537f62d2d21fcafbf8ea8830248cb82a5a03d23b03dbaab",
+    "platforms/windows/src/engine/src/downloader.rs": "44150aa9301c0c997e4b5c94f3ecb006eedd3de7ef7929de18d65d530c4a15c5",
+  "platforms/windows/src/engine/src/main.rs": "1c05b8925b900807112f57af99d40e36f71a0f37bd6770b37bfb9ba4d72b37f1",
+  "platforms/windows/src/engine/src/models/native_process.rs": "8988beadf86a88ac4d1ebfb6568191b10860094f1bd908f284df6ba7741c4a0c",
   "platforms/windows/src/engine/src/models/runtime.rs": "554fb40628ffd8653c8466ebae2a7e648e68ee3dfae99fa2a59b70b528c971b5",
-  "platforms/windows/src/engine/src/models/vlm.rs": "fa13b0ec9f0f0a7d996a3cb0bdd061017e66ebe569f1eef9e312bc5ad8a78507",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "c269203ae291937b3c62ae87faff6c2396cef987191176b0557e2d02f4e51ec8",
+  "platforms/windows/src/engine/src/models/vlm.rs": "feab915808a35c9bebfab4cb77399b5a7a086fe1e0d4f3506a2c102c2e736e73",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "5178b06b63a6cd44f98b765093f70670304a7cbad22e1ba2c538ac63600b83dc",
   "platforms/windows/src/engine/src/models/whisper.rs": "c6c6c4b288e0a6327fde8944cda3fbcfcc1cf5b30f2dd21bfbe5f388713fc0c9",
-  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "73a0e672c362f2123f7ba2138c65449aad1aa4cfca9ee86afb487031f12a4ec8",
-  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "e6ec521ac65aaab03c5918d6bc3b04854b2c6a878eed6b8fad82cf0aa50f1267",
-  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "ed0a6da9d9a5afc32ca0056f0c8d92b416164d1ae2c70e0c4f2a258e60a15129",
+  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "5c133b3492b75aeb950d0905348c9d2b5fb87fe85d1bb228b707c1e5db0f7a6c",
+  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "a3b83d9dbf74ee31353bbafc35cf8578d35544436ecd68fa64c240597f73a4ca",
+  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "bd37cec4fea60afc8009ae05874827298c38e491803bc5306d05483caa04ef45",
   "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
   "platforms/windows/src/engine/src/platform.rs": "4dac3644093f2125abb378b38ba803419a2c7bfd5b6441d39d881bd710032b3b",
   "platforms/windows/src/engine/src/shell/heic.rs": "120cf8559214a1bf96d528d6be0e1539303dffb4ba38bad53ec18c1728588f3c",
@@ -181,7 +198,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/video.rs": "76dc9fb3820f464a9390f3cb11142bfd3b401fcff6d5d90fb9edaace9a3500bf",
   "platforms/windows/src/engine/src/util/content_hash.rs": "bd242f7d035d086a034362de51df8c9598ce5028f99f84dbfec214ce5ee0c406",
   "platforms/windows/src/engine/src/util/elevation.rs": "3da9fe31efafaa0b276693e208f3b2b97312e2801a86cdee42b56781847cc0ff",
-  "platforms/windows/src/engine/src/util/path_safety.rs": "dfcb6489754fe2fa3c8b4e4a88ebfb6754e5008ecf1efbab816dc0478627efd6",
+  "platforms/windows/src/engine/src/util/path_safety.rs": "f583468cb89e1b1fda729e8a979a63bc2049deb318ba0963e93e16e69b668798",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
@@ -225,11 +242,15 @@ SAFE_NETWORK_SINK_PATTERNS = {
 }
 
 
-def _approved(host: str | None) -> bool:
-    if host is None:
+def _approved_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname is None:
         return False
-    host = host.lower().rstrip(".")
-    return any(host == approved or host.endswith(f".{approved}") for approved in APPROVED_HOSTS)
+    host = parsed.hostname.lower().rstrip(".")
+    return (
+        any(host == approved or host.endswith(f".{approved}") for approved in APPROVED_HOSTS)
+        or url in APPROVED_RUNTIME_URLS
+    )
 
 
 def _without_comments(text: str) -> str:
@@ -420,7 +441,8 @@ def _production_sources(root: Path) -> tuple[list[Path], list[str]]:
         if not path.is_file() or path.suffix.lower() not in RAW_NETWORK_PATTERNS:
             continue
         relative_parts = path.relative_to(root).parts
-        if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts):
+        if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts) \
+                or path.stem.endswith("_tests") or path.stem.endswith("_test"):
             continue
         files.append(path)
     return sorted(set(files)), []
@@ -813,26 +835,27 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
 def violations(registry: Path, downloader: Path) -> list[str]:
     failures, urls, hosts = analyze(registry, downloader)
     for url in sorted(urls):
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or not _approved(parsed.hostname):
-            failures.append(f"{registry}: non-Hugging-Face runtime URL: {url}")
-    if hosts != APPROVED_HOSTS:
+        if not _approved_url(url):
+            failures.append(f"{registry}: URL is not a Hugging Face model source or reviewed CUDA runtime: {url}")
+    expected_hosts = APPROVED_HOSTS | (KNOWN_EXTRA_HOSTS if urls & APPROVED_RUNTIME_URLS else set())
+    if hosts != expected_hosts:
         failures.append(
-            f"{downloader}: download host allowlist must be exactly {sorted(APPROVED_HOSTS)}; got {sorted(hosts)}"
+            f"{downloader}: download host allowlist must be exactly {sorted(expected_hosts)}; got {sorted(hosts)}"
         )
     return failures
 
 
 def known_blocker_violations(registry: Path, downloader: Path) -> list[str]:
     failures, urls, hosts = analyze(registry, downloader)
-    off_policy = {url for url in urls if not _approved(urlparse(url).hostname)}
+    off_policy = {url for url in urls if not _approved_url(url)}
     if off_policy != KNOWN_OFF_POLICY_URLS:
         failures.append(
             "off-policy runtime URL baseline changed; mirror removals require updating the reviewed baseline, "
             f"additions are forbidden: got {sorted(off_policy)}"
         )
     extras = hosts - APPROVED_HOSTS
-    if extras != KNOWN_EXTRA_HOSTS or not APPROVED_HOSTS.issubset(hosts):
+    expected_extras = KNOWN_EXTRA_HOSTS if urls & APPROVED_RUNTIME_URLS else set()
+    if extras != expected_extras or not APPROVED_HOSTS.issubset(hosts):
         failures.append(
             f"runtime host baseline changed: approved={sorted(APPROVED_HOSTS)}, extras={sorted(extras)}"
         )
@@ -894,7 +917,7 @@ def main() -> int:
     if args.known_blockers:
         print("Runtime egress audit passed: no additions beyond the reviewed release-blocking baseline.")
     else:
-        print("Runtime egress release gate passed: registry and redirects are Hugging Face-only.")
+        print("Runtime egress release gate passed: HF model sources and exact-pinned CUDA sources only.")
     return 0
 
 

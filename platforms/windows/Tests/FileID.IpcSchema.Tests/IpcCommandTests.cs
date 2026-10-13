@@ -13,6 +13,8 @@ namespace FileID.IpcSchema.Tests;
 
 public class IpcCommandTests
 {
+    private static readonly long[] _scopeFileIds = [3, 4];
+    private static readonly string[] _scopeExcludedFolders = ["/generated/private"];
     [Fact]
     public void StartScan_WithRootDisplay_RoundTrips()
     {
@@ -112,6 +114,32 @@ public class IpcCommandTests
         Assert.Equal("qwen2_5_vl_7b", p.ModelKind);
         Assert.True(p.SkipExisting);
         Assert.True(p.TagsOnly);
+    }
+
+    [Fact]
+    public void DeepAnalyzeAll_ScopesRoundTripWithExactCasing()
+    {
+        var command = new IpcCommand("scope", new DeepAnalyzeAllCommand("qwen2_5_vl_7b", true,
+            FileIDs: _scopeFileIds, ExcludedFolders: _scopeExcludedFolders));
+        var json = IpcCoder.Encode(command);
+        Assert.Contains("\"fileIDs\":[3,4]", json);
+        Assert.DoesNotContain("\"fileIds\"", json);
+        var payload = Assert.IsType<DeepAnalyzeAllCommand>(IpcCoder.Decode<IpcCommand>(json).Payload);
+        Assert.Equal(2, payload.FileIDs!.Count);
+        Assert.Equal(3, payload.FileIDs[0]);
+        Assert.Equal("/generated/private", Assert.Single(payload.ExcludedFolders!));
+    }
+
+    [Theory]
+    [InlineData("null", false)]
+    [InlineData("[]", true)]
+    public void DeepAnalyzeAll_EmptySelectionIsDistinctFromNull(string value, bool selected)
+    {
+        var json = "{\"id\":\"scope\",\"payload\":{\"deepAnalyzeAll\":{\"modelKind\":\"qwen2_5_vl_7b\",\"skipExisting\":true,\"fileIDs\":" + value + ",\"excludedFolders\":" + value + "}}}";
+        var payload = Assert.IsType<DeepAnalyzeAllCommand>(IpcCoder.Decode<IpcCommand>(json).Payload);
+        Assert.Equal(selected, payload.FileIDs is not null);
+        Assert.Equal(selected, payload.ExcludedFolders is not null);
+        Assert.True(payload.FileIDs is null || payload.FileIDs.Count == 0);
     }
 
     [Fact]

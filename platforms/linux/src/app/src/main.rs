@@ -7,6 +7,7 @@
 // engine subprocess, and presents the main window.
 
 mod engine_client;
+mod native_runtime;
 mod spring;
 mod tabs;
 mod window;

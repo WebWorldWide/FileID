@@ -434,9 +434,10 @@ impl DbWriter {
                     .with_context(|| format!("insert+id for {}", crate::platform::redact_path_for_log(&f.path)))?;
 
                 if let Some(emb) = &f.clip_embedding {
+                    anyhow::ensure!(crate::models::clip_space::valid(emb), "Invalid CLIP embedding cannot be persisted");
                     let bytes = floats_to_le_bytes(emb);
                     clip_stmt
-                        .execute(params![file_id, bytes, "mobileclip_s2"])
+                        .execute(params![file_id, bytes, crate::models::clip_space::model_id()])
                         .with_context(|| format!("clip insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
