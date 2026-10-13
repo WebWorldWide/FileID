@@ -3827,3 +3827,7 @@ The Store branch offered user-triggered Microsoft/NVIDIA CUDA runtime downloads 
 ## 2026-10-13 — Keep export ownership through Windows engine restart
 
 Hold the Windows File Tools export request in a dedicated state object until its own terminal response arrives. A cancellation acknowledgement is only a stop request; engine generation loss leaves the output unknown until durable history confirms it. This prevents a timed-out or restarted UI request from offering a second destructive operation while the first may still be writing. Use native WinUI controls and the existing IPC contract; add no dependency.
+
+## 2026-10-13 — Pause decorative Mac motion by native window activity
+
+Use a local monotonic clock and native AppKit window activity notifications to suspend the existing SwiftUI LavaLamp and shimmer timelines when the window is inactive, hidden, or occluded, when Reduce Motion is enabled, or when the user pauses motion. Keep the gold visual language and native SwiftUI canvas. This avoids animating invisible windows and makes motion controllable without adding a dependency or telemetry. Verify source behavior on hosted Swift CI and later on the owner’s Mac.

@@ -11,43 +11,31 @@ import SwiftUI
 /// a face crop). Subtle; not a literal "loading" word.
 struct ShimmerView: View {
     var cornerRadius: CGFloat = 8
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var phase: CGFloat = -1.2
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color.white.opacity(0.05))
-            .overlay(highlight)
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            .onAppear {
-                guard !reduceMotion else { return }
-                withAnimation(
-                    .linear(duration: 1.6).repeatForever(autoreverses: false)
-                ) {
-                    phase = 1.2
+        AtmosphereTimeline { elapsed in
+            let phase = CGFloat(-1.2 + 2.4 * elapsed.truncatingRemainder(dividingBy: 1.6) / 1.6)
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .fill(Color.white.opacity(0.05))
+                .overlay {
+                    GeometryReader { geo in
+                        let w = geo.size.width
+                        LinearGradient(
+                            colors: [
+                                Color.clear,
+                                Theme.gold.opacity(0.18),
+                                Theme.ai.opacity(0.18),
+                                Color.clear
+                            ],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .frame(width: w * 0.45)
+                        .offset(x: w * phase)
+                    }
                 }
-            }
-    }
-
-    @ViewBuilder
-    private var highlight: some View {
-        if reduceMotion {
-            EmptyView()
-        } else {
-            GeometryReader { geo in
-                let w = geo.size.width
-                LinearGradient(
-                    colors: [
-                        Color.clear,
-                        Theme.gold.opacity(0.18),
-                        Theme.ai.opacity(0.18),
-                        Color.clear
-                    ],
-                    startPoint: .leading, endPoint: .trailing
-                )
-                .frame(width: w * 0.45)
-                .offset(x: w * phase)
-            }
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
