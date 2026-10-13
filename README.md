@@ -3,21 +3,21 @@
 </p>
 
 <p align="center">
-  <strong>On-device AI file organization. macOS and Windows live, Linux Library + People + required-model Settings preview.</strong><br>
+  <strong>On-device AI file organization for macOS, Windows and Linux.</strong><br>
   <em>Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own.</em>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-15%2B-blue?style=flat-square">
   <img src="https://img.shields.io/badge/Windows-10%2F11%20%2B%20WoA-0078d4?style=flat-square">
-  <img src="https://img.shields.io/badge/Linux-Library%20%2B%20People%20%2B%20Settings%20preview-orange?style=flat-square">
+  <img src="https://img.shields.io/badge/Linux-GTK4%20%2B%20libadwaita-orange?style=flat-square">
   <img src="https://img.shields.io/badge/100%25-on--device-green?style=flat-square">
 </p>
 
 <p align="center">
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-engine.yml/badge.svg" alt="Windows engine"></a>
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/windows-app.yml/badge.svg" alt="Windows app"></a>
-  <a href="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml"><img src="https://github.com/AdamNolle/FileID/actions/workflows/macos.yml/badge.svg" alt="macOS app"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/windows-engine.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/windows-engine.yml/badge.svg" alt="Windows engine"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/windows-app.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/windows-app.yml/badge.svg" alt="Windows app"></a>
+  <a href="https://github.com/WebWorldWide/FileID/actions/workflows/macos.yml"><img src="https://github.com/WebWorldWide/FileID/actions/workflows/macos.yml/badge.svg" alt="macOS app"></a>
 </p>
 
 ---
@@ -37,7 +37,7 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 - [Build from source](#build-from-source) — Windows, macOS, and Linux
   - [Windows](#build--windows) — engine + WinUI 3 app
   - [macOS](#build--macos) — engine + SwiftUI app
-  - [Linux](#build--linux) — shared engine + GTK Library/People/required-model Settings preview
+  - [Linux](#build--linux) — shared engine + GTK4/libadwaita app
 - [Repository layout](#repository-layout) — where things live
 - [Architecture](#architecture) — two-binary IPC design, GPU acceleration, ML stack
 - [Continuous integration](#continuous-integration) — Windows + macOS workflows + privacy gate
@@ -53,7 +53,7 @@ Point FileID at a folder. It reads every file inside — images, video, PDFs, do
 ```bash
 ./build.sh -windows         # Windows: full fresh-install build + run
 ./build.sh -mac             # macOS:   build + launch
-./build.sh -linux           # Linux: build/stage GTK Library + People + required-model Settings preview; launch with display
+./build.sh -linux           # Linux: build/stage the shared engine + GTK app; launch with display
 ```
 
 Windows defaults to a fresh-install Release build copied to `~/Desktop/FileID/` and launched; Linux builds/stages both binaries under `platforms/linux/dist/fileid/` and runs a privacy gate without wiping user data. On Linux, the app launches when a graphical display is available; without one, it remains staged. Use `./build.sh -linux --no-run` to build/stage without launching.
@@ -97,9 +97,12 @@ Detailed instructions: [Build from source](#build-from-source).
 | **Library** | FTS5 search over filenames + OCR. Semantic CLIP search ("a dog at the beach"). RAM++ auto-tags every image with specific labels. Thumbnail grid + preview sheet. |
 | **People** | Face clusters from on-device SFace embeddings. Drag to merge. Name a cluster once and Deep Analyze captions use real names. |
 | **Cleanup** | Duplicate groups by perceptual hash. Trashed files stay recoverable. |
-| **Deep Analyze** | Local vision-language model (Qwen2.5-VL 7B · Gemma 3 · Mistral-Small-3.2) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
+| **Deep Analyze** | Local vision-language model (Qwen2.5-VL 7B · Qwen3-VL 4B/8B · Gemma 3 · Mistral-Small-3.2) writes a caption + smart filename per image, PDF, video keyframe, or doc thumbnail. |
 | **Restructure** | Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy. |
 | **Settings** | Model downloads, GPU acceleration picker, engine info, logs, privacy. |
+| **Search & Moments** | Keyword/hybrid search over names, text, captions and timestamped evidence; durable timeline jobs draft chapters and significant moments for review. |
+| **File Tools** | Preview → export → history → Undo for photo, chapter and fit-and-pad social video exports; originals are never modified. |
+| **Chat** | Local, evidence-grounded questions about your library with a bounded on-device model. |
 
 ### Finder tags (macOS)
 
@@ -107,7 +110,7 @@ FileID writes **real Finder tags** — the system-wide `tagNamesKey` xattrs, not
 
 ### Platform status
 
-macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux builds the shared Rust engine and a GTK4/libadwaita Library + People + required-model Settings preview; Cleanup, Deep Analyze, and Restructure are not wired. People controls were exercised on WSL/Xvfb against an isolated SQLite fixture; model-backed suggested merges were unavailable without weights. See [Build — Linux](#build--linux) for build steps and current limitations.
+macOS is the canonical reference and ships every tab end-to-end. The Windows port is feature-complete on the six tabs (Library / People / Cleanup / Deep Analyze / Restructure / Settings) and the first-run Welcome sheet — engine + IPC schema + scan pipeline + UI all wired. Release build is warning-free across both Rust and .NET; on-hardware GPU verification is ongoing. Database migrations v1–v12 are byte-faithful with macOS GRDB, so a library scanned on one platform opens on the other. Every default model is permissively licensed (Apache-2.0 / MIT) — the project is commercial-clean. Linux builds the shared Rust engine and a GTK4/libadwaita app with all six tabs plus the Search & Moments, File Tools and Chat workbenches; its UI is exercised headlessly against a real engine under Xvfb, while GPU and packaged-install acceptance remain release gates. Windows and Linux run timeline and significant-moment analysis through the shared engine with the vetted local FFmpeg runtime; on-device speech transcription is currently macOS-only. See [Build — Linux](#build--linux) for build steps and current limitations.
 
 ### First launch
 
@@ -299,7 +302,7 @@ FileID/
 │   │   │   ├── publish-bundle.ps1  # Release build (sign + MSI + bundle)
 │   │   │   └── build.ps1           # Engine-only Phase 0 build
 │   │   └── Tests/                  # xUnit tests for the IPC schema
-│   └── linux/                 # GTK Library + People + required-model Settings preview; shared Rust engine
+│   └── linux/                 # GTK4/libadwaita app; uses the shared Rust engine
 ├── shared/
 │   ├── ipc-schema/             # Canonical IPC contract (JSON Schema)
 │   ├── docs/                   # Architecture, decisions, models, privacy

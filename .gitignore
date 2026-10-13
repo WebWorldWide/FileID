@@ -151,3 +151,6 @@ __pycache__/
 *.local.json
 .env
 .env.local
+
+# Local agent/tool configuration
+.serena/
