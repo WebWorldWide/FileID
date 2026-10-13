@@ -44,7 +44,17 @@ UPSTREAM_ORGS = {
     "lightonai", "stepfun-ai", "XiaomiMiMo", "meta-llama", "tiiuae", "CohereLabs",
 }
 ALLOWED_LICENSES = {"apache-2.0": "Apache-2.0", "mit": "MIT", "gemma": "Gemma"}
-EXCLUDE = re.compile(r"abliterat|uncensor|nsfw|heretic|lora-|-lora|roleplay|merge|test|-pt-|base-gguf|-base$|-base-|draft|mtp|speculative|imatrix-only", re.I)
+EXCLUDE = re.compile(
+    r"abliterat|uncensor|nsfw|heretic|lora-|-lora|roleplay|merge|test|-pt-|base-gguf|-base$|-base-|draft|mtp|speculative"
+    r"|imatrix|bitnet|madlad|coder|safeguard|phone|guard-|-guard|embedding-gemma-test",
+    re.I,
+)
+# Files that ship beside the weights but are not a standalone model.
+AUXILIARY_FILE = re.compile(r"^(mtp|dspark|dflash|draft|eagle)-|imatrix|-mtp\b", re.I)
+# Below ~3 bits per weight, quality drops too far to offer.
+LOW_BIT = re.compile(r"IQ1|IQ2|TQ1|TQ2|Q2_K|Q2K|\bq2\b", re.I)
+SPEECH_NAME = re.compile(r"voxtral|whisper|asr|audio|speech", re.I)
+REASONING_NAME = re.compile(r"thinking|reasoning|r1-distill", re.I)
 GGUF_QUANT_PREFERENCE = ["Q4_K_M", "Q4_K_S", "Q4_0", "IQ4_XS", "Q5_K_M", "Q8_0", "BF16", "F16"]
 MMPROJ_PREFERENCE = ["f16", "F16", "bf16", "BF16", "Q8_0", "q8_0", "f32"]
 
@@ -95,6 +105,34 @@ def get(path: str, retries: int = 8):
     return None
 
 
+def small_file_sha256(repo: str, sha: str, path: str, limit: int = 20_000_000) -> tuple[str, int] | None:
+    """SHA256 of a non-LFS file at a pinned revision (configs, tokenizers)."""
+    url = f"https://huggingface.co/{repo}/resolve/{sha}/{urllib.parse.quote(path)}"
+    cached = CACHE / ("blob-" + hashlib.sha256(url.encode()).hexdigest() + ".json") if CACHE else None
+    if cached and cached.exists():
+        value = json.loads(cached.read_text())
+        return value["sha256"], value["bytes"]
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(url, timeout=90) as response:
+                data = response.read(limit + 1)
+            if len(data) > limit:
+                return None
+            result = (hashlib.sha256(data).hexdigest(), len(data))
+            if cached:
+                cached.write_text(json.dumps({"sha256": result[0], "bytes": result[1]}))
+            return result
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403, 404) or attempt == 5:
+                return None
+            time.sleep(int(error.headers.get("Retry-After") or 30) if error.code == 429 else 2 ** attempt)
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 5:
+                return None
+            time.sleep(2 ** attempt)
+    return None
+
+
 def license_of(info: dict) -> str | None:
     card = info.get("cardData") or {}
     license_value = card.get("license")
@@ -120,17 +158,19 @@ def base_model_of(info: dict) -> str | None:
     return base if isinstance(base, str) else None
 
 
-def upstream(repo: str, cache: dict, depth: int = 0, info: dict | None = None) -> tuple[str, dict | None]:
-    """Follow base_model links to the original release (at most 4 hops)."""
-    if repo in cache:
-        return cache[repo]
-    info = info if info is not None else (get(f"models/{repo}") or {})
-    base = base_model_of(info)
-    result = (repo, info or None)
-    if base and base != repo and depth < 4:
-        result = upstream(base, cache, depth + 1)
-    cache[repo] = result
-    return result
+def lineage(repo: str, cache: dict, info: dict | None = None) -> list[tuple[str, dict]]:
+    """The repo followed by its base_model ancestors (at most 4 hops)."""
+    chain: list[tuple[str, dict]] = []
+    current, current_info = repo, info
+    while current and len(chain) < 5 and all(current != seen for seen, _ in chain):
+        if current_info is None:
+            current_info = cache.get(current)
+            if current_info is None:
+                current_info = get(f"models/{current}") or {}
+                cache[current] = current_info
+        chain.append((current, current_info))
+        current, current_info = base_model_of(current_info), None
+    return chain
 
 
 def params_billion(name: str) -> float | None:
@@ -147,12 +187,14 @@ def active_billion(name: str) -> float | None:
 
 
 def pick(files: list[dict], preference: list[str], predicate) -> dict | None:
+    """First file matching the preference order; None when nothing preferred
+    matches, so unknown or low-bit quantizations are never chosen by default."""
     candidates = [f for f in files if predicate(f["path"])]
     for key in preference:
         for f in candidates:
-            if key in Path(f["path"]).name:
+            if key.lower() in Path(f["path"]).name.lower():
                 return f
-    return candidates[0] if candidates else None
+    return None
 
 
 def gguf_files(repo: str, sha: str) -> list[dict] | None:
@@ -183,22 +225,28 @@ def build_gguf_entry(info: dict, base_repo: str, base_info: dict, license_key: s
     files = gguf_files(repo, sha)
     if not files:
         return None
-    weights = [f for f in files if "mmproj" not in f["path"].lower() and not is_split(f["path"])]
+    weights = [
+        f for f in files
+        if "mmproj" not in f["path"].lower() and not is_split(f["path"])
+        and not AUXILIARY_FILE.search(Path(f["path"]).name) and not LOW_BIT.search(Path(f["path"]).name)
+    ]
     model = pick(weights, GGUF_QUANT_PREFERENCE, lambda p: True)
     if not model:
         return None
     projector = pick(files, MMPROJ_PREFERENCE, lambda p: "mmproj" in p.lower())
     pipeline = base_info.get("pipeline_tag") or info.get("pipeline_tag")
     role = ROLE_BY_PIPELINE.get(pipeline or "", "text")
-    if projector and role == "text":
+    if SPEECH_NAME.search(base_repo) or (pipeline or "").startswith("audio") or pipeline == "automatic-speech-recognition":
+        role = "speech"
+    elif projector and role == "text":
         role = "vision"
-    if role == "vision" and not projector:
+    if role == "vision" and (not projector or REASONING_NAME.search(base_repo) or REASONING_NAME.search(repo)):
         return None
     artifacts = [{"role": "model", **model}]
     if projector:
         artifacts.append({"role": "projector", **projector})
     total = sum(a["bytes"] for a in artifacts)
-    quant = next((q for q in GGUF_QUANT_PREFERENCE if q in Path(model["path"]).name), "other")
+    quant = next(q for q in GGUF_QUANT_PREFERENCE if q.lower() in Path(model["path"]).name.lower())
     resident_gb = total / 1e9 * 1.15 + (0.6 if role in ("vision", "text") else 0.1)
     return finish_entry(info, base_repo, base_info, license_key, "gguf", role, quant, artifacts, total, resident_gb, sha)
 
@@ -212,12 +260,24 @@ def build_mlx_entry(info: dict, base_repo: str, base_info: dict, license_key: st
     for item in tree:
         if item.get("type") != "file":
             continue
+        if item["path"].startswith(".") or item["path"].lower().endswith((".md", ".png", ".jpg", ".gitattributes")):
+            continue
         lfs = item.get("lfs") or {}
-        artifacts.append({"role": "file", "path": item["path"], "sha256": lfs.get("oid"), "bytes": lfs.get("size") or item.get("size")})
+        if lfs.get("oid"):
+            artifacts.append({"role": "file", "path": item["path"], "sha256": lfs["oid"], "bytes": lfs.get("size") or item.get("size")})
+            continue
+        pinned = small_file_sha256(repo, sha, item["path"])
+        if not pinned:
+            return None
+        artifacts.append({"role": "file", "path": item["path"], "sha256": pinned[0], "bytes": pinned[1]})
     if not any(a["path"].endswith(".safetensors") for a in artifacts):
         return None
     pipeline = base_info.get("pipeline_tag") or info.get("pipeline_tag")
-    role = ROLE_BY_PIPELINE.get(pipeline or "", "text")
+    role = "speech" if SPEECH_NAME.search(base_repo) else ROLE_BY_PIPELINE.get(pipeline or "", "text")
+    if role == "vision" and (REASONING_NAME.search(base_repo) or REASONING_NAME.search(repo)):
+        return None
+    if re.search(r"[123]bit|optiq-[12]", repo, re.I) and not re.search(r"[4-8]bit", repo, re.I):
+        return None
     total = sum(a["bytes"] or 0 for a in artifacts)
     quant = next((q for q in ["3bit", "4bit", "5bit", "6bit", "8bit", "bf16", "fp16"] if q in repo.lower()), "other")
     resident_gb = total / 1e9 * 1.15 + 0.6
@@ -226,7 +286,7 @@ def build_mlx_entry(info: dict, base_repo: str, base_info: dict, license_key: st
 
 def finish_entry(info, base_repo, base_info, license_key, fmt, role, quant, artifacts, total, resident_gb, sha) -> dict:
     repo = info["id"]
-    name = base_repo.split("/", 1)[1]
+    name = re.sub(r"[-_](GGUF|MLX[-_A-Za-z0-9]*)$", "", base_repo.split("/", 1)[1], flags=re.I)
     return {
         "id": re.sub(r"[^a-z0-9]+", "_", f"{name}_{fmt}_{quant}".lower()).strip("_"),
         "name": name,
@@ -285,14 +345,19 @@ def main() -> int:
     chosen: dict[tuple[str, str, str], tuple[int, dict]] = {}
     rejected: dict[str, int] = {}
     for info in discover(PUBLISHERS, formats, args.limit):
-        base_repo, base_info = upstream(info["id"], upstream_cache, info=info)
-        base_info = base_info or {}
-        org = base_repo.split("/", 1)[0]
-        license_key = license_of(base_info) or license_of(info)
-        if org not in UPSTREAM_ORGS:
+        chain = lineage(info["id"], upstream_cache, info=info)
+        # The model is the release this conversion was made from; deeper
+        # ancestors are its backbone. Every declared upstream license must
+        # be allowed, and the conversion may not claim a different one.
+        base_repo, base_info = chain[1] if len(chain) > 1 else chain[0]
+        org = chain[-1][0].split("/", 1)[0]
+        upstream_licenses = {license_of(item) for _, item in chain[1:]} - {None}
+        license_key = license_of(base_info) or license_of(chain[-1][1]) or license_of(info)
+        if org not in UPSTREAM_ORGS or base_repo.split("/", 1)[0] not in UPSTREAM_ORGS | set(PUBLISHERS):
             rejected["untrusted upstream"] = rejected.get("untrusted upstream", 0) + 1
             continue
-        if license_key not in ALLOWED_LICENSES or license_of(info) not in (None, license_key, "other"):
+        if (license_key not in ALLOWED_LICENSES or not upstream_licenses <= set(ALLOWED_LICENSES)
+                or license_of(info) not in (None, license_key, "other")):
             rejected["license"] = rejected.get("license", 0) + 1
             continue
         if EXCLUDE.search(base_repo):
