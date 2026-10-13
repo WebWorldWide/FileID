@@ -109,18 +109,8 @@ internal sealed partial class EngineClient
         lock (_writeLock)
         {
             var predecessor = _writeTail;
-            queued = Task.Run(async () =>
+            queued = CommandWriteQueue.Enqueue(predecessor, () =>
             {
-                try
-                {
-                    await predecessor.ConfigureAwait(false);
-                }
-                catch
-                {
-                    // A failed command must not poison the FIFO for later work.
-                }
-
-                ct.ThrowIfCancellationRequested();
                 var command = IpcCommand.New(payload);
                 var bytes = IpcCoder.EncodeLine(command);
                 DebugLog.Info($"[IPC OUT] {commandKind} ({bytes.Length} bytes)");
@@ -150,7 +140,7 @@ internal sealed partial class EngineClient
                 }
 
                 DebugLog.Info($"[IPC OUT] {commandKind} flushed to engine stdin.");
-            }, CancellationToken.None);
+            }, ct);
             _writeTail = queued;
         }
 

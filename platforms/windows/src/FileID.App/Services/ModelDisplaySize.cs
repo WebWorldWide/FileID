@@ -38,8 +38,10 @@ internal static class ModelDisplaySize
             ["mobileclip_s2"] = 352,        // CLIP ViT-B/32 vision ONNX (~335 MB, MIT)
             ["clip_text"] = (254 + 1 + 1),          // ≈ 256 with vocab + merges
             ["cudnn_runtime_x64"] = 430,
-            // ONNX Runtime CUDA provider pack (onnxruntime-win-x64-gpu zip).
-            ["ort_cuda_x64"] = 313,
+            // Matched ORT 1.22 GPU build plus CUDA 12.4 redistributables.
+            ["ort_cuda_x64"] = 1_164,
+            // CUDA llama.cpp binaries + their CUDA runtime DLLs.
+            ["llama_runtime_cuda_x64"] = 651,
             // ONNX Runtime OpenVINO pack (Intel; ORT-OpenVINO build + OV runtime).
             // ~40 MB compressed download (≈119 MB extracted).
             ["ort_openvino_x64"] = 40,

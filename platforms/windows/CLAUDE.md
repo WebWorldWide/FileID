@@ -1,6 +1,19 @@
 # FileID — Windows platform
 
-Windows 10/11 (x64 + ARM64 / Snapdragon WoA) build of FileID. 1:1 feature parity with the macOS reference, native Windows UI, native Windows performance.
+## Current Windows dev machine (2026-10-05)
+
+- Windows 11 Pro, build 26300; AMD Ryzen 9 9900X (12 cores / 24 logical processors); 64 GiB RAM.
+- GPUs: NVIDIA GeForce RTX 5080 (driver 617.14, compute capability 12.0) and AMD Radeon(TM) Graphics.
+- No FileID CUDA/cuDNN execution-provider files were found in the checked local runtime directories. GPU detection alone is not CUDA-path verification; do not accept NVIDIA/cuDNN terms or download vendor runtimes on the owner's behalf.
+- Treat the RTX 2060 throughput notes and the `G:\TrueNAS` corpus path below as historical until re-measured or confirmed on this machine. Record current driver/provider, corpus path, and benchmark result when running `build/iterate.ps1`.
+
+Windows 10/11 (x64 + ARM64 / Snapdragon WoA) build of FileID. macOS is the 1:1 feature and visual target, not a claim that every new feature is already mirrored.
+
+## Portable feature status (2026-10-10)
+
+The local reviewed parity slice adds reachable WinUI Search & Moments, chapter corrections/Undo, catalog-index jobs, File Tools and evidence Chat. Shared Rust supports keyword/semantic/hybrid and seed similarity through persisted verified-model HNSW graphs; confirmed People/event/time chat retrieval uses stored evidence, not portable model generation. Tools Undo is enabled after integrated no-clobber/restart ownership and cross-device recovery fixtures. Unsupported conversions remain explicit; timeline/speech/chapter generation, portable loaded-model chat, isolated cancellable video/conversion workers and complete resource accounting are unfinished.
+
+Parent solution build, 502 app tests, 49 IPC tests, format verification, strict engine Clippy/fmt/tests and disposable portable probes pass. Native WinUI interaction, Store startup, models/GPU, ARM64 and representative-library performance remain separate gates. Use `python shared/scripts/check_portable_parity.py --engine <built-engine>` only for temporary synthetic fixtures; see `shared/docs/NEXT_VERSION.md`.
 
 Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE.md`; for cross-platform contracts + principles see the root `CLAUDE.md` and `shared/`.
 
@@ -43,11 +56,11 @@ platforms/windows/
 .\platforms\windows\build\publish-bundle.ps1 -SkipSign   # release MSIs + FileIDSetup.exe
 ```
 
-Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build` / `dotnet test` / `dotnet format --verify-no-changes` on `FileID.sln`. On-hardware: `build\iterate.ps1 -Corpus <path>` drives a full scan + cluster + assertions against the RTX 2060 / `G:\TrueNAS`.
+Self-verify headlessly (this is the dev-env loop): from `src/engine`, `cargo clippy --all-targets -- -D warnings` + `cargo test`; for the app, `dotnet build` / `dotnet test` / `dotnet format --verify-no-changes` on `FileID.sln`. Current dev hardware: AMD Ryzen 9 9900X (12 cores / 24 threads), 64 GB RAM, GeForce RTX 5080 (16 GB VRAM, driver 617.14), Windows 11 Pro build 26300. The former `G:\TrueNAS` corpus is not mounted; pass an available representative copy explicitly with `build\iterate.ps1 -Corpus <path>`. Earlier RTX 2060 / DirectML results are historical, not a baseline for this machine. CUDA and DirectML still need current-hardware verification.
 
 ## Current status
 
-Engine and app cover all six tabs. The existing commercial-clean model stack was on-hardware verified (RTX 2060, DirectML); optional Qwen3-VL inference remains unverified without installed weights:
+Engine and app cover all six tabs. The existing commercial-clean model stack was previously verified on RTX 2060 / DirectML; current RTX 5080 validation and optional Qwen3-VL inference remain open without installed weights:
 - **Tagging:** RAM++ (Swin-L @384, 4585-tag ONNX) primary, per-class thresholds + generic-tag suppress-list; CLIP zero-shot scene tags are the fallback.
 - **Search:** CLIP ViT-B/32 (512-d image + text).
 - **Faces:** YuNet detect + SFace embed (128-d) + 5-point alignment; density clustering.
@@ -60,7 +73,7 @@ In progress / not done: butler restructure P2–P4 (VLM group naming, confidence
 
 - **Edition 2021, MSRV 1.90** (toolchain pinned in `rust-toolchain.toml`, both Windows targets).
 - **No new dependencies without asking.** Locked set in `Cargo.toml`; new crates need a `DECISIONS.md` justification.
-- **No telemetry.** The only network call site is `engine/src/downloader.rs` (HuggingFace fetch). CI grep-gates the binary for telemetry strings.
+- **No telemetry.** `engine/src/downloader.rs` is the only runtime network surface: user-triggered Hugging Face model downloads and exact SHA-256-pinned Microsoft/NVIDIA CUDA runtime archives. CUDA installs require NVIDIA license acceptance, and CI checks the exact URL/host allowlists.
 - **Path redaction.** `redact_path_for_log(path)` before any `tracing::*!()` that includes a user path.
 - **Default to no comments** — only a non-obvious *why* (workaround, invariant, perf pitfall).
 - **Sync mirrors for cancellation.** Hot loops check `AtomicBool::load(Relaxed)` instead of `await`-ing the coordinator (no per-file actor hop).

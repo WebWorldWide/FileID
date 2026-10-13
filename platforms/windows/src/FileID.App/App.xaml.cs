@@ -28,6 +28,8 @@ public partial class App : Application
 
     public App()
     {
+        DebugSettings.XamlResourceReferenceFailed += (_, e) =>
+            DebugLog.Warn("[XAML-RESOURCE] " + e.Message);
         InitializeComponent();
         UnhandledException += OnUnhandledException;
         // Background-thread exceptions (Task.Run continuations, ConfigureAwait(false)
@@ -39,6 +41,41 @@ public partial class App : Application
         // when the finalizer runs. Still worth logging — it identifies
         // missing awaits / fire-and-forget bugs.
         System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+    }
+
+    private void EnsureApplicationResources()
+    {
+        try
+        {
+            if (Resources.MergedDictionaries.Count == 0)
+            {
+                Resources.MergedDictionaries.Add(new Microsoft.UI.Xaml.Controls.XamlControlsResources());
+                Resources.MergedDictionaries.Add(new ResourceDictionary
+                {
+                    Source = new System.Uri("ms-appx:///AppResources/Theme.xaml"),
+                });
+                DebugLog.Warn("[XAML-RESOURCE] Rebuilt missing application resource dictionaries at startup.");
+            }
+
+            if (!Resources.ContainsKey("BoolToVisibility"))
+                Resources["BoolToVisibility"] = new FileID.Converters.BoolToVisibilityConverter();
+            if (!Resources.ContainsKey("NullToVisibility"))
+                Resources["NullToVisibility"] = new FileID.Converters.NullToVisibilityConverter();
+            if (!Resources.ContainsKey("IdentityDouble"))
+                Resources["IdentityDouble"] = new FileID.Converters.IdentityDoubleConverter();
+
+            var hasGoldBrush = Resources.ContainsKey("GoldBrush") ||
+                Resources.MergedDictionaries.Any(dictionary => dictionary.ContainsKey("GoldBrush"));
+            if (!hasGoldBrush)
+            {
+                DebugLog.Warn("[XAML-RESOURCE] GoldBrush is still unavailable after restoring application dictionaries.");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            DebugLog.Error("[XAML-RESOURCE] Application resource recovery failed: " + ex);
+            throw;
+        }
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -60,6 +97,23 @@ public partial class App : Application
             Trace("EnsureDirectories");
             AppPaths.EnsureDirectories();
             Trace($"State dir = {AppPaths.Root}");
+            EnsureApplicationResources();
+            Trace("InspectXamlResources");
+            try
+            {
+                var resources = Resources;
+                Trace($"XAML app resources: keys={resources.Count}, merged={resources.MergedDictionaries.Count}");
+                for (var i = 0; i < resources.MergedDictionaries.Count; i++)
+                {
+                    var dictionary = resources.MergedDictionaries[i];
+                    var hasGoldBrush = dictionary.ContainsKey("GoldBrush");
+                    Trace($"XAML merged[{i}]: source={dictionary.Source}, keys={dictionary.Count}, GoldBrush={hasGoldBrush}");
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Trace($"XAML resource audit failed (continuing): {ex.GetType().Name}: {ex.Message}");
+            }
             // Prime the disk thumbnail cache size counter so Settings →
             // Diagnostics shows a real number without waiting for the
             // first sweep. Off the UI thread: a warm cache is a recursive

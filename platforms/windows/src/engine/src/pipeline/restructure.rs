@@ -188,15 +188,19 @@ pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
         .collect()
 }
 
-/// Priority-based restructure matching macOS Restructure.swift. First
-/// match wins:
+/// Priority-based restructure matching macOS Restructure.swift. First match wins:
 ///   1. Named person  → People/<Name>/<Year>/
 ///   2. GPS location  → Places/<lat,lon-bucketed>/<Year>/
-///   3. Document       → Documents/<Year>/
-///   4. Image          → Photos/<Year>/<MonthName>/
-///   5. Video          → Videos/<Year>/
-///   6. Audio          → Audio/
-///   7. Fallback       → Misc/
+///   3. Document      → Documents/<Year>/
+///   4. Image         → Photos/<Year>/<MonthName>/
+///   5. Video         → Videos/<Year>/
+///   6. Audio         → Audio/<Year>/ (flat when no date signal)
+///   7. 3D model      → 3D Models/
+///   8. Fallback      → Misc/
+///
+/// A zero/missing timestamp is not a real date (FAT32 zero-epoch, corrupt mtime):
+/// it yields Ask confidence and a dateless (flat) folder, matching macOS, so a
+/// file is never silently filed into a 1970 bucket.
 pub fn classify(
     files: &[FileForClassify],
     library_root: &Path,
@@ -204,6 +208,7 @@ pub fn classify(
     let mut out = Vec::with_capacity(files.len());
     for f in files {
         let ts = f.created_unix.unwrap_or(f.modified_unix);
+        let ts_valid = ts > 86_400.0;
         let (y, m) = year_month(ts);
         let mname = month_name(m);
 
@@ -222,38 +227,86 @@ pub fn classify(
              Confidence::Review,
              "Taken at a shared location".to_string())
         } else if f.has_text || matches!(f.kind, FileKind::Pdf | FileKind::Doc) {
-            (library_root.join("Documents").join(format!("{y}")),
-             "document".to_string(),
-             Confidence::Review,
-             format!("Document from {y}"))
+            let docs = library_root.join("Documents");
+            (
+                if ts_valid { docs.join(format!("{y}")) } else { docs },
+                "document".to_string(),
+                if ts_valid { Confidence::Review } else { Confidence::Ask },
+                if ts_valid { format!("Document from {y}") } else { "Document — no date signal".to_string() },
+            )
         } else if matches!(f.kind, FileKind::Image) {
-            (library_root.join("Photos").join(format!("{y}")).join(&mname),
-             "photo".to_string(),
-             Confidence::Review,
-             format!("Photo from {mname} {y}"))
+            let photos = library_root.join("Photos");
+            (
+                if ts_valid { photos.join(format!("{y}")).join(&mname) } else { photos },
+                "photo".to_string(),
+                if ts_valid { Confidence::Review } else { Confidence::Ask },
+                if ts_valid { format!("Photo from {mname} {y}") } else { "Photo — no capture date".to_string() },
+            )
         } else if matches!(f.kind, FileKind::Video) {
-            (library_root.join("Videos").join(format!("{y}")),
-             "video".to_string(),
-             Confidence::Review,
-             format!("Video from {y}"))
+            let videos = library_root.join("Videos");
+            (
+                if ts_valid { videos.join(format!("{y}")) } else { videos },
+                "video".to_string(),
+                if ts_valid { Confidence::Review } else { Confidence::Ask },
+                if ts_valid { format!("Video from {y}") } else { "Video — no date signal".to_string() },
+            )
         } else if matches!(f.kind, FileKind::Audio) {
-            (library_root.join("Audio"), "audio".to_string(),
-             Confidence::Review, "Audio file".to_string())
+            let audio = library_root.join("Audio");
+            (
+                if ts_valid { audio.join(format!("{y}")) } else { audio },
+                "audio".to_string(),
+                Confidence::Review,
+                if ts_valid { format!("Audio file from {y}") } else { "Audio file".to_string() },
+            )
+        } else if matches!(f.kind, FileKind::Model) {
+            (library_root.join("3D Models"), "model".to_string(),
+             Confidence::Review, "3D model".to_string())
         } else {
             (library_root.join("Misc"), "misc".to_string(),
              Confidence::Ask, "No strong signal — left for you to decide".to_string())
         };
 
+        // Filename: keep the original or use the VLM suggestion. The VLM name is
+        // already slug-sanitized; the extension is capped separately from the
+        // stem so a long basename never loses its suffix. (macOS parity)
+        let name = proposed_filename(f);
         out.push(ProposedMove {
             file_id: f.file_id,
             source: f.source.clone(),
-            destination: dest.join(f.source.file_name().unwrap_or_default()),
+            destination: dest.join(name),
             category,
             confidence,
             reason: Some(reason),
         });
     }
     out
+}
+
+/// The basename the plan will write, byte-faithful with macOS
+/// `ruleClassify`: VLM proposal when present, otherwise the sanitized original
+/// stem with the extension re-attached.
+fn proposed_filename(f: &FileForClassify) -> String {
+    let ext = crate::util::path_safety::safe_filename_component_max(
+        &f.source
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        16,
+    );
+    let stem = match &f.vlm_proposed {
+        Some(p) if !p.is_empty() => p.clone(),
+        _ => crate::util::path_safety::safe_filename_component(
+            &f.source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+    };
+    if ext.is_empty() || ext == "_" {
+        stem
+    } else {
+        format!("{stem}.{ext}")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +320,22 @@ pub struct FileForClassify {
     pub location_lat: Option<f64>,
     pub location_lon: Option<f64>,
     pub has_text: bool,
+    /// Deep Analyze's smart-name proposal. macOS applies it during restructure;
+    /// Windows previously kept the original basename, so the same library laid
+    /// out different filenames on each platform. (lockstep restructure-3)
+    pub vlm_proposed: Option<String>,
+    /// The source identity as it existed when the plan was built. Carried onto
+    /// the emitted move so apply can bind the move to THIS file rather than to
+    /// whatever happens to live at `source` now. (audit P1)
+    pub identity: Option<PlannedIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlannedIdentity {
+    pub content_hash: Option<String>,
+    pub size_bytes: u64,
+    pub file_ref: Option<u64>,
+    pub modified_at: f64,
 }
 
 fn sanitize_path_component(s: &str) -> String {
@@ -341,6 +410,8 @@ mod tests {
             location_lat: None,
             location_lon: None,
             has_text: false,
+            vlm_proposed: None,
+            identity: None,
         }
     }
 
@@ -486,6 +557,8 @@ mod tests {
             location_lat: None,
             location_lon: None,
             has_text: false,
+            vlm_proposed: None,
+            identity: None,
         };
         let m = classify(&[f], Path::new("D:/Library"));
         let dest = m[0].destination.to_string_lossy();
@@ -506,6 +579,8 @@ mod tests {
             location_lat: None,
             location_lon: None,
             has_text: false,
+            vlm_proposed: None,
+            identity: None,
         };
         let m = classify(&[f], Path::new("D:/Library"));
         let dest = m[0].destination.to_string_lossy();
@@ -540,5 +615,84 @@ mod tests {
         assert_eq!(cats[0].count, 2);
         assert_eq!(cats[1].category, "video");
         assert_eq!(cats[1].count, 1);
+    }
+
+    /// macOS parity: a zero/corrupt timestamp is not a real date (FAT32 zero-epoch).
+    /// It must yield Ask confidence and a dateless folder, never a 1970 bucket.
+    #[test]
+    fn dateless_file_is_ask_and_flat() {
+        let m = classify(&[img(1, "C:/scan/mystery.jpg", 0.0)], Path::new("D:/Library"));
+        assert_eq!(m[0].confidence, Confidence::Ask);
+        assert_eq!(m[0].reason.as_deref(), Some("Photo — no capture date"));
+        assert_eq!(m[0].destination, Path::new("D:/Library/Photos/mystery.jpg"));
+    }
+
+    #[test]
+    fn dateless_document_reason_matches_macos() {
+        let mut f = img(1, "C:/scan/notes.pdf", 0.0);
+        f.kind = FileKind::Pdf;
+        let m = classify(&[f], Path::new("D:/Library"));
+        assert_eq!(m[0].confidence, Confidence::Ask);
+        assert_eq!(m[0].reason.as_deref(), Some("Document — no date signal"));
+    }
+
+    /// macOS parity: a dated audio file lands in Audio/<Year>/, not a flat Audio/.
+    #[test]
+    fn dated_audio_gets_its_year() {
+        let mut f = img(1, "C:/scan/podcast.mp3", 1_710_504_000.0);
+        f.kind = FileKind::Audio;
+        let m = classify(&[f], Path::new("D:/Library"));
+        assert_eq!(m[0].category, "audio");
+        assert_eq!(m[0].reason.as_deref(), Some("Audio file from 2024"));
+        assert_eq!(m[0].destination, Path::new("D:/Library/Audio/2024/podcast.mp3"));
+    }
+
+    #[test]
+    fn model_kind_routes_to_3d_models() {
+        let mut f = img(1, "C:/scan/part.stl", 1_710_504_000.0);
+        f.kind = FileKind::Model;
+        let m = classify(&[f], Path::new("D:/Library"));
+        assert_eq!(m[0].category, "model");
+        assert_eq!(m[0].reason.as_deref(), Some("3D model"));
+        assert_eq!(m[0].destination, Path::new("D:/Library/3D Models/part.stl"));
+    }
+
+    /// macOS parity: Deep Analyze's smart name is applied during restructure.
+    /// Windows previously kept the original basename, so the same library laid out
+    /// different filenames on each platform. (lockstep restructure-3)
+    #[test]
+    fn vlm_proposal_renames_the_file() {
+        let mut f = img(1, "C:/scan/IMG_1234.jpg", 1_710_504_000.0);
+        f.vlm_proposed = Some("sunset-over-the-bay".to_string());
+        let m = classify(&[f], Path::new("D:/Library"));
+        assert_eq!(
+            m[0].destination,
+            Path::new("D:/Library/Photos/2024/March/sunset-over-the-bay.jpg")
+        );
+    }
+
+    /// macOS caps the extension at 16 scalars separately from the 200-scalar stem
+    /// cap; capping the whole `stem.ext` blob cut the suffix off, so the file
+    /// stopped opening by double-click and dropped out of the next scan.
+    #[test]
+    fn long_extension_is_capped_separately_from_the_stem() {
+        let stem = "a".repeat(250);
+        let ext = "b".repeat(40);
+        let f = img(1, &format!("C:/scan/{stem}.{ext}"), 1_710_504_000.0);
+        let m = classify(&[f], Path::new("D:/Library"));
+        let name = m[0].destination.file_name().unwrap().to_string_lossy().to_string();
+        let (s, e) = name.split_once('.').expect("stem.ext preserved");
+        assert_eq!(s.chars().count(), 200, "stem capped at 200 scalars");
+        assert_eq!(e.chars().count(), 16, "extension capped at 16 scalars");
+    }
+
+    #[test]
+    fn illegal_characters_in_basename_are_sanitized() {
+        let f = img(1, "C:/scan/Mom: Vacation.jpg", 1_710_504_000.0);
+        let m = classify(&[f], Path::new("D:/Library"));
+        assert_eq!(
+            m[0].destination.file_name().unwrap().to_string_lossy(),
+            "Mom_ Vacation.jpg"
+        );
     }
 }

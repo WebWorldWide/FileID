@@ -295,6 +295,10 @@ fn restructure_move() -> RestructureMove {
         tier: Some("Anchor".into()),
         confidence: "auto".into(),
         reason: Some("Photo from 2024".into()),
+        content_hash: Some("a".repeat(64)),
+        size_bytes: Some(1024),
+        file_ref: Some(42),
+        modified_at: Some(1_700_000_000.0),
     }
 }
 

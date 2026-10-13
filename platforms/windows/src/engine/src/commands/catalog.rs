@@ -5,10 +5,20 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::sync::Arc;
 
-pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, request: CatalogRequest) {
+pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, index: Option<Arc<crate::catalog_index::CatalogIndex>>, request: CatalogRequest) {
     let request_id = request.request_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let Some(database) = database else { bail!("The catalog database is unavailable") };
+        if let Some(index) = index {
+            if request.action == "search" { return index.search(&request); }
+            if ["pauseJob","resumeJob","cancelJob"].contains(&request.action.as_str()) && request.job_id.as_deref() == Some(crate::catalog_index::CatalogIndex::job_id().as_str()) {
+                if request.request_id.is_empty() || request.request_id.chars().count() > 200 { bail!("Invalid catalog request") }
+                index.control(&request)?;
+                let mut result = response(&request.request_id, "ok", None);
+                result.jobs = jobs(&database.lock())?;
+                return Ok(result);
+            }
+        }
         let mut conn = database.lock();
         execute(&mut conn, &request)
     }).await;
@@ -29,19 +39,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
     let mut result = response(&request.request_id, "ok", None);
     match request.action.as_str() {
         "search" => {
-            if request.search_mode.as_deref().is_some_and(|mode| mode != "keyword")
-                || request.query_vector.is_some() || request.embedding_model.is_some()
-                || request.result_scope.as_deref().is_some_and(|scope| scope != "all")
-            {
-                bail!("Catalog vector search is currently available on macOS; PC integration is deferred")
-            }
-            if request.limit.is_some_and(|limit| !(1..=100).contains(&limit)) {
-                bail!("Invalid catalog result limit")
-            }
-            let query = request.query.as_deref().unwrap_or_default();
-            if query.trim().is_empty() || query.chars().count() > 2000 { bail!("Invalid search query") }
-            result.hits = search(conn,query,&[])?;
-            result.hits.truncate(request.limit.unwrap_or(100));
+            let (mode, query, limit, files_only) = super::catalog_search::validate(request)?;
+            if mode != "keyword" { bail!("Visual search requires the engine catalog runtime") }
+            result.hits = super::catalog_search::select(search(conn,query,&[])?, limit, files_only);
         }
         "detail" => result.chapters = chapters(conn, request.file_id.ok_or_else(|| anyhow::anyhow!("File selection required"))?)?,
         "saveChapter" => {
@@ -124,7 +124,7 @@ pub(crate) fn chapters(conn: &Connection, file: i64) -> Result<Vec<CatalogChapte
     Ok(rows)
 }
 
-fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
+pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
     let mut statement = conn.prepare("SELECT id,kind,file_ids_json,state,progress,error,created_at,updated_at FROM catalog_jobs ORDER BY created_at DESC LIMIT 200")?;
     let rows = statement.query_map([], |r| {let json:String=r.get(2)?; let ids=serde_json::from_str(&json).map_err(|e|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(e)))?;Ok(CatalogJob {id:r.get(0)?,kind:r.get(1)?,file_ids:ids,state:r.get(3)?,progress:r.get(4)?,error:r.get(5)?,created_at:r.get(6)?,updated_at:r.get(7)?})})?.collect::<rusqlite::Result<_>>()?;
     Ok(rows)
@@ -167,18 +167,5 @@ mod tests {
 }
 
 pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String]) -> Result<Vec<CatalogHit>> {
-    if !kinds.iter().all(|kind| ["image","video","pdf","doc","audio","other","model"].contains(&kind.as_str())) { bail!("Invalid media filter") }
-    let filter = if kinds.is_empty() { None } else { Some(serde_json::to_string(kinds)?) };
-            let quoted = query.split_whitespace().filter(|s| s.chars().any(char::is_alphanumeric)).map(|s| format!("\"{}\"", s.replace('"', "\"\""))).collect::<Vec<_>>().join(" ");
-            if quoted.is_empty() {
-                let Some(filter) = filter else { return Ok(vec![]); };
-                let mut statement = conn.prepare("SELECT id,path_text,kind,COALESCE(vlm_description,'') FROM files WHERE kind IN (SELECT value FROM json_each(?1)) ORDER BY id DESC LIMIT 100")?;
-                return Ok(statement.query_map([filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:None,start_seconds:None,page:None }))?.collect::<rusqlite::Result<Vec<_>>>()?);
-            }
-            let mut statement = conn.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') FROM catalog_file_fts JOIN files f ON f.id=catalog_file_fts.rowid WHERE catalog_file_fts MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) ORDER BY bm25(catalog_file_fts) LIMIT 100")?;
-            let mut hits = statement.query_map(params![quoted,filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:None,start_seconds:None,page:None }))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut statement = conn.prepare("SELECT f.id,f.path_text,CASE WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 'sampledFrame' ELSE e.kind END,e.text,e.evidence_id,COALESCE(c.start_seconds,p.start_seconds),p.page FROM catalog_evidence_fts e JOIN files f ON f.id=CAST(e.file_id AS INTEGER) LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' WHERE catalog_evidence_fts MATCH ?1 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) AND (c.stale=0 OR p.stale=0) ORDER BY bm25(catalog_evidence_fts) LIMIT 100")?;
-            let evidence = statement.query_map(params![quoted,filter], |r| Ok(CatalogHit { file_id:r.get(0)?,path:r.get(1)?,kind:r.get(2)?,text:r.get(3)?,evidence_id:r.get(4)?,start_seconds:r.get(5)?,page:r.get(6)? }))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            hits.extend(evidence);
-            Ok(hits)
+    super::catalog_retrieval::search(conn, query, kinds, &[], &[], None)
 }

@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <!--
     FileID — WinUI 3 unpackaged desktop app.
 
@@ -20,7 +20,7 @@
     <!-- Multi-resolution .ico (16/32/48/64/128/256) embedded in
          FileID.exe. Drives Explorer, taskbar, Alt-Tab, Add/Remove
          Programs, and the WiX MSI Icon element. Generated via
-         build/make-icon.ps1 from shared/docs/assets/FileID-AppIcon.png. -->
+         build/make-icon.ps1 from shared/docs/assets/FileID-Windows.png. -->
     <ApplicationIcon>Assets\FileID.ico</ApplicationIcon>
 
     <UseWinUI>true</UseWinUI>
@@ -88,6 +88,12 @@
   <ItemGroup>
     <ProjectReference Include="..\FileID.Theme\FileID.Theme.csproj" />
     <ProjectReference Include="..\FileID.IpcSchema\FileID.IpcSchema.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ResourceDictionary Source needs compiled XBF in the app PRI; a loose
+         Content copy of Theme.xaml makes packaged MainWindow XAML fail. -->
+    <Page Include="..\FileID.Theme\Theme.xaml" Link="AppResources\Theme.xaml" />
   </ItemGroup>
 
   <!-- App icon + ms-appx:/// Logo PNGs.

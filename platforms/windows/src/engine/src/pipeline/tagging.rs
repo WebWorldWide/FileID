@@ -1352,6 +1352,20 @@ async fn process_file_predecoded(
         tags_evaluated: false,
     };
 
+    let working_mb = decoded.as_ref().and_then(|result| result.as_ref().ok()).map(|(rgb, _, _)| (rgb.len() as u64).saturating_mul(4).div_ceil(1_048_576)).unwrap_or(0) + 32;
+    let admission_coord = coord.clone();
+    let admission = tokio::task::spawn_blocking(move || crate::resource_scheduler::ResourceScheduler::shared().reserve(
+        crate::resource_scheduler::Demand { memory_mb: working_mb, cpu: 1, io: 0 },
+        crate::resource_scheduler::Priority::Background, || admission_coord.is_cancelled())).await;
+    let _lease = match admission {
+        Ok(Ok(lease)) => lease,
+        result => {
+            tagged.failed = true;
+            tagged.error_message = Some(match result { Ok(Err(error)) => error.to_string(), Err(error) => error.to_string(), _ => unreachable!() });
+            return tagged;
+        }
+    };
+
     // Content identity for rename/move heal. The decoder thread already
     // computed `content_hash` for every non-online kind (image/doc/pdf/audio
     // via the single read; video/over-cap/other via the bounded composite),

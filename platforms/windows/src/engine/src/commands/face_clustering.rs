@@ -70,6 +70,10 @@ pub(crate) async fn handle_run_face_clustering(
 ) {
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<FaceClusteringResult> {
         let started = Instant::now();
+        let count: u64 = db.lock().query_row("SELECT COUNT(*) FROM face_prints WHERE arcface_embedding IS NOT NULL AND COALESCE(excluded,0)=0", [], |row| row.get(0))?;
+        let _lease = crate::resource_scheduler::ResourceScheduler::shared().reserve(
+            crate::resource_scheduler::Demand { memory_mb: 64 + count.saturating_mul(4096).div_ceil(1_048_576), cpu: 1, io: 1 },
+            crate::resource_scheduler::Priority::Background, || false)?;
 
         let faces: Vec<FaceRow>;
         {

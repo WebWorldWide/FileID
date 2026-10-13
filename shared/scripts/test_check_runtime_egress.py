@@ -111,7 +111,7 @@ class RuntimeEgressTests(unittest.TestCase):
         )
         return registry, downloader
 
-    def test_accepts_only_hugging_face_and_subdomains(self) -> None:
+    def test_accepts_hugging_face_model_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry, downloader = self.files(
                 directory,
@@ -123,7 +123,7 @@ class RuntimeEgressTests(unittest.TestCase):
             )
             self.assertEqual(violations(registry, downloader), [])
 
-    def test_rejects_off_policy_url_and_allowlist_host(self) -> None:
+    def test_rejects_unreviewed_url_and_allowlist_host(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry, downloader = self.files(
                 directory,
@@ -131,8 +131,25 @@ class RuntimeEgressTests(unittest.TestCase):
                 ["huggingface.co", "hf.co", "github.com"],
             )
             failures = violations(registry, downloader)
-            self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
+            self.assertTrue(any("reviewed CUDA runtime" in failure for failure in failures))
             self.assertTrue(any("allowlist must be exactly" in failure for failure in failures))
+
+    def test_accepts_only_exact_reviewed_cuda_runtime_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            registry, downloader = self.files(
+                directory,
+                ["https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-gpu-1.22.0.zip"],
+                ["huggingface.co", "hf.co", "github.com", "githubusercontent.com", "developer.download.nvidia.com"],
+            )
+            self.assertEqual(violations(registry, downloader), [])
+            registry.write_text(
+                registry.read_text(encoding="utf-8").replace("v1.22.0/", "v1.22.1/"),
+                encoding="utf-8",
+            )
+            self.assertTrue(any(
+                "reviewed CUDA runtime" in failure
+                for failure in violations(registry, downloader)
+            ))
 
     def test_rejects_dynamic_url_comment_decoy_and_redirect_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -639,7 +656,7 @@ class RuntimeEgressTests(unittest.TestCase):
             registry.write_text('FileEntry { url: "http://huggingface.co/file" }\n', encoding="utf-8")
             downloader.write_text("fn main() {}\n", encoding="utf-8")
             failures = violations(registry, downloader)
-            self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
+            self.assertTrue(any("reviewed CUDA runtime" in failure for failure in failures))
             self.assertTrue(any("expected exactly one" in failure for failure in failures))
 
 

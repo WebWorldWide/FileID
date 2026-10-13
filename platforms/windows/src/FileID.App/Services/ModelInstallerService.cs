@@ -605,6 +605,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         }
         DebugLog.Info($"[INSTALL] PrewarmAsync('{modelKind}') called. priorStatus={slot.Status}");
 
+        if (!await ModelLicenseGate.EnsureAcceptedAsync([modelKind]).ConfigureAwait(true))
+        {
+            DebugLog.Info($"[INSTALL] {modelKind} install cancelled because its license terms were declined.");
+            slot.ResetForRetry();
+            return;
+        }
+
         // Wait for engine Ready before touching slot.Status. If the engine
         // never reaches Ready, the slot stays in its prior state and the
         // user sees a clear error message instead of a misleading spinner.
