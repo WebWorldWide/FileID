@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 18:53 UTC — GitHub draft review and policy repair
+
+Committed and pushed portable video checkpoint `f97bba79` to `codex/portable-video-export` and opened draft PR #234. The first hosted action-pins job found the new FFmpeg builder scripts absent from the repository's reviewed shell inventory and a stale digest for Linux staging. The reviewed script digests and explicit builder allowance now pass all 18 local bootstrap-policy tests and the direct gate. The runtime-egress test's exact role inventory also needed the already reviewed video-worker entry; its focused inventory test and direct gate pass. This policy repair is a separate follow-up commit. Other hosted jobs are still running; no merge or release acceptance is claimed.
+
 ## 2026-10-13 18:47 UTC — Portable video worker lifetime checkpoint
 
 The Linux VM passed the complete Rust engine suite (420 library and 421 binary tests, plus two ancillary tests), strict Clippy, 38 GTK tests and strict Clippy after the video cancellation and parent-death changes. Its clean-source FFmpeg/OpenH264 bundle staged with the engine and GTK app, passed media and app privacy checks, and the app stayed alive under Xvfb for a bounded startup smoke. A Linux parent-death regression test verified that the export worker exits when its engine parent dies.
