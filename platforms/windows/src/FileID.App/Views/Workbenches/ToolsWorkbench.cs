@@ -1,4 +1,5 @@
-﻿using FileID.IpcSchema;
+﻿using System.ComponentModel;
+using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml.Controls;
@@ -16,15 +17,22 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     private readonly TextBlock _destination = Text("No output folder selected.");
     private readonly TextBlock _detail = Text("Loading local tool capabilities…");
     private readonly ListView _outputs = new() { Height = 180, SelectionMode = ListViewSelectionMode.None };
+    private readonly TextBlock _executionStatus = Text("No export awaiting confirmation.");
     private readonly ToolPreviewState _plan = new();
     private readonly Button _preview;
     private readonly Button _execute;
     private readonly Button _undo;
+    private readonly Button _cancel;
+    private readonly ToolExecutionState _execution;
+    private string? _appliedExecutionRequestID;
     private string? _destinationPath;
+    private bool _cancelAvailable;
+    private int _capabilitiesGeneration;
 
     public ToolsWorkbench(IntPtr hwnd) : base("File Tools")
     {
         _hwnd = hwnd;
+        _execution = Engine.ToolExecution;
         Inputs.Children.Add(Row(_query, ActionButton("Find files", SearchAsync)));
         Inputs.Children.Add(Text("Select up to 100 catalog files. Preview first; exports create new versions and preserve originals."));
         Inputs.Children.Add(_files);
@@ -38,7 +46,9 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         Inputs.Children.Add(Row(ActionButton("Refresh capabilities", CapabilitiesAsync), ActionButton("Last export", ct => SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "history"), ct)), _preview, _execute, _undo));
         Inputs.Children.Add(Text(ToolUndoIntegration.Detail));
         Inputs.Children.Add(_outputs);
-        Inputs.Children.Add(Text("Photo exports may strip metadata and normalize to SDR; review the capability details. Chapter VTT is markers, not speech subtitles. Video export, stabilization, AI upscaling, tracked reframing and export cancellation are unavailable in this adapter. A timeout does not mean an export stopped: check Last export before retrying."));
+        Inputs.Children.Add(_executionStatus);
+        Inputs.Children.Add(Text("Only recipes reported as available by the engine can run. Photo exports may strip metadata and normalize to SDR; review the capability details. Chapter VTT is markers, not speech subtitles. Video conversion does not imply stabilization, AI upscaling or tracked reframing. Cancel requests target the current export; wait for its final response. A timeout does not mean an export stopped: check Last export before retrying."));
+        _cancel = ControlButton("Cancel current export", CancelAsync);
         _files.SelectionChanged += (_, _) => Invalidate();
         _kind.SelectionChanged += (_, _) =>
         {
@@ -52,7 +62,40 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         UpdateControls();
     }
     private ToolCapability? Capability => (_kind.SelectedItem as CapabilityItem)?.Capability;
-    protected override void OnOpened() => Run(CapabilitiesAsync);
+    protected override void OnOpened()
+    {
+        Engine.PropertyChanged += OnEngineChanged;
+        ApplyExecutionSnapshot();
+        Run(async ct =>
+        {
+            await CapabilitiesAsync(ct);
+            if (_execution.NeedsRecovery) await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "history"), ct);
+        });
+    }
+    protected override void OnClosed() => Engine.PropertyChanged -= OnEngineChanged;
+    private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(EngineClient.ToolExecution)) return;
+        DebugLog.SafeRun("ToolsWorkbench.OnEngineChanged", () =>
+        {
+            DebugLog.Info($"[ENGINE-SUB:ToolsWorkbench] {e.PropertyName}");
+            var ct = Lifetime;
+            _ = DebugLog.SafeRunAsync("ToolsWorkbench.ApplyExecutionSnapshot", () => UI(ApplyExecutionSnapshot, ct));
+        });
+    }
+    private void ApplyExecutionSnapshot()
+    {
+        if (_execution.LastResponse is { } response && response.RequestID != _appliedExecutionRequestID)
+        {
+            _appliedExecutionRequestID = response.RequestID;
+            _plan.Apply("execute", response);
+            Status.Text = $"{response.Status} · {response.Message}";
+            ApplyOutputs(response);
+        }
+        UpdateControls();
+    }
+    private void ApplyOutputs(ToolResponse response) =>
+        _outputs.ItemsSource = response.Outputs.Select(output => $"{output.OutputPath}\n{output.State} · {output.Message}\nOriginal: {output.SourcePath}").ToArray();
     private bool CanPreview
     {
         get
@@ -65,9 +108,12 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     }
     protected override void UpdateControls()
     {
-        _preview.IsEnabled = CanPreview;
-        _execute.IsEnabled = _plan.CanExecute;
+        _preview.IsEnabled = CanPreview && !_execution.IsActive && !_execution.NeedsRecovery;
+        _execute.IsEnabled = _plan.CanExecute && !_execution.IsActive && !_execution.NeedsRecovery;
         _undo.IsEnabled = ToolUndoIntegration.CanUndo(_plan.UndoID);
+        _cancel.IsEnabled = _cancelAvailable && _capabilitiesGeneration == Engine.SpawnGeneration
+            && _execution.IsActive && !_execution.IsStopping && _execution.Generation == Engine.SpawnGeneration;
+        _executionStatus.Text = _execution.Label;
     }
     private void Invalidate()
     {
@@ -99,11 +145,15 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
             }
         }, ct);
     }
-    private Task CapabilitiesAsync(CancellationToken ct) => SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "capabilities"), ct);
+    private async Task CapabilitiesAsync(CancellationToken ct)
+    {
+        await Engine.WaitForReadyAsync(TimeSpan.FromSeconds(30), ct);
+        await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "capabilities"), ct);
+    }
     private Task PreviewAsync(CancellationToken ct)
     {
         UpdateControls();
-        if (!CanPreview || Capability is not { } capability || _format.SelectedItem is not string format)
+        if (_execution.IsActive || _execution.NeedsRecovery || !CanPreview || Capability is not { } capability || _format.SelectedItem is not string format)
             throw new InvalidOperationException("Choose an available tool, valid dimension, files and an existing output folder.");
         var ids = _files.SelectedItems.Cast<HitItem>().Select(item => item.Hit.FileID).Distinct().Order().ToArray();
         return SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "preview", ids, _destinationPath,
@@ -111,13 +161,14 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     }
     private async Task ExecuteAsync(CancellationToken ct)
     {
-        if (!_plan.CanExecute) throw new InvalidOperationException("Preview a fresh export first.");
+        if (_execution.IsActive || _execution.NeedsRecovery || !_plan.CanExecute) throw new InvalidOperationException("Preview a fresh export first; any prior export must be confirmed.");
         if (!await ConfirmAsync("Export new versions?", "Create the previewed files? Originals are preserved. Photo metadata may be stripped and output normalized to SDR. " + ToolUndoIntegration.Detail)) return;
         ct.ThrowIfCancellationRequested();
-        var id = _plan.PreviewID;
+        var id = _plan.PreviewID!;
+        var generation = Engine.SpawnGeneration;
         _plan.BeginExecute();
         UpdateControls();
-        await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "execute", OperationID: id), ct);
+        await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "execute", OperationID: id), ct, generation);
     }
     private async Task UndoAsync(CancellationToken ct)
     {
@@ -127,22 +178,60 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         ct.ThrowIfCancellationRequested();
         await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "undo", OperationID: id), ct);
     }
-    private async Task SendAsync(ToolRequest request, CancellationToken ct)
+    private async Task CancelAsync(CancellationToken ct)
     {
-        var response = await Engine.ToolAsync(request, ct);
+        var generation = Engine.SpawnGeneration;
+        if (!_cancelAvailable || _capabilitiesGeneration != generation)
+            throw new InvalidOperationException("The current adapter does not report interruptible export support.");
+        var id = _execution.RequireCancellationOwner(generation);
+        _execution.BeginCancellation(generation);
+        UpdateControls();
+        Status.Text = "Stopping · waiting for the engine to acknowledge the request…";
+        try
+        {
+            var response = await Engine.ToolAsync(new ToolRequest(Guid.NewGuid().ToString(), "cancel", OperationID: id), generation, ct);
+            await UI(() =>
+            {
+                if (generation != Engine.SpawnGeneration || !_execution.ApplyCancellationAck(id, generation, response)) return;
+                Status.Text = $"{response.Status} · {response.Message} · Awaiting final export results; cancellation acknowledgement is not a completion receipt.";
+                UpdateControls();
+            }, ct);
+        }
+        catch
+        {
+            await UI(() => _execution.CancellationFailed(id, generation), ct);
+            throw;
+        }
+    }
+    private async Task SendAsync(ToolRequest request, CancellationToken ct, int? expectedGeneration = null)
+    {
+        await Engine.WaitForReadyAsync(TimeSpan.FromSeconds(30), ct);
+        var generation = expectedGeneration ?? Engine.SpawnGeneration;
+        var response = await Engine.ToolAsync(request, generation, ct);
         await UI(() =>
         {
+            if (generation != Engine.SpawnGeneration) return;
             Status.Text = $"{response.Status} · {response.Message}";
             if (request.Action == "capabilities")
             {
-                _kind.ItemsSource = response.Capabilities.Select(capability => new CapabilityItem(capability)).ToArray();
-                _kind.SelectedIndex = response.Capabilities.Count > 0 ? 0 : -1;
+                _cancelAvailable = response.Status == "ok" && ToolExecutionState.SupportsCancellation(response.Capabilities);
+                _capabilitiesGeneration = generation;
+                var recipes = response.Capabilities.Where(capability => capability.Id != "cancel").Select(capability => new CapabilityItem(capability)).ToArray();
+                _kind.ItemsSource = recipes;
+                _kind.SelectedIndex = recipes.Length > 0 ? 0 : -1;
                 Invalidate();
             }
             else
             {
-                _plan.Apply(request.Action, response);
-                _outputs.ItemsSource = response.Outputs.Select(output => $"{output.OutputPath}\n{output.State} · {output.Message}\nOriginal: {output.SourcePath}").ToArray();
+                if (request.Action == "execute")
+                {
+                    ApplyExecutionSnapshot();
+                }
+                else
+                {
+                    _plan.Apply(request.Action, response);
+                    ApplyOutputs(response);
+                }
             }
             UpdateControls();
         }, ct);

@@ -1090,6 +1090,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         var retiringGeneration = SpawnGeneration;
         _workbenchRequests.FailGeneration(retiringGeneration);
+        if (ToolExecution.InvalidateGeneration(retiringGeneration)) PublishToolExecution();
         if (ChatSend.InvalidateGeneration(retiringGeneration)) PublishChatSend();
         _healthWaiters.FailGeneration(retiringGeneration, new InvalidOperationException("The engine generation stopped."));
         RetireDeepAnalyzeGeneration(retiringGeneration);

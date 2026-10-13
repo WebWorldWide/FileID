@@ -13,18 +13,47 @@ public sealed class CatalogJobActionsTests
     [InlineData("catalogIndex", "queued", false)]
     [InlineData("catalogIndex", "running", false)]
     [InlineData("catalogIndex", "completed", false)]
-    [InlineData("timelineSample", "paused", false)]
-    [InlineData("timelineSample", "failed", false)]
-    [InlineData("timelineSample", "cancelled", false)]
+    [InlineData("timelineSample", "paused", true)]
+    [InlineData("timelineSample", "failed", true)]
+    [InlineData("timelineSample", "cancelled", true)]
+    [InlineData("timelineSample", "running", false)]
+    [InlineData("timelineSample", "completed", false)]
+    [InlineData("unknown", "paused", false)]
     [InlineData(null, "paused", false)]
     [InlineData("catalogIndex", null, false)]
-    public void OnlyPausedOrRetryableCatalogIndexJobsEnableResume(string? kind, string? state, bool enabled)
+    public void OnlyPausedOrRetryableSupportedJobsEnableResume(string? kind, string? state, bool enabled)
     {
         Assert.Equal(enabled, CatalogJobActions.CanResume(kind, state));
     }
 
     [Fact]
-    public async Task BaselineUnsupportedResumeResponseIsRetainedAsErrorNotSuccess()
+    public void TimelineEnqueueUsesUniqueCatalogFileIDsNotEvidenceIDs()
+    {
+        var hit = new CatalogHit(42, "generated.mp4", "sampledFrame", "", "frame", 1, null);
+        var request = CatalogJobActions.TimelineRequest(new[] { hit, hit with { EvidenceID = "other" }, hit with { FileID = 7 } });
+        Assert.Equal("enqueueTimeline", request.Action);
+        Assert.Equal(new long[] { 7, 42 }, request.FileIDs);
+        Assert.Null(request.FileID);
+        Assert.Null(request.JobID);
+        Assert.Throws<InvalidOperationException>(() => CatalogJobActions.TimelineRequest(Array.Empty<CatalogHit>()));
+    }
+
+    [Theory]
+    [InlineData("pauseJob", "running")]
+    [InlineData("resumeJob", "paused")]
+    [InlineData("resumeJob", "failed")]
+    [InlineData("cancelJob", "queued")]
+    public void TimelineControlsKeepTheDurableJobID(string action, string state)
+    {
+        var job = new CatalogJob("durable-timeline", "timelineSample", new long[] { 42, 7 }, state, 0.5, null, 0, 1);
+        var request = CatalogJobActions.ControlRequest(action, job);
+        Assert.Equal(action, request.Action);
+        Assert.Equal(job.Id, request.JobID);
+        Assert.Null(request.FileIDs);
+    }
+
+    [Fact]
+    public async Task UnsupportedResumeResponseIsRetainedAsErrorNotSuccess()
     {
         using var requests = new WorkbenchRequests();
         var request = new CatalogRequest("resume", "resumeJob", null, null, null, null, "catalog-index", null);

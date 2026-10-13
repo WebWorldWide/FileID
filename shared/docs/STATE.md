@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-10-13 — Windows workbench completion under review
+
+The isolated `codex/windows-ui-integration` worktree ports the distinct Windows native UI checkpoint onto the current Store integration: durable export ownership across engine generations, capability-gated cancellation, history reconciliation, and catalog job action state. The native Windows solution builds with zero warnings; 54 IPC and 571 App tests pass in the Windows VM. This is still a draft integration, with packaged WinUI interaction and GPU/model behavior open.
+
 ## 2026-10-13 — Store/parity integration in review after shared-engine draft
 
 Hosted PR #236 exposed CLI/TUI restructure builders that still used the older shared-engine record shape. The CLI now reads the planned source identity and smart name from the catalog, carries identity into its serialized apply plan, and tests those fields. The TUI preview reads the smart name. The script digest and CLI/TUI lockfile inventory are also updated. Linux VM CLI source check passed before a second check/test attempt filled its scratch disk; generated scratch build targets were removed and the shared target retry is running. Windows VM Rust library tests remain in progress.

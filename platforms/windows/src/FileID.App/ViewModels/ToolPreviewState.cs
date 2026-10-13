@@ -32,6 +32,6 @@ internal sealed class ToolPreviewState
     }
 
     public static bool Supports(ToolCapability? capability, string format, uint dimension) =>
-        capability is { Available: true } && capability.OutputFormats.Contains(format, StringComparer.Ordinal)
+        capability is { Available: true, Id: "photo" or "chapters" or "video" } && capability.OutputFormats.Contains(format, StringComparer.Ordinal)
         && dimension is >= 1 and <= 8192;
 }

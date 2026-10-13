@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-13 Windows UI follow-on
+
+The Windows VM App suite passes (571 tests). Review export completion and cancel terminal behavior, then publish `codex/windows-ui-integration` as a draft PR. Keep the current video controls while integrating; confirm native packaged UI behavior on Windows before release acceptance.
+
 ## 2026-10-13 current integration priority
 
 PR #236 must clear its restarted hosted checks after the CLI/TUI restructure source-identity and lockfile fixes. Confirm Linux VM CLI/TUI check and the focused CLI identity regression once the shared build target completes; inspect Windows Rust library test results.

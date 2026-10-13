@@ -3823,3 +3823,7 @@ Post-validation source review found a generic close-during-awaited-preparation/s
 ## 2026-10-13 — Keep CUDA runtimes local under the existing egress boundary
 
 The Store branch offered user-triggered Microsoft/NVIDIA CUDA runtime downloads and broadened the downloader host allowlist. The current root policy permits only user-initiated Hugging Face model downloads. Integrate the branch's local CUDA detection and verification, but keep the downloader and registry on the current Hugging Face-only transport. Settings shows local CUDA pack paths and verification rather than a download action. This supersedes the Store branch's earlier proposed CUDA download exception; a separate owner-approved policy change would be needed to reintroduce it.
+
+## 2026-10-13 — Keep export ownership through Windows engine restart
+
+Hold the Windows File Tools export request in a dedicated state object until its own terminal response arrives. A cancellation acknowledgement is only a stop request; engine generation loss leaves the output unknown until durable history confirms it. This prevents a timed-out or restarted UI request from offering a second destructive operation while the first may still be writing. Use native WinUI controls and the existing IPC contract; add no dependency.
