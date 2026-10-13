@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-13 — PR #238 exact-head failures fixed; branch consolidation finalized
+
+The previous #238 head failed three hosted jobs. macOS `IPC schema conformance` rejected `applyRestructure`/`restructurePlan` because schema 1.13.0 added `contentHash`/`sizeBytes`/`fileRef`/`modifiedAt` to restructure moves while the Swift `RestructureMove` mirror dropped them; the C# mirror dropped them too (its test does not check field preservation), so the Windows app would have stripped stale-plan identity on apply. Both mirrors now carry the four optional fields. Windows x64 and ARM64-native failed eight resident-owner/runtime-cache tests because the runner's `temp_dir()` is an 8.3 short path (`RUNNER~1`) that the runtime fingerprint correctly rejects as non-canonical; the two fixtures now canonicalize their roots. The Windows `cargo audit` step's advisory-db cache error is pre-existing and `continue-on-error` (cargo-deny is the gate). This Linux dev host has no C linker, `swift`, or `dotnet`, so these fixes are verified by hosted CI only.
+
+The nine non-ancestral checkpoint heads listed in `BRANCH_AUDIT.md` are preserved as `archive/2026-10-13/<branch>` tags before their refs and the four integration worktrees are removed.
+
 ## 2026-10-13 — Missing-model fixture isolated from runner environment
 
 Consolidated Linux x64 CI passed 609 engine tests but one model-provenance test panicked because it unwrapped an unset `FILEID_MODELS_DIR`. The missing-weights fixture now uses generated scratch paths and verifies the typed refusal without ambient environment state. The separate actual verified-start test still rejects a non-VLM model before native loading. Both focused tests pass in the Linux VM; rerun the complete exact-head suite.

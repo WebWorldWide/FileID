@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-13 after consolidation merge
+
+Confirm exact-main CI for the #238 merge commit, including the macOS schema conformance suite and Windows x64/ARM64-native engine tests fixed in the final head. `main` is the only branch; unintegrated checkpoint work is recoverable from `archive/2026-10-13/*` tags (see `BRANCH_AUDIT.md`). The `parity/completion-runtime` Linux llama.cpp/whisper.cpp source builder still needs dependency, license, provenance, and offline-policy review before extraction. Production gates below and in `SHIP.md` are unchanged.
+
 ## 2026-10-13 final Linux engine CI rerun
 
 The consolidated Linux x64 suite exposed one test fixture that assumed `FILEID_MODELS_DIR` was set. The scratch-path correction and actual non-VLM verified-start case pass in the Linux VM. Confirm the complete Linux suite on the new PR #238 head.
