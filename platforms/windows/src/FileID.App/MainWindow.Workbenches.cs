@@ -14,6 +14,7 @@ public sealed partial class MainWindow
     private void OnToolsWorkbenchClicked(object sender, RoutedEventArgs e) =>
         OpenWorkbench(_toolsWorkbench ??= new ToolsWorkbench(WinRT.Interop.WindowNative.GetWindowHandle(this)));
     private void OnChatWorkbenchClicked(object sender, RoutedEventArgs e) => OpenWorkbench(new ChatWorkbench());
+    private void OnModelsWorkbenchClicked(object sender, RoutedEventArgs e) => OpenWorkbench(new ModelsWorkbench());
     private void OnCloseWorkbenchClicked(object sender, RoutedEventArgs e)
     {
         WorkbenchHost.Content = null;

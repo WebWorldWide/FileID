@@ -13,6 +13,24 @@ internal sealed partial class EngineClient
     public CatalogResponse? CatalogResponse { get => _catalogResponse; private set => Set(ref _catalogResponse, value); }
     public ToolResponse? ToolResponse { get => _toolResponse; private set => Set(ref _toolResponse, value); }
     public ChatResponse? ChatResponse { get => _chatResponse; private set => Set(ref _chatResponse, value); }
+    private BenchmarkProgress? _benchmarkProgress;
+    /// <summary>Latest progress of the running on-device benchmark.</summary>
+    public BenchmarkProgress? BenchmarkProgress { get => _benchmarkProgress; private set => Set(ref _benchmarkProgress, value); }
+
+    public Task<ModelCatalog> ListModelsAsync(string? role, CancellationToken ct = default)
+    {
+        var id = "models-" + Guid.NewGuid().ToString("N");
+        return SendWorkbenchAsync<ModelCatalog>(id, new ListModelsCommand(id, role), TimeSpan.FromSeconds(30), ct);
+    }
+
+    /// <summary>Benchmarks one installed model; tuning restarts the model several times, so allow an hour.</summary>
+    public Task<BenchmarkResult> BenchmarkModelAsync(string modelKind, bool tune, CancellationToken ct = default)
+    {
+        var id = "bench-" + Guid.NewGuid().ToString("N");
+        return SendWorkbenchAsync<BenchmarkResult>(id, new BenchmarkModelCommand(id, modelKind, tune), TimeSpan.FromHours(1), ct);
+    }
+
+    public Task CancelBenchmarkAsync() => SendCommandAsync(new CancelBenchmarkCommand());
 
     public Task<CatalogResponse> CatalogAsync(CatalogRequest request, CancellationToken ct = default) =>
         SendWorkbenchAsync<CatalogResponse>(request.RequestID, new CatalogRequestCommand(request), TimeSpan.FromSeconds(30), ct);
@@ -153,6 +171,15 @@ internal sealed partial class EngineClient
         {
             case ClipTextEmbeddingEvent embedding:
                 _workbenchRequests.Apply(embedding.Embedding.QueryId, generation, embedding.Embedding, embedding.Embedding.Query);
+                break;
+            case ModelCatalogEvent models:
+                _workbenchRequests.Apply(models.Catalog.RequestId, generation, models.Catalog);
+                break;
+            case BenchmarkProgressEvent progress:
+                BenchmarkProgress = progress.Progress;
+                break;
+            case BenchmarkResultEvent result:
+                _workbenchRequests.Apply(result.Result.RequestId, generation, result.Result);
                 break;
             case CatalogResponseEvent catalog when _workbenchRequests.Apply(catalog.Response.RequestID, generation, catalog.Response):
                 CatalogResponse = catalog.Response;

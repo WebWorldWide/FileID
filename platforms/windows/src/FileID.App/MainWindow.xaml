@@ -115,6 +115,7 @@
                     <Button Content="Search &amp; Moments" Click="OnCatalogWorkbenchClicked" />
                     <Button Content="File Tools" Click="OnToolsWorkbenchClicked" />
                     <Button Content="Chat" Click="OnChatWorkbenchClicked" />
+                    <Button Content="Models" Click="OnModelsWorkbenchClicked" />
                     <Button x:Name="CloseWorkbenchButton" Content="Back to tabs" Click="OnCloseWorkbenchClicked" Visibility="Collapsed" />
                 </StackPanel>
                 <views:DetailHostView x:Name="PrimaryDetailView" Grid.Row="1" />
