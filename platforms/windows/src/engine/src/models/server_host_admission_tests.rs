@@ -29,7 +29,7 @@ async fn fixture(root: &Path, url: String, s: Arc<ResourceScheduler>, memory_mb:
     tokio::time::timeout(Duration::from_secs(5), async { while !marker.exists() { tokio::task::yield_now().await; } }).await.unwrap();
     lease.retain_memory();
     assert_eq!((s.snapshot().memory_mb, s.snapshot().cpu, s.snapshot().io), (memory_mb,0,0));
-    (Arc::new(VlmServer { process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler:s, cancel:Arc::new(AtomicBool::new(false)), request_gate:tokio::sync::Mutex::new(()) }), tracker)
+    (Arc::new(VlmServer { last_timings: parking_lot::Mutex::new(None), process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler:s, cancel:Arc::new(AtomicBool::new(false)), request_gate:tokio::sync::Mutex::new(()) }), tracker)
 }
 #[tokio::test]
 #[ignore = "new generated admitted child; not an installed inference runtime"]

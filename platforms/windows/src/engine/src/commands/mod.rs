@@ -27,6 +27,7 @@ pub mod chat;
 mod chat_search;
 pub mod tools;
 pub mod models;
+pub mod benchmark;
 mod video_export;
 
 mod person_cluster_persistence;

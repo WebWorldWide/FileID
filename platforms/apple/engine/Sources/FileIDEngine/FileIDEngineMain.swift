@@ -385,6 +385,13 @@ struct FileIDEngineMain {
                 )
             }
             await sink.emit(.modelCatalog(ModelCatalog(requestID: requestID, physicalMemoryGB: memoryGB, vramMB: 0, models: models)))
+        case .benchmarkModel(let requestID, let modelKind, _):
+            await sink.emit(.benchmarkResult(BenchmarkResult(
+                requestID: requestID, modelKind: String(modelKind.prefix(128)), status: "error",
+                message: "On-device benchmarking is available in the shared engine on Windows and Linux; MLX benchmarking on macOS is not yet implemented."
+            )))
+        case .cancelBenchmark:
+            break
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))

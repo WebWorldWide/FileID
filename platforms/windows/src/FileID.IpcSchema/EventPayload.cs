@@ -22,6 +22,8 @@ public sealed record CatalogResponseEvent(CatalogResponse Response) : EventPaylo
 public sealed record ReadyEvent(EngineInfo Info) : EventPayload;
 public sealed record HealthCheckResultEvent(HealthCheckResult Result) : EventPayload;
 public sealed record ModelCatalogEvent(ModelCatalog Catalog) : EventPayload;
+public sealed record BenchmarkProgressEvent(BenchmarkProgress Progress) : EventPayload;
+public sealed record BenchmarkResultEvent(BenchmarkResult Result) : EventPayload;
 public sealed record ProgressEvent(ScanProgress Progress) : EventPayload;
 public sealed record PhaseChangedEvent(ScanPhase Phase) : EventPayload;
 
@@ -85,6 +87,8 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "ready" => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
             "healthCheckResult" => new HealthCheckResultEvent(ReadWrapped<HealthCheckResult>(ref reader, options)),
             "modelCatalog" => new ModelCatalogEvent(ReadWrapped<ModelCatalog>(ref reader, options)),
+            "benchmarkProgress" => new BenchmarkProgressEvent(ReadWrapped<BenchmarkProgress>(ref reader, options)),
+            "benchmarkResult" => new BenchmarkResultEvent(ReadWrapped<BenchmarkResult>(ref reader, options)),
             "progress" => new ProgressEvent(ReadWrapped<ScanProgress>(ref reader, options)),
             "phaseChanged" => new PhaseChangedEvent(ReadWrapped<ScanPhase>(ref reader, options)),
             "discoveryComplete" => new DiscoveryCompleteEvent(ReadDiscoveryComplete(ref reader)),
@@ -129,6 +133,8 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case ReadyEvent v: WriteWrapped(writer, "ready", v.Info, options); break;
             case HealthCheckResultEvent v: WriteWrapped(writer, "healthCheckResult", v.Result, options); break;
             case ModelCatalogEvent v: WriteWrapped(writer, "modelCatalog", v.Catalog, options); break;
+            case BenchmarkProgressEvent v: WriteWrapped(writer, "benchmarkProgress", v.Progress, options); break;
+            case BenchmarkResultEvent v: WriteWrapped(writer, "benchmarkResult", v.Result, options); break;
             case ProgressEvent v: WriteWrapped(writer, "progress", v.Progress, options); break;
             case PhaseChangedEvent v: WriteWrapped(writer, "phaseChanged", v.Phase, options); break;
             case DiscoveryCompleteEvent v: WriteDiscoveryComplete(writer, v); break;

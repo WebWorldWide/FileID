@@ -51,6 +51,7 @@ fn platform() -> &'static str {
 
 pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -> Vec<ModelCatalogItem> {
     let mut items = Vec::new();
+    let measured = crate::models::benchmark::local_results();
     if role.is_none_or(|r| r == "vision") {
         for model in &CURATED_VISION {
             let registry::LookupResult::Found(found) = registry::lookup_full(model.kind) else { continue };
@@ -74,7 +75,7 @@ pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -
                 runnable: true,
                 installed: crate::models::vlm::find_weights(model.kind).is_some(),
                 fits: fits(resident, physical_memory_gb, vram_mb),
-                benchmark: None,
+                benchmark: measured.get(model.kind).cloned(),
             });
         }
     }
@@ -97,11 +98,12 @@ pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -
             download_bytes: entry.download_bytes,
             estimated_resident_gb: entry.estimated_resident_gb,
             tier: entry.tier.clone(),
-            status: entry.status.clone(),
+            // A local benchmark is this machine's verification of a candidate.
+            status: if measured.contains_key(&entry.id) { "verified".into() } else { entry.status.clone() },
             runnable,
             installed: runnable && crate::models::vlm::find_weights(&entry.id).is_some(),
             fits: fits(entry.estimated_resident_gb, physical_memory_gb, vram_mb),
-            benchmark: None,
+            benchmark: measured.get(&entry.id).cloned(),
         });
     }
     items

@@ -101,6 +101,16 @@
               "role": { "type": "string", "enum": ["vision", "text", "embedding", "reranker", "speech"] }
             }
           } } },
+        { "type": "object", "required": ["benchmarkModel"], "additionalProperties": false,
+          "properties": { "benchmarkModel": { "type": "object", "additionalProperties": false,
+            "description": "Benchmark one installed model on this machine with locally rendered probes (no download, no personal files). tune additionally tries llama-server launch flags and keeps the fastest configuration whose greedy output is unchanged. Emits benchmarkProgress, then one benchmarkResult. One benchmark runs at a time.",
+            "required": ["requestID", "modelKind", "tune"], "properties": {
+              "requestID": { "$ref": "#/$defs/HealthRequestID" },
+              "modelKind": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "tune": { "type": "boolean" }
+            }
+          } } },
+        { "type": "object", "required": ["cancelBenchmark"], "additionalProperties": false, "properties": { "cancelBenchmark": { "type": "object", "additionalProperties": false, "description": "Stop the running benchmark; it replies with benchmarkResult status cancelled." } } },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false, "description": "Recluster compatible face evidence while retaining identity IDs and user corrections. Failed validation must not publish partial assignments." } } },
@@ -404,6 +414,14 @@
             }
           }
         },
+        { "type": "object", "required": ["benchmarkProgress"], "additionalProperties": false,
+          "properties": { "benchmarkProgress": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/BenchmarkProgress" } }
+          } } },
+        { "type": "object", "required": ["benchmarkResult"], "additionalProperties": false,
+          "properties": { "benchmarkResult": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/BenchmarkResult" } }
+          } } },
         { "type": "object", "required": ["modelCatalog"], "additionalProperties": false,
           "properties": { "modelCatalog": { "type": "object", "additionalProperties": false,
             "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/ModelCatalog" } }
@@ -551,6 +569,28 @@
         "runnable": { "type": "boolean" },
         "installed": { "type": "boolean" },
         "fits": { "type": "boolean" },
+        "benchmark": { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/ModelBenchmark" } ] }
+      }
+    },
+    "BenchmarkProgress": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestID", "modelKind", "phase", "completed", "total"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "modelKind": { "type": "string", "maxLength": 128 },
+        "phase": { "type": "string", "enum": ["loading", "measuring", "tuning"] },
+        "completed": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "BenchmarkResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestID", "modelKind", "status"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "modelKind": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["ok", "error", "cancelled"] },
+        "message": { "type": ["string", "null"], "maxLength": 2000 },
         "benchmark": { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/ModelBenchmark" } ] }
       }
     },

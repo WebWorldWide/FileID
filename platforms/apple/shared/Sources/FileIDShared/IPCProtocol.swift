@@ -38,6 +38,10 @@ public struct IPCCommand: Codable, Sendable {
         /// Read-only model catalog with install state, hardware fit and any
         /// local benchmark. Replies with `modelCatalog` (schema 1.14.0).
         case listModels(requestID: String, role: String?)
+        /// On-device benchmark of one installed model; replies with
+        /// `benchmarkProgress` events and one `benchmarkResult`.
+        case benchmarkModel(requestID: String, modelKind: String, tune: Bool)
+        case cancelBenchmark
         case requestStatus
         case shutdown
         case runFaceClustering
@@ -229,6 +233,8 @@ public struct IPCEvent: Codable, Sendable {
         case ready(EngineInfo)
         case healthCheckResult(HealthCheckResult)
         case modelCatalog(ModelCatalog)
+        case benchmarkProgress(BenchmarkProgress)
+        case benchmarkResult(BenchmarkResult)
         case progress(ScanProgress)
         case phaseChanged(ScanPhase)
         case discoveryComplete(totalFiles: Int)
@@ -329,6 +335,38 @@ public struct ModelCatalogItem: Codable, Sendable, Equatable {
         case ...48: return "xlarge"
         default: return "workstation"
         }
+    }
+}
+
+public struct BenchmarkProgress: Codable, Sendable, Equatable {
+    public let requestID: String
+    public let modelKind: String
+    public let phase: String
+    public let completed: Int
+    public let total: Int
+
+    public init(requestID: String, modelKind: String, phase: String, completed: Int, total: Int) {
+        self.requestID = requestID
+        self.modelKind = modelKind
+        self.phase = phase
+        self.completed = completed
+        self.total = total
+    }
+}
+
+public struct BenchmarkResult: Codable, Sendable, Equatable {
+    public let requestID: String
+    public let modelKind: String
+    public let status: String
+    public let message: String?
+    public let benchmark: ModelBenchmark?
+
+    public init(requestID: String, modelKind: String, status: String, message: String? = nil, benchmark: ModelBenchmark? = nil) {
+        self.requestID = requestID
+        self.modelKind = modelKind
+        self.status = status
+        self.message = message
+        self.benchmark = benchmark
     }
 }
 

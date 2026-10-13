@@ -79,6 +79,10 @@ pub enum CommandPayload {
     HealthCheck(HealthCheckPayload),
     #[serde(rename = "listModels")]
     ListModels(ListModelsPayload),
+    #[serde(rename = "benchmarkModel")]
+    BenchmarkModel(BenchmarkModelPayload),
+    #[serde(rename = "cancelBenchmark")]
+    CancelBenchmark(Empty),
     #[serde(rename = "shutdown")]
     Shutdown(Empty),
     #[serde(rename = "runFaceClustering")]
@@ -248,6 +252,45 @@ impl ListModelsPayload {
         HealthCheckPayload { request_id: self.request_id.clone() }.is_valid()
             && self.role.as_deref().is_none_or(|role| ["vision", "text", "embedding", "reranker", "speech"].contains(&role))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkModelPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub model_kind: String,
+    pub tune: bool,
+}
+
+impl BenchmarkModelPayload {
+    pub fn is_valid(&self) -> bool {
+        HealthCheckPayload { request_id: self.request_id.clone() }.is_valid() && (1..=128).contains(&self.model_kind.len())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkProgress {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub model_kind: String,
+    pub phase: String,
+    pub completed: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkResult {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub model_kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<ModelBenchmark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -667,6 +710,10 @@ pub enum EventPayload {
     HealthCheckResult(Wrap<HealthCheckResult>),
     #[serde(rename = "modelCatalog")]
     ModelCatalog(Wrap<ModelCatalog>),
+    #[serde(rename = "benchmarkProgress")]
+    BenchmarkProgress(Wrap<BenchmarkProgress>),
+    #[serde(rename = "benchmarkResult")]
+    BenchmarkResult(Wrap<BenchmarkResult>),
 
     #[serde(rename = "progress")]
     Progress(Wrap<ScanProgress>),

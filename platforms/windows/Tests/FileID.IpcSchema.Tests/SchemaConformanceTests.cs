@@ -178,6 +178,8 @@ public class SchemaConformanceTests
         new RequestStatusCommand(),
         new HealthCheckCommand("probe-1"),
         new ListModelsCommand("models-1", "vision"),
+        new BenchmarkModelCommand("bench-1", "qwen3_vl_4b", true),
+        new CancelBenchmarkCommand(),
         new ShutdownCommand(),
         new RunFaceClusteringCommand(),
         new VerifyCudaPackCommand(),
@@ -216,6 +218,8 @@ public class SchemaConformanceTests
         new CatalogResponseEvent(new CatalogResponse("r1", "ok", "Found a moment", new[] { new CatalogHit(42, @"C:\Photos\Birthday.mov", "chapter", "Gift Opening", "chapter-1", 12.5, 1) }, new[] { ExampleChapter() }, new[] { new CatalogJob("job-1", "timelineSample", new long[] { 42 }, "failed", 0.5, "Interrupted", 100, 101) })),
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
         new HealthCheckResultEvent(new HealthCheckResult("probe-1", 1234)),
+        new BenchmarkProgressEvent(new BenchmarkProgress("bench-1", "qwen3_vl_4b", "measuring", 3, 12)),
+        new BenchmarkResultEvent(new BenchmarkResult("bench-1", "qwen3_vl_4b", "error", "The model is not installed or failed verification")),
         new ModelCatalogEvent(new ModelCatalog("models-1", 16, 6144, new[]
         {
             new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",

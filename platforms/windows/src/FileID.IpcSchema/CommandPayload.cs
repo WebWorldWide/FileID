@@ -41,6 +41,13 @@ public sealed record HealthCheckCommand(
 public sealed record ListModelsCommand(
     [property: JsonPropertyName("requestID")] string RequestId,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Role = null) : CommandPayload;
+/// <summary>Benchmark one installed model on this machine (schema 1.14.0).
+/// Replies with <c>benchmarkProgress</c> events and one <c>benchmarkResult</c>.</summary>
+public sealed record BenchmarkModelCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string ModelKind,
+    bool Tune) : CommandPayload;
+public sealed record CancelBenchmarkCommand : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
@@ -243,6 +250,8 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "listModels" => JsonSerializer.Deserialize<ListModelsCommand>(ref reader, options) ?? throw new JsonException("listModels: null body"),
+            "benchmarkModel" => JsonSerializer.Deserialize<BenchmarkModelCommand>(ref reader, options) ?? throw new JsonException("benchmarkModel: null body"),
+            "cancelBenchmark" => Empty<CancelBenchmarkCommand>(ref reader),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
@@ -277,6 +286,8 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case ListModelsCommand c: WriteVariant(writer, "listModels", c, options); break;
+            case BenchmarkModelCommand c: WriteVariant(writer, "benchmarkModel", c, options); break;
+            case CancelBenchmarkCommand: WriteEmpty(writer, "cancelBenchmark"); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
             case VerifyCudaPackCommand: WriteEmpty(writer, "verifyCudaPack"); break;

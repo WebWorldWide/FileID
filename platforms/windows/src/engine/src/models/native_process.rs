@@ -110,7 +110,7 @@ impl NativeChild for Child {
         Box::pin(Child::wait(self))
     }
 }
-pub(crate) struct OwnedProcess { handle: ProcessHandle }
+pub(crate) struct OwnedProcess { handle: ProcessHandle, pid: Option<u32> }
 impl OwnedProcess {
     pub(crate) fn spawn(command: &mut Command, resources: Option<Arc<Lease>>, tracker: &ProcessTracker) -> Result<Self> {
         let (owned, _, _) = Self::spawn_piped(command, resources, tracker)?;
@@ -126,13 +126,16 @@ impl OwnedProcess {
         }), "Native runtime spawning blocked by unconfirmed or failed cleanup");
         configure(command);
         let mut child = command.spawn()?;
+        let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let (ownership, failure) = match ParentOwnership::new(&child) {
             Ok(owned) => (Some(owned), None),
             Err(error) => (None, Some(format!("Native parent ownership: {error}"))),
         };
-        Ok((Self::own(child, resources, tracker.0.clone(), &mut registry.handles, ownership, failure, Duration::from_secs(5)), stdout, stderr))
+        let mut owned = Self::own(child, resources, tracker.0.clone(), &mut registry.handles, ownership, failure, Duration::from_secs(5));
+        owned.pid = pid;
+        Ok((owned, stdout, stderr))
     }
     fn own(mut child: impl NativeChild, resources: Option<Arc<Lease>>, registrations: Arc<Mutex<ProcessRegistry>>,
         handles: &mut Vec<ProcessHandle>, ownership: Option<ParentOwnership>, failure: Option<String>, wait_bound: Duration) -> Self {
@@ -188,7 +191,7 @@ impl OwnedProcess {
                 }
             }
         });
-        Self { handle }
+        Self { handle, pid: None }
     }
     pub(crate) fn poll_exit(&self) -> Result<Option<std::process::ExitStatus>> {
         let state = self.handle.state.borrow();
@@ -210,6 +213,8 @@ impl OwnedProcess {
         healthy && !stopping && !resources.reaped && resources.work.is_none()
     }
     pub(crate) fn request_stop(&self) { self.handle.request_stop(); }
+    /// OS process id while running; used only to sample resident memory.
+    pub(crate) fn pid(&self) -> Option<u32> { self.pid }
     pub(crate) fn release_work(&self) { self.handle.resources.lock().work = None; }
     pub(crate) async fn wait_exit(&self) -> Result<std::process::ExitStatus> {
         self.handle.wait(Duration::from_secs(5)).await?;

@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{
-    HealthCheckPayload, HealthCheckResult, ListModelsPayload, ModelBenchmark, ModelCatalog, ModelCatalogItem,
+    HealthCheckPayload, HealthCheckResult, ListModelsPayload, ModelBenchmark, ModelCatalog, ModelCatalogItem, BenchmarkModelPayload, BenchmarkProgress, BenchmarkResult,
     ApplyRestructurePayload, ApplyTagsPayload, BatchSummary, BulkActionItem, BulkActionResult,
     CancelPrewarmPayload, ClipTextEmbedding, CommandPayload, DeepAnalyzeAllPayload,
     DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload,
@@ -198,6 +198,8 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::RequestStatus(_) => "requestStatus",
         CommandPayload::HealthCheck(_) => "healthCheck",
         CommandPayload::ListModels(_) => "listModels",
+        CommandPayload::BenchmarkModel(_) => "benchmarkModel",
+        CommandPayload::CancelBenchmark(_) => "cancelBenchmark",
         CommandPayload::Shutdown(_) => "shutdown",
         CommandPayload::RunFaceClustering(_) => "runFaceClustering",
         CommandPayload::DeepAnalyzeFile(_) => "deepAnalyzeFile",
@@ -237,6 +239,8 @@ fn event_tag(payload: &EventPayload) -> &'static str {
         EventPayload::Ready(_) => "ready",
         EventPayload::HealthCheckResult(_) => "healthCheckResult",
         EventPayload::ModelCatalog(_) => "modelCatalog",
+        EventPayload::BenchmarkProgress(_) => "benchmarkProgress",
+        EventPayload::BenchmarkResult(_) => "benchmarkResult",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
         EventPayload::DiscoveryComplete(_) => "discoveryComplete",
@@ -328,6 +332,8 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::RequestStatus(Empty {}),
         CommandPayload::HealthCheck(HealthCheckPayload { request_id: "probe-1".into() }),
         CommandPayload::ListModels(ListModelsPayload { request_id: "models-1".into(), role: Some("vision".into()) }),
+        CommandPayload::BenchmarkModel(BenchmarkModelPayload { request_id: "bench-1".into(), model_kind: "qwen3_vl_4b".into(), tune: true }),
+        CommandPayload::CancelBenchmark(Empty {}),
         CommandPayload::Shutdown(Empty {}),
         CommandPayload::RunFaceClustering(Empty {}),
         CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
@@ -426,6 +432,8 @@ fn event_exemplars() -> Vec<EventPayload> {
         serde_json::from_value(serde_json::json!({"toolResponse":{"_0":{"requestID":"tool","status":"ok","message":"Exported","operationID":"plan","outputs":[{"fileID":1,"sourcePath":"/internal/a.png","outputPath":"/internal/b.png","state":"completed","message":"Original preserved"}],"capabilities":[{"id":"photo","available":true,"inputFormats":["png"],"outputFormats":["png"],"detail":"Conversion"}]}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogResponse":{"_0":{"requestID":"r1","status":"ok","hits":[],"chapters":[],"jobs":[]}}})).unwrap(),
         EventPayload::HealthCheckResult(Wrap::new(HealthCheckResult { request_id: "probe-1".into(), pid: 4242 })),
+        EventPayload::BenchmarkProgress(Wrap::new(BenchmarkProgress { request_id: "bench-1".into(), model_kind: "qwen3_vl_4b".into(), phase: "measuring".into(), completed: 3, total: 12 })),
+        EventPayload::BenchmarkResult(Wrap::new(BenchmarkResult { request_id: "bench-1".into(), model_kind: "qwen3_vl_4b".into(), status: "error".into(), message: Some("The model is not installed or failed verification".into()), benchmark: None })),
         EventPayload::ModelCatalog(Wrap::new(ModelCatalog {
             request_id: "models-1".into(),
             physical_memory_gb: 16.0,

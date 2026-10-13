@@ -765,6 +765,8 @@ public final class EngineClient {
         //    cross-platform engine doesn't wedge the wire. ──
         case .healthCheckResult,
              .modelCatalog,
+             .benchmarkProgress,
+             .benchmarkResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,

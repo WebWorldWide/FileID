@@ -43,6 +43,20 @@ public sealed record ModelCatalogItem(
     bool Fits,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
 
+public sealed record BenchmarkProgress(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string ModelKind,
+    string Phase,
+    int Completed,
+    int Total);
+
+public sealed record BenchmarkResult(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string ModelKind,
+    string Status,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Message = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
+
 public sealed record ModelBenchmark(
     string MeasuredAt,
     string Hardware,

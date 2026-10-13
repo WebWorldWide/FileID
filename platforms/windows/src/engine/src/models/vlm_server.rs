@@ -26,7 +26,17 @@ use futures_util::StreamExt;
 use tokio::process::Command;
 use super::native_process::{OwnedProcess, ProcessTracker};
 
+/// llama-server's own per-request measurements (`timings` in its reply).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Timings {
+    pub prompt_tokens: u64,
+    pub prompt_per_second: f64,
+    pub predicted_tokens: u64,
+    pub predicted_per_second: f64,
+}
+
 pub struct VlmServer {
+    last_timings: parking_lot::Mutex<Option<Timings>>,
     process: OwnedProcess,
     base_url: String,
     api_key: String,
@@ -67,6 +77,13 @@ impl VlmServer {
     /// Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime
     /// never blocks the working Vulkan one.
     pub async fn start(gguf: &Path, mmproj: &Path, cancel: &Arc<AtomicBool>) -> Result<Self> {
+        Self::start_with_arguments(gguf, mmproj, cancel, None).await
+    }
+
+    /// Start with explicit tuning flags instead of the stored profile. Used by
+    /// the benchmark to try candidates; flags outside the allowlist are refused.
+    pub async fn start_with_arguments(gguf: &Path, mmproj: &Path, cancel: &Arc<AtomicBool>, arguments: Option<&[String]>) -> Result<Self> {
+        if arguments.is_some_and(|args| !super::launch_tuning::valid(args)) { bail!("Launch flags outside the tuning allowlist"); }
         if cancel.load(Ordering::Relaxed) { bail!("VLM server startup cancelled"); }
         let memory_mb = crate::util::model_memory::require_model_headroom(gguf,mmproj)
             .await.map_err(super::native_admission::HostAdmissionError)?;
@@ -88,7 +105,7 @@ impl VlmServer {
             let device = if crate::models::runtime::user_forced_cpu() { None }
                 else { crate::models::vlm::discrete_gpu_device(&bin, cancel).await? };
             let resources = reserve_host(scheduler.clone(), Demand { memory_mb, cpu: 1, io: 1 }, cancel.clone()).await?;
-            match Self::start_with_binary(&bin, gguf, mmproj, cancel, resources, device.as_deref()).await {
+            match Self::start_with_binary(&bin, gguf, mmproj, cancel, resources, device.as_deref(), arguments).await {
                 Ok(server) => return Ok(server),
                 Err(err) => {
                     if crate::coordinator::process_gpu_device_removed() || !ProcessTracker::shared().allows_fallback() {
@@ -109,6 +126,7 @@ impl VlmServer {
         cancel: &Arc<AtomicBool>,
         resources: Arc<Lease>,
         device: Option<&str>,
+        arguments: Option<&[String]>,
     ) -> Result<Self> {
         crate::models::runtime::ensure_gpu_inference_alive()?;
         let port = pick_free_port()?;
@@ -116,6 +134,10 @@ impl VlmServer {
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
         // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
         let forced_cpu = crate::models::runtime::user_forced_cpu();
+        // Flags kept by `fileid-bench --tune` for this model on this machine.
+        // Forced CPU always wins over a tuned GPU offload.
+        let tuned = if forced_cpu { None } else { arguments.map(<[String]>::to_vec).or_else(|| super::launch_tuning::lookup(gguf)) };
+        let gpu_layers = tuned.as_ref().and_then(|args| args.chunks(2).find(|pair| pair[0] == "-ngl").map(|pair| pair[1].clone()));
         let mut cmd = Command::new(bin);
         cmd.arg("-m")
             .arg(gguf)
@@ -130,9 +152,12 @@ impl VlmServer {
             // Offload all layers to the GPU (0 when the user forced CPU). Falls
             // back to CPU layers if VRAM is short — llama.cpp handles the spill.
             .arg("-ngl")
-            .arg(if forced_cpu { "0" } else { "99" })
+            .arg(if forced_cpu { "0".to_owned() } else { gpu_layers.unwrap_or_else(|| "99".to_owned()) })
             .arg("-c")
             .arg("4096");
+        for pair in tuned.iter().flat_map(|args| args.chunks(2)).filter(|pair| pair[0] != "-ngl") {
+            cmd.arg(&pair[0]).arg(&pair[1]);
+        }
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
         // skipped under forced-CPU so we don't re-engage the evacuated GPU.
         if !forced_cpu {
@@ -196,6 +221,7 @@ impl VlmServer {
         );
         resources.retain_memory();
         Ok(Self {
+            last_timings: parking_lot::Mutex::new(None),
             process: child,
             base_url,
             api_key,
@@ -240,6 +266,15 @@ impl VlmServer {
         result
     }
 
+    /// Timings from the most recent completed request, when the server sent them.
+    pub fn last_timings(&self) -> Option<Timings> {
+        *self.last_timings.lock()
+    }
+
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.process.pid()
+    }
+
     pub(crate) fn reusable_idle(&self) -> bool {
         !self.cancel.load(Ordering::Relaxed) && self.process.reusable_idle()
     }
@@ -269,6 +304,7 @@ impl VlmServer {
         if !status.is_success() { bail!("llama-server returned {status}: {text}"); }
         let json: serde_json::Value =
             serde_json::from_str(&text).context("parse VLM response JSON")?;
+        *self.last_timings.lock() = parse_timings(&json["timings"]);
         let content = json["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| anyhow!("VLM response missing choices[0].message.content: {text}"))?;
@@ -278,6 +314,16 @@ impl VlmServer {
 
 async fn wait_request_cancelled(request: &AtomicBool, stop: &AtomicBool) {
     while !request.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(25)).await; }
+}
+
+fn parse_timings(value: &serde_json::Value) -> Option<Timings> {
+    let number = |key: &str| value[key].as_f64().filter(|v| v.is_finite() && *v >= 0.0);
+    Some(Timings {
+        prompt_tokens: value["prompt_n"].as_u64()?,
+        prompt_per_second: number("prompt_per_second")?,
+        predicted_tokens: value["predicted_n"].as_u64()?,
+        predicted_per_second: number("predicted_per_second")?,
+    })
 }
 
 fn build_loopback_client() -> Result<reqwest::Client> {
@@ -441,6 +487,9 @@ mod resident_owner_tests;
 #[cfg(test)]
 #[path = "probe_fallback_tests.rs"]
 mod probe_fallback_tests;
+#[cfg(test)]
+#[path = "benchmark_server_tests.rs"]
+mod benchmark_server_tests;
 
 #[cfg(test)]
 mod tests {
