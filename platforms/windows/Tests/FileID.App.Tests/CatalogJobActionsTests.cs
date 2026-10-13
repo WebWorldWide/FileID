@@ -38,10 +38,30 @@ public sealed class CatalogJobActionsTests
         Assert.Throws<InvalidOperationException>(() => CatalogJobActions.TimelineRequest(Array.Empty<CatalogHit>()));
     }
 
+    [Fact]
+    public void TimelineEnqueueCarriesTheSelectedModeAndRejectsUnknownModes()
+    {
+        var hit = new CatalogHit(42, "generated.mp4", "sampledFrame", "", "frame", 1, null);
+        Assert.Equal("moments", CatalogJobActions.TimelineRequest(new[] { hit }, "moments").TimelineMode);
+        Assert.Null(CatalogJobActions.TimelineRequest(new[] { hit }).TimelineMode);
+        Assert.Throws<InvalidOperationException>(() => CatalogJobActions.TimelineRequest(new[] { hit }, "dense"));
+    }
+
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("cancelled")]
+    public void RetryingAStoppedTimelineEnqueuesItsFilesAgain(string state)
+    {
+        var job = new CatalogJob("durable-timeline", "timelineSample", new long[] { 42, 7, 42 }, state, 0.5, "error", 0, 1);
+        var request = CatalogJobActions.ControlRequest("resumeJob", job);
+        Assert.Equal("enqueueTimeline", request.Action);
+        Assert.Equal(new long[] { 7, 42 }, request.FileIDs);
+        Assert.Null(request.JobID);
+    }
+
     [Theory]
     [InlineData("pauseJob", "running")]
     [InlineData("resumeJob", "paused")]
-    [InlineData("resumeJob", "failed")]
     [InlineData("cancelJob", "queued")]
     public void TimelineControlsKeepTheDurableJobID(string action, string state)
     {

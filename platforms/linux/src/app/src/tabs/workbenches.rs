@@ -215,8 +215,13 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     actions.append(&mode);
     let search_notice = label("Keyword search selected. Hybrid uses existing local CLIP weights only; no download starts here.");
     body.append(&search_notice);
-    let status = label("Sparse sampled frames are unverified; native timestamp playback and timeline inference are unavailable.");
+    let status = label("Sparse sampled frames are unverified and can miss brief events.");
     body.append(&status);
+    let timeline = row();
+    let timeline_mode = gtk::DropDown::from_strings(&["Quick samples", "Significant moments"]);
+    timeline.append(&timeline_mode);
+    body.append(&timeline);
+    body.append(&label("Timeline analysis needs a local visual model from Deep Analyze; nothing is downloaded automatically. Quick samples caption one moment per ten seconds; significant moments also examine overlapping four-second frame sequences. Speech transcription is not yet available on Linux. Every draft chapter needs review."));
     let hits = column();
     body.append(&hits);
     let chapters = column();
@@ -305,6 +310,20 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
                     });
                 }
             }
+        });
+    }
+    {
+        let ui = ui.clone();
+        button(&timeline, "Analyze selected video timeline", move || {
+            if ui.requests.borrow().busy("timeline") {
+                return;
+            }
+            let Some(hit) = ui.selected.borrow().clone() else {
+                ui.status.set_label("Select a video result (Chapters) first.");
+                return;
+            };
+            let mode = if timeline_mode.selected() == 1 { "moments" } else { "sampled" };
+            ui.send("timeline", timeline_request(vec![hit.file_id], mode));
         });
     }
     {
@@ -427,18 +446,16 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
                                     let controls = row();
                                     for (action, name) in job_controls(&job) {
                                         let u = ui.clone();
-                                        let id = job.id.clone();
+                                        let job = job.clone();
                                         button(&controls, name, move || {
-                                            let mut r = catalog_request(action);
-                                            r.job_id = Some(id.clone());
-                                            u.send("job-control", r);
+                                            u.send("job-control", job_request(action, &job));
                                         });
                                     }
                                     jr.append(&controls);
                                     ui.jobs.append(&jr);
                                 }
                             }
-                            "job-control" => ui.send("jobs", catalog_request("jobs")),
+                            "job-control" | "timeline" => ui.send("jobs", catalog_request("jobs")),
                             _ => {}
                         }
                     }
@@ -480,17 +497,42 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     (page("Search & Moments", &body), ui)
 }
 
+fn timeline_request(file_ids: Vec<i64>, mode: &str) -> CatalogRequest {
+    let mut r = catalog_request("enqueueTimeline");
+    r.file_ids = Some(file_ids);
+    r.timeline_mode = Some(mode.into());
+    r
+}
+
+/// The engine resumes only paused timeline jobs; a failed or cancelled one is
+/// retried as a fresh job over the same files, as on macOS.
+fn job_request(action: &str, job: &CatalogJob) -> CatalogRequest {
+    if action == "retryTimeline" {
+        let mut ids = job.file_ids.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut r = catalog_request("enqueueTimeline");
+        r.file_ids = Some(ids);
+        return r;
+    }
+    let mut r = catalog_request(action);
+    r.job_id = Some(job.id.clone());
+    r
+}
+
 fn job_controls(job: &CatalogJob) -> Vec<(&'static str, &'static str)> {
     let mut controls = vec![];
-    if job.kind == "timelineSample" {
+    if !matches!(job.kind.as_str(), "timelineSample" | "catalogIndex") {
         return controls;
     }
     if matches!(job.state.as_str(), "running" | "queued") {
         controls.push(("pauseJob", "Pause"));
     }
-    if job.kind == "catalogIndex" && matches!(job.state.as_str(), "paused" | "failed" | "cancelled")
-    {
-        controls.push(("resumeJob", "Resume / retry"));
+    match (job.kind.as_str(), job.state.as_str()) {
+        (_, "paused") => controls.push(("resumeJob", "Resume")),
+        ("catalogIndex", "failed" | "cancelled") => controls.push(("resumeJob", "Retry")),
+        ("timelineSample", "failed" | "cancelled") => controls.push(("retryTimeline", "Retry")),
+        _ => {}
     }
     if matches!(job.state.as_str(), "running" | "queued" | "paused") {
         controls.push(("cancelJob", "Cancel"));
@@ -1052,27 +1094,41 @@ pub fn chat(engine: Engine) -> gtk::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn job_controls_do_not_offer_nonexistent_timeline_runtime() {
-        let mut j = CatalogJob {
+    fn job(kind: &str, state: &str) -> CatalogJob {
+        CatalogJob {
             id: "job".into(),
-            kind: "timelineSample".into(),
-            file_ids: vec![],
-            state: "paused".into(),
+            kind: kind.into(),
+            file_ids: vec![42, 7, 42],
+            state: state.into(),
             progress: 0.2,
             error: None,
             created_at: 0.0,
             updated_at: 0.0,
-        };
-        for state in ["queued", "running", "paused", "failed", "cancelled", "completed"] {
-            j.state = state.into();
-            assert!(job_controls(&j).is_empty());
         }
-        j.state = "paused".into();
-        j.kind = "catalogIndex".into();
-        assert_eq!(job_controls(&j).len(), 2);
-        j.state = "completed".into();
-        assert!(job_controls(&j).is_empty());
+    }
+    fn actions(job: &CatalogJob) -> Vec<&'static str> {
+        job_controls(job).into_iter().map(|(action, _)| action).collect()
+    }
+    #[test]
+    fn job_controls_follow_engine_transitions() {
+        assert_eq!(actions(&job("timelineSample", "running")), ["pauseJob", "cancelJob"]);
+        assert_eq!(actions(&job("timelineSample", "paused")), ["resumeJob", "cancelJob"]);
+        assert_eq!(actions(&job("timelineSample", "failed")), ["retryTimeline"]);
+        assert!(actions(&job("timelineSample", "completed")).is_empty());
+        assert_eq!(actions(&job("catalogIndex", "failed")), ["resumeJob"]);
+        assert_eq!(actions(&job("catalogIndex", "paused")), ["resumeJob", "cancelJob"]);
+        assert!(actions(&job("unknown", "paused")).is_empty());
+    }
+    #[test]
+    fn timeline_requests_carry_files_mode_and_retry_identity() {
+        let request = timeline_request(vec![42], "moments");
+        assert_eq!(request.action, "enqueueTimeline");
+        assert_eq!(request.file_ids.as_deref(), Some(&[42][..]));
+        assert_eq!(request.timeline_mode.as_deref(), Some("moments"));
+        let retry = job_request("retryTimeline", &job("timelineSample", "failed"));
+        assert_eq!((retry.action.as_str(), retry.file_ids.as_deref(), retry.job_id.as_deref()), ("enqueueTimeline", Some(&[7, 42][..]), None));
+        let pause = job_request("pauseJob", &job("timelineSample", "running"));
+        assert_eq!((pause.action.as_str(), pause.job_id.as_deref()), ("pauseJob", Some("job")));
     }
 }
 

@@ -319,6 +319,11 @@ async fn async_main() -> Result<()> {
     let dispatch_sink = sink.clone();
     let dispatch_shutdown = shutdown.clone();
     let catalog_index = db_conn.as_ref().map(|writer| catalog_index::CatalogIndex::new(writer.clone(), db_path.clone(), db_path.with_extension("visual-index")));
+    if let Some(writer) = db_conn.as_ref() {
+        if let Err(error) = commands::timeline::recover(&writer.lock()) {
+            tracing::warn!(?error, "timeline job recovery failed");
+        }
+    }
     let dispatch_catalog_index = catalog_index.clone();
     let dispatch_db = db_conn.clone();
 
