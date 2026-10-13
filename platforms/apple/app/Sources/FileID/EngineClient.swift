@@ -764,6 +764,7 @@ public final class EngineClient {
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
         case .healthCheckResult,
+             .modelCatalog,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,

@@ -15,6 +15,46 @@ public sealed record HealthCheckResult(
     [property: JsonPropertyName("requestID")] string RequestId,
     int Pid);
 
+/// <summary>Reply to <c>listModels</c>: curated and catalog models for this
+/// platform with install state, hardware fit and any local benchmark.</summary>
+public sealed record ModelCatalog(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    double PhysicalMemoryGB,
+    long VramMB,
+    IReadOnlyList<ModelCatalogItem> Models);
+
+public sealed record ModelCatalogItem(
+    string Id,
+    string Name,
+    string Family,
+    string Upstream,
+    string Role,
+    string Format,
+    string Quantization,
+    string License,
+    bool TermsRequired,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? ParametersBillion,
+    long DownloadBytes,
+    double EstimatedResidentGB,
+    string Tier,
+    string Status,
+    bool Runnable,
+    bool Installed,
+    bool Fits,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
+
+public sealed record ModelBenchmark(
+    string MeasuredAt,
+    string Hardware,
+    double LoadSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? PromptTokensPerSecond = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? GeneratedTokensPerSecond = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? SecondsPerImage = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? PeakResidentGB = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? JsonValidRate = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? ProbeAccuracy = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? TunedArguments = null);
+
 public sealed record EngineInfo(
     string Version,
     int Pid,

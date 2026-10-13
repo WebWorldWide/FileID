@@ -21,6 +21,7 @@ public sealed record CatalogResponseEvent(CatalogResponse Response) : EventPaylo
 
 public sealed record ReadyEvent(EngineInfo Info) : EventPayload;
 public sealed record HealthCheckResultEvent(HealthCheckResult Result) : EventPayload;
+public sealed record ModelCatalogEvent(ModelCatalog Catalog) : EventPayload;
 public sealed record ProgressEvent(ScanProgress Progress) : EventPayload;
 public sealed record PhaseChangedEvent(ScanPhase Phase) : EventPayload;
 
@@ -83,6 +84,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "catalogResponse" => new CatalogResponseEvent(ReadWrapped<CatalogResponse>(ref reader, options)),
             "ready" => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
             "healthCheckResult" => new HealthCheckResultEvent(ReadWrapped<HealthCheckResult>(ref reader, options)),
+            "modelCatalog" => new ModelCatalogEvent(ReadWrapped<ModelCatalog>(ref reader, options)),
             "progress" => new ProgressEvent(ReadWrapped<ScanProgress>(ref reader, options)),
             "phaseChanged" => new PhaseChangedEvent(ReadWrapped<ScanPhase>(ref reader, options)),
             "discoveryComplete" => new DiscoveryCompleteEvent(ReadDiscoveryComplete(ref reader)),
@@ -126,6 +128,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case CatalogResponseEvent v: WriteWrapped(writer, "catalogResponse", v.Response, options); break;
             case ReadyEvent v: WriteWrapped(writer, "ready", v.Info, options); break;
             case HealthCheckResultEvent v: WriteWrapped(writer, "healthCheckResult", v.Result, options); break;
+            case ModelCatalogEvent v: WriteWrapped(writer, "modelCatalog", v.Catalog, options); break;
             case ProgressEvent v: WriteWrapped(writer, "progress", v.Progress, options); break;
             case PhaseChangedEvent v: WriteWrapped(writer, "phaseChanged", v.Phase, options); break;
             case DiscoveryCompleteEvent v: WriteDiscoveryComplete(writer, v); break;

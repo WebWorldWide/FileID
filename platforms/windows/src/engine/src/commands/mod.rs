@@ -26,6 +26,7 @@ mod catalog_take_suggestions;
 pub mod chat;
 mod chat_search;
 pub mod tools;
+pub mod models;
 mod video_export;
 
 mod person_cluster_persistence;

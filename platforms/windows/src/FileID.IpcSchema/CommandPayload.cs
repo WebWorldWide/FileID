@@ -36,6 +36,11 @@ public sealed record CancelScanCommand : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
 public sealed record HealthCheckCommand(
     [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
+/// <summary>Read-only local model catalog (schema 1.14.0). Replies with
+/// <c>modelCatalog</c>; never downloads, loads or benchmarks a model.</summary>
+public sealed record ListModelsCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Role = null) : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
@@ -237,6 +242,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
+            "listModels" => JsonSerializer.Deserialize<ListModelsCommand>(ref reader, options) ?? throw new JsonException("listModels: null body"),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
@@ -270,6 +276,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
+            case ListModelsCommand c: WriteVariant(writer, "listModels", c, options); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
             case VerifyCudaPackCommand: WriteEmpty(writer, "verifyCudaPack"); break;

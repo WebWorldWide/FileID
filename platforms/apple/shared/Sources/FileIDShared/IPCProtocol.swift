@@ -35,6 +35,9 @@ public struct IPCCommand: Codable, Sendable {
         case chatRequest(request: ChatRequest)
         case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
+        /// Read-only model catalog with install state, hardware fit and any
+        /// local benchmark. Replies with `modelCatalog` (schema 1.14.0).
+        case listModels(requestID: String, role: String?)
         case requestStatus
         case shutdown
         case runFaceClustering
@@ -225,6 +228,7 @@ public struct IPCEvent: Codable, Sendable {
         case toolResponse(ToolResponse)
         case ready(EngineInfo)
         case healthCheckResult(HealthCheckResult)
+        case modelCatalog(ModelCatalog)
         case progress(ScanProgress)
         case phaseChanged(ScanPhase)
         case discoveryComplete(totalFiles: Int)
@@ -256,6 +260,105 @@ public struct IPCEvent: Codable, Sendable {
 }
 
 // MARK: - DTOs
+
+public struct ModelCatalog: Codable, Sendable {
+    public let requestID: String
+    public let physicalMemoryGB: Double
+    public let vramMB: Int64
+    public let models: [ModelCatalogItem]
+
+    public init(requestID: String, physicalMemoryGB: Double, vramMB: Int64, models: [ModelCatalogItem]) {
+        self.requestID = requestID
+        self.physicalMemoryGB = physicalMemoryGB
+        self.vramMB = vramMB
+        self.models = models
+    }
+}
+
+public struct ModelCatalogItem: Codable, Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let family: String
+    public let upstream: String
+    public let role: String
+    public let format: String
+    public let quantization: String
+    public let license: String
+    public let termsRequired: Bool
+    public let parametersBillion: Double?
+    public let downloadBytes: Int64
+    public let estimatedResidentGB: Double
+    public let tier: String
+    public let status: String
+    public let runnable: Bool
+    public let installed: Bool
+    public let fits: Bool
+    public let benchmark: ModelBenchmark?
+
+    public init(id: String, name: String, family: String, upstream: String, role: String, format: String,
+                quantization: String, license: String, termsRequired: Bool, parametersBillion: Double?,
+                downloadBytes: Int64, estimatedResidentGB: Double, tier: String, status: String,
+                runnable: Bool, installed: Bool, fits: Bool, benchmark: ModelBenchmark? = nil) {
+        self.id = id
+        self.name = name
+        self.family = family
+        self.upstream = upstream
+        self.role = role
+        self.format = format
+        self.quantization = quantization
+        self.license = license
+        self.termsRequired = termsRequired
+        self.parametersBillion = parametersBillion
+        self.downloadBytes = downloadBytes
+        self.estimatedResidentGB = estimatedResidentGB
+        self.tier = tier
+        self.status = status
+        self.runnable = runnable
+        self.installed = installed
+        self.fits = fits
+        self.benchmark = benchmark
+    }
+
+    /// Mirrors the Rust engine's tier bands so both engines label alike.
+    public static func tier(forResidentGB gigabytes: Double) -> String {
+        switch gigabytes {
+        case ...3: return "tiny"
+        case ...6: return "small"
+        case ...12: return "medium"
+        case ...24: return "large"
+        case ...48: return "xlarge"
+        default: return "workstation"
+        }
+    }
+}
+
+public struct ModelBenchmark: Codable, Sendable, Equatable {
+    public let measuredAt: String
+    public let hardware: String
+    public let loadSeconds: Double
+    public let promptTokensPerSecond: Double?
+    public let generatedTokensPerSecond: Double?
+    public let secondsPerImage: Double?
+    public let peakResidentGB: Double?
+    public let jsonValidRate: Double?
+    public let probeAccuracy: Double?
+    public let tunedArguments: [String]?
+
+    public init(measuredAt: String, hardware: String, loadSeconds: Double, promptTokensPerSecond: Double? = nil,
+                generatedTokensPerSecond: Double? = nil, secondsPerImage: Double? = nil, peakResidentGB: Double? = nil,
+                jsonValidRate: Double? = nil, probeAccuracy: Double? = nil, tunedArguments: [String]? = nil) {
+        self.measuredAt = measuredAt
+        self.hardware = hardware
+        self.loadSeconds = loadSeconds
+        self.promptTokensPerSecond = promptTokensPerSecond
+        self.generatedTokensPerSecond = generatedTokensPerSecond
+        self.secondsPerImage = secondsPerImage
+        self.peakResidentGB = peakResidentGB
+        self.jsonValidRate = jsonValidRate
+        self.probeAccuracy = probeAccuracy
+        self.tunedArguments = tunedArguments
+    }
+}
 
 public struct HealthCheckResult: Codable, Sendable {
     public let requestID: String

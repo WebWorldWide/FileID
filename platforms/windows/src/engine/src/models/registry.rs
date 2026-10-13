@@ -51,7 +51,7 @@ pub(crate) fn vlm_dir_name(model_kind: &str) -> Option<&'static str> {
         "qwen2_5_vl_7b" | "qwen2.5-vl-7b" => Some("qwen2.5-vl-7b"),
         "gemma_3_4b" | "gemma-3-4b" => Some("gemma-3-4b"),
         "mistral_small_3_2" | "mistral-small-3.2" => Some("mistral-small-3.2"),
-        _ => None,
+        _ => super::catalog::directory(model_kind),
     }
 }
 
@@ -438,8 +438,29 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ship the QNN runtime. Per-model `_int8`/`_qnn` variants follow
         // the same rule — `models::variants` picks them up if dropped into
         // the model dir by hand, and falls back to the fp32 graph otherwise.
-        _ => LookupResult::Unknown,
+        _ => catalog_model(&models_root, model_kind).map_or(LookupResult::Unknown, LookupResult::Found),
     }
+}
+
+/// A runnable catalog vision model, laid out like the curated VLMs
+/// (`vlm/<dir>/model.gguf` + `mmproj.gguf`) so discovery, provenance and the
+/// resident server treat it identically.
+fn catalog_model(models_root: &std::path::Path, model_kind: &str) -> Option<Model> {
+    let entry = super::catalog::runnable_vision(model_kind)?;
+    let dir = models_root.join("vlm").join(super::catalog::directory(model_kind)?);
+    let files = entry
+        .files
+        .iter()
+        .filter_map(|file| {
+            let name = match file.role.as_str() {
+                "model" => "model.gguf",
+                "projector" => "mmproj.gguf",
+                _ => return None,
+            };
+            Some(FileEntry { url: file.url.clone(), dest: dir.join(name), sha256: file.sha256.clone(), approx_bytes: file.bytes.unwrap_or(0) })
+        })
+        .collect();
+    Some(Model { id: entry.id.as_str(), display_name: entry.name.as_str(), files })
 }
 
 /// Stable, short token identifying the EXACT pinned artifacts of `model` —

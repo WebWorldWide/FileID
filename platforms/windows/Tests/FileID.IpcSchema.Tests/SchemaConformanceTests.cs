@@ -177,6 +177,7 @@ public class SchemaConformanceTests
         new CancelScanCommand(),
         new RequestStatusCommand(),
         new HealthCheckCommand("probe-1"),
+        new ListModelsCommand("models-1", "vision"),
         new ShutdownCommand(),
         new RunFaceClusteringCommand(),
         new VerifyCudaPackCommand(),
@@ -215,6 +216,12 @@ public class SchemaConformanceTests
         new CatalogResponseEvent(new CatalogResponse("r1", "ok", "Found a moment", new[] { new CatalogHit(42, @"C:\Photos\Birthday.mov", "chapter", "Gift Opening", "chapter-1", 12.5, 1) }, new[] { ExampleChapter() }, new[] { new CatalogJob("job-1", "timelineSample", new long[] { 42 }, "failed", 0.5, "Interrupted", 100, 101) })),
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
         new HealthCheckResultEvent(new HealthCheckResult("probe-1", 1234)),
+        new ModelCatalogEvent(new ModelCatalog("models-1", 16, 6144, new[]
+        {
+            new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",
+                "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true,
+                new ModelBenchmark("2026-10-13T22:00:00Z", "x86_64 · 16 GB · RTX 2060 6 GB", 3.2, 900, 55, 1.4, 2.6, 0.95, 0.8, new[] { "-ngl", "99" })),
+        })),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),
         new DiscoveryCompleteEvent(50_000),

@@ -9,7 +9,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{
-    HealthCheckPayload, HealthCheckResult,
+    HealthCheckPayload, HealthCheckResult, ListModelsPayload, ModelBenchmark, ModelCatalog, ModelCatalogItem,
     ApplyRestructurePayload, ApplyTagsPayload, BatchSummary, BulkActionItem, BulkActionResult,
     CancelPrewarmPayload, ClipTextEmbedding, CommandPayload, DeepAnalyzeAllPayload,
     DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload,
@@ -197,6 +197,7 @@ fn command_tag(payload: &CommandPayload) -> &'static str {
         CommandPayload::CancelScan(_) => "cancelScan",
         CommandPayload::RequestStatus(_) => "requestStatus",
         CommandPayload::HealthCheck(_) => "healthCheck",
+        CommandPayload::ListModels(_) => "listModels",
         CommandPayload::Shutdown(_) => "shutdown",
         CommandPayload::RunFaceClustering(_) => "runFaceClustering",
         CommandPayload::DeepAnalyzeFile(_) => "deepAnalyzeFile",
@@ -235,6 +236,7 @@ fn event_tag(payload: &EventPayload) -> &'static str {
         EventPayload::CatalogResponse(_) => "catalogResponse",
         EventPayload::Ready(_) => "ready",
         EventPayload::HealthCheckResult(_) => "healthCheckResult",
+        EventPayload::ModelCatalog(_) => "modelCatalog",
         EventPayload::Progress(_) => "progress",
         EventPayload::PhaseChanged(_) => "phaseChanged",
         EventPayload::DiscoveryComplete(_) => "discoveryComplete",
@@ -325,6 +327,7 @@ fn command_exemplars() -> Vec<CommandPayload> {
         CommandPayload::CancelScan(Empty {}),
         CommandPayload::RequestStatus(Empty {}),
         CommandPayload::HealthCheck(HealthCheckPayload { request_id: "probe-1".into() }),
+        CommandPayload::ListModels(ListModelsPayload { request_id: "models-1".into(), role: Some("vision".into()) }),
         CommandPayload::Shutdown(Empty {}),
         CommandPayload::RunFaceClustering(Empty {}),
         CommandPayload::DeepAnalyzeFile(DeepAnalyzeFilePayload {
@@ -423,6 +426,22 @@ fn event_exemplars() -> Vec<EventPayload> {
         serde_json::from_value(serde_json::json!({"toolResponse":{"_0":{"requestID":"tool","status":"ok","message":"Exported","operationID":"plan","outputs":[{"fileID":1,"sourcePath":"/internal/a.png","outputPath":"/internal/b.png","state":"completed","message":"Original preserved"}],"capabilities":[{"id":"photo","available":true,"inputFormats":["png"],"outputFormats":["png"],"detail":"Conversion"}]}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"catalogResponse":{"_0":{"requestID":"r1","status":"ok","hits":[],"chapters":[],"jobs":[]}}})).unwrap(),
         EventPayload::HealthCheckResult(Wrap::new(HealthCheckResult { request_id: "probe-1".into(), pid: 4242 })),
+        EventPayload::ModelCatalog(Wrap::new(ModelCatalog {
+            request_id: "models-1".into(),
+            physical_memory_gb: 16.0,
+            vram_mb: 6144,
+            models: vec![ModelCatalogItem {
+                id: "qwen3_vl_2b_instruct_gguf_q4_k_m".into(), name: "Qwen3-VL-2B-Instruct".into(), family: "Qwen3".into(),
+                upstream: "Qwen/Qwen3-VL-2B-Instruct".into(), role: "vision".into(), format: "gguf".into(), quantization: "Q4_K_M".into(),
+                license: "Apache-2.0".into(), terms_required: false, parameters_billion: Some(2.0), download_bytes: 1_500_000_000,
+                estimated_resident_gb: 2.3, tier: "tiny".into(), status: "verified".into(), runnable: true, installed: true, fits: true,
+                benchmark: Some(ModelBenchmark {
+                    measured_at: "2026-10-13T22:00:00Z".into(), hardware: "x86_64 · 16 GB · RTX 2060 6 GB".into(), load_seconds: 3.2,
+                    prompt_tokens_per_second: Some(900.0), generated_tokens_per_second: Some(55.0), seconds_per_image: Some(1.4),
+                    peak_resident_gb: Some(2.6), json_valid_rate: Some(0.95), probe_accuracy: Some(0.8), tuned_arguments: Some(vec!["-ngl".into(), "99".into(), "-fa".into(), "on".into()]),
+                }),
+            }],
+        })),
         EventPayload::Ready(Wrap::new(EngineInfo {
             version: "0.1.0".into(),
             pid: 4242,

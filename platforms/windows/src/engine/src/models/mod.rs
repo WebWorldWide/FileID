@@ -19,6 +19,7 @@
 // pack detection) live in `runtime.rs`.
 
 pub mod bge_text;
+pub mod catalog;
 pub mod clip_text;
 pub mod clip_space;
 pub mod clip_tokenizer;
