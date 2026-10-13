@@ -30,6 +30,10 @@ impl ClipText {
         if !path.exists() {
             anyhow::bail!("CLIP text weights missing at {}", path.display());
         }
+        super::clip_space::verify(path, "clip_text", 0)?;
+        let directory = path.parent().ok_or_else(|| anyhow::anyhow!("CLIP weights have no directory"))?;
+        super::clip_space::verify(&directory.join("vocab.json"), "clip_text", 1)?;
+        super::clip_space::verify(&directory.join("merges.txt"), "clip_text", 2)?;
         let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
@@ -89,6 +93,7 @@ impl ClipText {
             .context("extract CLIP text output as f32")?;
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
+        if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP text embedding") }
         Ok(emb)
     }
 
@@ -143,6 +148,7 @@ impl ClipText {
         for i in 0..batch {
             let mut emb = data[i * dim..(i + 1) * dim].to_vec();
             l2_normalize(&mut emb);
+            if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP text embedding") }
             out.push(emb);
         }
         Ok(out)

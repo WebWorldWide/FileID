@@ -16,8 +16,12 @@ pub(crate) mod trash_log;
 pub(crate) mod wipe;
 
 pub mod catalog;
+
 pub mod catalog_takes;
 mod catalog_take_suggestions;
+pub(crate) mod catalog_search;
+pub(crate) mod catalog_retrieval;
+
 
 pub mod chat;
 mod chat_search;

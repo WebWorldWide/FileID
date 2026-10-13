@@ -3668,3 +3668,7 @@ File Tools execution holds the catalog connection lock while a video worker runs
 ## 2026-10-13 — Tie portable video children to the engine lifetime
 
 An engine crash must not leave FFmpeg writing an orphaned staged output. On Linux, set `PR_SET_PDEATHSIG` before the worker exec and verify the original parent PID inside the forked child to close the parent-exit race. On Windows, place each worker in a job with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; dropping the engine's job handle terminates its members. Use the existing `libc` and `windows` dependencies, adding only the Windows JobObjects feature. Keep the job handle alive until the probe or export finishes; if assignment fails, terminate the child and report an error. This limits orphaned subprocesses but does not replace the persisted stage/receipt recovery journal.
+
+## 2026-10-13 — Persist the shared Rust visual search graph
+
+Enable the existing MIT/Apache-2.0 `instant-distance` crate's `with-serde` feature so its graph can be restored after restart. This adds transitive `serde-big-array` 0.5.1 (MIT OR Apache-2.0), explicitly approved by the owner. Keep the graph bound to its model, catalog revision, dimension, and topology; reject incompatible or corrupt snapshots and rebuild from catalog vectors. This is local index persistence, not model inference or a quality claim.

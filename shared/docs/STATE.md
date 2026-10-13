@@ -1,5 +1,15 @@
 # FileID — State
 
+## 2026-10-13 19:34 UTC — Portable video merged; shared engine VM verification
+
+PR #234 passed all 18 exact-head checks and merged into `main` at `5a7ef8cb7962b67433bf6f715aa9f60a2246c02d`. The stacked shared-engine PR #235 was retargeted to `main`; the completed `codex/portable-video-export` branch was removed locally and remotely. Seven exact-main workflows started for the merge commit and are pending. No release acceptance follows from the merge.
+
+The shared-engine integration also passed Windows VM `cargo check --all-targets`, strict Clippy, and all 475 Rust library tests, including portable video/Undo, alongside the previously verified Linux 451-test and strict Clippy results. Hosted PR #235 exposed missing CLI/TUI/Linux dependency lock entries and the corresponding Flatpak source manifest; both are regenerated, verified, and pushed as follow-up commits. Current exact-head CI is still running. The older `parity/shared-engine` source branch remains until this integration lands. Three reviewed redundant or superseded remote refs have been removed; other distinct WIP branches remain under review.
+
+## 2026-10-13 19:10 UTC — Shared Rust engine integration under review
+
+An isolated `codex/shared-engine-integration` worktree merges the older `parity/shared-engine` checkpoint into the portable-video branch without changing PR #234's head. The merge retains current catalog chapter/text search and video File Tools fields, adds the branch's persistent visual catalog index and shared resource scheduler, and enables the approved `instant-distance` serialization feature with MIT/Apache-2.0 `serde-big-array` 0.5.1. Linux VM source compilation, strict Clippy, and 451 Rust library tests pass; Rust formatting, runtime-egress, and bootstrap supply-chain gates pass. Windows build/runtime, broader cross-platform integration, hosted CI, and release acceptance remain open.
+
 ## 2026-10-13 18:53 UTC — GitHub draft review and policy repair
 
 Committed and pushed portable video checkpoint `f97bba79` to `codex/portable-video-export` and opened draft PR #234. The first hosted action-pins job found the new FFmpeg builder scripts absent from the repository's reviewed shell inventory and a stale digest for Linux staging. The reviewed script digests and explicit builder allowance now pass all 18 local bootstrap-policy tests and the direct gate. The runtime-egress test's exact role inventory also needed the already reviewed video-worker entry; its focused inventory test and direct gate pass. This policy repair is a separate follow-up commit. Other hosted jobs are still running; no merge or release acceptance is claimed.

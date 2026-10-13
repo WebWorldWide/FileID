@@ -3070,6 +3070,19 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/serde-big-array/serde-big-array-0.5.1.crate",
+    "sha256": "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f",
+    "dest": "cargo/vendor/serde-big-array-0.5.1"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\":\"11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f\",\"files\":{}}",
+    "dest": "cargo/vendor/serde-big-array-0.5.1",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
     "url": "https://static.crates.io/crates/serde_core/serde_core-1.0.229.crate",
     "sha256": "67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48",
     "dest": "cargo/vendor/serde_core-1.0.229"
