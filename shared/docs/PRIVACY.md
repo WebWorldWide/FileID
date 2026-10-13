@@ -6,6 +6,8 @@ It applies to both shipping platforms — Windows (Rust `fileid-engine` + WinUI 
 
 ## What we do — Windows Store version
 
+The optional NVIDIA CUDA installers are user-triggered. They fetch only the exact SHA-256-pinned Microsoft ONNX Runtime GPU archive and NVIDIA CUDA 12.4/cuDNN 9.5 archives listed in `shared/scripts/check_runtime_egress.py`, after showing and recording acceptance of the applicable NVIDIA terms. Idle startup performs no downloads. FileID verifies each runtime archive before extraction. Your network provider can see which archive URLs you request; requests do not include file contents, filenames, folder paths, or search history.
+
 The Windows Store package includes its required Vulkan llama.cpp runtime, whisper.cpp runtime, and OpenVINO provider. These runtimes are staged from SHA-256-pinned release archives during packaging; the installed app does not fetch runtime binaries at startup.
 
 The Windows Store app downloads model files only from `huggingface.co`, only after you choose to install a model. FileID verifies pinned model hashes where the model registry provides them. Your selected model and download size may be visible to your network provider as ordinary HTTPS traffic. Requests do not include your file contents, filenames, folder paths, or search history. Installed models work offline.

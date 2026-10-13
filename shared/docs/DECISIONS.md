@@ -11,6 +11,10 @@ Use Apple Speech for macOS video transcription only when the active recognizer r
 
 ---
 
+## 2026-10-05 — Keep CUDA runtimes opt-in and exact-source pinned
+
+Offer CUDA as an explicit user-triggered Windows install so Store installs do not silently fetch large vendor runtimes or accept vendor terms on the user's behalf. Pin every archive by SHA256, restrict each source to the reviewed official Microsoft/NVIDIA URL, and require the matching license acceptance before downloading. Keep CPU/DirectML/Vulkan fallback behavior available when CUDA is not installed or cannot initialize.
+
 ## 2026-10-03 — Isolate Mac App Store sandbox behavior behind a build flag
 
 Keep Developer builds unchanged and compile `FILEID_APP_STORE` only for the Mac App Store package. The Store app and inherited CLI helper require bookmark grants for selected source/output folders, while model weights live in the app container. This avoids weakening the Store sandbox or breaking the existing Developer ID workflow. IPC v1.7 mirrors the bookmark contract across Swift, Rust, and C#; Windows treats the grant as a no-op. Signing and API credentials remain owner-managed and are not stored in the repository.
@@ -3561,3 +3565,35 @@ Apple's macOS App Store provisioning profile uses `com.apple.application-identif
 ## 2026-10-03 — Defer stale Windows app test-suite repair to the PC session
 
 The Windows app job's nested-path check silently skipped `FileID.App.Tests`. A hosted discovery experiment found 157 compilation diagnostics because existing tests reference missing or changed app members. Keep the current packaging/IPC gate documented as incomplete app-suite coverage. On the owner's PC, reconcile tests with current APIs and add fail-closed discovery; do not hide the mismatch by excluding tests. No Windows product or test source is changed before that session.
+
+## 2026-10-10 — Persist the portable HNSW graph under approved serialization
+
+Use `instant-distance` 0.6.1's existing `with-serde` feature instead of persisting vectors and rebuilding the entire graph as the normal cold-start path. The owner explicitly approved the resulting `serde-big-array` 0.5 dependency and its official Cargo-registry acquisition; both portable lockfiles pin 0.5.1. Its crate metadata declares `MIT OR Apache-2.0`. Keep graph snapshots model/revision separated and reject corrupt or mismatched candidates; a denied disk-restore reservation discards that candidate and requires independent database-rebuild admission. Do not relabel legacy `mobileclip_s2` embeddings as verified OpenAI CLIP vectors. This approval does not authorize other new dependencies or model/runtime downloads.
+
+## 2026-10-10 — Expose only current-contract parity and accepted reversible mutations
+
+Mirror actual macOS catalog/tools/chat behavior through the existing canonical IPC rather than inventing `indexing` statuses or simulating unavailable inference. Cold hybrid search returns real keyword evidence with explicit durable index work; semantic search without an available compatible graph reports an error. GTK Deep Analyze remains caption review until inference exists. New export recovery attempts persist publication ownership before reconciliation; absent/false markers or mismatched hashes fail conservatively. Portable moves publish without clobbering and do not report source-removal failure as success. Activated Windows/GTK Tools Undo and GTK Restructure Apply/Undo after integrated Windows/WSL disposable-file probes, WSL cross-device recovery, failure-injection unit tests and native GTK request tests. This is backend safety acceptance, not real-library, model, WinUI runtime, GPU or release acceptance.
+
+## 2026-10-10 — Review egress source pins after parity integration
+
+Review the cumulative diffs for the nine changed pinned source files before updating their normalized SHA256 entries. The changes add local startup resources, safe-open policy reuse, typed IPC/request lifecycle, index dispatch, document-expansion bounds and restructure identity/no-clobber safeguards; reviewed raw-network and download-sink inventories are unchanged. Keep the exact transport/host/URL checks intact and rerun the strict gate plus all 24 adversarial policy tests. Updating hashes without source review would merely silence the gate.
+
+## 2026-10-10 — Bound native runtime hardening and validation acquisition
+
+Owner explicitly approved only the existing pinned permissive CLIP/RAM++/YuNet/SFace/Whisper-base/Qwen2.5-VL-7B weights in isolated validation storage and official MIT llama.cpp b9254/whisper.cpp v1.9.0 source builds. No additional weights, dependencies, system packages or vendor-runtime/license acceptance is implied. Because b9254 lacks an outbound-client build-off switch, owner selected a narrowly audited source patch that hard-disables remote download/content helpers while retaining authenticated loopback inference. Verify pristine upstream pins/license, exact patch application/digest and resulting build identities; a local trap must receive no attempted download/remote-image requests. `--offline` remains defense in depth, not proof that compiled outbound helpers are absent.
+
+## 2026-10-10 — Preserve truthful native-media and execute ownership boundaries
+
+Accept explicit Windows refusal when WinRT changes positive audio edit-list offsets; enforce the Mac worker's audio-offset/duration validation and clean staging without publishing a final file. This is a disclosed adapter limit, not universal SDR conversion or native Mac success for the fixture. Actual decoded frame/PCM timestamps anchor evidence; caller-owned staging survives until hardened publication. Helper transient admission must not be charged again by consumers. Tools response status remains `ok/error`; separate cancel acknowledgements never finish an execute request. Bounded client-owned request/operation/generation tracking outlives UI timeout/unload, and observed engine retirement requires durable recovery reconciliation rather than assumed success.
+
+## 2026-10-10 — Repair existing Mac Deep Analyze scope drift schema first
+
+Owner chose actual exclusion parity instead of a raw-settings workaround. Canonical schema 1.8.0 and typed Rust/C# mirrors now represent existing Mac optional `fileIDs` and `excludedFolders` with bounded arrays. Null/omitted IDs mean whole library; an empty explicit selection must never become whole library; exclusions do not silently filter a deliberate selected-file run. Whole-library exclusion enforcement must honor directory-component boundaries and resolved targets, reject invalid/uncertain settings rather than dropping privacy preferences, and use a typed whitelisted Windows preference without weakening unknown-key handling. DTO/codec tests are not enforcement acceptance: retain native fail-closed guards until parent backend/UI integration and regression tests pass.
+
+## 2026-10-11 — One shared Rust engine with narrow native adapters
+
+Owner requested a single Rust engine across Windows, macOS and Linux and explicitly selected Rust core with thin native adapters. Target one authoritative `shared/engine` codebase for catalog writes/migrations, pipeline/job orchestration, resources/model policy, search/timeline/Chat, file mutations/recovery and canonical IPC. Retain native SwiftUI, WinUI 3 and GTK4/libadwaita frontends; do not introduce web UI or a second backend business-logic implementation.
+
+Preserve macOS MLX/CoreML/ANE, Vision, AVFoundation, bookmark/security-scoped access and signing/sandbox behavior through narrow native adapters governed by the Rust engine. Adapter implementation language may be Swift/Objective-C/C/C++; it owns only native service/session mechanics, not catalog writes, job policy or a parallel engine. Move frontend-owned inference such as the existing Swift CLIP text encoder behind the shared engine as part of convergence. Keep read-only native catalog views where appropriate.
+
+Wait for active exclusive core fix/review writers before relocating shared source. Preserve the dirty original, existing catalogs/corrections/Undo and all incident evidence; no destructive database migration or premature deletion of the Swift reference implementation. Retire it from shipping only after contract, catalog round-trip, sandbox/signing and native Mac hardware validation. Existing download/dependency/license limits still apply; this choice does not authorize new packages/models/network acquisition. Shared Rust is a portability/consistency target, not measured proof of performance improvement or Mac runtime acceptance.

@@ -48,7 +48,7 @@ printf 'name,amount\nalice,10' > /tmp/fid_corpus/data.csv
 printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xcf\xc0\x00\x00\x00\x03\x00\x01\xff\xff\xff\xff\x00\x00\x00\x00IEND\xaeB`\x82' > /tmp/fid_corpus/pic1.png
 cp /tmp/fid_corpus/pic1.png /tmp/fid_corpus/pic2.png
 ```
-For real performance/accuracy runs use the `G:\TrueNAS` corpus (Windows dev box) or the external Adlon drive copy — never the originals; copy first.
+For real performance/accuracy runs, pass an available representative corpus explicitly with `platforms/windows/build/iterate.ps1 -Corpus <path>`. The old Windows dev box’s `G:\TrueNAS` path is not mounted on the current system. Use a copied corpus, never the originals. Current Windows hardware: Ryzen 9 9900X, 64 GB RAM, GeForce RTX 5080 (16 GB VRAM, driver 617.14), Windows 11 Pro build 26300. Treat earlier RTX 2060 throughput and accuracy measurements as historical.
 
 ---
 
@@ -190,8 +190,8 @@ These need the real OS + GPU/NPU; they cannot be verified headlessly. For each, 
 - This app uses MLX/CoreML, so it needs **no** ONNX runtime and no `fileid models download`.
 
 ### Windows (WinUI 3 / .NET 8) — `platforms/windows`
-- `dotnet build`; run the packaged app. Engine auto-detects EP (DirectML on the RTX 2060 dev box; CPU fallback otherwise).
-- E2E: same six-tab walk. Verify the Win2D `LavaLampBackground` port renders, springs feel right, gold palette. Run `iterate.ps1` + `scan_assertions.py` against `G:\TrueNAS` for accuracy/throughput (≥140 files/s target on GPU).
+- `dotnet build`; run the packaged app. Engine auto-detects the execution provider (the current dev box has an RTX 5080; CPU fallback remains available).
+- E2E: same six-tab walk. Verify the Win2D `LavaLampBackground` port renders, springs feel right, and the gold palette. Run `iterate.ps1 -Corpus <path>` + `scan_assertions.py` against the current copied corpus for accuracy and throughput; record RTX 5080 DirectML and CUDA results separately (≥140 files/s remains the target, not a measured result).
 - Pre-push gate: `dotnet build` + `dotnet test` + `dotnet format --verify-no-changes`.
 
 ### Linux (GTK4 + libadwaita) — `platforms/linux`

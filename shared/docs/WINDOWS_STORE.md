@@ -1,14 +1,22 @@
 # Microsoft Store submission
 
-## Current submission status — 2026-10-03
+## Current owner-reported status — 2026-10-05
+
+The owner reports that FileID was approved by Microsoft Store. This PC has the Store-installed `AdamNolle.FileID` package version `0.1.1.0`; next update target `0.1.2.0`. Partner Center was not rechecked in this turn, so the exact approved submission/package state remains owner-reported. GitHub `main` and this checkout are at `754f8b0b69b0e04ac6764cff01fa34d136ebb8ad`; PRs #219 and #220 are merged, and all 18 workflow checks for that commit completed successfully. GitHub's combined status endpoint still returns `pending` without any status contexts, so treat only the individual workflow checks as confirmed.
+
+The approved download is not yet a release-ready experience. Windows Application Error records from 2026-10-04 show, and a new launch on 2026-10-05 12:00:52 UTC reproduced, Store package `0.1.1.0` failing in `Microsoft.UI.Xaml.dll` with `0xC000027B`; the app log records `XamlParseException` in `MainWindow.InitializeComponent()`. An unpackaged Release build reached `OnLaunched complete` and emitted engine-ready/UI binding events on this PC, but that does not clear the Store-package launch gate.
+
+Remaining gates: diagnose and verify a fixed packaged build; build a higher package version and verify the exact MSIX; run App Certification Kit and inspect its report; capture several authentic app screenshots (the current listing draft has only one genuine Deep Analyze screen); validate CUDA scanning and CUDA Deep Analyze on the RTX 5080; and rerun strict release/privacy/runtime-egress checks on the final release commit. Screenshot set after launch is repaired: Library, People, Cleanup, Deep Analyze, Restructure, and Settings, each captured from FileID with a representative copied test corpus where relevant. The old `G:\TrueNAS` corpus is not mounted; use a copied representative corpus. Do not use the promo-video draft or upload/submit an update until these gates pass.
+
+## Historical submission snapshot — 2026-10-03
 
 PR #213 is merged into `main` at `a11cbd09`; its exact-head checks passed, and the merged source tree matches the Store-package build source. Main-branch CI for `a11cbd09` is running. The validated package currently in Partner Center is the older `0.1.0.0` package. A repeated upload of the same package identity was rejected and removed; the saved package remains in the draft.
 
 Partner Center product `9PC8HSD86887`, submission `1152921505702035520`: worldwide availability is saved at the free base price; Properties, Age ratings, Packages, the English (United States) listing, and Submission Options are complete. The age rating is IARC 12+ / ESRB Teen. The listing has six feature bullets, the description and short description, and one genuine Deep Analyze screenshot. Automatic publishing after certification is selected. The runFullTrust use and basic verification guidance are in Additional Testing Information.
 
-Branch `codex/windows-store-version-bump` increments the Windows package version to `0.1.1` / `0.1.1.0` so the updated app can replace the `0.1.0.0` package already in this submission. The new package has not been built or uploaded, and certification has not been requested.
+The previous `0.1.1.0` package replaced `0.1.0.0`. For the next update, `platforms/windows/VERSION`, the Rust engine version, Cargo lock root entry, and Store manifest are aligned at `0.1.2` / `0.1.2.0`, higher than the currently installed Store package. A baseline `0.1.2.0` MSIX has been built locally and passed static identity/payload verification; it still includes the unresolved Store startup failure, so no candidate has passed launch or WACK. Nothing has been uploaded, and certification has not been requested.
 
-The local App Certification Kit attempt produced no report and did not install the package; WACK remains unverified. The `G:\TrueNAS` corpus is unavailable in this session, and vendor/model acceptance remains open. After the version-bump PR passes exact-head CI, merge it, confirm main CI, upload its `0.1.1.0` MSIX, submit for certification, and monitor Microsoft's result.
+The local App Certification Kit attempt produced no report and did not install the package; WACK remains unverified. The former `G:\TrueNAS` corpus is not mounted on the current RTX 5080 system; hardware acceptance requires an available copied corpus, and vendor/model acceptance remains open. After fixing and testing Store-package startup, build and verify the `0.1.2.0` MSIX, run App Certification Kit and inspect its report, complete hardware and screenshot gates, then upload and submit that exact package in Partner Center and monitor Microsoft's result.
 ## Reserved product
 
 Verified in Partner Center on 2026-10-02. FileID already exists as an **MSIX or PWA app**, with status **Not started**. Use this product rather than reserving a second name or creating an MSI/EXE listing.
@@ -31,7 +39,7 @@ pwsh -NoProfile -File build/publish-store.ps1
 pwsh -NoProfile -File build/verify-store-package.ps1 -Path dist/store/FileID-0.1.0-x64.msix
 ```
 
-The script builds the native engine, publishes the existing WinUI app with `FileIDStoreBuild=true`, stages ONNX Runtime/DirectML/PDFium, and stages SHA-256-pinned Vulkan llama.cpp, whisper.cpp, and OpenVINO provider bundles with license notices. It checks binary privacy and runs MakeAppx validation. Bundled runtime assets are resolved from the installed package; app runtime downloads remain explicit user actions for Hugging Face model artifacts only. Version comes from `platforms/windows/VERSION`; the fourth MSIX version component is zero. Initial Store packaging is **x64 only**; native ARM64 remains a separate runtime/hardware verification gate.
+The script builds the native engine, publishes the existing WinUI app with `FileIDStoreBuild=true`, stages ONNX Runtime/DirectML/PDFium, and stages SHA-256-pinned Vulkan llama.cpp, whisper.cpp, and OpenVINO provider bundles with license notices. Optional CUDA runtime downloads are user-triggered in Settings and use only the exact SHA-256-pinned Microsoft/NVIDIA URLs reviewed by the runtime-egress gate; the app records NVIDIA license acceptance before downloading. It checks binary privacy and runs MakeAppx validation. Bundled runtime assets are resolved from the installed package; idle app startup performs no downloads. Version comes from `platforms/windows/VERSION`; the fourth MSIX version component is zero. Initial Store packaging is **x64 only**; native ARM64 remains a separate runtime/hardware verification gate.
 
 The existing Windows App Runtime 1.7 and VC++ Desktop frameworks are declared Store-managed dependencies. .NET is self-contained. Store builds skip the unpackaged bootstrapper; MSI/dev builds retain it. The engine remains a bundled child process using the existing IPC contract. Store builds do not silently fetch runtime binaries. No new library dependencies or web UI are introduced.
 
@@ -42,7 +50,7 @@ The existing Windows App Runtime 1.7 and VC++ Desktop frameworks are declared St
 Packaging success is not release acceptance. Before submission:
 
 - Pass Rust Clippy/tests, **both** C# test projects with nonempty passing reports, solution formatting, IPC parity, binary privacy, and hosted CI on the exact release commit. `dotnet test FileID.sln` currently discovers no tests; run the projects explicitly.
-- The strict runtime-egress gate now passes without `--known-blockers`. Runtime archives are provisioned through the Store package; normal app startup does not fetch them. Keep user-initiated model downloads Hugging Face-only.
+- The strict runtime-egress gate must pass without `--known-blockers`. Runtime archives are provisioned through the Store package except optional CUDA packs, which download only after explicit user action and NVIDIA license acceptance. Model downloads stay on Hugging Face; idle-startup downloads and other network calls are prohibited.
 - Verify installed MSIX launch from Start, engine startup, model install/cancel/retry, all six tabs, folder access, scanning, duplicate safety, restructure preview/Undo, restart, upgrade and uninstall on a fresh Windows profile. Use copies for mutation checks. Verify WinUI/GPU behavior on hardware.
 - Run Windows App Certification Kit and inspect its report. MakeAppx validation does not substitute for certification or installed-app testing.
 - Review and include approved native dependency redistribution notices and optional model terms.
