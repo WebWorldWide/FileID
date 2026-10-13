@@ -387,9 +387,9 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     {
         let status_label = this.status_label.clone();
         open_trash.connect_clicked(move |_| {
-            if let Err(error) = gio::AppInfo::launch_default_for_uri(
-                "trash:///", None::<&gio::AppLaunchContext>
-            ) {
+            if let Err(error) =
+                gio::AppInfo::launch_default_for_uri("trash:///", None::<&gio::AppLaunchContext>)
+            {
                 status_label.set_text(&format!("Could not open Trash: {error}"));
             }
         });
@@ -408,23 +408,26 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                             this.reload();
                         }
                     }
-                EngineEvent::Ready | EngineEvent::ScanComplete(_) => this.reload(),
-                EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
-                    this.finish_trash(result);
-                }
-                EngineEvent::BulkActionResult(result) if result.action == "restoreFromTrash" => {
-                    this.finish_restore(result);
-                }
-                EngineEvent::Exited if this.deleting.get() => {
-                    this.fail_trash("The engine exited before confirming the Trash operation.");
-                }
-                EngineEvent::Exited if this.restoring.get() => {
-                    this.restoring.set(false);
-                    this.restore_button.set_sensitive(true);
-                    this.update_global_summary();
-                    this.status_label.set_text("The engine exited before confirming the restore.");
-                    this.reveal_status();
-                }
+                    EngineEvent::Ready | EngineEvent::ScanComplete(_) => this.reload(),
+                    EngineEvent::BulkActionResult(result) if is_trash_result(&result.action) => {
+                        this.finish_trash(result);
+                    }
+                    EngineEvent::BulkActionResult(result)
+                        if result.action == "restoreFromTrash" =>
+                    {
+                        this.finish_restore(result);
+                    }
+                    EngineEvent::Exited if this.deleting.get() => {
+                        this.fail_trash("The engine exited before confirming the Trash operation.");
+                    }
+                    EngineEvent::Exited if this.restoring.get() => {
+                        this.restoring.set(false);
+                        this.restore_button.set_sensitive(true);
+                        this.update_global_summary();
+                        this.status_label
+                            .set_text("The engine exited before confirming the restore.");
+                        this.reveal_status();
+                    }
                     _ => {}
                 }
             }
@@ -488,7 +491,8 @@ impl Cleanup {
         self.reload_pending.set(false);
         if self.groups.borrow().is_empty() {
             self.empty_page.set_title("Checking for duplicates…");
-            self.empty_page.set_description(Some("Reading the library and verifying files."));
+            self.empty_page
+                .set_description(Some("Reading the library and verifying files."));
             self.empty_page.set_icon_name(Some("view-refresh-symbolic"));
             let spinner = gtk::Spinner::new();
             spinner.start();
@@ -1048,7 +1052,8 @@ impl Cleanup {
             "Delete {total_sel} selected ({})",
             format_bytes(total_sel_bytes)
         ));
-        self.delete_btn.set_sensitive(total_sel > 0 && !self.deleting.get() && !self.restoring.get());
+        self.delete_btn
+            .set_sensitive(total_sel > 0 && !self.deleting.get() && !self.restoring.get());
         self.clear_btn.set_sensitive(total_sel > 0);
 
         let has_groups = !visible.is_empty();
@@ -1162,14 +1167,18 @@ impl Cleanup {
             if selected.is_empty() {
                 continue;
             }
-            let keeper = group.members.iter()
+            let keeper = group
+                .members
+                .iter()
                 .find(|member| !requested.contains(&member.id))
                 .or_else(|| group.members.first())
-                .and_then(|member| Some(ExactTrashCandidate {
-                    id: member.id,
-                    path: std::path::PathBuf::from(&member.path),
-                    size: u64::try_from(member.size).ok()?,
-                }));
+                .and_then(|member| {
+                    Some(ExactTrashCandidate {
+                        id: member.id,
+                        path: std::path::PathBuf::from(&member.path),
+                        size: u64::try_from(member.size).ok()?,
+                    })
+                });
             let Some(keeper) = keeper else {
                 rejected_without_keeper += selected.len();
                 continue;
@@ -1177,13 +1186,17 @@ impl Cleanup {
             let mut selected = selected;
             if let Some(index) = selected.iter().position(|member| member.id == keeper.id) {
                 let selected_keeper = selected.swap_remove(index);
-                if let Some(witness) = group.members.iter()
+                if let Some(witness) = group
+                    .members
+                    .iter()
                     .find(|member| member.id != keeper.id)
-                    .and_then(|member| Some(ExactTrashCandidate {
-                        id: member.id,
-                        path: std::path::PathBuf::from(&member.path),
-                        size: u64::try_from(member.size).ok()?,
-                    }))
+                    .and_then(|member| {
+                        Some(ExactTrashCandidate {
+                            id: member.id,
+                            path: std::path::PathBuf::from(&member.path),
+                            size: u64::try_from(member.size).ok()?,
+                        })
+                    })
                 {
                     checks.push(ExactTrashGroup {
                         expected_hash,
@@ -1328,9 +1341,12 @@ impl Cleanup {
             .set(self.trash_generation.get().wrapping_add(1));
         self.deleting.set(false);
         if result.succeeded > 0 {
-            *self.last_batch.borrow_mut() = result.action.split_once(':')
+            *self.last_batch.borrow_mut() = result
+                .action
+                .split_once(':')
                 .map(|(_, batch)| batch.to_owned());
-            self.restore_button.set_visible(self.last_batch.borrow().is_some());
+            self.restore_button
+                .set_visible(self.last_batch.borrow().is_some());
         }
         let total_failed = result.failed as usize + pending.preflight_rejected;
         if total_failed == 0 {
@@ -1383,38 +1399,52 @@ impl Cleanup {
         if self.restoring.get() || self.deleting.get() {
             return;
         }
-        let Some(batch_id) = self.last_batch.borrow().clone() else { return };
+        let Some(batch_id) = self.last_batch.borrow().clone() else {
+            return;
+        };
         self.restoring.set(true);
         self.update_global_summary();
         self.restore_button.set_sensitive(false);
         self.status_label.set_text("Restoring files from Trash…");
         self.reveal_status();
-        if let Err(error) = self.engine.borrow_mut().send(
-            CommandPayload::RestoreFromTrash(RestoreFromTrashPayload { batch_id })
-        ) {
+        if let Err(error) = self
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::RestoreFromTrash(RestoreFromTrashPayload {
+                batch_id,
+            }))
+        {
             self.restoring.set(false);
             self.restore_button.set_sensitive(true);
             self.update_global_summary();
-            self.status_label.set_text(&format!("Could not send restore command: {error}"));
+            self.status_label
+                .set_text(&format!("Could not send restore command: {error}"));
         }
     }
 
     fn finish_restore(self: &Rc<Self>, result: fileid_engine::ipc::BulkActionResult) {
-        if !self.restoring.replace(false) { return; }
+        if !self.restoring.replace(false) {
+            return;
+        }
         self.restore_button.set_sensitive(true);
         self.update_global_summary();
         if result.failed == 0 {
             self.last_batch.borrow_mut().take();
             self.restore_button.set_visible(false);
             self.status_label.set_text(&format!(
-                "Restored {} file{} to the library.", result.succeeded,
+                "Restored {} file{} to the library.",
+                result.succeeded,
                 plural(result.succeeded as usize)
             ));
         } else {
-            let details = result.messages.iter()
+            let details = result
+                .messages
+                .iter()
                 .filter(|message| !message.ok)
                 .filter_map(|message| message.message.as_deref())
-                .take(2).collect::<Vec<_>>().join(" · ");
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(" · ");
             self.status_label.set_text(&format!(
                 "Restored {}; {} could not be restored. {details}",
                 result.succeeded, result.failed
@@ -1556,10 +1586,7 @@ fn update_group_selection_widgets(
             (c, b)
         }
     });
-    sel_lbl.set_text(&format!(
-        "{cnt} selected · {}",
-        format_bytes(bytes)
-    ));
+    sel_lbl.set_text(&format!("{cnt} selected · {}", format_bytes(bytes)));
     sel_lbl.set_visible(cnt > 0);
     del_btn.set_label(&format!("Delete {cnt} from this group"));
     del_btn.set_sensitive(cnt > 0);
@@ -1955,20 +1982,29 @@ fn load_similar_until(
 }
 
 fn pure_exact_group(raw: &[RawRow], indices: &[usize]) -> bool {
-    let Some(first) = indices.first().map(|index| &raw[*index]) else { return false };
-    let Ok(size) = u64::try_from(first.size) else { return false };
+    let Some(first) = indices.first().map(|index| &raw[*index]) else {
+        return false;
+    };
+    let Ok(size) = u64::try_from(first.size) else {
+        return false;
+    };
     if size.saturating_mul(indices.len() as u64) > EXACT_READ_BUDGET_BYTES as u64
         || indices.iter().any(|index| raw[*index].size != first.size)
     {
         return false;
     }
     let Ok(digest) = fileid_engine::util::content_hash::exact_file_sha256(
-        std::path::Path::new(&first.path), size
-    ) else { return false };
+        std::path::Path::new(&first.path),
+        size,
+    ) else {
+        return false;
+    };
     indices.iter().skip(1).all(|index| {
         fileid_engine::util::content_hash::exact_file_sha256(
-            std::path::Path::new(&raw[*index].path), size
-        ).is_ok_and(|other| other == digest)
+            std::path::Path::new(&raw[*index].path),
+            size,
+        )
+        .is_ok_and(|other| other == digest)
     })
 }
 
@@ -2410,7 +2446,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "fileid-linux-similar-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         for (id, bytes) in [(1, b"same"), (2, b"same"), (3, b"diff")] {

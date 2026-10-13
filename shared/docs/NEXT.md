@@ -1,5 +1,9 @@
 # NEXT — resume here
 
+## 2026-10-13 Linux native tab follow-on
+
+Finish strict Clippy and a real GTK launch for `codex/linux-ui-integration`, then publish it for hosted review. Verify Settings optional-weight copy against the current model registry and retain the current Deep, Restructure, and Search/Tools/Chat workbenches.
+
 ## 2026-10-13 current integration priority
 
 PR #238 must clear its hosted checks after the CLI/TUI restructure source-identity and lockfile fixes. Linux VM CLI/TUI checks and Windows Rust library tests pass. Confirm the focused CLI identity regression once its shared-target build completes.
