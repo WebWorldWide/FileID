@@ -19,7 +19,7 @@ fn enqueue_records_portable_recipe_and_rejects_unusable_requests() {
     let ok = request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1,1],"timelineMode":"moments"}));
     let (id, response) = enqueue(&mut conn, &ok, Some("qwen3_vl_4b"), true).unwrap();
     assert_eq!(response.status, "ok");
-    assert!(response.message.unwrap().contains("speech transcription is not yet available"));
+    assert!(response.message.unwrap().contains("Install a speech model from the model catalog"));
     assert_eq!(response.jobs.len(), 1);
     let (kind, ids, recipe, state): (String, String, String, String) = conn
         .query_row("SELECT kind,file_ids_json,recipe_json,state FROM catalog_jobs WHERE id=?1", [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
@@ -182,11 +182,19 @@ struct ScriptedModel {
     captions: Vec<&'static str>,
     calls: std::sync::atomic::AtomicUsize,
     sequences: std::sync::atomic::AtomicUsize,
+    speech_calls: std::sync::atomic::AtomicUsize,
     pause_after: Option<(usize, Arc<Mutex<Connection>>, String)>,
 }
 
 impl FrameModel for ScriptedModel {
     fn caption(&self, image: &Path, _: &str, _: u32, _: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        if image.extension().is_some_and(|e| e == "wav") {
+            let bytes = std::fs::read(image).unwrap_or_default();
+            let valid = bytes.len() > 44 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+                && u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize == bytes.len() - 8;
+            self.speech_calls.fetch_add(1, Ordering::SeqCst);
+            return std::future::ready(if valid { Ok("language English<asr_text>Happy birthday Sam".to_owned()) } else { Err(anyhow!("malformed WAV")) });
+        }
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let readable = image::image_dimensions(image).is_ok();
         if let Some((after, database, id)) = &self.pause_after {
@@ -195,7 +203,7 @@ impl FrameModel for ScriptedModel {
             }
         }
         let text = self.captions[call % self.captions.len()].to_owned();
-        async move { if readable { Ok(text) } else { Err(anyhow!("frame was not a decodable image")) } }
+        std::future::ready(if readable { Ok(text) } else { Err(anyhow!("frame was not a decodable image")) })
     }
     fn sequence(&self, images: &[&Path], _: &str, _: u32, _: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
         self.sequences.fetch_add(1, Ordering::SeqCst);
@@ -208,7 +216,7 @@ impl FrameModel for ScriptedModel {
 }
 
 fn scripted(captions: Vec<&'static str>, pause_after: Option<(usize, Arc<Mutex<Connection>>, String)>) -> ScriptedModel {
-    ScriptedModel { captions, calls: 0.into(), sequences: 0.into(), pause_after }
+    ScriptedModel { captions, calls: 0.into(), sequences: 0.into(), speech_calls: 0.into(), pause_after }
 }
 
 fn media_fixture(lavfi: &str) -> Option<(PathBuf, Arc<Mutex<Connection>>)> {
@@ -254,14 +262,14 @@ async fn worker_samples_captions_drafts_chapters_and_resumes_after_pause() {
     let job = start(&database.lock(), &id).unwrap().unwrap();
     let pausing = scripted(captions.clone(), Some((2, database.clone(), id.clone())));
     let cancel = Arc::new(AtomicBool::new(false));
-    let first = process(&id, &job, &pausing, &frames, &cancel, &sink, &database).await;
+    let first = process(&id, &job, &pausing, &frames, &cancel, &sink, &database, 1.0).await;
     assert!(first.unwrap_err().is::<Interrupted>(), "pausing must interrupt, not fail");
     assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_passages WHERE confidence=0"), 1, "only the frame finished before the pause is kept");
 
     database.lock().execute("UPDATE catalog_jobs SET state='queued' WHERE id=?1", [&id]).unwrap();
     let job = start(&database.lock(), &id).unwrap().unwrap();
     let resumed = scripted(captions[1..].to_vec(), None);
-    process(&id, &job, &resumed, &frames, &cancel, &sink, &database).await.unwrap();
+    process(&id, &job, &resumed, &frames, &cancel, &sink, &database, 1.0).await.unwrap();
     assert_eq!(resumed.calls.load(Ordering::SeqCst), 3, "evidence captured before the pause is reused");
     assert_eq!(resumed.sequences.load(Ordering::SeqCst), 0, "sampled mode never runs moment windows");
 
@@ -295,7 +303,7 @@ async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
 
     let job = start(&database.lock(), &id).unwrap().unwrap();
     let model = scripted(vec!["A ball in a yard"], None);
-    process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database).await.unwrap();
+    process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database, 1.0).await.unwrap();
     assert_eq!(model.sequences.load(Ordering::SeqCst), 2, "a six-second clip has two overlapping windows");
     let moments = count(&database, "SELECT COUNT(*) FROM catalog_chapters WHERE file_id=1 AND model_version LIKE 'timeline-moment-sequence-v1/%' AND user_edited=0");
     assert_eq!(moments, 1, "the edited window keeps the user's chapter instead of a draft");
@@ -307,7 +315,62 @@ async fn worker_moment_windows_keep_user_edits_and_refuse_changed_sources() {
     std::fs::write(&path, b"replaced").unwrap();
     database.lock().execute("UPDATE catalog_jobs SET state='queued',checkpoint_json='0' WHERE id=?1", [&id]).unwrap();
     let job = start(&database.lock(), &id).unwrap().unwrap();
-    let error = process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database).await.unwrap_err();
+    let error = process(&id, &job, &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database, 1.0).await.unwrap_err();
     assert!(error.to_string().contains("source changed"));
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn speech_pass_transcribes_audio_chunks_and_resumes_by_chunk() {
+    if !video_export::available() {
+        eprintln!("vetted FFmpeg runtime not staged; skipping");
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!("fileid-timeline-speech-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("talk.mp4");
+    video_export::generate_test_video(&path);
+    let metadata = std::fs::metadata(&path).unwrap();
+    let modified = metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+    let conn = Connection::open_in_memory().unwrap();
+    crate::db::migrations::apply(&conn).unwrap();
+    conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,?2,?3,0,'video','mp4')",
+        params![path.to_str().unwrap(), metadata.len() as i64, modified]).unwrap();
+    let database = Arc::new(Mutex::new(conn));
+    let (id, _) = enqueue(&mut database.lock(), &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1]})), Some("qwen3_vl_4b"), true).unwrap();
+    let job = start(&database.lock(), &id).unwrap().unwrap();
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let frames = directory.join("frames");
+    let model = scripted(vec!["unused"], None);
+    transcribe(&id, &job, "qwen3_asr_0_6b_gguf_q8_0", &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database, 0.8).await.unwrap();
+    assert_eq!(model.speech_calls.load(Ordering::SeqCst), 1, "a two-second clip is one chunk");
+    let (text, start, end, confidence): (String, f64, f64, f64) = database.lock()
+        .query_row("SELECT text,start_seconds,end_seconds,confidence FROM catalog_passages WHERE file_id=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+    assert_eq!(text, "Happy birthday Sam");
+    assert!(start.abs() < 1e-9 && end > 1.5 && (confidence - 0.5).abs() < 1e-9);
+    assert_eq!(count(&database, "SELECT COUNT(*) FROM catalog_coverage WHERE id LIKE 'speech-coverage:%' AND status='verified'"), 2, "the chunk and the whole file are verified");
+    assert!(count(&database, "SELECT COUNT(*) FROM catalog_evidence_fts WHERE catalog_evidence_fts MATCH 'birthday'") >= 1);
+
+    transcribe(&id, &job, "qwen3_asr_0_6b_gguf_q8_0", &model, &frames, &Arc::new(AtomicBool::new(false)), &sink, &database, 0.8).await.unwrap();
+    assert_eq!(model.speech_calls.load(Ordering::SeqCst), 1, "verified chunks are not transcribed again");
+    let progress: f64 = database.lock().query_row("SELECT progress FROM catalog_jobs WHERE id=?1", [&id], |r| r.get(0)).unwrap();
+    assert!((progress - 1.0).abs() < 1e-9);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn wav_header_sizes_are_rewritten_for_streamed_audio() {
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&u32::MAX.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&[0; 16]);
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&u32::MAX.to_le_bytes());
+    wav.extend_from_slice(&[1; 10]);
+    video_export::fix_wav_sizes(&mut wav).unwrap();
+    assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize, wav.len() - 8);
+    assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 10);
+    assert!(video_export::fix_wav_sizes(&mut b"RIFF\0\0\0\0WAVEjunk".to_vec()).is_err());
 }

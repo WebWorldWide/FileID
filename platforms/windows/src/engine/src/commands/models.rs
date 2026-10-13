@@ -83,7 +83,7 @@ pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -
         if role.is_some_and(|r| r != entry.role) || !entry.platforms.iter().any(|p| p == platform()) {
             continue;
         }
-        let runnable = catalog::runnable_vision(&entry.id).is_some();
+        let runnable = catalog::runnable(&entry.id).is_some();
         items.push(ModelCatalogItem {
             id: entry.id.clone(),
             name: entry.name.clone(),

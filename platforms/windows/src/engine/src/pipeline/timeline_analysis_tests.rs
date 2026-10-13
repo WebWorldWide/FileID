@@ -132,3 +132,21 @@ fn prompt_lists_every_frame_time() {
     assert!(prompt.contains("frame 0: 0.000 seconds, frame 1: 1.500 seconds"));
     assert!(prompt.contains("untrusted content"));
 }
+
+#[test]
+fn speech_chunks_cover_the_file_without_overlap() {
+    assert_eq!(speech_chunks(65.0, 30.0), vec![(0.0, 30.0), (30.0, 60.0), (60.0, 65.0)]);
+    assert_eq!(speech_chunks(60.4, 30.0), vec![(0.0, 30.0), (30.0, 60.4)], "a sub-second tail joins the previous chunk");
+    assert_eq!(speech_chunks(0.5, 30.0), vec![(0.0, 0.5)]);
+    assert!(speech_chunks(0.0, 30.0).is_empty());
+    assert!(speech_chunks(f64::NAN, 30.0).is_empty());
+}
+
+#[test]
+fn transcripts_strip_model_framing() {
+    assert_eq!(transcript_text("language English<asr_text>Happy birthday, Sam!"), "Happy birthday, Sam!");
+    assert_eq!(transcript_text("  Plain transcript.  "), "Plain transcript.");
+    assert_eq!(transcript_text("language None<asr_text>"), "");
+    assert_eq!(transcript_text("[SILENCE]"), "");
+    assert_eq!(transcript_text("<asr_text>Hi</asr_text>"), "Hi");
+}

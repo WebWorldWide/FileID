@@ -357,6 +357,45 @@ pub fn chapter_suggestions(
         .collect()
 }
 
+pub const SPEECH_CHUNK_SECONDS: f64 = 30.0;
+pub const SPEECH_PROMPT: &str = "Transcribe the audio.";
+
+/// Non-overlapping speech chunks. Speech models used here return text
+/// without word timestamps, so overlapping chunks would duplicate words; a
+/// passage's timestamps are its chunk's bounds.
+pub fn speech_chunks(duration: f64, chunk_seconds: f64) -> Vec<(f64, f64)> {
+    if !duration.is_finite() || duration <= 0.0 || duration > MAX_DURATION_SECONDS || !chunk_seconds.is_finite() || chunk_seconds <= 0.0 {
+        return vec![];
+    }
+    let mut chunks: Vec<(f64, f64)> = Vec::new();
+    let mut start = 0.0;
+    while start < duration {
+        let end = duration.min(start + chunk_seconds);
+        // Fold a sliver shorter than a second into the previous chunk.
+        if end - start < 1.0 && !chunks.is_empty() {
+            if let Some(last) = chunks.last_mut() {
+                *last = (last.0, end);
+            }
+            break;
+        }
+        chunks.push((start, end));
+        start = end;
+    }
+    chunks
+}
+
+/// The spoken text from a speech model's reply: Qwen3-ASR prefixes
+/// `language <name><asr_text>`; other models return the text directly.
+pub fn transcript_text(raw: &str) -> String {
+    let text = raw.rsplit_once("<asr_text>").map_or(raw, |(_, after)| after);
+    let text = text.replace("</asr_text>", "");
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("[silence]") || text.eq_ignore_ascii_case("<|nospeech|>") {
+        return String::new();
+    }
+    text.chars().take(4_000).collect()
+}
+
 #[cfg(test)]
 #[path = "timeline_analysis_tests.rs"]
 mod tests;
