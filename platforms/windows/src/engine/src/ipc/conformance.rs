@@ -295,6 +295,10 @@ fn restructure_move() -> RestructureMove {
         tier: Some("Anchor".into()),
         confidence: "auto".into(),
         reason: Some("Photo from 2024".into()),
+        content_hash: Some("a".repeat(64)),
+        size_bytes: Some(1024),
+        file_ref: Some(42),
+        modified_at: Some(1_700_000_000.0),
     }
 }
 
@@ -336,6 +340,8 @@ fn command_exemplars() -> Vec<CommandPayload> {
             skip_existing: true,
             tags_only: true,
             propose_renames: true,
+            file_ids: Some(vec![1, 2]),
+            excluded_folders: Some(vec!["/generated/private".into()]),
         }),
         CommandPayload::DeepAnalyzeCancel(Empty {}),
         CommandPayload::PrewarmModel(PrewarmModelPayload { model_kind: "arcface".into() }),

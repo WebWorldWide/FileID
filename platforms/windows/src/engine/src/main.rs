@@ -456,6 +456,21 @@ async fn async_main() -> Result<()> {
 
     // Wait for shutdown signal (from either source).
     main_shutdown.await;
+    stdio_loop.abort();
+    deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let resident_cleanup_error = models::resident_service::ResidentService::shared().shutdown().await.err();
+    let tracker_cleanup_error = models::native_process::ProcessTracker::shared().shutdown().await.err();
+    let native_cleanup_error = match (resident_cleanup_error, tracker_cleanup_error) {
+        (None, error) | (error, None) => error,
+        (Some(resident), Some(tracker)) => Some(anyhow::anyhow!("Resident cleanup: {resident:#}; native tracker: {tracker:#}")),
+    };
+    if let Some(error) = &native_cleanup_error {
+        tracing::error!(%error, "Native cleanup failed at shutdown");
+        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+            kind: "native_cleanup_failed_at_shutdown".into(),
+            message: error.to_string(), path: None, model_kind: None,
+        })))).await;
+    }
 
     // Checkpoint before exit so the next opener doesn't need the .wal/.shm
     // sidecars. On failure, surface to the sink before teardown so the
@@ -484,6 +499,7 @@ async fn async_main() -> Result<()> {
     drop(sink);
     let _ = tokio::time::timeout(Duration::from_secs(2), sink_writer).await;
 
+    if let Some(error) = native_cleanup_error { return Err(error); }
     tracing::info!("FileIDEngine exiting cleanly");
     Ok(())
 }

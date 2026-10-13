@@ -113,7 +113,16 @@ public sealed partial class MainWindow : Window
         // InitializeComponent MUST succeed; if it throws there's no
         // window to show. Let it propagate up to the App handler.
         Trace("InitializeComponent");
-        InitializeComponent();
+        try
+        {
+            InitializeComponent();
+        }
+        catch (System.Exception ex)
+        {
+            Trace($"InitializeComponent failed (HRESULT=0x{ex.HResult:X8}): {ex}");
+            FlushTrace();
+            throw;
+        }
         Title = "FileID";
 
         Step("ApplyTitleBarChrome", ApplyTitleBarChrome);

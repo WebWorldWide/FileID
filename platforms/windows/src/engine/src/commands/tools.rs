@@ -376,11 +376,15 @@ mod tests {
             Self{root,source,conn}
         }
 
+
  fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16,allow_upscale:None,video_aspect_ratio:None}),operation_id:None,destination_bookmark:None}}
+
         fn reopen(&mut self) {
             let conn=std::mem::replace(&mut self.conn,Connection::open_in_memory().unwrap());
             conn.close().unwrap(); self.conn=crate::db::open_writer(&self.root.join("catalog.sqlite")).unwrap();
         }
+
+
 
     }
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}

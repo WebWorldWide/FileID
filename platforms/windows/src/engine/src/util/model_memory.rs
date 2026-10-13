@@ -11,7 +11,7 @@ pub(crate) fn rejection(total_mb: u64, available_mb: u64, requested_mb: u64) -> 
     None
 }
 
-pub(crate) async fn require_model_headroom(gguf: &Path, projection: &Path) -> Result<()> {
+pub(crate) async fn require_model_headroom(gguf: &Path, projection: &Path) -> Result<u64> {
     let weights = tokio::fs::metadata(gguf).await?;
     let vision = tokio::fs::metadata(projection).await?;
     if !weights.is_file() || !vision.is_file() || weights.len() == 0 || vision.len() == 0 { bail!("Model weights must be nonempty regular files") }
@@ -19,7 +19,7 @@ pub(crate) async fn require_model_headroom(gguf: &Path, projection: &Path) -> Re
     let total = (crate::platform::physical_memory_gb() * 1024.0) as u64;
     let available = crate::platform::available_memory_mb();
     if let Some(reason) = rejection(total,available,requested) { bail!("{reason}") }
-    Ok(())
+    Ok(requested)
 }
 
 fn estimate_mb(weights: u64, projection: u64) -> Result<u64> {

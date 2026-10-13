@@ -222,12 +222,15 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/tui/src/models.rs",
             "platforms/tui/src/scan.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
-            # Reviewed 2026-07-29: both match the deliberately-broad raw-network
+            # The reviewed files below match deliberately broad raw-network
             # patterns on non-network constructs — restructure.rs imports the
             # Win32 FILE_SHARE_READ *filesystem* constant, and
             # EngineClient.Commands.cs declares a local `Process?` handle for the
-            # engine child. Neither performs network I/O.
+            # engine child. deep_scope.rs and native_process.rs use local
+            # Windows kernel FFI for path comparison and child ownership.
             "platforms/windows/src/engine/src/commands/restructure.rs",
+            "platforms/windows/src/engine/src/commands/deep_scope.rs",
+            "platforms/windows/src/engine/src/models/native_process.rs",
             "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
             "platforms/windows/src/engine/src/models/vlm.rs",
             "platforms/windows/src/engine/src/models/whisper.rs",

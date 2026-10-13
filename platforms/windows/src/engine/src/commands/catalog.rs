@@ -174,6 +174,8 @@ mod tests {
 
 pub(crate) fn search(conn: &Connection, query: &str, kinds: &[String]) -> Result<Vec<CatalogHit>> {
 
+
     super::catalog_retrieval::search(conn, query, kinds, &[], &[], None)
+
 
 }

@@ -283,7 +283,7 @@ pub struct DeepAnalyzeFolderPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeepAnalyzeAllPayload {
     pub model_kind: String,
     pub skip_existing: bool,
@@ -297,6 +297,10 @@ pub struct DeepAnalyzeAllPayload {
     /// caption + tags without the rename VLM call. Ignored when tags_only.
     #[serde(default = "default_true")]
     pub propose_renames: bool,
+    #[serde(default, rename = "fileIDs", skip_serializing_if = "Option::is_none")]
+    pub file_ids: Option<Vec<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_folders: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -367,6 +371,19 @@ pub struct RestructureMove {
     /// Plain-language "why filed here" shown in the drill-down. None when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Plan-time source identity. A plan is a snapshot taken at plan time and
+    /// applied after an arbitrary delay, so `source` alone is not authoritative:
+    /// a file replaced at the same path is a DIFFERENT file. Apply re-checks the
+    /// live DB row and stats the file on disk against these before moving.
+    /// (audit P1 — stale plan could move a replacement file)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_ref: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1178,6 +1195,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deep_analyze_all_scopes_roundtrip_without_casing_drift() {
+        let json = r#"{"id":"scope","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":true,"fileIDs":[3,4],"excludedFolders":["/generated/private"]}}}"#;
+        let command: IpcCommand = serde_json::from_str(json).unwrap();
+        let encoded = serde_json::to_value(&command).unwrap();
+        let scope = &encoded["payload"]["deepAnalyzeAll"];
+        assert_eq!(scope["fileIDs"], serde_json::json!([3, 4]));
+        assert!(scope.get("fileIds").is_none());
+        assert_eq!(scope["excludedFolders"], serde_json::json!(["/generated/private"]));
+    }
+
+    #[test]
+    fn deep_analyze_all_misspelled_selection_cannot_become_whole_library() {
+        let json = r#"{"id":"scope","payload":{"deepAnalyzeAll":{"modelKind":"qwen2_5_vl_7b","skipExisting":true,"fileIds":[]}}}"#;
+        assert!(serde_json::from_str::<IpcCommand>(json).is_err());
+    }
+
+    #[test]
+    fn deep_analyze_all_empty_selection_is_distinct_from_null_or_omitted() {
+        for (fields, selected) in [
+            (serde_json::json!({}), false),
+            (serde_json::json!({"fileIDs": null, "excludedFolders": null}), false),
+            (serde_json::json!({"fileIDs": [], "excludedFolders": []}), true),
+        ] {
+            let mut scope = serde_json::json!({"modelKind": "qwen2_5_vl_7b", "skipExisting": true});
+            scope.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+            let command: IpcCommand = serde_json::from_value(serde_json::json!({"id": "scope", "payload": {"deepAnalyzeAll": scope}})).unwrap();
+            let CommandPayload::DeepAnalyzeAll(payload) = command.payload else { panic!("wrong command") };
+            assert_eq!(payload.file_ids.is_some(), selected);
+            assert_eq!(payload.excluded_folders.is_some(), selected);
+            assert!(payload.file_ids.as_ref().is_none_or(Vec::is_empty));
+        }
+    }
+
     /// F-C2-002: `cancelPrewarm` must decode with `modelKind` OMITTED (the
     /// cancel-all form → `None`) and with it present (targeted per-model cancel).
     /// The empty-object form `{"cancelPrewarm":{}}` is the canonical cancel-all.
@@ -1246,6 +1297,8 @@ mod tests {
                 skip_existing: true,
                 tags_only: true,
                 propose_renames: true,
+                file_ids: None,
+                excluded_folders: None,
             }),
             CommandPayload::DeepAnalyzeCancel(Empty {}),
             CommandPayload::PrewarmModel(PrewarmModelPayload {
@@ -1268,6 +1321,10 @@ mod tests {
                     tier: Some("Anchor".into()),
                     confidence: "auto".into(),
                     reason: Some("Photo from 2024".into()),
+                    content_hash: None,
+                    size_bytes: None,
+                    file_ref: None,
+                    modified_at: None,
                 }],
                 use_symlinks: false,
             }),

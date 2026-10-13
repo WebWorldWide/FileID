@@ -17,9 +17,31 @@ pub enum Priority {
     Background,
     Interactive,
 }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AcceleratorDemand {
+    pub gpu_mb: u64,
+    pub npu_mb: u64,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AcceleratorCapacity {
+    pub gpu_mb: Option<u64>,
+    pub npu_mb: Option<u64>,
+}
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Snapshot {
+    pub memory_mb: u64,
+    pub cpu: usize,
+    pub io: usize,
+    pub gpu_mb: u64,
+    pub npu_mb: u64,
+    pub active: usize,
+    pub waiting: usize,
+}
 struct State {
     next: u64,
     active: BTreeMap<u64, (Demand, Priority)>,
+    accelerators: BTreeMap<u64, AcceleratorDemand>,
     waiting: BTreeMap<u64, (Demand, Priority)>,
 }
 pub struct ResourceScheduler {
@@ -28,6 +50,7 @@ pub struct ResourceScheduler {
     memory: Box<dyn Fn() -> (u64, u64) + Send + Sync>,
     cpu: usize,
     io: usize,
+    accelerator_capacity: AcceleratorCapacity,
 }
 pub struct Lease {
     scheduler: Arc<ResourceScheduler>,
@@ -35,7 +58,9 @@ pub struct Lease {
 }
 impl Drop for Lease {
     fn drop(&mut self) {
-        self.scheduler.state.lock().active.remove(&self.id);
+        let mut state = self.scheduler.state.lock();
+        state.active.remove(&self.id);
+        state.accelerators.remove(&self.id);
         self.scheduler.changed.notify_all();
     }
 }
@@ -71,16 +96,26 @@ impl ResourceScheduler {
         cpu: usize,
         io: usize,
     ) -> Arc<Self> {
+        Self::new_with_accelerators(memory, cpu, io, AcceleratorCapacity::default())
+    }
+    pub fn new_with_accelerators(
+        memory: impl Fn() -> (u64, u64) + Send + Sync + 'static,
+        cpu: usize,
+        io: usize,
+        accelerator_capacity: AcceleratorCapacity,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(State {
                 next: 0,
                 active: BTreeMap::new(),
+                accelerators: BTreeMap::new(),
                 waiting: BTreeMap::new(),
             }),
             changed: Condvar::new(),
             memory: Box::new(memory),
             cpu: cpu.max(1),
             io: io.max(1),
+            accelerator_capacity,
         })
     }
     pub fn reserve(
@@ -89,6 +124,48 @@ impl ResourceScheduler {
         priority: Priority,
         cancelled: impl Fn() -> bool,
     ) -> Result<Lease> {
+        self.reserve_with_accelerators(demand, AcceleratorDemand::default(), priority, cancelled)
+    }
+    #[cfg(test)]
+    pub fn snapshot(&self) -> Snapshot {
+        let state = self.state.lock();
+        let used = state.active.values().fold(Demand::default(), |sum, (d, _)| Demand {
+            memory_mb: sum.memory_mb.saturating_add(d.memory_mb),
+            cpu: sum.cpu.saturating_add(d.cpu),
+            io: sum.io.saturating_add(d.io),
+        });
+        Snapshot {
+            memory_mb: used.memory_mb, cpu: used.cpu, io: used.io,
+            gpu_mb: state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.gpu_mb)),
+            npu_mb: state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.npu_mb)),
+            active: state.active.len(), waiting: state.waiting.len(),
+        }
+    }
+    pub fn under_pressure(&self) -> bool {
+        let (total, available) = (self.memory)();
+        total == 0 || available < (total / 4).clamp(2048, 8192)
+    }
+    pub fn reserve_with_accelerators(
+        self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
+        priority: Priority, cancelled: impl Fn() -> bool,
+    ) -> Result<Lease> {
+        self.reserve_internal(demand, accelerators, priority, cancelled, false)
+    }
+    pub fn reserve_queued(
+        self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
+        priority: Priority, cancelled: impl Fn() -> bool,
+    ) -> Result<Lease> {
+        self.reserve_internal(demand, accelerators, priority, cancelled, true)
+    }
+    fn reserve_internal(
+        self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
+        priority: Priority, cancelled: impl Fn() -> bool, wait_background: bool,
+    ) -> Result<Lease> {
+        for (requested, capacity) in [(accelerators.gpu_mb, self.accelerator_capacity.gpu_mb), (accelerators.npu_mb, self.accelerator_capacity.npu_mb)] {
+            if requested > 0 && capacity.is_none_or(|capacity| requested > capacity) {
+                bail!("Accelerator capacity unknown or exceeded")
+            }
+        }
         let (total, available) = (self.memory)();
         if demand.memory_mb == 0 && demand.cpu == 0 && demand.io == 0 {
             bail!("Invalid resource estimate")
@@ -132,13 +209,19 @@ impl ResourceScheduler {
                     .is_none()
                     && demand.memory_mb.saturating_add(used.memory_mb)
                         <= total.saturating_sub((total / 4).clamp(2048, 8192)));
+            let used_gpu = state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.gpu_mb));
+            let used_npu = state.accelerators.values().fold(0u64, |sum, d| sum.saturating_add(d.npu_mb));
+            let accelerator_ok = (accelerators.gpu_mb == 0 || self.accelerator_capacity.gpu_mb.is_some_and(|cap| used_gpu.saturating_add(accelerators.gpu_mb) <= cap))
+                && (accelerators.npu_mb == 0 || self.accelerator_capacity.npu_mb.is_some_and(|cap| used_npu.saturating_add(accelerators.npu_mb) <= cap));
             if first == Some(id)
+                && accelerator_ok
                 && memory_ok
                 && used.cpu + demand.cpu <= self.cpu
                 && used.io + demand.io <= self.io
             {
                 state.waiting.remove(&id);
                 state.active.insert(id, (demand, priority));
+                state.accelerators.insert(id, accelerators);
                 return Ok(Lease {
                     scheduler: self.clone(),
                     id,
@@ -152,7 +235,8 @@ impl ResourceScheduler {
             let resident_blocks_budget = demand.memory_mb > 0
                 && demand.memory_mb.saturating_add(resident_memory)
                     > total.saturating_sub((total / 4).clamp(2048, 8192));
-            if resident_blocks_budget
+            if (!accelerator_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
+                || resident_blocks_budget
                 || (!memory_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
             {
                 state.waiting.remove(&id);
@@ -160,7 +244,7 @@ impl ResourceScheduler {
                 bail!("Resource admission deferred: resident memory cannot release during this operation")
             }
             if state.active.is_empty()
-                || (priority == Priority::Background
+                || (!wait_background && priority == Priority::Background
                     && state
                         .active
                         .values()
@@ -174,6 +258,10 @@ impl ResourceScheduler {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "resource_prerequisites_tests.rs"]
+mod prerequisites_tests;
 
 #[cfg(test)]
 mod tests {

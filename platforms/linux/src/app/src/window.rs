@@ -3,8 +3,8 @@
 // Library and People share the engine connection with scan controls.
 
 use adw::prelude::*;
-use gtk::glib::clone;
 use gtk::glib;
+use gtk::glib::clone;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -26,7 +26,9 @@ pub fn on_activate(app: &adw::Application) {
     // capture; GTK is single-threaded on the main context.
     let engine = Rc::new(RefCell::new(EngineClient::new()));
 
-    let header = adw::HeaderBar::builder().css_classes(["fileid-headerbar"]).build();
+    let header = adw::HeaderBar::builder()
+        .css_classes(["fileid-headerbar"])
+        .build();
 
     // Folder display label on the left of the title — same idea as
     // macOS SidebarFolderHeader / Windows SidebarFolderHeader.
@@ -48,7 +50,6 @@ pub fn on_activate(app: &adw::Application) {
     pages.set_vexpand(true);
     let switcher = gtk::StackSwitcher::new();
     switcher.set_stack(Some(&pages));
-    header.pack_start(&switcher);
 
     let start_btn = gtk::Button::builder()
         .label("Start scan")
@@ -96,6 +97,26 @@ pub fn on_activate(app: &adw::Application) {
             crate::app_settings::remember_active_tab(name.as_str());
         }
     });
+    let navigation = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    navigation.append(&switcher);
+    for (title, build) in [
+        ("Search & Moments", crate::tabs::workbenches::catalog as fn(_) -> _),
+        ("File Tools", crate::tabs::workbenches::tools as fn(_) -> _),
+        ("Chat", crate::tabs::workbenches::chat as fn(_) -> _),
+    ] {
+        let button = gtk::Button::with_label(title);
+        let workbench = adw::Window::builder()
+            .title(title)
+            .default_width(900)
+            .default_height(680)
+            .transient_for(&window)
+            .hide_on_close(true)
+            .content(&build(engine.clone()))
+            .build();
+        button.connect_clicked(move |_| workbench.present());
+        navigation.append(&button);
+    }
+    content.append(&navigation);
     content.append(&pages);
 
     let root = adw::ToolbarView::new();
@@ -115,11 +136,66 @@ pub fn on_activate(app: &adw::Application) {
         restored_folder.map(|folder| folder.to_string_lossy().into_owned()),
     ));
     let can_scan = Rc::new(Cell::new(false));
+    let scan_active = Rc::new(Cell::new(false));
+    let scan_terminal = Rc::new(RefCell::new(None::<fileid_engine::ipc::ScanPhase>));
+    let paused = Rc::new(Cell::new(false));
+    let pause_btn = gtk::Button::with_label("Pause");
+    pause_btn.set_sensitive(false);
+    let cancel_btn = gtk::Button::with_label("Cancel scan");
+    cancel_btn.set_sensitive(false);
+    header.pack_end(&pause_btn);
+    header.pack_end(&cancel_btn);
+    {
+        let engine = engine.clone();
+        let paused = paused.clone();
+        let status = status_label.clone();
+        pause_btn.connect_clicked(move |button| {
+            let payload = if paused.get() {
+                fileid_engine::ipc::CommandPayload::ResumeScan(fileid_engine::ipc::Empty {})
+            } else {
+                fileid_engine::ipc::CommandPayload::PauseScan(fileid_engine::ipc::Empty {})
+            };
+            match engine.borrow_mut().send(payload) {
+                Ok(()) => {
+                    paused.set(!paused.get());
+                    button.set_label(if paused.get() { "Resume" } else { "Pause" });
+                    status.set_label(if paused.get() {
+                        "Pause requested"
+                    } else {
+                        "Resume requested"
+                    });
+                }
+                Err(e) => status.set_label(&e.to_string()),
+            }
+        });
+    }
+    {
+        let engine = engine.clone();
+        let status = status_label.clone();
+        cancel_btn.connect_clicked(move |_| {
+            match engine
+                .borrow_mut()
+                .send(fileid_engine::ipc::CommandPayload::CancelScan(
+                    fileid_engine::ipc::Empty {},
+                )) {
+                Ok(()) => status.set_label("Scan cancellation requested; waiting for engine."),
+                Err(e) => status.set_label(&e.to_string()),
+            }
+        });
+    }
 
     // Pick folder → GTK native FileDialog (folder mode).
     pick_btn.connect_clicked(clone!(
-        #[weak] window, #[weak] folder_label, #[weak] start_btn,
-        #[strong] selected_folder, #[strong] can_scan,
+        #[weak]
+        window,
+        #[weak]
+        folder_label,
+        #[weak]
+        start_btn,
+        #[strong]
+        selected_folder,
+        #[strong]
+        can_scan,
         move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Pick a folder to organize")
@@ -137,20 +213,31 @@ pub fn on_activate(app: &adw::Application) {
                             folder_label.set_label(&display);
                             crate::app_settings::remember_folder(&path);
                             *selected_folder.borrow_mut() = Some(path.to_string_lossy().into_owned());
-                    start_btn.set_sensitive(can_scan.get());
+                            start_btn.set_sensitive(can_scan.get());
                         }
                     }
                 }
-            ));
+                ),
+            );
         }
     ));
 
     // Start scan → IPC startScan to the engine.
     start_btn.connect_clicked(clone!(
-        #[strong] engine, #[strong] selected_folder, #[strong] can_scan,
-        #[weak] start_btn, #[weak] status_label,
+        #[strong]
+        engine,
+        #[strong]
+        selected_folder,
+        #[strong]
+        can_scan,
+        #[weak]
+        start_btn,
+        #[weak]
+        status_label,
         move |_| {
-            let Some(folder) = selected_folder.borrow().clone() else { return; };
+            let Some(folder) = selected_folder.borrow().clone() else {
+                return;
+            };
             let mut e = engine.borrow_mut();
             match e.start_scan(&folder) {
                 Ok(()) => {
@@ -173,7 +260,8 @@ pub fn on_activate(app: &adw::Application) {
     let rx = engine.borrow_mut().spawn();
     glib::MainContext::default().spawn_local(clone!(
         #[weak] status_label, #[weak] start_btn, #[weak] pages,
-        #[strong] selected_folder, #[strong] can_scan,
+        #[strong] selected_folder, #[strong] can_scan, #[strong] scan_active, #[strong] paused, #[strong] scan_terminal,
+        #[weak] pause_btn, #[weak] cancel_btn,
         async move {
         while let Ok(state) = rx.recv().await {
             if matches!(&state, EngineState::ModelDownloadProgress(_)
@@ -190,16 +278,32 @@ pub fn on_activate(app: &adw::Application) {
                 | EngineState::RestructurePlan(_)
                 | EngineState::RestructureApplyResult(_)
                 | EngineState::CatalogResponse(_)
-                | EngineState::ToolResponse(_)) {
+                | EngineState::ToolResponse(_)
+                | EngineState::ChatResponse(_)
+                | EngineState::ClipTextEmbedding(_)) {
                 continue;
             }
-            let available = matches!(&state, EngineState::Ready | EngineState::ScanComplete(_) | EngineState::Error { .. });
+            match &state {
+                EngineState::Scanning => { scan_active.set(true); *scan_terminal.borrow_mut() = None; paused.set(false); pause_btn.set_label("Pause"); },
+                EngineState::ScanPhase(phase) => {
+                    let terminal = matches!(phase, fileid_engine::ipc::ScanPhase::Idle | fileid_engine::ipc::ScanPhase::Completed | fileid_engine::ipc::ScanPhase::Cancelled | fileid_engine::ipc::ScanPhase::Failed);
+                    scan_active.set(!terminal);
+                    if terminal { *scan_terminal.borrow_mut() = Some(*phase); }
+                },
+                EngineState::ScanComplete(_) | EngineState::Failed(_) | EngineState::Exited => scan_active.set(false),
+                EngineState::Error { kind, .. } if kind == "models_not_installed" => scan_active.set(false),
+                _ => {}
+            }
+            pause_btn.set_sensitive(scan_active.get()); cancel_btn.set_sensitive(scan_active.get());
+            let available = !scan_active.get() && matches!(&state, EngineState::Ready | EngineState::ScanComplete(_) | EngineState::ScanPhase(_) | EngineState::Error { .. });
             let label = match state {
                 EngineState::Spawning => "Engine: spawning…".to_string(),
                 EngineState::Ready => "Engine: ready".to_string(),
                 EngineState::Scanning => "Engine: scanning…".to_string(),
+                EngineState::Progress(p) => format!("Scan {:?}: {} / {} · {} failed · {:.1} files/s", p.phase, p.processed, p.total, p.failed, p.files_per_second),
                 EngineState::BatchLanded(n) => format!("Engine: scanning… {n} files processed"),
-                EngineState::ScanComplete(n) => format!("Scan complete — {n} files processed"),
+                EngineState::ScanComplete(n) => scan_count_label(n, scan_terminal.borrow().as_ref()),
+                EngineState::ScanPhase(phase) => format!("Scan: {phase:?}"),
                 EngineState::Error { kind, message, .. } if kind == "models_not_installed" => {
                     pages.set_visible_child_name("settings");
                     let missing = message.split_once("Missing:").map(|(_, kinds)| kinds.trim())
@@ -223,6 +327,7 @@ pub fn on_activate(app: &adw::Application) {
                 | EngineState::ToolResponse(_) => continue,
                 EngineState::Failed(message) => format!("Engine: {message}"),
                 EngineState::Exited => "Engine: exited".to_string(),
+                _ => continue,
             };
             can_scan.set(available);
             start_btn.set_sensitive(can_scan.get() && selected_folder.borrow().is_some());
@@ -235,5 +340,36 @@ pub fn on_activate(app: &adw::Application) {
     window.present();
     if crate::welcome::should_show() {
         crate::welcome::present(&window, engine.clone());
+    }
+}
+
+fn scan_count_label(processed: u64, terminal: Option<&fileid_engine::ipc::ScanPhase>) -> String {
+    use fileid_engine::ipc::ScanPhase;
+    let outcome = match terminal {
+        Some(ScanPhase::Cancelled) => "cancelled",
+        Some(ScanPhase::Failed) => "failed",
+        _ => "complete",
+    };
+    format!("Scan {outcome} — {processed} files processed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn terminal_scan_counts_do_not_relabel_cancelled_or_failed_scans_as_success() {
+        use fileid_engine::ipc::ScanPhase;
+        assert_eq!(
+            scan_count_label(4, Some(&ScanPhase::Cancelled)),
+            "Scan cancelled — 4 files processed"
+        );
+        assert_eq!(
+            scan_count_label(4, Some(&ScanPhase::Failed)),
+            "Scan failed — 4 files processed"
+        );
+        assert_eq!(
+            scan_count_label(4, Some(&ScanPhase::Completed)),
+            "Scan complete — 4 files processed"
+        );
     }
 }

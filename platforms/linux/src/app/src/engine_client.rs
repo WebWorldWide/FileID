@@ -11,11 +11,26 @@ use gtk::prelude::*;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 
 #[derive(Debug, Clone)]
 pub enum EngineState {
+    CatalogResponse(fileid_engine::ipc::CatalogResponse),
+    ToolResponse(fileid_engine::ipc::ToolResponse),
+    ChatResponse(fileid_engine::ipc::ChatResponse),
+    ClipTextEmbedding(fileid_engine::ipc::ClipTextEmbedding),
+    Progress(fileid_engine::ipc::ScanProgress),
+    ScanPhase(fileid_engine::ipc::ScanPhase),
+    RestructurePlan(fileid_engine::ipc::RestructurePlan),
+    RestructureApplyResult(fileid_engine::ipc::RestructureApplyResult),
+    DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting),
+    DeepAnalyzeProgress(fileid_engine::ipc::DeepAnalyzeProgress),
+    DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone),
+    DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete),
     Spawning,
     Ready,
     Scanning,
@@ -27,14 +42,6 @@ pub enum EngineState {
     BulkActionResult(fileid_engine::ipc::BulkActionResult),
     MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
     ModelDownloadProgress(ModelDownloadProgress),
-    DeepAnalyzeStarting(fileid_engine::ipc::DeepAnalyzeStarting),
-    DeepAnalyzeProgress(fileid_engine::ipc::DeepAnalyzeProgress),
-    DeepAnalyzeFileDone(fileid_engine::ipc::DeepAnalyzeFileDone),
-    DeepAnalyzeComplete(fileid_engine::ipc::DeepAnalyzeComplete),
-    CatalogResponse(fileid_engine::ipc::CatalogResponse),
-    ToolResponse(fileid_engine::ipc::ToolResponse),
-    RestructurePlan(fileid_engine::ipc::RestructurePlan),
-    RestructureApplyResult(fileid_engine::ipc::RestructureApplyResult),
     Error { kind: String, message: String, model_kind: Option<String> },
     Failed(String),
     Exited,
@@ -78,7 +85,8 @@ pub fn texture_from_decoded(decoded: DecodedImage) -> gtk::gdk::Texture {
         gtk::gdk::MemoryFormat::R8g8b8a8,
         &pixels,
         width as usize * 4,
-    ).upcast()
+    )
+    .upcast()
 }
 
 pub struct EngineClient {
@@ -86,6 +94,7 @@ pub struct EngineClient {
     stdin: Option<ChildStdin>,
     subscribers: Arc<Mutex<Vec<Sender<EngineState>>>>,
     next_command_id: u64,
+    ready: Arc<AtomicBool>,
 }
 
 impl EngineClient {
@@ -95,16 +104,31 @@ impl EngineClient {
             stdin: None,
             subscribers: Arc::new(Mutex::new(Vec::new())),
             next_command_id: 0,
+            ready: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn subscribe(&mut self) -> Receiver<EngineState> {
         let (tx, rx) = async_channel::unbounded();
-        self.subscribers.lock().expect("subscriber lock poisoned").push(tx);
+        self.subscribers
+            .lock()
+            .expect("subscriber lock poisoned")
+            .push(tx);
         rx
     }
+    #[cfg(test)]
+    pub(crate) fn publish_test_event(&self, event: EngineState) {
+        if matches!(
+            event,
+            EngineState::Ready | EngineState::Failed(_) | EngineState::Exited
+        ) {
+            self.ready
+                .store(matches!(event, EngineState::Ready), Ordering::Release);
+        }
+        publish(&self.subscribers, event);
+    }
     pub fn is_ready(&self) -> bool {
-        self.child.is_some()
+        self.ready.load(Ordering::Acquire)
     }
 
     pub fn spawn(&mut self) -> Receiver<EngineState> {
@@ -114,23 +138,32 @@ impl EngineClient {
         match exe {
             Ok(path) => {
                 publish(&self.subscribers, EngineState::Spawning);
-            match Command::new(&path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                Ok(mut child) => {
-                    self.stdin = child.stdin.take();
-                    let stdout = child.stdout.take().expect("piped stdout should be present");
-                    let subscribers = Arc::clone(&self.subscribers);
-                    thread::spawn(move || drain_engine_stdout(BufReader::new(stdout), subscribers));
-                    self.child = Some(child);
+                match Command::new(&path)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        self.stdin = child.stdin.take();
+                        let stdout = child.stdout.take().expect("piped stdout should be present");
+                        let subscribers = Arc::clone(&self.subscribers);
+                        let ready = Arc::clone(&self.ready);
+                        thread::spawn(move || {
+                            drain_engine_stdout(BufReader::new(stdout), subscribers, ready)
+                        });
+                        self.child = Some(child);
+                    }
+                    Err(err) => publish(
+                        &self.subscribers,
+                        EngineState::Failed(format!("spawn failed: {err}")),
+                    ),
                 }
-                Err(err) => publish(&self.subscribers, EngineState::Failed(format!("spawn failed: {err}"))),
             }
-                }
-            Err(err) => publish(&self.subscribers, EngineState::Failed(format!("engine binary not found: {err}"))),
+            Err(err) => publish(
+                &self.subscribers,
+                EngineState::Failed(format!("engine binary not found: {err}")),
+            ),
         }
         rx
     }
@@ -163,7 +196,10 @@ impl EngineClient {
     pub fn send(&mut self, payload: CommandPayload) -> Result<()> {
         let stdin = self.stdin.as_mut().context("engine not spawned")?;
         self.next_command_id = self.next_command_id.wrapping_add(1);
-        let cmd = IpcCommand { id: format!("linux-{}", self.next_command_id), payload };
+        let cmd = IpcCommand {
+            id: format!("linux-{}", self.next_command_id),
+            payload,
+        };
         serde_json::to_writer(&mut *stdin, &cmd)?;
         stdin.write_all(b"\n")?;
         stdin.flush()?;
@@ -178,7 +214,11 @@ impl EngineClient {
         rx
     }
 
-    pub fn request_scaled_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
+    pub fn request_scaled_thumbnail(
+        &self,
+        path: String,
+        dim: i32,
+    ) -> Receiver<Option<DecodedImage>> {
         let (tx, rx) = async_channel::bounded(1);
         thread::spawn(move || {
             let image = fileid_engine::shell::thumbnail::render_at(Path::new(&path), dim).ok();
@@ -187,17 +227,26 @@ impl EngineClient {
         rx
     }
 
-    pub fn request_video_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
+    pub fn request_video_thumbnail(
+        &self,
+        path: String,
+        dim: i32,
+    ) -> Receiver<Option<DecodedImage>> {
         let (tx, rx) = async_channel::bounded(1);
         thread::spawn(move || {
-            let image = fileid_engine::shell::video::keyframe_25pct(Path::new(&path)).ok()
+            let image = fileid_engine::shell::video::keyframe_25pct(Path::new(&path))
+                .ok()
                 .filter(|frame| frame.width <= dim as u32 && frame.height <= dim as u32)
                 .map(|frame| {
                     let mut rgba = Vec::with_capacity(frame.rgb.len() / 3 * 4);
                     for pixel in frame.rgb.chunks_exact(3) {
                         rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
                     }
-                    DecodedImage { width: frame.width, height: frame.height, rgba }
+                    DecodedImage {
+                        width: frame.width,
+                        height: frame.height,
+                        rgba,
+                    }
                 });
             let _ = tx.send_blocking(image);
         });
@@ -206,7 +255,9 @@ impl EngineClient {
 }
 
 fn publish(subscribers: &Arc<Mutex<Vec<Sender<EngineState>>>>, state: EngineState) {
-    subscribers.lock().expect("subscriber lock poisoned")
+    subscribers
+        .lock()
+        .expect("subscriber lock poisoned")
         .retain(|subscriber| subscriber.send_blocking(state.clone()).is_ok());
 }
 
@@ -248,29 +299,34 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
          f.vlm_description, f.vlm_proposed_name \
          FROM files f WHERE {filter} ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?3"
     ))?;
-    let rows = stmt.query_map((pattern.as_str(), kind, spec.limit.clamp(1, 1000)), |row| {
-        let path: String = row.get(1)?;
-        let name = Path::new(&path).file_name().unwrap_or_default().to_string_lossy().into_owned();
-        Ok(FileRow {
-            id: row.get(0)?,
-            path,
-            name,
-            kind: row.get(2)?,
-            extension: row.get(3)?,
-            size_bytes: row.get(4)?,
-            created_at: row.get(5)?,
-            modified_at: row.get(6)?,
-            has_faces: row.get(7)?,
-            has_text: row.get(8)?,
-            file_ref: row.get(9)?,
-            content_hash: row.get(10)?,
-            description: row.get(11)?,
-            proposed_name: row.get(12)?,
-        })
-    })?.collect::<std::result::Result<Vec<_>, _>>()?;
+    let rows = stmt
+        .query_map((pattern.as_str(), kind, spec.limit.clamp(1, 1000)), |row| {
+            let path: String = row.get(1)?;
+            let name = Path::new(&path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            Ok(FileRow {
+                id: row.get(0)?,
+                path,
+                name,
+                kind: row.get(2)?,
+                extension: row.get(3)?,
+                size_bytes: row.get(4)?,
+                created_at: row.get(5)?,
+                modified_at: row.get(6)?,
+                has_faces: row.get(7)?,
+                has_text: row.get(8)?,
+                file_ref: row.get(9)?,
+                content_hash: row.get(10)?,
+                description: row.get(11)?,
+                proposed_name: row.get(12)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok((rows, total))
 }
-
 
 impl Drop for EngineClient {
     fn drop(&mut self) {
@@ -289,29 +345,46 @@ impl Drop for EngineClient {
 fn locate_engine_binary() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("FILEID_ENGINE") {
         let p = PathBuf::from(s);
-        if p.exists() { return Ok(p); }
+        if p.exists() {
+            return Ok(p);
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             for candidate in ["FileIDEngine", "fileid-engine"] {
                 let p = dir.join(candidate);
-                if p.exists() { return Ok(p); }
+                if p.exists() {
+                    return Ok(p);
+                }
             }
         }
     }
-    for sys in ["/usr/lib/FileID/FileIDEngine", "/usr/libexec/FileID/FileIDEngine"] {
+    for sys in [
+        "/usr/lib/FileID/FileIDEngine",
+        "/usr/libexec/FileID/FileIDEngine",
+    ] {
         let p = PathBuf::from(sys);
-        if p.exists() { return Ok(p); }
+        if p.exists() {
+            return Ok(p);
+        }
     }
     anyhow::bail!("engine binary not found (set FILEID_ENGINE or place beside the app exe)")
 }
 
-fn drain_engine_stdout(reader: impl BufRead, subscribers: Arc<Mutex<Vec<Sender<EngineState>>>>) {
+fn drain_engine_stdout(
+    reader: impl BufRead,
+    subscribers: Arc<Mutex<Vec<Sender<EngineState>>>>,
+    ready: Arc<AtomicBool>,
+) {
     for line in reader.lines() {
         let line = match line {
             Ok(line) => line,
             Err(err) => {
-                publish(&subscribers, EngineState::Failed(format!("engine output error: {err}")));
+                ready.store(false, Ordering::Release);
+                publish(
+                    &subscribers,
+                    EngineState::Failed(format!("engine output error: {err}")),
+                );
                 publish(&subscribers, EngineState::Exited);
                 return;
             }
@@ -320,25 +393,33 @@ fn drain_engine_stdout(reader: impl BufRead, subscribers: Arc<Mutex<Vec<Sender<E
             continue;
         };
         let state = match event.payload {
+            EventPayload::CatalogResponse(r) => EngineState::CatalogResponse(r.inner),
+            EventPayload::ToolResponse(r) => EngineState::ToolResponse(r.inner),
+            EventPayload::ChatResponse(r) => EngineState::ChatResponse(r.inner),
+            EventPayload::ClipTextEmbedding(r) => EngineState::ClipTextEmbedding(r.inner),
+            EventPayload::Progress(r) => EngineState::Progress(r.inner),
+            EventPayload::PhaseChanged(r) => EngineState::ScanPhase(r.inner),
+            EventPayload::RestructurePlan(r) => EngineState::RestructurePlan(r.inner),
+            EventPayload::RestructureApplyResult(r) => EngineState::RestructureApplyResult(r.inner),
+            EventPayload::DeepAnalyzeStarting(r) => EngineState::DeepAnalyzeStarting(r.inner),
+            EventPayload::DeepAnalyzeProgress(r) => EngineState::DeepAnalyzeProgress(r.inner),
+            EventPayload::DeepAnalyzeFileDone(r) => EngineState::DeepAnalyzeFileDone(r.inner),
+            EventPayload::DeepAnalyzeComplete(r) => EngineState::DeepAnalyzeComplete(r.inner),
             EventPayload::Ready(_) => EngineState::Ready,
-            EventPayload::BatchSummary(batch) => EngineState::BatchLanded(batch.inner.processed_total),
-            EventPayload::ScanComplete(result) => EngineState::ScanComplete(result.inner.processed_files),
-            EventPayload::FaceClusteringComplete(result) => EngineState::FaceClusteringComplete(result.inner),
+            EventPayload::BatchSummary(batch) => {
+                EngineState::BatchLanded(batch.inner.processed_total)
+            }
+            EventPayload::ScanComplete(result) => {
+                EngineState::ScanComplete(result.inner.processed_files)
+            }
+            EventPayload::FaceClusteringComplete(result) => {
+                EngineState::FaceClusteringComplete(result.inner)
+            }
             EventPayload::BulkActionResult(result) => EngineState::BulkActionResult(result.inner),
-        EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
-        EventPayload::ModelDownloadProgress(progress) =>
-            EngineState::ModelDownloadProgress(progress.inner),
-        EventPayload::DeepAnalyzeStarting(event) => EngineState::DeepAnalyzeStarting(event.inner),
-        EventPayload::DeepAnalyzeProgress(event) => EngineState::DeepAnalyzeProgress(event.inner),
-        EventPayload::DeepAnalyzeFileDone(event) => EngineState::DeepAnalyzeFileDone(event.inner),
-        EventPayload::DeepAnalyzeComplete(event) => EngineState::DeepAnalyzeComplete(event.inner),
-        EventPayload::CatalogResponse(response) => EngineState::CatalogResponse(response.inner),
-        EventPayload::ToolResponse(response) => EngineState::ToolResponse(response.inner),
-        EventPayload::RestructurePlan(plan) => EngineState::RestructurePlan(plan.inner),
-        EventPayload::RestructureApplyResult(result) => {
-            EngineState::RestructureApplyResult(result.inner)
-        }
-        EventPayload::Error(error) => match error.inner.kind.as_str() {
+            EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
+            EventPayload::ModelDownloadProgress(progress) =>
+                EngineState::ModelDownloadProgress(progress.inner),
+            EventPayload::Error(error) => match error.inner.kind.as_str() {
                 "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
                 "face_clustering_busy" => EngineState::FaceClusteringBusy(error.inner.message),
                 _ => EngineState::Error {
@@ -349,9 +430,16 @@ fn drain_engine_stdout(reader: impl BufRead, subscribers: Arc<Mutex<Vec<Sender<E
             },
             _ => continue,
         };
+        if matches!(state, EngineState::Ready) {
+            ready.store(true, Ordering::Release);
+        }
         publish(&subscribers, state);
     }
-    publish(&subscribers, EngineState::Failed("engine exited".to_owned()));
+    ready.store(false, Ordering::Release);
+    publish(
+        &subscribers,
+        EngineState::Failed("engine exited".to_owned()),
+    );
     publish(&subscribers, EngineState::Exited);
 }
 
@@ -360,6 +448,27 @@ mod tests {
     use super::*;
     use fileid_engine::ipc::{EngineError, EngineInfo, ScanComplete, Wrap};
     use std::io::Cursor;
+
+    #[test]
+    fn fixture_publisher_sets_readiness_before_delivery() {
+        let mut client = EngineClient::new();
+        let events = client.subscribe();
+        assert!(!client.is_ready());
+        client.publish_test_event(EngineState::Ready);
+        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Ready));
+        assert!(client.is_ready());
+        client.publish_test_event(EngineState::Scanning);
+        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Scanning));
+        assert!(client.is_ready());
+        client.publish_test_event(EngineState::Failed("generated fixture failure".into()));
+        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Failed(_)));
+        assert!(!client.is_ready());
+        client.publish_test_event(EngineState::Ready);
+        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Ready));
+        client.publish_test_event(EngineState::Exited);
+        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Exited));
+        assert!(!client.is_ready());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -440,22 +549,105 @@ mod tests {
         );
         let (tx, rx) = async_channel::unbounded();
         let (tx_other, rx_other) = async_channel::unbounded();
-        drain_engine_stdout(Cursor::new(stream), Arc::new(Mutex::new(vec![tx, tx_other])));
+        drain_engine_stdout(
+            Cursor::new(stream),
+            Arc::new(Mutex::new(vec![tx, tx_other])),
+            Arc::new(AtomicBool::new(false)),
+        );
         assert!(matches!(rx.recv_blocking().unwrap(), EngineState::Ready));
-        assert!(matches!(rx.recv_blocking().unwrap(), EngineState::ScanComplete(13)));
-        assert!(matches!(rx.recv_blocking().unwrap(), EngineState::ModelDownloadProgress(progress)
+        assert!(matches!(
+            rx.recv_blocking().unwrap(),
+            EngineState::ScanComplete(13)
+        ));
+        assert!(
+            matches!(rx.recv_blocking().unwrap(), EngineState::ModelDownloadProgress(progress)
             if progress.model_kind == "arcface" && progress.fraction == 0.4
-                && progress.bytes_done == Some(40)));
-        assert!(matches!(rx.recv_blocking().unwrap(), EngineState::Error { kind, message, model_kind }
+                && progress.bytes_done == Some(40))
+        );
+        assert!(
+            matches!(rx.recv_blocking().unwrap(), EngineState::Error { kind, message, model_kind }
             if kind == "models_not_installed" && message == "Install models before scanning"
-                && model_kind.is_none()));
-        assert!(matches!(rx.recv_blocking().unwrap(), EngineState::Error { kind, model_kind, .. }
-            if kind == "prewarm_cancelled" && model_kind.as_deref() == Some("arcface")));
-        assert!(matches!(rx.recv_blocking().unwrap(), EngineState::Failed(message) if message == "engine exited"));
-        assert!(matches!(rx_other.recv_blocking().unwrap(), EngineState::Ready));
-        assert!(matches!(rx_other.recv_blocking().unwrap(), EngineState::ScanComplete(13)));
-        assert!(matches!(rx_other.recv_blocking().unwrap(), EngineState::ModelDownloadProgress(progress)
-            if progress.model_kind == "arcface" && progress.total_bytes == Some(100)));
+                && model_kind.is_none())
+        );
+        assert!(
+            matches!(rx.recv_blocking().unwrap(), EngineState::Error { kind, model_kind, .. }
+            if kind == "prewarm_cancelled" && model_kind.as_deref() == Some("arcface"))
+        );
+        assert!(
+            matches!(rx.recv_blocking().unwrap(), EngineState::Failed(message) if message == "engine exited")
+        );
+        assert!(matches!(
+            rx_other.recv_blocking().unwrap(),
+            EngineState::Ready
+        ));
+        assert!(matches!(
+            rx_other.recv_blocking().unwrap(),
+            EngineState::ScanComplete(13)
+        ));
+        assert!(
+            matches!(rx_other.recv_blocking().unwrap(), EngineState::ModelDownloadProgress(progress)
+            if progress.model_kind == "arcface" && progress.total_bytes == Some(100))
+        );
+    }
+
+    #[test]
+    fn workbench_responses_keep_request_and_conversation_ids_and_exit_is_not_ready() {
+        use fileid_engine::ipc::{CatalogResponse, ChatResponse, ToolResponse};
+        let events = [
+            IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(CatalogResponse {
+                request_id: "catalog-1".into(),
+                status: "ok".into(),
+                message: None,
+                hits: vec![],
+                chapters: vec![],
+                jobs: vec![],
+                events: None,
+                takes: None,
+                recommendation: None,
+                suggested_take_groups: None,
+            }))),
+            IpcEvent::now(EventPayload::ToolResponse(Wrap::new(ToolResponse {
+                request_id: "tools-2".into(),
+                status: "error".into(),
+                message: "Unavailable".into(),
+                operation_id: None,
+                outputs: vec![],
+                capabilities: vec![],
+            }))),
+            IpcEvent::now(EventPayload::ChatResponse(Wrap::new(ChatResponse {
+                request_id: "chat-3".into(),
+                conversation_id: "conversation".into(),
+                status: "completed".into(),
+                message: "Retrieved".into(),
+                messages: vec![],
+                hits: vec![],
+            }))),
+        ];
+        let stream = events
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        let (tx, rx) = async_channel::unbounded();
+        let ready = Arc::new(AtomicBool::new(true));
+        drain_engine_stdout(
+            Cursor::new(stream),
+            Arc::new(Mutex::new(vec![tx])),
+            ready.clone(),
+        );
+        assert!(
+            matches!(rx.recv_blocking().unwrap(),EngineState::CatalogResponse(r) if r.request_id=="catalog-1")
+        );
+        assert!(
+            matches!(rx.recv_blocking().unwrap(),EngineState::ToolResponse(r) if r.request_id=="tools-2" && r.status=="error")
+        );
+        assert!(
+            matches!(rx.recv_blocking().unwrap(),EngineState::ChatResponse(r) if r.request_id=="chat-3" && r.conversation_id=="conversation")
+        );
+        assert!(!ready.load(Ordering::Acquire));
     }
 
     #[test]
@@ -463,7 +655,10 @@ mod tests {
         let fixture = std::env::temp_dir().join(format!(
             "fileid-library-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&fixture).unwrap();
         let db_path = fixture.join("fileid.sqlite");
@@ -485,28 +680,52 @@ mod tests {
                 "INSERT INTO files (path_text,path_hash,size_bytes,scanned_at,kind,extension,failed) VALUES (?1,4,17,4,'image','png',1)",
                 [fixture.join("failed.png").to_str().unwrap()],
             ).unwrap();
-            conn.execute("INSERT INTO tags (file_id,tag,source) VALUES (1,'urgent','manual')", []).unwrap();
-            conn.execute("INSERT INTO ocr_text (file_id,text) VALUES (3,'needle in OCR')", []).unwrap();
+            conn.execute(
+                "INSERT INTO tags (file_id,tag,source) VALUES (1,'urgent','manual')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ocr_text (file_id,text) VALUES (3,'needle in OCR')",
+                [],
+            )
+            .unwrap();
         }
         let query = |search: &str, kind: Option<&str>, limit: i64| {
-            query_files_at_path(&db_path, &QuerySpec {
-                search: search.to_owned(),
-                kind: kind.map(str::to_owned),
-                limit,
-            }).unwrap()
+            query_files_at_path(
+                &db_path,
+                &QuerySpec {
+                    search: search.to_owned(),
+                    kind: kind.map(str::to_owned),
+                    limit,
+                },
+            )
+            .unwrap()
         };
         let (first, total) = query("", None, 2);
         assert_eq!(total, 3);
-        assert_eq!(first.iter().map(|file| file.name.as_str()).collect::<Vec<_>>(), ["image.png", "notes.pdf"]);
+        assert_eq!(
+            first
+                .iter()
+                .map(|file| file.name.as_str())
+                .collect::<Vec<_>>(),
+            ["image.png", "notes.pdf"]
+        );
         let (literal, literal_total) = query("100%", None, 10);
         assert_eq!(literal_total, 1);
         assert_eq!(literal[0].name, "draft_100%.txt");
         assert_eq!(query("urgent", None, 10).1, 1);
         assert_eq!(query("needle", None, 10).0[0].kind, "pdf");
         assert_eq!(query("", Some("image"), 10).1, 1);
-        assert!(query_files_at_path(&fixture.join("missing.sqlite"), &QuerySpec {
-            search: String::new(), kind: None, limit: 10,
-        }).is_err());
+        assert!(query_files_at_path(
+            &fixture.join("missing.sqlite"),
+            &QuerySpec {
+                search: String::new(),
+                kind: None,
+                limit: 10,
+            }
+        )
+        .is_err());
         std::fs::remove_dir_all(fixture).unwrap();
     }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Measure warm IPC lexical search on synthetic internal-drive catalog fixtures."""
 import argparse
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -30,7 +31,7 @@ def main():
             engine.wait("ready")
         finally:
             engine.close()
-        with sqlite3.connect(directory / "FileID/fileid.sqlite") as db:
+        with closing(sqlite3.connect(directory / "FileID/fileid.sqlite")) as db, db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executemany("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,vlm_description) VALUES(?,?,?,100,10,0,?,?,?)", (
                 (i, f"/internal/Family Library/Bucket{i % 1000} - File {i}.{'pdf' if i % 10 == 0 else 'mov'}", i, "doc" if i % 10 == 0 else "video", "pdf" if i % 10 == 0 else "mov", "Roof repair estimate and invoice" if i % 10 == 0 else "Alex plays baseball and opens birthday presents")

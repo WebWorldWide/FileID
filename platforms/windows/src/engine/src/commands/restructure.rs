@@ -19,11 +19,12 @@ use crate::pipeline::restructure_semantic;
 /// Files + per-file person names for restructure planning. Person names come
 /// from a deduped, ordered correlated subquery — NOT
 /// `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects at run with
-/// "DISTINCT aggregates must have exactly one argument". `names` (column 8) is a
+/// "DISTINCT aggregates must have exactly one argument". `names` (column 12) is a
 /// char(31)-separated list; the row reader takes the first.
 const PLAN_FILES_SQL: &str = "SELECT
    f.id, f.path_text, f.kind, f.modified_at, f.created_at,
-   f.location_lat, f.location_lon, f.has_text,
+   f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name,
+   f.content_hash, f.size_bytes, f.file_ref,
    (SELECT GROUP_CONCAT(name, char(31))
       FROM (SELECT DISTINCT p.name
               FROM persons p
@@ -109,11 +110,12 @@ pub(crate) async fn handle_plan_restructure(
                     "pdf" => FileKind::Pdf,
                     "doc" => FileKind::Doc,
                     "audio" => FileKind::Audio,
+                    "model" => FileKind::Model,
                     _ => FileKind::Other,
                 };
                 let modified: Option<f64> = row.get(3)?;
                 let created: Option<f64> = row.get(4)?;
-                let names: Option<String> = row.get(8)?;
+                let names: Option<String> = row.get(12)?;
                 let person_name = names
                     .as_deref()
                     .and_then(|s| s.split('\x1F').next())
@@ -129,6 +131,15 @@ pub(crate) async fn handle_plan_restructure(
                     location_lat: row.get(5)?,
                     location_lon: row.get(6)?,
                     has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
+                    vlm_proposed: row.get::<_, Option<String>>(8)?,
+                    identity: Some(restructure::PlannedIdentity {
+                        content_hash: row
+                            .get::<_, Option<Vec<u8>>>(9)?
+                            .map(hex::encode),
+                        size_bytes: row.get::<_, Option<u64>>(10)?.unwrap_or(0),
+                        file_ref: row.get::<_, Option<u64>>(11)?,
+                        modified_at: modified.unwrap_or(0.0),
+                    }),
                 })
             })?;
             let mut out = Vec::new();
@@ -169,6 +180,14 @@ pub(crate) async fn handle_plan_restructure(
         };
 
     let library_root_path = std::path::Path::new(&library_root);
+
+    // Plan-time identity per file, carried onto every emitted move so apply can
+    // bind the move to the file the plan actually saw rather than whatever
+    // happens to live at `source` when apply runs. (audit P1)
+    let identities: std::collections::HashMap<i64, restructure::PlannedIdentity> = files
+        .iter()
+        .filter_map(|f| f.identity.clone().map(|i| (f.file_id, i)))
+        .collect();
 
     // Butler P1: semantic + learn-your-style classification for image files that
     // have a CLIP embedding; everything else (and density-clustering noise)
@@ -368,6 +387,7 @@ pub(crate) async fn handle_plan_restructure(
                     .parent()
                     .and_then(|p| tier_by_folder.get(p))
                     .map(|s| (*s).to_string());
+                let id = identities.get(&m.file_id);
                 IpcMove {
                     file_id: m.file_id,
                     source: m.source.to_string_lossy().to_string(),
@@ -376,6 +396,10 @@ pub(crate) async fn handle_plan_restructure(
                     tier,
                     confidence: m.confidence.as_str().to_string(),
                     reason: m.reason,
+                    content_hash: id.and_then(|i| i.content_hash.clone()),
+                    size_bytes: id.map(|i| i.size_bytes),
+                    file_ref: id.and_then(|i| i.file_ref),
+                    modified_at: id.map(|i| i.modified_at),
                 }
             })
             .collect(),
@@ -520,23 +544,35 @@ mod tests {
                  id INTEGER PRIMARY KEY, path_text TEXT, kind TEXT,
                  modified_at REAL, created_at REAL,
                  location_lat REAL, location_lon REAL,
-                 has_text INTEGER, failed INTEGER DEFAULT 0);
+                 has_text INTEGER, vlm_proposed_name TEXT, failed INTEGER DEFAULT 0,
+                 content_hash BLOB, size_bytes INTEGER, file_ref INTEGER);
              CREATE TABLE persons(id INTEGER PRIMARY KEY, name TEXT);
              CREATE TABLE face_prints(file_id INTEGER, person_id INTEGER);
              INSERT INTO files(id,path_text,kind,failed) VALUES
                  (1,'/a.jpg','image',0),(2,'/b.jpg','image',0),(3,'/c.jpg','image',1);
+             UPDATE files SET vlm_proposed_name='sunset-over-the-bay', content_hash=X'686173682d61', size_bytes=4, file_ref=42 WHERE id=1;
              INSERT INTO persons(id,name) VALUES (1,'Bob'),(2,'Alice');
              INSERT INTO face_prints(file_id,person_id) VALUES (1,1),(1,1),(1,2);",
         )
         .unwrap();
 
         let mut stmt = conn.prepare(PLAN_FILES_SQL).expect("planner SQL prepares");
-        let mut rows: Vec<(i64, Option<String>)> = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(8)?)))
+        let identity = stmt.query_row([], |row| Ok((
+            row.get::<_, Vec<u8>>(9)?,
+            row.get::<_, u64>(10)?,
+            row.get::<_, u64>(11)?,
+        ))).unwrap();
+        assert_eq!(identity, (b"hash-a".to_vec(), 4, 42));
+        let mut rows: Vec<(i64, Option<String>, Option<String>)> = stmt
+            .query_map([], |r| Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, Option<String>>(8)?,
+            )))
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        rows.sort_by_key(|(id, _)| *id);
+        rows.sort_by_key(|(id, _, _)| *id);
 
         // failed=1 (file 3) is excluded; file 1 dedupes Bob+Bob+Alice into two
         // names joined by char(31); file 2 has no faces → NULL. Compare as a set
@@ -546,6 +582,10 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, ["Alice", "Bob"]);
         assert_eq!(rows[1].1, None);
+        // The smart-rename column must be readable by the row reader (column 8),
+        // which is what makes Windows and macOS lay out the same filenames.
+        assert_eq!(rows[0].2.as_deref(), Some("sunset-over-the-bay"));
+        assert_eq!(rows[1].2, None);
     }
 
     /// The embedding load must be tier-gated: Low caps the resident map, while
@@ -630,6 +670,10 @@ mod tests {
                 tier: None,
                 confidence: String::new(),
                 reason: None,
+                content_hash: None,
+                size_bytes: None,
+                file_ref: None,
+                modified_at: None,
             }],
             use_symlinks: false,
         };
