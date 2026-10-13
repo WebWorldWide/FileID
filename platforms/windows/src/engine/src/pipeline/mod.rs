@@ -22,3 +22,5 @@ pub mod cluster_suggestions;
 pub mod audio_meta;
 pub mod doc_extract;
 pub mod usn;
+
+pub mod media_worker;

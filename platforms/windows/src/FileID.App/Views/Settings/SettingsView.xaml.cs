@@ -185,7 +185,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             InstallCudaLlamaButton.Content = "Installed";
             InstallCudaLlamaButton.IsEnabled = false;
-            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
+            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp is installed. Deep Analyze uses it on the next run.";
         }
         // Gate on the ORT CUDA provider (the pack that actually enables the
         // CUDA EP); cuDNN alone never flipped scanning off DirectML.
@@ -281,10 +281,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             }
         });
 
-    /// <summary> toggle the NVIDIA acceleration card based on
-    /// the detected GPU vendor. The card surfaces two affordances: install
-    /// the CUDA-flavored llama.cpp runtime (no cuDNN required) and direct
-    /// the user to NVIDIA's cuDNN download for the CUDA ORT EP.</summary>
+    /// <summary>Toggle the NVIDIA acceleration card based on the detected
+    /// GPU vendor. The card configures the optional CUDA ORT execution provider.</summary>
     private void SyncNvidiaSection()
     {
         var hw = EngineClient.Instance.Info?.Hardware;
@@ -293,10 +291,13 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
 
         if (isNvidia)
         {
+            NvidiaAccelerationSection.Visibility = Visibility.Visible;
             var ep = (hw?.ExecutionProvider ?? "").ToLowerInvariant();
             CudnnStatusText.Text = ep == "cuda"
-                ? "✓ CUDA execution provider is active — scanning runs on the CUDA EP."
-                : "Install the CUDA pack to unlock the CUDA execution provider for scanning (~3-5x faster than DirectML on RTX-class GPUs). One click fetches the ONNX Runtime CUDA provider + cuDNN.";
+                ? "✓ The current scan engine is using the CUDA execution provider."
+                : SentinelExists("ort_cuda_x64")
+                    ? "CUDA files are installed. Restart the engine to select the CUDA execution provider."
+                    : "Install the optional CUDA 12.4 and cuDNN runtime pack (~1.6 GB) to enable NVIDIA acceleration for scanning.";
         }
     }
 
@@ -307,10 +308,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             var s = AppViewModel.Instance.Settings;
             CleanupAutoTagToggle.IsOn = s.CleanupAutoTagKept;
-            // Inverted: AppSettings stores "Disable…" but the UI shows
-            // "Auto-install on" (truthy = enabled).
-            AutoInstallCudaToggle.IsOn = !s.DisableAutoInstallCuda;
-
             // Hydrate the EP override picker too.
             string current = s.GpuExecutionProviderOverride ?? "auto";
             for (int i = 0; i < ProviderCombo.Items.Count; i++)
@@ -337,28 +334,6 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             s.CleanupAutoTagKept = CleanupAutoTagToggle.IsOn;
             s.Save();
         });
-
-    private void OnAutoInstallCudaToggled(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnAutoInstallCudaToggled), () =>
-        {
-            if (_initializingToggles) return;
-            var s = AppViewModel.Instance.Settings;
-            s.DisableAutoInstallCuda = !AutoInstallCudaToggle.IsOn;
-            s.Save();
-            // Project policy forbids a silent GPU-pack fetch, so there is no
-            // engine-ready auto-install left to gate — persisting the flag alone
-            // left this toggle dead. Flipping it ON is itself the explicit user
-            // action that installs the CUDA llama.cpp pack now (skip when it is
-            // already on disk or an install is in flight: the button disables in
-            // both cases). OFF just persists the opt-out.
-            if (AutoInstallCudaToggle.IsOn
-                && InstallCudaLlamaButton.IsEnabled
-                && !SentinelExists("llama_runtime_cuda_x64"))
-            {
-                _ = InstallCudaLlamaAsync(InstallCudaLlamaButton);
-            }
-        });
-
     private void OnProviderOverrideChanged(object sender, SelectionChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnProviderOverrideChanged), () =>
         {
@@ -849,45 +824,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         if (seconds < 3600) return $"{seconds / 60:0}m {seconds % 60:00}s";
         return $"{seconds / 3600:0}h {(seconds % 3600) / 60:00}m";
     }
-
-    /// <summary>F3c install button: kicks off llama_runtime_cuda_x64
-    /// prewarm. Engine downloads, extracts, then VlmRunner::find prefers
-    /// the CUDA build automatically on the next Deep Analyze.</summary>
-    private async void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button button) return;
-        await InstallCudaLlamaAsync(button).ConfigureAwait(true);
-    }
-
-    private async Task InstallCudaLlamaAsync(Button button)
-    {
-        var originalContent = button.Content;
-        try
-        {
-            button.IsEnabled = false;
-            button.Content = "Installing…";
-            CudaLlamaStatusText.Text = "Downloading CUDA llama.cpp build (~200 MB)…";
-            await EngineClient.Instance.PrewarmModelAsync("llama_runtime_cuda_x64");
-            button.Content = "Installed";
-            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on next run.";
-        }
-        catch (Exception ex)
-        {
-            DebugLog.Warn($"Install CUDA llama.cpp failed: {ex.Message}");
-            button.Content = originalContent;
-            button.IsEnabled = true;
-            CudaLlamaStatusText.Text = $"Install failed: {ex.Message}";
-        }
-    }
-
-    /// <summary>In-app CUDA pack install. Fetches the ONNX Runtime CUDA provider
-    /// (onnxruntime_providers_cuda.dll, ~313 MB from Microsoft's GitHub release —
-    /// the piece pyke's binaries omit, so the thing that actually enables the
-    /// CUDA EP) plus the cuDNN redist (~430 MB from NVIDIA's CDN). The engine
-    /// extracts both under Models/, registers their DLL dirs, and pins
-    /// ORT_DYLIB_PATH to the matched GPU runtime. After completion the user hits
-    /// "Verify install" (or restarts the engine) to flip scanning from DirectML
-    /// to the CUDA EP (~3-5x faster).</summary>
+    /// <summary>Download the matched CUDA 12.4, ORT GPU, and cuDNN runtimes after
+    /// the user accepts the relevant NVIDIA terms.</summary>
     private async void OnInstallCudnnClicked(object sender, RoutedEventArgs e)
     {
         if (sender is not Button button) return;
@@ -896,13 +834,20 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             button.IsEnabled = false;
             button.Content = "Installing…";
-            CudnnStatusText.Text = "Downloading CUDA pack (~745 MB): cuDNN + ORT CUDA provider…";
-            // Provider last — it's the "installed" gate; finishing it last keeps
-            // the status accurate (see ModelInstallerService.Accelerator).
+            CudnnStatusText.Text = "Reviewing license terms before downloading the CUDA runtime pack…";
+            if (!await Services.ModelLicenseGate.EnsureAcceptedAsync(
+                    ["cudnn_runtime_x64", "ort_cuda_x64"]))
+            {
+                button.Content = originalContent;
+                button.IsEnabled = true;
+                CudnnStatusText.Text = "CUDA installation cancelled; no files were downloaded.";
+                return;
+            }
+            CudnnStatusText.Text = "Downloading approximately 1.6 GB from Microsoft and NVIDIA…";
             await EngineClient.Instance.PrewarmModelAsync("cudnn_runtime_x64");
             await EngineClient.Instance.PrewarmModelAsync("ort_cuda_x64");
             button.Content = "Installed";
-            CudnnStatusText.Text = "✓ CUDA pack installed. Click \"Verify install\" or restart FileID to switch scanning to the CUDA EP.";
+            CudnnStatusText.Text = "✓ CUDA runtime pack installed. Verify it or restart the engine to switch scanning to CUDA.";
         }
         catch (Exception ex)
         {
@@ -910,6 +855,35 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             button.Content = originalContent;
             button.IsEnabled = true;
             CudnnStatusText.Text = $"Install failed: {ex.Message}";
+        }
+    }
+
+    private async void OnInstallCudaLlamaClicked(object sender, RoutedEventArgs e)
+    {
+        var button = InstallCudaLlamaButton;
+        try
+        {
+            button.IsEnabled = false;
+            button.Content = "Review terms…";
+            if (!await Services.ModelLicenseGate.EnsureAcceptedAsync(["llama_runtime_cuda_x64"]))
+            {
+                button.Content = "Install";
+                button.IsEnabled = true;
+                CudaLlamaStatusText.Text = "CUDA installation cancelled; no files were downloaded.";
+                return;
+            }
+            button.Content = "Installing…";
+            CudaLlamaStatusText.Text = "Downloading the pinned CUDA llama.cpp runtime (~650 MB)…";
+            await EngineClient.Instance.PrewarmModelAsync("llama_runtime_cuda_x64");
+            button.Content = "Installed";
+            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp installed. Deep Analyze will use it on its next run.";
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn($"Install CUDA llama.cpp failed: {ex.Message}");
+            button.Content = "Install";
+            button.IsEnabled = true;
+            CudaLlamaStatusText.Text = $"Install failed: {ex.Message}";
         }
     }
 

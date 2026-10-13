@@ -11,10 +11,9 @@
             <ResourceDictionary.MergedDictionaries>
                 <!-- WinUI 3 stock styles. Must be first so our overrides win. -->
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
-                <!-- FileID palette + tokens (gold/lavender/cyan/pink, surface,
-                     spacing, radii, motion durations). Lives in FileID.Theme;
-                     loaded via the assembly's ms-appx:/// URI. -->
-                <ResourceDictionary Source="ms-appx:///FileID.Theme/Theme.xaml" />
+                <!-- FileID palette + tokens are compiled into this app's PRI
+                     at AppResources/Theme.xaml for packaged ResourceDictionary loading. -->
+                <ResourceDictionary Source="ms-appx:///AppResources/Theme.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibility" />

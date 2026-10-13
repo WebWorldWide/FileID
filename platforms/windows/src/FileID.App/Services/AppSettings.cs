@@ -76,27 +76,16 @@ internal sealed class AppSettings
     /// Once true the banner stays hidden across launches.</summary>
     public bool HideDeepAnalyzeExplainer { get; set; } = false;
 
-    /// <summary>Opt out of the silent CUDA llama.cpp install that fires
-    /// when the engine reports an NVIDIA GPU. False (the default) means
-    /// auto-install is enabled — Deep Analyze gets the 15-25% faster
-    /// CUDA build without the user finding a hidden Settings button.
-    /// True disables the auto-install entirely.</summary>
+    /// <summary>Legacy preference retained so existing settings files
+    /// continue to round-trip. CUDA runtime installs are explicit actions.</summary>
     public bool DisableAutoInstallCuda { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready,
-    /// the Vulkan llama.cpp runtime is fetched silently so Deep Analyze
-    /// works without the user finding the Install button. Vulkan ships
-    /// on every GPU vendor — no NVIDIA gate. True disables the
-    /// auto-install entirely (manual install still available via the
-    /// engine's PrewarmModel IPC if a user-facing button is added).</summary>
+    /// <summary>Legacy preference retained for settings compatibility.
+    /// Runtime downloads require a user action.</summary>
     public bool DisableAutoInstallVulkanRuntime { get; set; } = false;
 
-    /// <summary>Default false (auto-install enabled). On engine-ready
-    /// AND NVIDIA hardware, cuDNN is fetched from NVIDIA's public CDN
-    /// (developer.download.nvidia.com) so the ORT CUDA EP can replace
-    /// DirectML for scanning (~10-15% throughput on RTX-class). True
-    /// disables; users can fall back to system-installed CUDA Toolkit
-    /// + cuDNN if they prefer the BYO path.</summary>
+    /// <summary>Legacy preference retained for settings compatibility.
+    /// CUDA runtime downloads require a user action and NVIDIA terms acceptance.</summary>
     public bool DisableAutoInstallCudnn { get; set; } = false;
 
     /// <summary>Default false (auto-install enabled). On engine-ready AND Intel

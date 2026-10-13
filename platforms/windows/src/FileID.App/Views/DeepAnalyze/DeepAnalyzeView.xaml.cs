@@ -839,6 +839,11 @@ public sealed partial class DeepAnalyzeView : UserControl
             var slot = ModelInstallerService.Instance.DeepVlm;
             if (slot.Status == ModelInstallStatus.Downloading || !SelectModel(requestedKind)) return;
             modelId = requestedKind;
+            if (!await ModelLicenseGate.EnsureAcceptedAsync([modelId]))
+            {
+                DebugLog.Info($"VLM install cancelled because license terms for {modelId} were declined.");
+                return;
+            }
             // Mark the shared slot before the first await. Otherwise a second
             // card or Welcome Install All can prewarm a different VLM while
             // the first click is still waiting for engine progress.
