@@ -10,7 +10,7 @@
 //
 // Hardening: `find()` only probes `%LOCALAPPDATA%\FileID\Models\
 // llama.cpp\` (no PATH lookup — supply-chain hardening). Binary is
-// sanity-checked (PE header + size bounds) before spawning.
+// sanity-checked (host-compatible PE/ELF header + size bounds) before spawning.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -89,58 +89,14 @@ impl VlmRunner {
     /// llama.cpp\` and verify it's a sane PE binary in the expected
     /// size range. Returns Err with a friendly message if missing —
     /// callers surface that to the user as "VLM runtime not installed".
+    fn binaries() -> Result<Vec<PathBuf>> { super::native_runtime::candidates("llama-mtmd-cli", "FILEID_LLAMA_CLI") }
     pub fn find() -> Result<Self> {
-        let root = crate::paths::models_dir().context("resolving Models dir")?;
-        let vulkan_dir = root.join("llama.cpp");
-        let cuda_dir = root.join("llama.cpp-cuda");
-        // Prefer the CUDA runtime (faster on NVIDIA) when it has the multimodal
-        // binary AND it actually launches; otherwise the universal Vulkan
-        // runtime. `sanity_check_binary` runs `--version`, so a CUDA build
-        // missing its runtime DLLs fails the probe and we fall through to Vulkan
-        // instead of erroring.
-        for dir in [&cuda_dir, &vulkan_dir] {
-            for cand in [
-                dir.join("llama-mtmd-cli.exe"),
-                dir.join("bin").join("llama-mtmd-cli.exe"),
-            ] {
-                if cand.exists() && sanity_check_binary(&cand).is_ok() {
-                    return Ok(VlmRunner { binary: cand });
-                }
+        for binary in Self::binaries()? {
+            if super::native_runtime::probe_version(&binary).is_ok() {
+                return Ok(Self { binary });
             }
         }
-        if let Some(dir) = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.join("RuntimeBundles/llama.cpp")))
-        {
-            for cand in [
-                dir.join("llama-mtmd-cli.exe"),
-                dir.join("bin").join("llama-mtmd-cli.exe"),
-            ] {
-                if cand.exists() && sanity_check_binary(&cand).is_ok() {
-                    return Ok(VlmRunner { binary: cand });
-                }
-            }
-        }
-        // Distinguish "not installed at all" from "installed but too old".
-        // Pre-mtmd-unification llama.cpp builds (≈b4400 and earlier) ship
-        // llama-server.exe / llama-llava-cli.exe / llama-qwen2vl-cli.exe but
-        // NOT the unified llama-mtmd-cli.exe this code drives — and they also
-        // predate Qwen2.5-VL. Emit an accurate, actionable message rather than
-        // the misleading "runtime not found" when a stale runtime is present.
-        if vulkan_dir.join("llama-server.exe").exists()
-            || vulkan_dir.join("llama-cli.exe").exists()
-            || cuda_dir.join("llama-server.exe").exists()
-        {
-            bail!(
-                "The installed llama.cpp runtime is too old for image analysis \
-                 (missing llama-mtmd-cli.exe, and pre-Qwen2.5-VL). Update it from \
-                 Settings -> Performance -> 'Install llama.cpp runtime'."
-            )
-        }
-        bail!(
-            "llama.cpp runtime not found under {}. Install it from Settings -> Performance -> 'Install llama.cpp runtime'.",
-            vulkan_dir.display()
-        )
+        bail!("Compatible installed llama-mtmd-cli runtime not found; configure FILEID_LLAMA_CLI or install the runtime in Settings")
     }
 }
 
@@ -163,56 +119,6 @@ fn find_weights_at(root: &std::path::Path, model_kind: &str) -> Option<(PathBuf,
     }
 }
 
-fn sanity_check_binary(p: &PathBuf) -> Result<()> {
-    let meta = std::fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
-    let len = meta.len();
-    // Floor is 20 KB, not 3 MB: modern llama.cpp ships a thin launcher
-    // (llama-mtmd-cli.exe ~89 KB, the heavy code lives in mtmd.dll / ggml DLLs),
-    // so a 3 MB floor rejected a perfectly valid binary and surfaced a bogus
-    // "runtime too old, re-install" toast. 20 KB still catches a truncated or
-    // empty download; the --version probe below catches missing DLLs.
-    if !(20_000..=200_000_000).contains(&len) {
-        bail!(
-            "{}: unexpected size {} bytes (expected 20 KB..200 MB)",
-            p.display(),
-            len
-        );
-    }
-    let mut buf = [0u8; 2];
-    use std::io::Read;
-    let mut f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-    f.read_exact(&mut buf).context("reading PE header")?;
-    if buf != *b"MZ" {
-        bail!("{}: not a PE binary (missing MZ header)", p.display());
-    }
-    // PE-header + size pass even if dependent DLLs are missing.
-    // Spawning --version trips on dyld errors so we can emit an
-    // actionable "reinstall the runtime" message instead of letting
-    // caption() fail later with STATUS_DLL_NOT_FOUND.
-    let out = std::process::Command::new(p)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => bail!(
-            "{}: --version exited with status {:?}. The binary is present but \
-             likely missing dependent DLLs (a Performance Pack install probably \
-             didn't finish). Re-install from Settings -> Performance.",
-            p.display(),
-            o.status.code()
-        ),
-        Err(err) => bail!(
-            "{}: could not spawn for --version probe ({err}). Likely \
-             missing dependent DLLs — re-install the runtime from \
-             Settings -> Performance.",
-            p.display()
-        ),
-    }
-}
-
 /// Caption an image. Streams stdout line-by-line, calling `on_token`
 /// per chunk and accumulating the final text. Honors cancellation via
 /// the shared `AtomicBool` — flips kill the child process within
@@ -231,9 +137,20 @@ pub async fn caption(
     #[cfg(not(feature = "vlm-native"))]
     {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
+        super::runtime::ensure_gpu_inference_alive()?;
+        let bytes = tokio::fs::metadata(&req.gguf_path).await?.len().saturating_add(tokio::fs::metadata(&req.mmproj_path).await?.len());
+        let mb = bytes.div_ceil(1_048_576);
+        let memory_mb = mb.saturating_add(mb.div_ceil(4)).saturating_add(1408);
+        let admission_cancel = cancel.clone();
+        let forced_cpu = super::runtime::user_forced_cpu() || super::runtime::verified_gpu_capacity_mb()
+            .is_none_or(|capacity| memory_mb.saturating_add(crate::resource_scheduler::ResourceScheduler::shared().snapshot().gpu_mb) > capacity);
+        let lease = tokio::task::spawn_blocking(move || crate::resource_scheduler::ResourceScheduler::shared().reserve_with_accelerators(
+            crate::resource_scheduler::Demand { memory_mb, cpu: 1, io: 1 },
+            crate::resource_scheduler::AcceleratorDemand { gpu_mb: if forced_cpu { 0 } else { memory_mb }, npu_mb: 0 },
+            crate::resource_scheduler::Priority::Interactive, || admission_cancel.load(std::sync::atomic::Ordering::Relaxed))).await??;
         crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path).await?;
         let mut cmd = Command::new(&runner.binary);
-        cmd.arg("-m").arg(&req.gguf_path);
+        cmd.arg("--offline").arg("-m").arg(&req.gguf_path);
         cmd.arg("--mmproj").arg(&req.mmproj_path);
         cmd.arg("--image").arg(&req.image_path);
         cmd.arg("-p").arg(&req.prompt);
@@ -251,8 +168,8 @@ pub async fn caption(
         // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
         // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
         // recovery), evacuating the GPU for the per-file CLI path too. (F-C1-006)
-        let forced_cpu = crate::models::runtime::user_forced_cpu();
         cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
+        if forced_cpu { cmd.arg("--no-mmproj-offload"); }
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
         // skipped under forced-CPU so we don't re-engage the evacuated GPU.
         if !forced_cpu {
@@ -265,16 +182,21 @@ pub async fn caption(
         cmd.stdin(std::process::Stdio::null());
         // Kill the child if the parent task is dropped mid-caption so we
         // don't orphan llama-mtmd-cli for the OS session.
-        cmd.kill_on_drop(true);
+        super::native_process::configure(&mut cmd);
 
-        let mut child = cmd.spawn().with_context(|| format!("spawn {}", runner.binary.display()))?;
+        let mut child = cmd.spawn().with_context(|| format!("spawn {}", crate::platform::redact_path_for_log(&runner.binary)))?;
+        let stderr = child.stderr.take();
+        let stdout = child.stdout.take();
+        let tracker = super::native_process::ProcessTracker::default();
+        let process = super::native_process::OwnedProcess::new(child, Some(Arc::new(lease)), &tracker);
+        process.poll_exit()?;
         // Drain stderr concurrently. llama.cpp is extremely verbose on stderr
         // (backend init, full model/mmproj metadata, sampling params, timings —
         // tens of KB, emitted during load BEFORE any stdout token). With the
         // pipe captured but never read, the child blocks on its next stderr
         // write once the OS pipe buffer fills while we block reading stdout —
         // a deadlock that hangs Deep Analyze. Read it to EOF on its own task.
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = stderr {
             // llama.cpp echoes the --image arg (a user path) into its
             // diagnostics; the model/binary paths are app-structural and
             // pass redaction unchanged.
@@ -287,18 +209,21 @@ pub async fn caption(
                 }
             });
         }
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("missing stdout pipe"))?;
+        let stdout = stdout.ok_or_else(|| anyhow!("missing stdout pipe"))?;
+        let stdout = tokio::io::AsyncReadExt::take(stdout, 1024 * 1024 + 1);
         let mut reader = BufReader::new(stdout).lines();
 
         let mut text = String::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
         loop {
             tokio::select! {
                 line = reader.next_line() => {
                     match line {
                         Ok(Some(l)) => {
+                            if text.len().saturating_add(l.len()) > 1024 * 1024 {
+                                process.shutdown().await?;
+                                bail!("VLM CLI output exceeded cap");
+                            }
                             on_token(&l);
                             if !text.is_empty() {
                                 text.push('\n');
@@ -313,15 +238,18 @@ pub async fn caption(
                     }
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = child.kill().await;
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) || std::time::Instant::now() >= deadline || crate::coordinator::process_gpu_device_removed() {
+                        process.shutdown().await?;
                         bail!("cancelled");
                     }
                 }
             }
         }
 
-        let status = child.wait().await.context("waiting on VLM child")?;
+        let status = match process.wait_exit().await {
+            Ok(status) => status,
+            Err(error) => { process.shutdown().await?; return Err(error); }
+        };
         if !status.success() {
             bail!("VLM exited with status {:?}", status);
         }
@@ -384,7 +312,7 @@ pub(crate) async fn discrete_gpu_device(binary: &std::path::Path) -> Option<Stri
         .await
         .insert(binary.to_path_buf(), resolved.clone());
     if let Some(dev) = &resolved {
-        tracing::info!(%dev, binary = %binary.display(), "[VLM] pinning llama.cpp to discrete GPU");
+        tracing::info!(%dev, binary = %crate::platform::redact_path_for_log(binary), "[VLM] pinning llama.cpp to discrete GPU");
     }
     resolved
 }
@@ -395,8 +323,10 @@ async fn probe_discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
-    cmd.kill_on_drop(true);
+    super::native_process::configure(&mut cmd);
     let child = cmd.spawn().ok()?;
+    #[cfg(windows)]
+    let _ownership = super::native_process::ParentOwnership::new(&child).ok()?;
     let out = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
         .await
         .ok()? // probe timed out
@@ -510,5 +440,38 @@ mod tests {
         // device 0 is the dGPU on hybrid systems).
         let out = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4070 (8188 MiB, free)\n";
         assert_eq!(parse_best_vulkan_device(out), None);
+    }
+}
+
+#[cfg(test)]
+mod configured_runtime_tests {
+    use super::*;
+    #[test]
+    #[ignore = "internal configured discovery fixture"]
+    fn configured_cli_fixture() {
+        let expected = std::path::PathBuf::from(std::env::var_os("FILEID_LLAMA_CLI").unwrap());
+        if std::env::var("FILEID_TEST_CLI_CASE").unwrap() == "valid" {
+            assert_eq!(VlmRunner::binaries().unwrap(), vec![expected]);
+        } else { assert!(VlmRunner::binaries().is_err()); }
+    }
+    #[test]
+    fn canonical_configured_cli_validates_absolute_host_paths() {
+        let binary = std::env::current_exe().unwrap();
+        let foreign = std::env::temp_dir().join(format!("fileid-foreign-cli-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&foreign, vec![0; 20000]).unwrap();
+        for (case, path) in [("valid", binary.clone()), ("relative", "relative-cli".into()), ("foreign", foreign.clone())] {
+            let status = std::process::Command::new(&binary)
+                .args(["--exact", "models::vlm::configured_runtime_tests::configured_cli_fixture", "--ignored", "--nocapture"])
+                .env("FILEID_LLAMA_CLI", path).env("FILEID_LLAMA_MTMD", "unapproved-name-must-not-be-read")
+                .env("FILEID_TEST_CLI_CASE", case).status().unwrap();
+            assert!(status.success(), "{case}");
+        }
+        std::fs::remove_file(foreign).unwrap();
+    }
+    #[test]
+    #[ignore = "requires explicitly configured approved installed native CLI"]
+    fn configured_installed_cli_is_discovered_and_version_probed() {
+        let expected = std::path::PathBuf::from(std::env::var_os("FILEID_LLAMA_CLI").unwrap());
+        assert_eq!(VlmRunner::find().unwrap().binary, expected);
     }
 }

@@ -20,6 +20,7 @@
 
 pub mod bge_text;
 pub mod clip_text;
+pub mod clip_space;
 pub mod clip_tokenizer;
 pub mod ep_guard;
 pub mod mobileclip;
@@ -39,3 +40,9 @@ pub mod vlm_server;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;
+
+pub mod native_runtime;
+mod native_process;
+pub mod resident;
+
+mod onnx_residency;

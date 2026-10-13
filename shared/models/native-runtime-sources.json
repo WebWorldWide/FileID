@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "llama": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "version": "b9254",
+    "commit": "e947228222147356bc7e64154d3439e142481632",
+    "archiveUrl": "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/e947228222147356bc7e64154d3439e142481632",
+    "archiveSha256": "b45827df371f9a418680f0137f58a3a27e0e577b4c5e99e54519eea28be67241",
+    "license": "MIT",
+    "licenseSha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+    "patch": "platforms/linux/build/patches/llama-b9254-no-outbound.patch",
+    "patchSha256": "2178a595901d98df42c23e96999fffe1bb7c32c9634bf8a5a762bd1a6b922e9c",
+    "upstreamFiles": {
+      "common/http.h": "166e8ce85e6293423a0ca772fb18078b7c9f80de9736462fcc46800e78459451",
+      "tools/server/server-models.cpp": "0f55b4a7f637bb47624c90b62a94006ff83170168666df8233bc3c6a5cf1ba07",
+      "vendor/cpp-httplib/httplib.cpp": "ecc8c9d994de0506f07bd1684d708f0d23f95a9dbbbf4a64a11e64418dea34f6"
+    },
+    "patchedFiles": {
+      "common/http.h": "d5a6e71ebf436e1de38da0282e0fe9e400b20597fa17fab3a0a383812f9e3a38",
+      "tools/server/server-models.cpp": "65d6e0f93e8625b15e2e99e77e06335ec8bb0255105141ad2271e9f1d810dda4",
+      "vendor/cpp-httplib/httplib.cpp": "c386e956260264b4c42413763b74d3e5453388e6ecb6c7b74368bddffac04151"
+    },
+    "networkPolicy": "Outbound HTTP helper, proxy helper and client socket creation disabled by pinned source patch. Authenticated loopback inference listener remains. FileID additionally launches with --offline."
+  },
+  "whisper": {
+    "repository": "https://github.com/ggml-org/whisper.cpp",
+    "version": "v1.9.0",
+    "commit": "86c40c3bd6fc86f1187fb751d111b49e0fc18e84",
+    "archiveUrl": "https://codeload.github.com/ggml-org/whisper.cpp/tar.gz/86c40c3bd6fc86f1187fb751d111b49e0fc18e84",
+    "archiveSha256": "2c2b020305abe6024c07716d40c71a7172182dd2063e076b8b509882023aa7bb",
+    "license": "MIT",
+    "licenseSha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+    "networkPolicy": "WHISPER_CURL=OFF; no server target built."
+  }
+}

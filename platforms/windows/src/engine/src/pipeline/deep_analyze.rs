@@ -50,6 +50,21 @@ impl AnalyzeMode {
 /// Removes the temp rasterized frame on EVERY exit path (`?` error, cancel
 /// bail, success), so VLM error paths no longer leak temp files (#24). Mirrors
 /// the discovery.rs `TempDir` Drop pattern.
+struct RasterAdmissionGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl Drop for RasterAdmissionGuard {
+    fn drop(&mut self) { self.0.store(true, std::sync::atomic::Ordering::Relaxed); }
+}
+async fn reserve_raster_work(cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<crate::resource_scheduler::Lease> {
+    let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _guard = RasterAdmissionGuard(abandoned.clone());
+    tokio::task::spawn_blocking(move || crate::resource_scheduler::ResourceScheduler::shared().reserve_queued(
+        crate::resource_scheduler::Demand { memory_mb: 512, cpu: 1, io: 1 },
+        crate::resource_scheduler::AcceleratorDemand::default(),
+        crate::resource_scheduler::Priority::Interactive,
+        || cancel.load(std::sync::atomic::Ordering::Relaxed) || abandoned.load(std::sync::atomic::Ordering::Relaxed),
+    )).await?
+}
+
 struct TempFileGuard(Option<std::path::PathBuf>);
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
@@ -71,14 +86,23 @@ pub async fn analyze_file(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
 
+    let service = crate::models::resident::ResidentModelService::shared();
+    if service.load_installed(Some(model_kind), crate::resource_scheduler::Priority::Interactive, cancel.clone()).await.is_ok()
+        && vlm_server_payload_ok(&service, model_kind, cancel.clone()).await.is_ok() {
+        return analyze_file_via_server(db, &service, file_id, model_kind, mode, cancel, face_names, on_token).await;
+    }
     let started = std::time::Instant::now();
 
     // Resolve weights for this model_kind.
-    let (gguf, mmproj) = vlm::find_weights(model_kind)
-        .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
+    let service = crate::models::resident::ResidentModelService::shared();
+    let verified = service.resolve_model(Some(model_kind), true).await?;
+    let gguf = verified.artifacts[0].path.clone();
+    let mmproj = verified.artifacts[1].path.clone();
 
     // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
+    let raster_lease = reserve_raster_work(cancel.clone()).await?;
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    drop(raster_lease);
     // Guard cleans the temp frame on any exit, including the `?`/bail paths
     // below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
@@ -331,7 +355,9 @@ fn persist_vlm_results(
 /// incompatibility and fall back to the per-file CLI path (a different,
 /// known-good code path) instead of producing zero tags.
 pub(crate) async fn vlm_server_payload_ok(
-    server: &crate::models::vlm_server::VlmServer,
+    server: &crate::models::resident::ResidentModelService,
+    model: &str,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     let test_img = std::env::temp_dir().join(format!(
         "fileid-vlm-selftest-{}.jpg",
@@ -346,7 +372,7 @@ pub(crate) async fn vlm_server_payload_ok(
     ))
     .save_with_format(&test_img, image::ImageFormat::Jpeg)
     .map_err(|e| anyhow::anyhow!("write VLM self-test image: {e}"))?;
-    let result = server.complete(&test_img, "Reply with: ok", 1).await;
+    let result = server.caption(model, &test_img, "Reply with: ok", 1, crate::resource_scheduler::Priority::Interactive, cancel).await;
     let _ = std::fs::remove_file(&test_img);
     result.map(|_| ())
 }
@@ -363,16 +389,17 @@ async fn wait_cancelled(cancel: &std::sync::atomic::AtomicBool) {
 /// of blocking up to the client's (300 s) timeout. Dropping the losing branch's
 /// future cancels the underlying reqwest request. (audit E4)
 async fn complete_cancellable(
-    server: &crate::models::vlm_server::VlmServer,
+    server: &crate::models::resident::ResidentModelService,
+    model: &str,
     image: &std::path::Path,
     prompt: &str,
     max_tokens: u32,
-    cancel: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<String> {
     tokio::select! {
         biased;
         _ = wait_cancelled(cancel) => anyhow::bail!("cancelled"),
-        r = server.complete(image, prompt, max_tokens) => r,
+        r = server.caption(model, image, prompt, max_tokens, crate::resource_scheduler::Priority::Interactive, cancel.clone()) => r,
     }
 }
 
@@ -386,7 +413,7 @@ async fn complete_cancellable(
 /// backend-agnostic.
 pub(crate) async fn analyze_file_via_server(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
-    server: &crate::models::vlm_server::VlmServer,
+    server: &crate::models::resident::ResidentModelService,
     file_id: i64,
     model_kind: &str,
     mode: AnalyzeMode,
@@ -396,7 +423,9 @@ pub(crate) async fn analyze_file_via_server(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
     let started = std::time::Instant::now();
+    let raster_lease = reserve_raster_work(cancel.clone()).await?;
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    drop(raster_lease);
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
@@ -410,7 +439,7 @@ pub(crate) async fn analyze_file_via_server(
             anyhow::bail!("cancelled");
         }
         let cap_prompt = vlm::caption_prompt_with_faces(face_names);
-        let d = complete_cancellable(server, &rasterized, &cap_prompt, 80, &cancel).await?;
+        let d = complete_cancellable(server, model_kind, &rasterized, &cap_prompt, 80, &cancel).await?;
         on_token(&d);
         description = Some(d);
     }
@@ -420,7 +449,7 @@ pub(crate) async fn analyze_file_via_server(
             anyhow::bail!("cancelled");
         }
         tags = parse_vlm_tags(
-            &complete_cancellable(server, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?,
+            &complete_cancellable(server, model_kind, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?,
         );
         // Surface tags in the live stream so a tags-only pass shows feedback.
         if !tags.is_empty() {
@@ -435,7 +464,7 @@ pub(crate) async fn analyze_file_via_server(
         let ren_prompt = vlm::rename_prompt_with_faces(face_names);
         proposed_name = Some(apply_person_prefix(
             &sanitize_proposed_name(
-                &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
+                &complete_cancellable(server, model_kind, &rasterized, &ren_prompt, 30, &cancel).await?,
             ),
             face_names,
         ));

@@ -112,14 +112,27 @@ pub(crate) async fn handle_deep_analyze_file(
     ))))
     .await;
 
-    let runner = match crate::models::vlm::VlmRunner::find() {
-        Ok(r) => r,
-        Err(err) => {
+    let service = crate::models::resident::ResidentModelService::shared();
+    let runtime = match crate::models::vlm::VlmRunner::find() {
+        Ok(runner) => Ok(Some(runner)),
+        Err(cli_error) => match crate::models::vlm_server::VlmServer::server_binaries() {
+            Ok(binaries) if binaries.is_empty() => Err(("llama_cpp_missing", cli_error)),
+            Err(error) => Err(("deep_analyze_failed", error)),
+            Ok(_) => match service.load_installed(Some(&payload.model_kind), crate::resource_scheduler::Priority::Interactive, cancel.clone()).await {
+                Err(error) => Err(("deep_analyze_failed", error)),
+                Ok(_) => crate::pipeline::deep_analyze::vlm_server_payload_ok(&service, &payload.model_kind, cancel.clone()).await
+                    .map(|_| None).map_err(|error| ("deep_analyze_failed", error)),
+            },
+        },
+    };
+    let runner = match runtime {
+        Ok(runner) => runner,
+        Err((kind, err)) => {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "llama_cpp_missing".into(),
-                message: format!("{err}"),
+                kind: kind.into(),
+                message: format!("{err:#}"),
                 path: None,
-                model_kind: None,
+                model_kind: Some(payload.model_kind.clone()),
             }))))
             .await;
             // Always send a terminal Complete so the UI clears the
@@ -156,15 +169,7 @@ pub(crate) async fn handle_deep_analyze_file(
         let conn = db.lock();
         fetch_face_names(&conn, file_id)
     };
-    let outcome = analyze_file(
-        db,
-        &runner,
-        file_id,
-        &model_kind,
-        AnalyzeMode::Both,
-        cancel.clone(),
-        &face_names,
-        move |chunk| {
+    let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
             // send.await }) pattern would pile up unbounded tasks if the
@@ -196,9 +201,12 @@ pub(crate) async fn handle_deep_analyze_file(
                     current_caption: Some(snapshot),
                 },
             ))));
-        },
-    )
-    .await;
+    };
+    let outcome = if let Some(runner) = runner {
+        analyze_file(db, &runner, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token).await
+    } else {
+        analyze_file_via_server(db, &service, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token).await
+    };
 
     match outcome {
         Ok(out) => {
@@ -438,14 +446,17 @@ async fn run_deep_analyze_batch(
     // including the cancel-early path below.
     let server = match weights {
         Some((gguf, mmproj)) => {
-            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj, &cancel).await {
-                Ok(s) => {
+            let service = crate::models::resident::ResidentModelService::shared();
+            let _ = (gguf, mmproj);
+            match service.load_installed(Some(model_kind), crate::resource_scheduler::Priority::Interactive, cancel.clone()).await {
+                Ok(_) => {
+                    let s = service;
                     // A2: verify the server accepts our multimodal payload shape
                     // BEFORE committing the whole batch to it. If it rejects the
                     // request (e.g. 400 on the image_url data-URI — a format that
                     // was never hardware-verified), fall back to the per-file CLI
                     // instead of failing every file silently.
-                    match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s).await {
+                    match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s, model_kind, cancel.clone()).await {
                         Ok(()) => {
                             tracing::info!(model_kind, "[VLM-SERVER] persistent server up; payload self-test OK; using it for the batch");
                             Some(s)
@@ -722,7 +733,7 @@ async fn run_deep_analyze_batch(
                 // ONLY if that probe also fails (the server is actually gone).
                 if use_server && runner.is_some() {
                     let server_dead = match server.as_ref() {
-                        Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
+                        Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv, model_kind, cancel.clone())
                             .await
                             .is_err(),
                         None => true,
@@ -904,5 +915,89 @@ mod tests {
             !skip_for("qwen2.5-vl-7b"),
             "a model switch must re-analyze, not skip the old model's caption"
         );
+    }
+}
+
+#[cfg(test)]
+mod installed_runtime_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "requires explicitly configured isolated verified weights and server-only native runtime"]
+    async fn server_only_installed_runtime_persists_single_file_and_terminal_ipc() {
+        assert!(std::env::var_os("FILEID_LLAMA_SERVER").is_some());
+        assert!(crate::models::vlm::VlmRunner::find().is_err(), "this fixture must exercise server-only discovery");
+        let image = std::env::temp_dir().join(format!("fileid-single-native-fixture-{}.png", uuid::Uuid::new_v4()));
+        image::RgbImage::from_pixel(32, 32, image::Rgb([128, 128, 128])).save(&image).unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,kind,extension,failed) VALUES(?1,0,100,0,'image','png',0)", [image.to_string_lossy().as_ref()]).unwrap();
+        let id = conn.last_insert_rowid();
+        let db = Arc::new(Mutex::new(conn));
+        let (sink, mut events) = Sink::channel_for_test(1024);
+        let model = crate::models::resident::DEFAULT_MODEL;
+        handle_deep_analyze_file(sink, db.clone(), ipc::DeepAnalyzeFilePayload { file_id: id, model_kind: model.into() }, Arc::new(AtomicBool::new(false))).await;
+        std::fs::remove_file(image).unwrap();
+        let mut terminal = None;
+        let mut file_done = false;
+        while let Some(event) = events.recv().await {
+            match event.payload {
+                EventPayload::DeepAnalyzeComplete(result) => terminal = Some(result.inner),
+                EventPayload::DeepAnalyzeFileDone(_) => file_done = true,
+                EventPayload::Error(error) => panic!("native handler failed: {:?}", error.inner),
+                _ => {},
+            }
+        }
+        let terminal = terminal.unwrap();
+        assert_eq!((terminal.processed, terminal.failed, terminal.cancelled), (1, 0, false));
+        assert!(file_done);
+        let (description, completed): (String, String) = db.lock().query_row("SELECT vlm_description,vlm_full_model FROM files WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert!(!description.trim().is_empty()); assert_eq!(completed, model);
+        crate::models::resident::ResidentModelService::shared().shutdown().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod server_integrity_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore = "internal corrupted generated model fixture"]
+    async fn corrupted_server_only_model_fixture() {
+        let db = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+        let (sink, mut events) = Sink::channel_for_test(16);
+        handle_deep_analyze_file(sink, db, ipc::DeepAnalyzeFilePayload { file_id: 1, model_kind: crate::models::resident::DEFAULT_MODEL.into() }, Arc::new(AtomicBool::new(false))).await;
+        let mut error_seen = false;
+        let mut terminal_seen = false;
+        while let Some(event) = events.recv().await {
+            match event.payload {
+                EventPayload::Error(error) => {
+                    assert_eq!(error.inner.kind, "deep_analyze_failed");
+                    assert!(error.inner.message.contains("pinned SHA256 verification"), "{}", error.inner.message);
+                    assert!(!error.inner.message.contains("FILEID_LLAMA_CLI"));
+                    error_seen = true;
+                }
+                EventPayload::DeepAnalyzeComplete(complete) => { assert_eq!(complete.inner.failed, 1); assert!(!complete.inner.cancelled); terminal_seen = true; }
+                _ => {}
+            }
+        }
+        assert!(error_seen && terminal_seen);
+        crate::models::resident::ResidentModelService::shared().shutdown().await.unwrap();
+    }
+    #[test]
+    fn server_only_integrity_failure_preserves_actionable_error_and_terminal_ipc() {
+        let root = std::env::temp_dir().join(format!("fileid-corrupt-model-{}", uuid::Uuid::new_v4()));
+        let models = root.join("models");
+        let weights = models.join("vlm/qwen2.5-vl-7b");
+        std::fs::create_dir_all(&weights).unwrap();
+        std::fs::write(weights.join("model.gguf"), b"generated corrupt weights").unwrap();
+        std::fs::write(weights.join("mmproj.gguf"), b"generated corrupt projector").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let status = std::process::Command::new(&executable)
+            .args(["--exact", "commands::deep_analyze::server_integrity_tests::corrupted_server_only_model_fixture", "--ignored", "--nocapture"])
+            .env("FILEID_MODELS_DIR", &models).env("FILEID_LLAMA_SERVER", &executable)
+            .env("FILEID_LLAMA_CLI", root.join("missing-cli"))
+            .env("LOCALAPPDATA", root.join("state")).env("XDG_DATA_HOME", root.join("state"))
+            .status().unwrap();
+        assert!(status.success());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

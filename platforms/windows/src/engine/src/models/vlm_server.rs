@@ -1,16 +1,5 @@
-// Persistent llama.cpp server for VLM inference.
-//
-// Spawns `llama-server.exe` ONCE (loading the multi-GB model + mmproj a single
-// time) and serves many images over its OpenAI-compatible
-// `/v1/chat/completions` multimodal endpoint. This is the bulk path: the
-// per-file `llama-mtmd-cli.exe` subprocess (`vlm::caption`) reloads the model
-// on every call, so a whole-library Deep Analyze pass through the CLI is many
-// hours; through the server it is ~1–3 s/file because the model stays resident.
-//
-// The CLI path remains as a fallback (single-file Deep Analyze, or when the
-// server can't start). Binaries come from the same Vulkan runtime dir
-// (`%LOCALAPPDATA%\FileID\Models\llama.cpp\`) that `VlmRunner` probes; the
-// runtime bump to b9254 ships both `llama-mtmd-cli.exe` and `llama-server.exe`.
+// Authenticated loopback inference transport. Admission and residency are owned
+// by models::resident; native_process owns kill/reap and parent-death cleanup.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -21,11 +10,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
+use std::sync::Arc;
+use crate::resource_scheduler::Lease;
+use super::native_process::{OwnedProcess, ProcessTracker};
 
 pub struct VlmServer {
     // Held so the child is killed on drop (kill_on_drop). Never read directly.
-    _child: Child,
+    process: super::native_process::OwnedProcess,
+    #[cfg(test)]
+    process_id: u32,
     base_url: String,
     api_key: String,
     client: reqwest::Client,
@@ -45,38 +39,19 @@ impl VlmServer {
     /// first (faster on NVIDIA), then the universal Vulkan runtime. `start`
     /// tries each until one becomes healthy, so a present-but-broken CUDA
     /// runtime (e.g. missing cudart DLLs) transparently falls back to Vulkan.
-    fn server_binaries() -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        if let Ok(root) = crate::paths::models_dir() {
-        let mut dirs = vec![root.join("llama.cpp-cuda"), root.join("llama.cpp")];
-        if let Ok(executable) = std::env::current_exe() {
-            if let Some(application_dir) = executable.parent() {
-                dirs.push(application_dir.join("RuntimeBundles/llama.cpp"));
-            }
-        }
-        for dir in dirs {
-                for cand in [
-                    dir.join(format!("llama-server{BIN_EXT}")),
-                    dir.join("bin").join(format!("llama-server{BIN_EXT}")),
-                ] {
-                    if cand.exists() {
-                        out.push(cand);
-                    }
-                }
-            }
-        }
-        out
+    pub(crate) fn server_binaries() -> Result<Vec<PathBuf>> {
+        super::native_runtime::candidates("llama-server", "FILEID_LLAMA_SERVER")
     }
 
     /// Start the server with the given model + mmproj and wait for `/health`.
     /// The model load happens here (once); `complete()` calls are then cheap.
     /// Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime
     /// never blocks the working Vulkan one.
-    pub async fn start(gguf: &Path, mmproj: &Path, cancel: &AtomicBool) -> Result<Self> {
+    pub(crate) async fn start(gguf: &Path, mmproj: &Path, cancel: &AtomicBool, allow_gpu: bool, resources: Arc<Lease>, tracker: &ProcessTracker) -> Result<Self> {
         if cancel.load(Ordering::Relaxed) { bail!("VLM server startup cancelled"); }
         crate::util::model_memory::require_model_headroom(gguf,mmproj).await?;
         crate::models::runtime::ensure_gpu_inference_alive()?;
-        let bins = Self::server_binaries();
+        let bins = Self::server_binaries()?;
         if bins.is_empty() {
             bail!(
                 "llama-server{BIN_EXT} not found — update the llama.cpp runtime from \
@@ -89,10 +64,10 @@ impl VlmServer {
             if cancel.load(Ordering::Relaxed) {
                 bail!("VLM server startup cancelled");
             }
-            match Self::start_with_binary(&bin, gguf, mmproj, cancel).await {
+            match Self::start_with_binary(&bin, gguf, mmproj, cancel, allow_gpu, resources.clone(), tracker).await {
                 Ok(server) => return Ok(server),
                 Err(err) => {
-                    if crate::coordinator::process_gpu_device_removed() {
+                    if tracker.has_unreaped() || crate::coordinator::process_gpu_device_removed() {
                         return Err(err);
                     }
                     tracing::warn!(binary = %crate::platform::redact_path_for_log(&bin), ?err, "[VLM-SERVER] candidate failed; trying next backend");
@@ -108,15 +83,19 @@ impl VlmServer {
         gguf: &Path,
         mmproj: &Path,
         cancel: &AtomicBool,
+        allow_gpu: bool,
+        resources: Arc<Lease>,
+        tracker: &ProcessTracker,
     ) -> Result<Self> {
         crate::models::runtime::ensure_gpu_inference_alive()?;
         let port = pick_free_port()?;
         let api_key = new_api_key();
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
         // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
-        let forced_cpu = crate::models::runtime::user_forced_cpu();
+        let forced_cpu = !allow_gpu || crate::models::runtime::user_forced_cpu()
+            || crate::models::runtime::verified_gpu_capacity_mb().is_none();
         let mut cmd = Command::new(bin);
-        cmd.arg("-m")
+        cmd.arg("--offline").arg("-m")
             .arg(gguf)
             .arg("--mmproj")
             .arg(mmproj)
@@ -132,6 +111,7 @@ impl VlmServer {
             .arg(if forced_cpu { "0" } else { "99" })
             .arg("-c")
             .arg("4096");
+        if forced_cpu { cmd.arg("--no-mmproj-offload"); }
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
         // skipped under forced-CPU so we don't re-engage the evacuated GPU.
         if !forced_cpu {
@@ -147,52 +127,17 @@ impl VlmServer {
             .stdin(Stdio::null());
         // Kill the server if this handle is dropped (job done / cancelled /
         // engine exit) so we never orphan a multi-GB process.
-        cmd.kill_on_drop(true);
+        super::native_process::configure(&mut cmd);
 
-        let mut child = cmd.spawn().context("spawn bundled llama-server")?;
-        let base_url = format!("http://127.0.0.1:{port}");
         let client = build_loopback_client()?;
-
-        // Health-poll until ready, but bail FAST if the child exits early — a
-        // CUDA build missing its runtime DLLs dies on launch, and we don't want
-        // to wait the full timeout before falling back to Vulkan.
-        let health_url = format!("{base_url}/health");
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            if let Err(err) = crate::models::runtime::ensure_gpu_inference_alive() {
-                stop_child(&mut child).await;
-                return Err(err);
-            }
-            if cancel.load(Ordering::Relaxed) {
-                stop_child(&mut child).await;
-                bail!("VLM server startup cancelled");
-            }
-            if let Ok(Some(status)) = child.try_wait() {
-                bail!("llama-server exited early ({status}) — likely missing GPU runtime DLLs");
-            }
-            // Short per-request timeout so a server that accepts the connection
-            // but stalls the /health response can't defeat the 120s deadline by
-            // hanging on the client's 300s default. (audit E13)
-            if let Ok(resp) = client
-                .get(&health_url)
-                .bearer_auth(&api_key)
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await
-            {
-                if resp.status().is_success() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    if let Some(status) = child.try_wait().context("poll VLM server after health")? {
-                        bail!("llama-server exited after health check ({status})");
-                    }
-                    break;
-                }
-            }
-            if Instant::now() >= deadline {
-                stop_child(&mut child).await;
-                bail!("llama-server did not become healthy within 120s");
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        let child = cmd.spawn().context("spawn bundled llama-server")?;
+        #[cfg(test)]
+        let process_id = child.id().context("native server process ID")?;
+        let process = OwnedProcess::new(child, Some(resources), tracker);
+        let base_url = format!("http://127.0.0.1:{port}");
+        if let Err(error) = wait_for_readiness(&process, &client, &base_url, &api_key, cancel).await {
+            process.shutdown().await.context("cleanup failed VLM startup")?;
+            return Err(error);
         }
         tracing::info!(
             binary = %crate::platform::redact_path_for_log(bin),
@@ -200,7 +145,9 @@ impl VlmServer {
             "[VLM-SERVER] ready"
         );
         Ok(Self {
-            _child: child,
+            process,
+            #[cfg(test)]
+            process_id,
             base_url,
             api_key,
             client,
@@ -210,7 +157,15 @@ impl VlmServer {
     /// Run one multimodal completion: image + text prompt → text. The image is
     /// read from disk and inlined as a base64 data URI (the format
     /// `/v1/chat/completions` accepts for `image_url`).
+    #[allow(dead_code)]
     pub async fn complete(&self, image_path: &Path, prompt: &str, max_tokens: u32) -> Result<String> {
+        self.image_request(image_path, prompt, max_tokens, false, |_| {}).await
+    }
+    pub async fn complete_stream(&self, image_path: &Path, prompt: &str, max_tokens: u32, on_token: impl FnMut(&str)) -> Result<String> {
+        self.image_request(image_path, prompt, max_tokens, true, on_token).await
+    }
+    async fn image_request(&self, image_path: &Path, prompt: &str, max_tokens: u32, streaming: bool, on_token: impl FnMut(&str)) -> Result<String> {
+        validate_generation("", prompt, max_tokens)?;
         let bytes = read_image_bounded(image_path).await?;
         let data_uri = format!(
             "data:{};base64,{}",
@@ -233,34 +188,111 @@ impl VlmServer {
             "max_tokens": max_tokens,
             "n_predict": max_tokens,
             "temperature": 0.0,
-            "stream": false
+            "stream": streaming
         });
-        // reqwest is built without the `json` feature here, so serialize the
-        // body + parse the reply by hand via serde_json.
+        self.request(body, on_token).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn generate_text(
+        &self, system: &str, prompt: &str, max_tokens: u32, on_token: impl FnMut(&str),
+    ) -> Result<String> {
+        validate_generation(system, prompt, max_tokens)?;
+        self.request(serde_json::json!({
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            "max_tokens": max_tokens, "n_predict": max_tokens, "temperature": 0.0, "stream": true,
+        }), on_token).await
+    }
+
+    async fn request(&self, body: serde_json::Value, mut on_token: impl FnMut(&str)) -> Result<String> {
+        let streaming = body["stream"].as_bool() == Some(true);
         let body_bytes = serde_json::to_vec(&body).context("encode VLM request body")?;
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
-            .body(body_bytes)
-            .send()
-            .await
-            .context("VLM chat/completions request")?;
+        if body_bytes.len() > 96 * 1024 * 1024 { bail!("VLM request body exceeded cap"); }
+        let resp = self.client.post(format!("{}/v1/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key).header("content-type", "application/json")
+            .body(body_bytes).send().await.context("VLM chat/completions request")?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = read_response_bounded(resp).await.unwrap_or_default();
             bail!("llama-server returned {status}: {text}");
         }
+        if streaming {
+            let mut stream = resp.bytes_stream();
+            let mut decoder = SseDecoder::default();
+            while let Some(chunk) = stream.next().await {
+                if decoder.push(&chunk?, &mut on_token)? { return Ok(decoder.text); }
+            }
+            bail!("VLM stream ended without completion marker");
+        }
         let text = read_response_bounded(resp).await?;
-        let json: serde_json::Value =
-            serde_json::from_str(&text).context("parse VLM response JSON")?;
-        let content = json["choices"][0]["message"]["content"]
-            .as_str()
-            .ok_or_else(|| anyhow!("VLM response missing choices[0].message.content: {text}"))?;
+        let json: serde_json::Value = serde_json::from_str(&text).context("parse VLM response JSON")?;
+        let content = json["choices"][0]["message"]["content"].as_str()
+            .ok_or_else(|| anyhow!("VLM response missing message content"))?;
         Ok(content.trim().to_string())
     }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(base_url: String, resources: Arc<Lease>, tracker: &ProcessTracker) -> Self {
+        let mut command = super::native_process::test_child_command();
+        let child = command.spawn().unwrap();
+        Self { process_id: child.id().unwrap(), process: OwnedProcess::new(child, Some(resources), tracker), base_url, api_key: new_api_key(), client: build_loopback_client().unwrap() }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn process_id(&self) -> u32 { self.process_id }
+
+    pub(crate) fn retain_work(&self, resources: Arc<Lease>) -> Result<()> { self.process.retain_work(resources) }
+    pub(crate) fn release_work(&self) { self.process.release_work(); }
+    pub async fn shutdown(self) -> Result<()> { self.process.shutdown().await }
+}
+
+async fn wait_for_readiness(process: &OwnedProcess, client: &reqwest::Client, base_url: &str, api_key: &str, cancel: &AtomicBool) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        crate::models::runtime::ensure_gpu_inference_alive()?;
+        if cancel.load(Ordering::Relaxed) { bail!("VLM server startup cancelled"); }
+        if let Some(status) = process.poll_exit()? { bail!("llama-server exited during startup ({status})"); }
+        if let Ok(response) = client.get(format!("{base_url}/health")).bearer_auth(api_key).timeout(Duration::from_secs(2)).send().await {
+            if response.status().is_success() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some(status) = process.poll_exit()? { bail!("llama-server exited after health check ({status})"); }
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline { bail!("llama-server did not become healthy within 120s"); }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+pub(crate) fn validate_generation(system: &str, prompt: &str, max_tokens: u32) -> Result<()> {
+    if system.len().saturating_add(prompt.len()) > 32 * 1024 || prompt.trim().is_empty() || !(1..=512).contains(&max_tokens) {
+        bail!("Invalid bounded generation request");
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct SseDecoder { pending: Vec<u8>, text: String, received: usize }
+impl SseDecoder {
+    fn push(&mut self, chunk: &[u8], on_token: &mut impl FnMut(&str)) -> Result<bool> {
+        self.received = self.received.saturating_add(chunk.len());
+        if self.received > MAX_VLM_RESPONSE_BYTES { bail!("VLM stream exceeded response cap"); }
+        self.pending.extend_from_slice(chunk);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<_> = self.pending.drain(..=end).collect();
+            let line = std::str::from_utf8(&line)?.trim();
+            let Some(data) = line.strip_prefix("data:") else { continue };
+            let data = data.trim();
+            if data == "[DONE]" { return Ok(true); }
+            let json: serde_json::Value = serde_json::from_str(data).context("parse VLM stream event")?;
+            if json.get("error").is_some() { bail!("VLM stream returned an error"); }
+            if let Some(token) = json["choices"][0]["delta"]["content"].as_str() {
+                self.text.push_str(token); on_token(token);
+            }
+        }
+        Ok(false)
+    }
+
 }
 
 fn build_loopback_client() -> Result<reqwest::Client> {
@@ -276,13 +308,7 @@ fn build_loopback_client_with(builder: reqwest::ClientBuilder) -> Result<reqwest
         .context("build VLM HTTP client")
 }
 
-async fn stop_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-}
+
 
 async fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
     let safe_path = crate::platform::redact_path_for_log(path);
@@ -333,10 +359,10 @@ fn new_api_key() -> String {
 }
 
 /// llama-server cannot inherit a pre-bound listener, so the parent must release
-/// the selected loopback port before spawn. Startup still fails closed: health
-/// requires an unguessable bearer token and readiness is accepted only after the
-/// spawned child is confirmed alive, so a process that wins the bind race cannot
-/// be mistaken for FileID's server.
+/// the selected loopback port before spawn. Upstream health is public; inference
+/// requires the per-session bearer token. Readiness also checks that the spawned
+/// child remains alive after health; a health reply alone is not proof that the
+/// owned process is ready.
 fn pick_free_port() -> Result<u16> {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").context("bind ephemeral port for VLM server")?;
@@ -368,6 +394,58 @@ fn image_mime(bytes: &[u8]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn delayed_readiness_cleanup(drop_startup: bool) {
+        use crate::resource_scheduler::{Demand, Priority, ResourceScheduler};
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (seen, health_seen) = tokio::sync::oneshot::channel();
+        let responder = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048]; assert!(stream.read(&mut request).unwrap() > 0);
+            write!(stream, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+            seen.send(()).unwrap();
+        });
+        let scheduler = ResourceScheduler::new(|| (16384, 12000), 1, 1);
+        let tracker = Arc::new(ProcessTracker::default());
+        let lease = Arc::new(scheduler.reserve(Demand { memory_mb: 1024, cpu: 1, io: 1 }, Priority::Interactive, || false).unwrap());
+        let server = VlmServer::fixture(base_url, lease, &tracker);
+        let pid = server.process_id();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let startup = { let cancel = cancel.clone(); tokio::spawn(async move {
+            let result = wait_for_readiness(&server.process, &server.client, &server.base_url, &server.api_key, &cancel).await;
+            server.shutdown().await.unwrap();
+            result
+        }) };
+        tokio::time::timeout(Duration::from_secs(3), health_seen).await.unwrap().unwrap();
+        assert!(super::super::native_process::test_child_alive(pid));
+        assert_eq!(scheduler.snapshot().memory_mb, 1024);
+        assert!(scheduler.reserve(Demand { cpu: 1, io: 1, ..Demand::default() }, Priority::Background, || false).is_err());
+        if drop_startup { startup.abort(); let _ = startup.await; }
+        else { cancel.store(true, Ordering::Relaxed); assert!(startup.await.unwrap().unwrap_err().to_string().contains("startup cancelled")); }
+        tracker.shutdown().await.unwrap();
+        assert!(!super::super::native_process::test_child_alive(pid));
+        assert_eq!(scheduler.snapshot().active, 0);
+        responder.join().unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_delayed_readiness_reaps_before_releasing_startup_admission() { delayed_readiness_cleanup(false).await; }
+    #[tokio::test]
+    async fn dropped_delayed_readiness_keeps_owned_cleanup_and_admission() { delayed_readiness_cleanup(true).await; }
+
+    #[test]
+    fn sse_fragmentation_utf8_crlf_and_done_are_bounded() {
+        let mut decoder = SseDecoder::default();
+        let mut tokens = String::new();
+        let bytes = "data: {\"choices\":[{\"delta\":{\"content\":\"caf\u{e9}\"}}]}\r\n\r\ndata: [DONE]\n".as_bytes();
+        let mut done = false;
+        for byte in bytes { done |= decoder.push(&[*byte], &mut |token| tokens.push_str(token)).unwrap(); }
+        assert!(done); assert_eq!(tokens, "café"); assert_eq!(decoder.text, tokens);
+        assert!(SseDecoder::default().push(&vec![0; MAX_VLM_RESPONSE_BYTES + 1], &mut |_| {}).is_err());
+        assert!(validate_generation("", "ok", 513).is_err());
+        assert!(validate_generation("", &"x".repeat(32769), 1).is_err());
+    }
 
     #[tokio::test]
     async fn bounded_image_reader_rejects_oversized_sparse_file() {

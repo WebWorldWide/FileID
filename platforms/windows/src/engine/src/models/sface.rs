@@ -23,6 +23,7 @@ use super::runtime::{
 
 pub struct SFace {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -53,6 +54,7 @@ impl SFace {
                 .context("register execution providers (SFace)")?;
         }
         tracing::info!(model = "SFace", chain = ?chain_labels, "EP priority chain registered");
+        let residency = super::onnx_residency::reserve(path, false)?;
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SFace)")?;
@@ -65,7 +67,7 @@ impl SFace {
             .name
             .clone();
 
-        let mut model = Self { session, input_name, model_version };
+        let mut model = Self { _residency: residency, session, input_name, model_version };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 112 * 112])?;
         tracing::info!(

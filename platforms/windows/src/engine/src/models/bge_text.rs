@@ -28,6 +28,7 @@ const MAX_SEQ: usize = 256;
 
 pub struct BgeText {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's input tensor names, read once at load. BGE binds up to three
     /// inputs (ids/mask/token_type) by name; caching the list avoids rebuilding
     /// a `Vec<String>` from `session.inputs` on every `embed`.
@@ -70,12 +71,13 @@ impl BgeText {
                 .context("register execution providers (BGE)")?;
         }
         tracing::info!(model = "BGE-small-en-v1.5", "pinned to CPU EP");
+        let residency = super::onnx_residency::reserve(weights, true)?;
         let session = builder
             .commit_from_file(weights)
             .context("ORT session commit (BGE)")?;
         let input_names: Vec<String> = session.inputs.iter().map(|i| i.name.clone()).collect();
 
-        let mut model = Self { session, input_names, tokenizer };
+        let mut model = Self { _residency: residency, session, input_names, tokenizer };
         let _ = model.embed("warmup")?;
         tracing::info!(model = "BGE-small-en-v1.5", "warmup complete");
         Ok(model)

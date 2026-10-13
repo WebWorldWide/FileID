@@ -18,6 +18,7 @@ const CONTEXT_LEN: usize = 77;
 
 pub struct ClipText {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -30,6 +31,10 @@ impl ClipText {
         if !path.exists() {
             anyhow::bail!("CLIP text weights missing at {}", path.display());
         }
+        super::clip_space::verify(path, "clip_text", 0)?;
+        let directory = path.parent().ok_or_else(|| anyhow::anyhow!("CLIP weights have no directory"))?;
+        super::clip_space::verify(&directory.join("vocab.json"), "clip_text", 1)?;
+        super::clip_space::verify(&directory.join("merges.txt"), "clip_text", 2)?;
         let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
@@ -43,6 +48,7 @@ impl ClipText {
                 .context("register execution providers (CLIP text)")?;
         }
         tracing::info!(model = "CLIP text", chain = ?chain_labels, "EP priority chain registered");
+        let residency = super::onnx_residency::reserve(path, false)?;
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (CLIP text)")?;
@@ -52,7 +58,7 @@ impl ClipText {
             .ok_or_else(|| anyhow::anyhow!("CLIP text ONNX has no inputs"))?
             .name
             .clone();
-        Ok(Self { session, input_name, tokenizer })
+        Ok(Self { _residency: residency, session, input_name, tokenizer })
     }
 
     pub fn embed(&mut self, query: &str) -> Result<Vec<f32>> {
@@ -89,6 +95,7 @@ impl ClipText {
             .context("extract CLIP text output as f32")?;
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
+        if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP text embedding") }
         Ok(emb)
     }
 
@@ -143,6 +150,7 @@ impl ClipText {
         for i in 0..batch {
             let mut emb = data[i * dim..(i + 1) * dim].to_vec();
             l2_normalize(&mut emb);
+            if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP text embedding") }
             out.push(emb);
         }
         Ok(out)

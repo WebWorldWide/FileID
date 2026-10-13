@@ -111,6 +111,7 @@ fn load_suppress_sidecar(tag_list: &Path) -> HashSet<String> {
 
 pub struct RamPlusTagger {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's single input tensor name, read once at load. Reused on every
     /// forward instead of re-walking `session.inputs.first()` per inference.
     input_name: String,
@@ -169,6 +170,7 @@ impl RamPlusTagger {
                 .context("register execution providers (RAM++)")?;
         }
         tracing::info!(model = "RAM++", tags = tags.len(), chain = ?chain_labels, "EP priority chain registered");
+        let residency = super::onnx_residency::reserve(onnx, false)?;
         let session = builder
             .commit_from_file(onnx)
             .context("ORT session commit (RAM++)")?;
@@ -241,6 +243,7 @@ impl RamPlusTagger {
         let suppress_extra = load_suppress_sidecar(tag_list);
 
         let mut model = Self {
+            _residency: residency,
             session,
             input_name,
             tags,

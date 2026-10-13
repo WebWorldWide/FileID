@@ -1,0 +1,31 @@
+--- a/common/http.h
++++ b/common/http.h
+@@ -66,6 +66,7 @@
+ }
+ 
+ static std::pair<httplib::Client, common_http_url> common_http_client(const std::string & url) {
++    throw std::runtime_error("FileID native runtime: outbound HTTP helpers disabled");
+     common_http_url parts = common_http_parse_url(url);
+ 
+     if (parts.host.empty()) {
+--- a/tools/server/server-models.cpp
++++ b/tools/server/server-models.cpp
+@@ -1462,6 +1462,7 @@
+         int32_t timeout_read,
+         int32_t timeout_write
+         ) {
++    throw std::runtime_error("FileID native runtime: outbound proxy helper disabled");
+     // shared between reader and writer threads
+     auto cli  = std::make_shared<httplib::ClientImpl>(host, port);
+     auto pipe = std::make_shared<pipe_t<msg_t>>();
+--- a/vendor/cpp-httplib/httplib.cpp
++++ b/vendor/cpp-httplib/httplib.cpp
+@@ -8471,6 +8471,8 @@
+ }
+ 
+ socket_t ClientImpl::create_client_socket(Error &error) const {
++  error = Error::Connection;
++  return INVALID_SOCKET; // FileID: no outbound socket or DNS, including remote media.
+   if (!proxy_host_.empty() && proxy_port_ != -1) {
+     return detail::create_client_socket(
+         proxy_host_, std::string(), proxy_port_, address_family_, tcp_nodelay_,

@@ -189,7 +189,11 @@
                   "category": { "type": "string" },
                   "tier": { "type": ["string", "null"] },
                   "confidence": { "type": "string" },
-                  "reason": { "type": ["string", "null"] }
+                  "reason": { "type": ["string", "null"] },
+                  "contentHash": { "type": ["string", "null"], "description": "Plan-time content fingerprint. A plan is a snapshot; `source` alone is not authoritative — a file replaced at the same path is a different file. Apply re-checks this against the live row before moving." },
+                  "sizeBytes": { "type": ["integer", "null"], "minimum": 0, "description": "Plan-time size. Apply stats the source and rejects a mismatch." },
+                  "fileRef": { "type": ["integer", "null"], "description": "Plan-time filesystem identity (NTFS index / POSIX inode)." },
+                  "modifiedAt": { "type": ["number", "null"], "description": "Plan-time Unix mtime. Apply stats the source and rejects a mismatch, which catches a replacement that was never rescanned." }
                 }
               } },
               "useSymlinks": { "type": "boolean" }
@@ -828,7 +832,11 @@
                   "category":    { "type": "string" },
                   "tier":        { "type": ["string", "null"], "description": "V14.9 A7: per-move tier — Anchor / Mixed / Junk." },
                   "confidence":  { "type": "string", "description": "Butler confidence band — auto / review / ask (RESTRUCTURE.md §6). Empty on older engines." },
-                  "reason":      { "type": ["string", "null"], "description": "Plain-language 'why filed here', shown in the drill-down." }
+                  "reason":      { "type": ["string", "null"], "description": "Plain-language 'why filed here', shown in the drill-down." },
+                  "contentHash": { "type": ["string", "null"], "description": "Plan-time content fingerprint carried so apply can bind the move to the planned file, not just its path." },
+                  "sizeBytes":   { "type": ["integer", "null"], "minimum": 0, "description": "Plan-time size." },
+                  "fileRef":     { "type": ["integer", "null"], "description": "Plan-time filesystem identity (NTFS index / POSIX inode)." },
+                  "modifiedAt":  { "type": ["number", "null"], "description": "Plan-time Unix mtime." }
                 }
               } },
               "categoryCounts":        { "type": "array", "items": { "type": "object", "additionalProperties": false,

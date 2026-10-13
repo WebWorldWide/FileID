@@ -33,6 +33,7 @@ const NMS_IOU: f32 = 0.3;
 
 pub struct YuNet {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -57,6 +58,7 @@ impl YuNet {
                 .context("register execution providers (YuNet)")?;
         }
         tracing::info!(model = "YuNet", chain = ?chain_labels, "EP priority chain registered");
+        let residency = super::onnx_residency::reserve(path, false)?;
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (YuNet)")?;
@@ -100,7 +102,7 @@ impl YuNet {
             }
         }
 
-        let mut model = Self { session, input_name };
+        let mut model = Self { _residency: residency, session, input_name };
         let warmup_started = std::time::Instant::now();
         let _ = model.detect(&vec![0u8; 3 * (INPUT as usize) * (INPUT as usize)], INPUT, INPUT)?;
         tracing::info!(

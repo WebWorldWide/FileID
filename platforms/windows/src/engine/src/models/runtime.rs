@@ -839,3 +839,19 @@ mod tests {
         }
     }
 }
+
+/// Dedicated adapter memory is evidence of capacity, not proof that an EP bound.
+pub fn verified_gpu_capacity_mb() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+        let index = RuntimeProbe::shared().adapter_index?;
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
+        let adapter = unsafe { factory.EnumAdapters1(index) }.ok()?;
+        let desc = unsafe { adapter.GetDesc1() }.ok()?;
+        let mb = (desc.DedicatedVideoMemory as u64) / 1_048_576;
+        (mb > 0).then_some(mb)
+    }
+    #[cfg(not(windows))]
+    { None }
+}

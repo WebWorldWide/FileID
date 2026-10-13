@@ -39,6 +39,7 @@ pub struct Pose {
 
 pub struct Scrfd {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -64,6 +65,7 @@ impl Scrfd {
                 .context("register execution providers (SCRFD)")?;
         }
         tracing::info!(model = "SCRFD", chain = ?chain_labels, "EP priority chain registered");
+        let residency = super::onnx_residency::reserve(path, false)?;
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (SCRFD)")?;
@@ -75,6 +77,7 @@ impl Scrfd {
             .clone();
         // SCRFD-10g default input is 640×640. We resize before feed.
         let mut model = Self {
+            _residency: residency,
             session,
             input_name,
             input_size: (640, 640),

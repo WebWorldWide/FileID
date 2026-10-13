@@ -24,6 +24,7 @@ const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
 pub struct MobileClipImage {
     session: Session,
+    _residency: crate::resource_scheduler::Lease,
     /// The ONNX's single input tensor name, read once at load and reused on
     /// every forward instead of re-walking `session.inputs.first()`.
     input_name: String,
@@ -36,6 +37,7 @@ impl MobileClipImage {
         if !path.exists() {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
+        super::clip_space::verify(path, "mobileclip_s2", 0)?;
         let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
@@ -49,6 +51,7 @@ impl MobileClipImage {
                 .context("register execution providers (MobileCLIP image)")?;
         }
         tracing::info!(model = "MobileCLIP image", chain = ?chain_labels, "EP priority chain registered");
+        let residency = super::onnx_residency::reserve(path, false)?;
         let session = builder
             .commit_from_file(path)
             .context("ORT session commit (MobileCLIP image)")?;
@@ -60,7 +63,7 @@ impl MobileClipImage {
             .clone();
         // Warmup with a zero 256×256 frame so first-call kernel compile
         // happens during load.
-        let mut model = Self { session, input_name, input_size: 224 };
+        let mut model = Self { _residency: residency, session, input_name, input_size: 224 };
         let warmup_started = std::time::Instant::now();
         let _ = model.embed(&[0u8; 3 * 224 * 224])?;
         tracing::info!(
@@ -115,6 +118,7 @@ impl MobileClipImage {
             .context("extract MobileCLIP output as f32")?;
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
+        if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
         Ok(emb)
     }
 
@@ -181,12 +185,14 @@ impl MobileClipImage {
                 data.len()
             );
         }
+        if total != batch * super::clip_space::DIMENSION { anyhow::bail!("Invalid CLIP image output dimension") }
         let embed_dim = total / batch;
         let mut out = Vec::with_capacity(batch);
         for b in 0..batch {
             let start = b * embed_dim;
             let mut emb: Vec<f32> = data[start..start + embed_dim].to_vec();
             l2_normalize(&mut emb);
+            if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
             out.push(emb);
         }
         Ok(out)
