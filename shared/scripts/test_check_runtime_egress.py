@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from check_runtime_egress import (
+    catalog_urls_checked,
     EXPECTED_INITIAL_GUARD,
     EXPECTED_INITIAL_PREDICATE,
     EXPECTED_REDIRECT_POLICY,
@@ -133,6 +134,32 @@ class RuntimeEgressTests(unittest.TestCase):
             failures = violations(registry, downloader)
             self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
             self.assertTrue(any("allowlist must be exactly" in failure for failure in failures))
+
+    def test_catalog_urls_must_be_pinned_files_in_their_own_revision(self) -> None:
+        import json
+        revision = "a" * 40
+        def entry(url: str, sha: str | None = "b" * 64) -> dict:
+            return {"id": "m", "repo": "org/model-GGUF", "revision": revision, "files": [{"url": url, "sha256": sha}]}
+        good = f"https://huggingface.co/org/model-GGUF/resolve/{revision}/model-Q4_K_M.gguf"
+        cases = {
+            good: True,
+            f"https://huggingface.co/org/model-GGUF/resolve/main/model.gguf": False,
+            f"https://huggingface.co/other/model-GGUF/resolve/{revision}/model.gguf": False,
+            f"https://evil.example/org/model-GGUF/resolve/{revision}/model.gguf": False,
+            f"http://huggingface.co/org/model-GGUF/resolve/{revision}/model.gguf": False,
+            f"https://huggingface.co/org/model-GGUF/resolve/{revision}/../escape.gguf": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            for url, accepted in cases.items():
+                catalog.write_text(json.dumps({"entries": [entry(url)]}))
+                failures, urls = catalog_urls_checked(catalog)
+                self.assertEqual(not failures, accepted, url)
+                self.assertEqual(urls == {url}, accepted, url)
+            catalog.write_text(json.dumps({"entries": [entry(good, None)]}))
+            self.assertTrue(any("SHA256" in f for f in catalog_urls_checked(catalog)[0]))
+            catalog.write_text("not json")
+            self.assertTrue(catalog_urls_checked(catalog)[0])
 
     def test_rejects_dynamic_url_comment_decoy_and_redirect_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
