@@ -88,7 +88,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     {
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,?1,1,?2,0,'image','png','Previously indexed gold square fixture caption')",rusqlite::params![source.to_str().unwrap(),png.len()]).unwrap();
-        conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-job','timelineSample','[1]','{}','paused',0,'Synthetic paused record; no timeline inference ran',0,0)",[]).unwrap();
+        conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-job','timelineSample','[1]','{}','completed',1,'Synthetic completed record; no timeline inference ran',0,0)",[]).unwrap();
     }
     let engine = Rc::new(RefCell::new(EngineClient::new()));
     let catalog = workbenches::catalog(engine.clone());
@@ -138,7 +138,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     assert!(!descendants(&catalog)
         .into_iter()
         .filter_map(|w| w.downcast::<gtk::Button>().ok())
-        .any(|b| matches!(b.label().as_deref(), Some("Pause" | "Resume / retry" | "Cancel"))));
+        .any(|b| matches!(b.label().as_deref(), Some("Pause" | "Resume" | "Retry" | "Cancel"))));
     let read = fileid_engine::db::open_read(&db_path).unwrap();
     assert_eq!(
         read.query_row(
@@ -147,7 +147,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
             |r| r.get::<_, String>(0),
         )
         .unwrap(),
-        "paused"
+        "completed"
     );
     {
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();

@@ -21,4 +21,5 @@ pub mod restructure_semantic;
 pub mod cluster_suggestions;
 pub mod audio_meta;
 pub mod doc_extract;
+pub(crate) mod timeline_analysis;
 pub mod usn;

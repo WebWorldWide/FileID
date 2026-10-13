@@ -41,7 +41,7 @@ fn assert_complete(event: EventPayload, cancelled: bool, failed: u64) {
     match event {
         EventPayload::DeepAnalyzeComplete(c) => {
             assert_eq!((c.inner.processed, c.inner.failed, c.inner.cancelled), (4, failed, cancelled));
-            assert_eq!(c.inner.model_kind, "generated-batch-model"); assert!(c.inner.total_seconds > 7.0);
+            assert_eq!(c.inner.model_kind, "generated-batch-model"); assert!(c.inner.total_seconds >= 7.0, "cleanup time is added, never subtracted");
         }
         _ => panic!("expected exactly one owned batch completion"),
     }

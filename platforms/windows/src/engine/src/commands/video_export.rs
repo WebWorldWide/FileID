@@ -97,6 +97,10 @@ fn wait(child: &mut Child, timeout: Duration, cancelled: Option<&AtomicBool>) ->
 }
 
 fn capture(executable: &Path, args: &[&str], timeout: Duration, maximum: usize) -> Result<Vec<u8>> {
+    capture_cancellable(executable, args, timeout, maximum, None)
+}
+
+fn capture_cancellable(executable: &Path, args: &[&str], timeout: Duration, maximum: usize, cancelled: Option<&AtomicBool>) -> Result<Vec<u8>> {
     let mut child = command(executable)?;
     let (mut child, _lifetime) = spawn(child.args(args)
         .stdin(Stdio::null())
@@ -117,7 +121,7 @@ fn capture(executable: &Path, args: &[&str], timeout: Duration, maximum: usize) 
         }
         Ok((collected, truncated))
     });
-    let status = wait(&mut child, timeout, None);
+    let status = wait(&mut child, timeout, cancelled);
     let (output, truncated) = reader.join().map_err(|_| anyhow::anyhow!("The video worker output failed"))??;
     status?;
     ensure!(!truncated, "The video worker returned too much metadata");
@@ -308,6 +312,126 @@ pub(super) fn verify(source: &Probe, output: &Probe, recipe: &ToolRecipe) -> Res
             "Export validation rejected audio timing or codec");
     }
     Ok(())
+}
+
+/// Read-only facts the timeline worker needs. Unlike `probe`, extra data or
+/// subtitle tracks and wide-gamut sources are accepted: frames are only
+/// decoded for analysis, never re-encoded into a user-visible output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct AnalysisProbe {
+    pub(crate) duration: f64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
+fn demuxer(source: &Path) -> Result<&'static str> {
+    match source.extension().and_then(|value| value.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("mp4" | "mov" | "m4v" | "3gp") => Ok("mov"),
+        Some("mkv" | "webm") => Ok("matroska"),
+        Some("avi") => Ok("avi"),
+        _ => bail!("Timeline analysis supports MP4, MOV, M4V, 3GP, MKV, WebM and AVI videos"),
+    }
+}
+
+fn input_args(source: &Path) -> Result<Vec<String>> {
+    let format = demuxer(source)?;
+    let mut args: Vec<String> = ["-protocol_whitelist", "file", "-f", format].map(str::to_owned).into();
+    if format == "mov" {
+        args.extend(["-enable_drefs", "0", "-use_absolute_path", "0"].map(str::to_owned));
+    }
+    Ok(args)
+}
+
+fn parse_analysis_probe(data: &[u8]) -> Result<AnalysisProbe> {
+    let document: Value = serde_json::from_slice(data).context("Invalid video metadata")?;
+    let streams = document["streams"].as_array().context("Missing video streams")?;
+    let video = streams.iter().find(|stream| stream["codec_type"] == "video" && stream["disposition"]["attached_pic"] != 1)
+        .context("The file has no video stream")?;
+    let width = video["width"].as_u64().context("Missing video width")?;
+    let height = video["height"].as_u64().context("Missing video height")?;
+    let duration = number(&document["format"]["duration"]).or_else(|| number(&video["duration"])).context("Missing video duration")?;
+    ensure!(duration > 0.0 && duration <= crate::pipeline::timeline_analysis::MAX_DURATION_SECONDS && width > 0 && height > 0 && width <= 16_384 && height <= 16_384,
+        "Unsupported video duration or dimensions");
+    let rotated = video["side_data_list"].as_array().is_some_and(|items| items.iter().filter_map(|item| number(&item["rotation"]))
+        .any(|rotation| (rotation.abs() - 90.0).abs() <= 1.0 || (rotation.abs() - 270.0).abs() <= 1.0));
+    let (width, height) = if rotated { (height as u32, width as u32) } else { (width as u32, height as u32) };
+    Ok(AnalysisProbe { duration, width, height })
+}
+
+pub(crate) fn analysis_probe(source: &Path, cancelled: &AtomicBool) -> Result<AnalysisProbe> {
+    let runtime = runtime()?;
+    let mut args = vec!["-v".to_owned(), "error".to_owned()];
+    args.extend(input_args(source)?);
+    args.extend(["-show_streams", "-show_format", "-of", "json", "-i"].map(str::to_owned));
+    args.push(source.to_str().context("Invalid video path")?.to_owned());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    parse_analysis_probe(&capture_cancellable(&runtime.ffprobe, &args, PROBE_TIMEOUT, 256 * 1024, Some(cancelled))?)
+}
+
+fn decode_args(source: &Path, start: f64, length: Option<f64>, filter: &str, pixel_format: &str) -> Result<Vec<String>> {
+    ensure!(start.is_finite() && start >= 0.0, "Invalid frame time");
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin"].map(str::to_owned).into();
+    args.extend(["-ss".to_owned(), format!("{start:.3}")]);
+    if let Some(length) = length {
+        ensure!(length.is_finite() && length > 0.0, "Invalid frame interval");
+        args.extend(["-t".to_owned(), format!("{length:.3}")]);
+    }
+    args.extend(input_args(source)?);
+    args.push("-i".to_owned());
+    args.push(source.to_str().context("Invalid video path")?.to_owned());
+    args.extend(["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filter, "-pix_fmt", pixel_format, "-f", "rawvideo", "pipe:1"].map(str::to_owned));
+    Ok(args)
+}
+
+const SIGNAL_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// 1 fps grayscale signatures for `[start, end)`, keyed by media time.
+pub(crate) fn signal_frames(source: &Path, start: f64, end: f64, cancelled: &AtomicBool) -> Result<Vec<(f64, Vec<u8>)>> {
+    use crate::pipeline::timeline_analysis::{SIGNAL_HEIGHT, SIGNAL_WIDTH};
+    ensure!(end > start, "Invalid signal interval");
+    let runtime = runtime()?;
+    let filter = format!("fps=1,scale={SIGNAL_WIDTH}:{SIGNAL_HEIGHT}:flags=area");
+    let args = decode_args(source, start, Some(end - start), &filter, "gray")?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let frame = SIGNAL_WIDTH * SIGNAL_HEIGHT;
+    let maximum = frame * ((end - start).ceil() as usize + 2);
+    let data = capture_cancellable(&runtime.ffmpeg, &args, SIGNAL_TIMEOUT, maximum, Some(cancelled))?;
+    ensure!(data.len() % frame == 0, "The video worker returned a partial signal frame");
+    Ok(data.chunks_exact(frame).enumerate().map(|(index, pixels)| (start + index as f64, pixels.to_vec())).collect())
+}
+
+/// Even dimensions whose long side is at most `max_side`, preserving aspect.
+pub(crate) fn fitted_size(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+    let scale = (f64::from(max_side) / f64::from(width.max(height))).min(1.0);
+    let even = |value: f64| ((value.round() as u32).max(2) / 2) * 2;
+    (even(f64::from(width) * scale), even(f64::from(height) * scale))
+}
+
+/// One RGB frame at `seconds`, scaled to `width`×`height`.
+pub(crate) fn frame_rgb(source: &Path, seconds: f64, width: u32, height: u32, cancelled: &AtomicBool) -> Result<Vec<u8>> {
+    let runtime = runtime()?;
+    let filter = format!("scale={width}:{height}:flags=bicubic");
+    let mut args = decode_args(source, seconds, None, &filter, "rgb24")?;
+    let position = args.iter().position(|arg| arg == "-vf").context("Invalid decoder arguments")?;
+    args.splice(position..position, ["-frames:v".to_owned(), "1".to_owned()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let expected = width as usize * height as usize * 3;
+    let data = capture_cancellable(&runtime.ffmpeg, &args, PROBE_TIMEOUT, expected, Some(cancelled))?;
+    ensure!(data.len() == expected, "The video worker could not decode a frame at {seconds:.3} seconds");
+    Ok(data)
+}
+
+/// Silent clip from a lavfi source such as `testsrc2=size=64x36:rate=5:duration=6`.
+#[cfg(test)]
+pub(super) fn generate_silent_test_video(source: &Path, lavfi: &str) {
+    let runtime = runtime().unwrap();
+    let status = command(&runtime.ffmpeg).unwrap()
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", lavfi])
+        .args(["-c:v", "libopenh264", "-b:v", "200k", "-y"])
+        .arg(source)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .status().unwrap();
+    assert!(status.success(), "could not create the silent video test fixture");
 }
 
 #[cfg(test)]
