@@ -36,7 +36,6 @@ RUN="true"
 RUN_TESTS="false"
 ARM64="false"
 SIGN="false"
-VLM_NATIVE="false"
 FAST="false"
 LINUX_REQUESTED_ARGS=("$@")
 
@@ -68,7 +67,6 @@ Windows/macOS flags (availability varies by target):
   --debug          Debug build instead of Release (faster iteration)
   --tests          Run cargo + dotnet tests
   --arm64          Cross-compile for ARM64 (Snapdragon WoA) — Windows only
-  --vlm-native     Build with native llama.cpp bindings — Windows only
   --fast           Iteration-friendly release: thin LTO + parallel codegen
                    (~40-60% faster Rust compile, small runtime delta).
                    Use during inner-loop iteration.
@@ -224,7 +222,6 @@ EOF
             RUN_TESTS=$(ask_yes_no "Run cargo + dotnet tests after build?" "n")
             if [ "$TARGET" = "windows" ]; then
                 ARM64=$(ask_yes_no "Cross-compile for ARM64 (Snapdragon WoA)?" "n")
-                VLM_NATIVE=$(ask_yes_no "Native llama.cpp bindings (cmake required)?" "n")
                 FAST=$(ask_yes_no "Use --fast (thin LTO, faster Rust compile)?" "n")
                 SIGN=$(ask_yes_no "Authenticode-sign all binaries?" "n")
             fi
@@ -242,7 +239,6 @@ EOF
     [ "$RUN" = "false" ] && equiv="$equiv --no-run"
     [ "$RUN_TESTS" = "true" ] && equiv="$equiv --tests"
     [ "$ARM64" = "true" ] && equiv="$equiv --arm64"
-    [ "$VLM_NATIVE" = "true" ] && equiv="$equiv --vlm-native"
     [ "$FAST" = "true" ] && equiv="$equiv --fast"
     [ "$SIGN" = "true" ] && equiv="$equiv --sign"
 
@@ -273,7 +269,6 @@ while [ $# -gt 0 ]; do
         --no-run) RUN="false" ;;
         --tests) RUN_TESTS="true" ;;
         --arm64) ARM64="true" ;;
-        --vlm-native) VLM_NATIVE="true" ;;
         --fast) FAST="true" ;;
         --sign) SIGN="true" ;;
         --help|-h) show_help ;;
@@ -309,7 +304,6 @@ case "$TARGET" in
         $RUN        && ps_args+=("-Run")
         $RUN_TESTS  && ps_args+=("-RunTests")
         $ARM64      && ps_args+=("-Arm64")
-        $VLM_NATIVE && ps_args+=("-VlmNative")
         $FAST       && ps_args+=("-Fast")
         $SIGN       && ps_args+=("-Sign")
 

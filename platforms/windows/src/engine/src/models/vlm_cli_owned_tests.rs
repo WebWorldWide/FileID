@@ -100,7 +100,7 @@ async fn cli_owned_actual_caption_missing_model_is_typed_before_probe_or_child()
 }
 #[test]
 fn cli_owned_actual_consumers_reserve_after_probe_and_share_tracker_atomic_pipe_spawn() {
-    let caller = include_str!("vlm.rs").replace("\r\n", "\n"); let begin = caller.find("#[cfg(not(feature = \"vlm-native\"))]").unwrap(); let end = caller[begin..].find("#[cfg(feature = \"vlm-native\")]\nmod native").unwrap() + begin; let caller = &caller[begin..end];
+    let caller = include_str!("vlm.rs").replace("\r\n", "\n"); let begin = caller.find("pub async fn caption(").unwrap(); let end = caller[begin..].find("// ── Discrete-GPU selection").unwrap() + begin; let caller = &caller[begin..end];
     assert!(caller.find("discrete_gpu_device").unwrap() < caller.find("reserve_host").unwrap()); assert!(caller.contains("model_mb.checked_add(512)"));
     assert!(caller.contains("run_caption_command")); assert!(caller.contains("ProcessTracker::shared()")); assert!(!caller.contains("cmd.spawn()"));
     let owner = include_str!("native_process.rs").replace("\r\n", "\n"); let begin = owner.find("pub(crate) fn spawn_piped").unwrap(); let owner = &owner[begin..owner.find("fn own(mut child").unwrap()];

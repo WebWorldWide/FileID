@@ -179,7 +179,6 @@ Useful unified-script flags:
 | `--debug` | Debug build (faster iteration; needs .NET SDK on host to launch) |
 | `--tests` | Run cargo + dotnet tests |
 | `--arm64` | Cross-compile for Snapdragon WoA |
-| `--vlm-native` | Build with native llama.cpp bindings (requires cmake) |
 | `--sign` | Authenticode-sign every binary (needs `FILEID_EV_THUMBPRINT` env var) |
 | `--help` | Full flag list |
 
@@ -198,7 +197,6 @@ Underlying `build-all.ps1` flags (use directly when you want finer control):
 | `-SkipEngine` | Only rebuild the WinUI 3 app |
 | `-SkipApp` | Only rebuild the Rust engine |
 | `-Arm64` | Cross-compile for ARM64 |
-| `-VlmNative` | Native llama.cpp bindings |
 | `-Sign -Thumbprint <hex>` | Authenticode-sign every binary |
 
 **The three iteration commands you'll reach for most** — run from the repo root in Windows Terminal. These assume PowerShell 7 (`pwsh`); on built-in Windows PowerShell 5.1 just drop the `pwsh` prefix and call `.\platforms\windows\build\build-all.ps1 …` directly. All three build **Debug** (engine + app) by default — add `-Release` for the slower self-contained build that ships, and `-Run` to launch the app when the build finishes.

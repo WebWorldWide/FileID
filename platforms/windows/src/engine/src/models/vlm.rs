@@ -1,12 +1,8 @@
 // Subprocess wrapper around llama.cpp's `llama-mtmd-cli.exe` for VLM
 // inference (Deep Analyze).
 //
-// We deliberately go through a subprocess instead of linking the
-// `llama-cpp-2` Rust bindings by default. The native binding adds ~150
-// MB of build artifacts and requires cmake at build time. The subprocess
-// path keeps CI builds fast and the runtime DLL surface small. Toggle
-// `--features vlm-native` at build time if zero-subprocess inference
-// matters for your deployment.
+// A subprocess keeps the engine free of a linked llama.cpp build (cmake,
+// ~150 MB of artifacts) and lets it ship the upstream release binaries.
 //
 // Hardening: explicit canonical runtime or app-owned bundles, never PATH.
 // Binary is host/header/size-checked before an admitted owned version probe.
@@ -134,82 +130,50 @@ pub async fn caption(
     cancel: Arc<std::sync::atomic::AtomicBool>,
     on_token: impl FnMut(&str),
 ) -> Result<CaptionResult> {
-    #[cfg(feature = "vlm-native")]
-    {
-        return native::caption(runner, req, cancel, on_token).await;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
+    if req.prompt.len() > 32 * 1024 || !(1..=4096).contains(&req.max_tokens) { bail!("VLM generation exceeds prompt/token bounds"); }
+    let model_mb = crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path)
+        .await.map_err(super::native_admission::HostAdmissionError)?;
+    let verified = runner.weights.require_pair(&req.gguf_path, &req.mmproj_path, cancel.clone()).await?;
+    let mut cmd = Command::new(&runner.binary);
+    cmd.arg("-m").arg(&req.gguf_path);
+    cmd.arg("--mmproj").arg(&req.mmproj_path);
+    cmd.arg("--image").arg(&req.image_path);
+    cmd.arg("-p").arg(&req.prompt);
+    cmd.arg("--n-predict").arg(req.max_tokens.to_string());
+    if req.greedy {
+        cmd.arg("--temp").arg("0");
     }
-
-    #[cfg(not(feature = "vlm-native"))]
-    {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
-        if req.prompt.len() > 32 * 1024 || !(1..=4096).contains(&req.max_tokens) { bail!("VLM generation exceeds prompt/token bounds"); }
-        let model_mb = crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path)
-            .await.map_err(super::native_admission::HostAdmissionError)?;
-        let verified = runner.weights.require_pair(&req.gguf_path, &req.mmproj_path, cancel.clone()).await?;
-        let mut cmd = Command::new(&runner.binary);
-        cmd.arg("-m").arg(&req.gguf_path);
-        cmd.arg("--mmproj").arg(&req.mmproj_path);
-        cmd.arg("--image").arg(&req.image_path);
-        cmd.arg("-p").arg(&req.prompt);
-        cmd.arg("--n-predict").arg(req.max_tokens.to_string());
-        if req.greedy {
-            cmd.arg("--temp").arg("0");
+    // Don't print the prompt back at us; we only want the completion.
+    cmd.arg("--no-display-prompt");
+    // Offload all layers to the GPU, mirroring the persistent server
+    // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
+    // this the per-file CLI path ran the entire VLM decode + vision
+    // projector on the CPU — many-fold slower. Quality-neutral (same
+    // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
+    // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
+    // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
+    // recovery), evacuating the GPU for the per-file CLI path too.
+    let forced_cpu = crate::models::runtime::user_forced_cpu();
+    cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
+    // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
+    // skipped under forced-CPU so we don't re-engage the evacuated GPU.
+    if !forced_cpu {
+        if let Some(dev) = discrete_gpu_device(&runner.binary, &cancel).await? {
+            cmd.arg("--device").arg(dev);
         }
-        // Don't print the prompt back at us; we only want the completion.
-        cmd.arg("--no-display-prompt");
-        // Offload all layers to the GPU, mirroring the persistent server
-        // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
-        // this the per-file CLI path ran the entire VLM decode + vision
-        // projector on the CPU — many-fold slower. Quality-neutral (same
-        // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
-        // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
-        // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
-        // recovery), evacuating the GPU for the per-file CLI path too.
-        let forced_cpu = crate::models::runtime::user_forced_cpu();
-        cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
-        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
-        // skipped under forced-CPU so we don't re-engage the evacuated GPU.
-        if !forced_cpu {
-            if let Some(dev) = discrete_gpu_device(&runner.binary, &cancel).await? {
-                cmd.arg("--device").arg(dev);
-            }
-        }
-        verified.recheck(cancel.clone()).await?;
-        let memory_mb = model_mb.checked_add(512)
-            .ok_or_else(|| super::native_admission::HostAdmissionError(anyhow!("VLM CLI host estimate overflow")))?;
-        let resources = super::native_admission::reserve_host(crate::resource_scheduler::ResourceScheduler::shared(),
-            crate::resource_scheduler::Demand { memory_mb, cpu: 1, io: 1 }, cancel.clone()).await?;
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.stdin(std::process::Stdio::null());
-        let text = cli_output::run_caption_command(cmd, resources, cancel, &req.image_path,
-            on_token, super::native_process::ProcessTracker::shared()).await?;
-        Ok(CaptionResult { text })
     }
-}
-
-#[cfg(feature = "vlm-native")]
-mod native {
-    // Native (in-process) llama.cpp path. Off by default; the user opts
-    // in via `cargo build --features vlm-native --release`. Adds ~150 MB
-    // build artifacts + requires cmake.
-    //
-    // For now this is a placeholder that delegates to the subprocess
-    // path so the feature builds cleanly. A real implementation lands
-    // in a follow-up; the contract is the same.
-    use super::*;
-    pub async fn caption(
-        runner: &VlmRunner,
-        req: &CaptionRequest,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
-        on_token: impl FnMut(&str),
-    ) -> Result<CaptionResult> {
-        // Falls through to the subprocess code path so the feature is
-        // additive rather than an alternate code path. Replace with a
-        // real llama-cpp-2 invocation once the native build wires up.
-        let _ = (runner, req, cancel, on_token);
-        bail!("vlm-native is a build-time placeholder; rebuild without the feature")
-    }
+    verified.recheck(cancel.clone()).await?;
+    let memory_mb = model_mb.checked_add(512)
+        .ok_or_else(|| super::native_admission::HostAdmissionError(anyhow!("VLM CLI host estimate overflow")))?;
+    let resources = super::native_admission::reserve_host(crate::resource_scheduler::ResourceScheduler::shared(),
+        crate::resource_scheduler::Demand { memory_mb, cpu: 1, io: 1 }, cancel.clone()).await?;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+    let text = cli_output::run_caption_command(cmd, resources, cancel, &req.image_path,
+        on_token, super::native_process::ProcessTracker::shared()).await?;
+    Ok(CaptionResult { text })
 }
 
 // ── Discrete-GPU selection for the llama.cpp runner ────────────────────
