@@ -1,4 +1,4 @@
-using FileID.IpcSchema;
+﻿using FileID.IpcSchema;
 using FileID.ViewModels;
 using Xunit;
 
