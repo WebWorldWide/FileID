@@ -2,7 +2,7 @@
 
 Short, current priorities only. History lives in `STATE.md` (newest first) and git; release gates live in `SHIP.md`; the feature ledger lives in `NEXT_VERSION.md`; model choices live in `MODELS.md`.
 
-## Where things stand (2026-10-13)
+## Where things stand (2026-10-14)
 
 - `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags.
 - The shared Rust engine (`platforms/windows/src/engine`) serves Windows, Linux, the CLI and the TUI. macOS has its own Swift engine and remains the behavioral reference.
@@ -10,9 +10,9 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## In flight
 
-1. **Portable timeline and significant moments** (`feat/portable-timeline`). The shared engine runs `enqueueTimeline` with the vetted FFmpeg runtime and the resident VLM: change-guided samples, overlapping moment windows, draft chapters, durable pause/resume/cancel. GTK and WinUI expose quick-samples/significant-moments and real job controls. Verified: Linux engine (639 lib tests, strict Clippy), GTK (50 tests + real-engine Xvfb fixture), Windows engine timeline tests and .NET (54 IPC + 576 App). Remaining: hosted CI, a real-model run (no VM has VLM weights), portable speech (needs the whisper.cpp runtime review below).
-2. **Extended model catalog and benchmarking** (`feat/model-bench`): 333-model catalog, `listModels`, on-device benchmark and tuning, GTK and WinUI catalog UI. Next: run benchmarks on the RTX 2060 PC and the Mac, exercise the WinUI Models workbench interactively, and add MLX benchmarking and catalog MLX loading on macOS.
-3. **Portable speech** (`feat/portable-speech`): Qwen3-ASR through the existing llama.cpp runtime transcribes timeline audio in 30-second passages on Windows/Linux — no whisper.cpp dependency needed.
+1. **Portable speech** (PR #244, `feat/portable-speech`): Qwen3-ASR through the existing llama.cpp runtime transcribes timeline audio in 30-second passages on Windows/Linux. Verified end to end over IPC on the Linux VM; merge when hosted CI is green.
+2. **Redesign** (FileID Prototype v3): blocked until the design files are exported into the repo or the Design connector is authorized from an interactive session; then port to SwiftUI, WinUI and GTK keeping the palette, springs and `LavaLampBackground`.
+3. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; add MLX benchmarking and catalog MLX loading on macOS.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 
