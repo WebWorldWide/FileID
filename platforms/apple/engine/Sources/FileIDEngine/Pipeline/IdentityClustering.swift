@@ -64,7 +64,6 @@ public enum IdentityClustering {
         /// calibration — macOS uses Apple Vision face quality (a different
         /// 0..1 scale) and a separate alignment path, so the Windows-calibrated
         /// values do NOT transfer.
-        // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         public let mutualKNN: Bool
 
         // Defaults calibrated on-hardware for SFace (128-d) — the commercial-clean
@@ -85,7 +84,7 @@ public enum IdentityClustering {
             pass3MinMeanCosine: Float = 0.60,
             pass3MaxSplits: Int = 7,
             kNN: Int = 10,
-            mutualKNN: Bool = false // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            mutualKNN: Bool = false
         ) {
             self.pass1Cosine = pass1Cosine
             self.pass2Cosine = pass2Cosine
@@ -94,7 +93,7 @@ public enum IdentityClustering {
             self.pass3MinMeanCosine = pass3MinMeanCosine
             self.pass3MaxSplits = pass3MaxSplits
             self.kNN = kNN
-            self.mutualKNN = mutualKNN // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            self.mutualKNN = mutualKNN
         }
     }
 
@@ -166,7 +165,7 @@ public enum IdentityClustering {
             // the pairs whose reverse (j,i) is also present. Determinism
             // preserved: candidates are gathered in ascending-i / searcher order
             // and unioned in that same order. Pairs keyed as i*n+j (unique since
-            // both < n). UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            // both < n).
             var directed = Set<Int>()
             var candidates: [(Int, Int)] = []
             for i in 0..<n {

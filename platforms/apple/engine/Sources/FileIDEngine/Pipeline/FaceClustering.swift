@@ -399,7 +399,6 @@ public enum FaceClustering {
     /// present → false, absent → `dflt`. Used for the mutual-kNN Pass-1 gate, which
     /// stays OFF by default on macOS pending on-Mac label calibration (Apple Vision
     /// quality is a different scale than the Windows YuNet path). (parity mirror)
-    // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
     static func envBool(_ key: String, _ dflt: Bool) -> Bool {
         guard let v = ProcessInfo.processInfo.environment[key] else { return dflt }
         return v == "1" || v.lowercased() == "true"
@@ -558,7 +557,6 @@ public enum FaceClustering {
         // DEFAULT is 0.0 = OFF (zero regression); a Mac session must calibrate it
         // against labels before enabling. Only applied when > 0, so missing/NULL
         // quality (-1 sentinel) is untouched at the default.
-        // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         let clusterMinQuality = envDouble("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0...1.0)
         let rows: [ClusteringFaceRow]
         let rowsOverflowed: Bool
@@ -684,7 +682,7 @@ public enum FaceClustering {
             // DEFAULT OFF on macOS (Windows is default-ON): the Vision quality scale +
             // separate alignment path mean the Windows calibration doesn't transfer, so
             // enable only after on-Mac label validation.
-            mutualKNN: envBool("FILEID_FACE_MUTUAL_KNN", false) // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            mutualKNN: envBool("FILEID_FACE_MUTUAL_KNN", false)
         )
         let icResult = IdentityClustering.cluster(
             embeddings: vecsByDense,
