@@ -149,10 +149,15 @@ fn record(measurement: &mut Measurement, timings: Option<Timings>) {
     }
 }
 
-/// Samples a process's resident memory until dropped.
+/// Samples a process's resident memory until finished.
 struct PeakSampler {
+    pid: Option<u32>,
     peak: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+}
+
+fn resident_bytes(system: &mut sysinfo::System, pid: sysinfo::Pid) -> Option<u64> {
+    system.refresh_process(pid).then(|| system.process(pid).map(sysinfo::Process::memory)).flatten()
 }
 
 impl PeakSampler {
@@ -162,24 +167,29 @@ impl PeakSampler {
         if let Some(pid) = pid {
             let (peak, stop) = (peak.clone(), stop.clone());
             std::thread::spawn(move || {
-                use sysinfo::{Pid, System};
-                let mut system = System::new();
-                let pid = Pid::from_u32(pid);
+                let mut system = sysinfo::System::new();
+                let pid = sysinfo::Pid::from_u32(pid);
                 while !stop.load(Ordering::Relaxed) {
-                    if system.refresh_process(pid) {
-                        if let Some(process) = system.process(pid) {
-                            peak.fetch_max(process.memory(), Ordering::Relaxed);
-                        }
+                    if let Some(bytes) = resident_bytes(&mut system, pid) {
+                        peak.fetch_max(bytes, Ordering::Relaxed);
                     }
                     std::thread::sleep(Duration::from_millis(200));
                 }
             });
         }
-        Self { peak, stop }
+        Self { pid, peak, stop }
     }
 
     fn finish(&self) -> u64 {
         self.stop.store(true, Ordering::Relaxed);
+        // A run shorter than the sampler's first refresh would otherwise
+        // report no memory at all.
+        if self.peak.load(Ordering::Relaxed) == 0 {
+            if let Some(pid) = self.pid {
+                let bytes = resident_bytes(&mut sysinfo::System::new(), sysinfo::Pid::from_u32(pid));
+                self.peak.fetch_max(bytes.unwrap_or(0), Ordering::Relaxed);
+            }
+        }
         self.peak.load(Ordering::Relaxed)
     }
 }
