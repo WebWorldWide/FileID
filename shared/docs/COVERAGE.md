@@ -93,7 +93,7 @@ macOS coverage is not separately tracked here.
 |---|---|
 | `Theme/LavaLampBackground.swift` + `Motion/LavaLampBackground.cs`, Win2D canvases (Sankey, IridescentBorder), Metal/Win2D shaders | GPU-resident visuals; no CPU-runnable assertion path. |
 | `shell/video.rs` Media Foundation keyframe path | Needs a real codec; covered via `iterate.ps1` only. |
-| `models/{ram_plus,sface,yunet,clip_text,vlm,florence2}.rs` ORT `Session` run paths | Need shipped model DLLs; covered via on-hardware `iterate.ps1`. |
+| `models/{ram_plus,sface,yunet,clip_text,vlm}.rs` ORT `Session` run paths | Need shipped model DLLs; covered via on-hardware `iterate.ps1`. |
 | `main.rs` `main()` / `async_main()` | Covered by the engine-startup CI smoke, not unit tests. |
 | WinUI `*.xaml.cs` wiring, `MainWindow` Mica/Acrylic + drag region | UI-thread-bound; covered by the app-startup smoke + manual verification. |
 

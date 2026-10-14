@@ -177,7 +177,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "ba93f190e50d7054940fd27de4fc58908793d7cfecdea5f60b27f8a15ab2375a",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "42fa76c8bef4ff3b8289f83413054a64083e7e88b8d87d26fa6f6ee8cd214804",
   "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
-  "platforms/windows/src/engine/src/platform.rs": "545358679af1acdb3098c1ae507168f36db4061acc26ebd5e3e40f38a07e3b69",
+  "platforms/windows/src/engine/src/platform.rs": "1170f086ea4c16a1a44ab223096c06d02ea738f63969b7a8929c4d107180107e",
   "platforms/windows/src/engine/src/shell/heic.rs": "ee5d2ad38f883fc19c879480e0f70634a9cb47034794223e4b88f1215ed8ecfd",
   "platforms/windows/src/engine/src/shell/mod.rs": "6cef0bf08549e1f1e5b845c7956e00aa58f196bb5457135823372522f93be339",
   "platforms/windows/src/engine/src/shell/ocr.rs": "813527fc9eeb3ab4f93dbc31ebc180669d41fb6039fc470668abdf52395f7fcc",

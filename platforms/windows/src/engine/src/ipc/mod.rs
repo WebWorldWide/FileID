@@ -1012,7 +1012,7 @@ pub struct EngineError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// For errors that pertain to a specific model install/download, the
-    /// model id (e.g. `mobileclip_s2`, `bge_text`, `florence2_base`). Lets
+    /// model id (e.g. `mobileclip_s2`, `bge_text`, `qwen3_vl_4b`). Lets
     /// the app route the error to the right install slot without fragile
     /// path-string matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]

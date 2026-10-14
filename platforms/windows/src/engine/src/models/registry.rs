@@ -373,58 +373,6 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── Florence-2 base (Phase 7 — registry arm + skeleton; the generation
-        // loop wiring is the documented Phase 7b follow-up). 4-ONNX split +
-        // BART tokenizer + config from the community ONNX export at
-        // `onnx-community/Florence-2-base` (Microsoft Florence-2, MIT). The
-        // model is downloadable today; `models::florence2` exposes the canonical
-        // install dir so progress UI works against the same layout the future
-        // loader will read.
-        "florence2_base" | "florence2" => {
-            let dir = models_root.join("florence2");
-            LookupResult::Found(Model {
-                id: "florence2_base",
-                display_name: "Florence-2 base (grounded regions)",
-                files: vec![
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/vision_encoder.onnx".to_string(),
-                        dest: dir.join("vision_encoder.onnx"),
-                        sha256: Some("2c7464fce495ea43b415b48afe7dbe84a9ebbe0cfe3c31fdd81c6dd66b39ff75".into()),
-                        approx_bytes: 110_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/embed_tokens.onnx".to_string(),
-                        dest: dir.join("embed_tokens.onnx"),
-                        sha256: Some("fec0fd20276af861afb6a23a11544bf1378c05e2a41001b610cc281e244c4b20".into()),
-                        approx_bytes: 25_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/encoder_model.onnx".to_string(),
-                        dest: dir.join("encoder_model.onnx"),
-                        sha256: Some("b155b5a0e56a4244c62060751bb1b70dfe481015d0dbfa6d19b1912d9e58da0d".into()),
-                        approx_bytes: 110_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/decoder_model_merged.onnx".to_string(),
-                        dest: dir.join("decoder_model_merged.onnx"),
-                        sha256: Some("6d6e1266d7f94f5d4ec9cc07d9c1f7b3e47049c9b0de7bbe82a91e62dfd152af".into()),
-                        approx_bytes: 200_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/tokenizer.json".to_string(),
-                        dest: dir.join("tokenizer.json"),
-                        sha256: Some("d69dcdb2323e124ac4f800cb9863ddccea0d7bb11e16125e8df3bd60f2f8aeac".into()),
-                        approx_bytes: 5_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/config.json".to_string(),
-                        dest: dir.join("config.json"),
-                        sha256: Some("74efbe2299e13cfcc9e083861eae4a943d76f784ddd595d85e779d189cf0a574".into()),
-                        approx_bytes: 10_000,
-                    },
-                ],
-            })
-        }
 
         // ── Per-vendor accelerated runtimes (CUDA EP / OpenVINO EP / QNN EP)
         // are deliberately NOT downloaded by the engine: each requires a
@@ -686,7 +634,7 @@ mod tests {
         // ort_openvino IS on HF, so it belongs here for real coverage.
         let kinds = [
             "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
-            "florence2", "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
+            "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
             "gemma_3_4b", "mistral_small_3_2", "ort_openvino_x64",
         ];
         for kind in kinds {

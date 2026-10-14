@@ -934,15 +934,19 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     }
 }
 
+/// POSIX: when the parent exits the engine is reparented (to init or a
+/// subreaper), so a changed `getppid()` means the app is gone.
 #[cfg(not(windows))]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
-    // POSIX fallback: poll getppid every 5 s; if it changes (i.e. our parent
-    // was reaped and we got reparented to init) trigger shutdown.
-    let _ = parent_pid;
-    let _ = shutdown;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        // TODO(linux): real implementation.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // SAFETY: getppid has no preconditions and cannot fail.
+        let current = unsafe { libc::getppid() };
+        if u32::try_from(current).ok() != Some(parent_pid) {
+            tracing::info!(parent_pid, current, "parent process exited; signaling shutdown");
+            shutdown.notify_waiters();
+            return;
+        }
     }
 }
 
