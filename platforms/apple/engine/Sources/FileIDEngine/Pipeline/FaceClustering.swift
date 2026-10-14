@@ -399,7 +399,6 @@ public enum FaceClustering {
     /// present → false, absent → `dflt`. Used for the mutual-kNN Pass-1 gate, which
     /// stays OFF by default on macOS pending on-Mac label calibration (Apple Vision
     /// quality is a different scale than the Windows YuNet path). (parity mirror)
-    // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
     static func envBool(_ key: String, _ dflt: Bool) -> Bool {
         guard let v = ProcessInfo.processInfo.environment[key] else { return dflt }
         return v == "1" || v.lowercased() == "true"
@@ -445,7 +444,7 @@ public enum FaceClustering {
     /// Memory cap on faces clustered per run (~2 KB/embedding + HNSW). This is a
     /// HARD bound, not a window: incompatible or oversized input rejects the pass.
     /// Larger libraries need incremental, resource-budgeted assignment.
-    /// (audit F-C3-033)
+    /// (033)
     public static let maxFacesPerRun: Int = 200_000
 
     /// Effective mid-pass cancel for a clustering run. The SCAN cancel mirror is
@@ -455,12 +454,12 @@ public enum FaceClustering {
     /// prior scan was cancelled (it would hit cancel on its first poll and return
     /// before the persist txn — a silent "0 persons" no-op). We honor the mirror
     /// only when it flips true AFTER this run began (`baseline == false`) — a
-    /// genuine shutdown/cancel mid-pass — preserving the F-C3-042 cooperative
-    /// cancel. (audit R-07)
+    /// genuine shutdown/cancel mid-pass — preserving the cooperative
+    /// cancel.
     static func clusterShouldCancel(baseline: Bool, current: Bool,
                                     shuttingDown: Bool = false) -> Bool {
         // A genuine shutdown always aborts (its dedicated mirror is never set by a
-        // stale scan-cancel), regardless of the sticky scan-cancel baseline. (R-07)
+        // stale scan-cancel), regardless of the sticky scan-cancel baseline.
         shuttingDown || (current && !baseline)
     }
 
@@ -474,7 +473,7 @@ public enum FaceClustering {
         // Snapshot the sticky SCAN cancel mirror at entry so this clustering job
         // has its own cancellation scope: a previously-cancelled scan can't
         // suppress a later manual/auto cluster, while a cancel/shutdown arriving
-        // DURING the run still aborts it at a safe boundary. (audit R-07)
+        // DURING the run still aborts it at a safe boundary.
         let cancelBaseline = ScanCoordinator.isCancelledSync()
 
         // ArcFace is a hard requirement — no Vision-print fallback. Vision
@@ -532,7 +531,7 @@ public enum FaceClustering {
         // Persons whose faces are excluded from THIS run's pool (Phase-0 unknown).
         // The persist must preserve these rows even if the user un-marks one during
         // the lock-free window: their faces are in NO new cluster, so a wipe would
-        // orphan the faces and destroy the just-entered name. (R3-02)
+        // orphan the faces and destroy the just-entered name.
         let poolExcludedPersonIDs: Set<Int64> = Set(
             priorAnchors.filter { $0.isUnknown }.map { $0.id }
         )
@@ -557,8 +556,7 @@ public enum FaceClustering {
         // calibrated gate is 0.35) — that value does NOT transfer. So the macOS
         // DEFAULT is 0.0 = OFF (zero regression); a Mac session must calibrate it
         // against labels before enabling. Only applied when > 0, so missing/NULL
-        // quality (-1 sentinel) is untouched at the default. (see MACOS_LOCKSTEP_NOTES)
-        // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+        // quality (-1 sentinel) is untouched at the default.
         let clusterMinQuality = envDouble("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0...1.0)
         let rows: [ClusteringFaceRow]
         let rowsOverflowed: Bool
@@ -578,7 +576,7 @@ public enum FaceClustering {
                 // Canonical cross-platform face-clustering failure kind (the
                 // Windows form); was `face_cluster_failed`. The app's gate
                 // release keys on the `face_cluster` prefix, so this still
-                // releases it. (audit F-C2-003)
+                // releases it. (003)
                 kind: "face_clustering_failed",
                 message: "Face caches need a compatible refresh before clustering. Existing People and assignments were preserved. Continue face processing; stale, legacy or mixed model vectors cannot be compared."
             )))
@@ -597,7 +595,7 @@ public enum FaceClustering {
         }
         // Hitting the cap means there are likely embedded faces past it that
         // this wipe-recluster run leaves unassigned. Surface it instead of the
-        // old (false) "a re-run picks up overflow" promise. (audit F-C3-033)
+        // old (false) "a re-run picks up overflow" promise. (033)
         if rowsOverflowed {
             JSONLog.shared.warn(ev: "face_cluster_overflow",
                                 error: "embedded faces reached the \(maxFacesPerRun) per-run cap; faces past it stay unassigned until a window-aware persist lands.")
@@ -683,8 +681,8 @@ public enum FaceClustering {
             // Mutual-kNN Pass-1 gate — parity hook for the Rust FILEID_FACE_MUTUAL_KNN.
             // DEFAULT OFF on macOS (Windows is default-ON): the Vision quality scale +
             // separate alignment path mean the Windows calibration doesn't transfer, so
-            // enable only after on-Mac label validation. (see MACOS_LOCKSTEP_NOTES)
-            mutualKNN: envBool("FILEID_FACE_MUTUAL_KNN", false) // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            // enable only after on-Mac label validation.
+            mutualKNN: envBool("FILEID_FACE_MUTUAL_KNN", false)
         )
         let icResult = IdentityClustering.cluster(
             embeddings: vecsByDense,
@@ -704,7 +702,7 @@ public enum FaceClustering {
             // persist transaction. `clusterShouldCancel` ignores a mirror that was
             // already true at entry (a sticky prior scan-cancel) so this job runs;
             // it fires only on a transition during the run. Cancelled = nothing
-            // persisted. (F-C3-042, R-07)
+            // persisted.
             shouldCancel: {
                 Self.clusterShouldCancel(baseline: cancelBaseline,
                                          current: ScanCoordinator.isCancelledSync(),
@@ -713,7 +711,7 @@ public enum FaceClustering {
         )
 
         // A cancellation mid-pass discards the (partial) clustering result: we
-        // persist nothing so the next run re-clusters from a clean slate. (F-C3-042)
+        // persist nothing so the next run re-clusters from a clean slate.
         if icResult.cancelled {
             JSONLog.shared.info(ev: "face_cluster_cancelled",
                                 extra: ["faces": AnyCodable(decoded.count)])
@@ -726,7 +724,7 @@ public enum FaceClustering {
         // Group dense nodes by cluster id (IdentityClustering returns dense IDs
         // from 0). Iterate by sorted cluster id below so person-row creation
         // order — and the IDs the People tab shows — is stable across runs.
-        // (audit F-C3-007)
+        // (007)
         var byCluster: [Int: [Int]] = [:]
         for (denseIdx, cid) in icResult.clusterIDs.enumerated() {
             byCluster[cid, default: []].append(denseIdx)
@@ -995,11 +993,11 @@ public enum FaceClustering {
     /// Three user-verdict guards, enforced transitively through the union-find
     /// (a bridge singleton can never co-locate a forbidden pair even via a chain):
     ///   • is_unknown persons are excluded entirely — the "don't identify these"
-    ///     verdict is never overwritten by a cosine merge. (audit F-C3-003)
+    ///     verdict is never overwritten by a cosine merge. (003)
     ///   • face_verifications "different people" verdicts block the affected
-    ///     person pair. (audit F-C3-004)
+    ///     person pair. (004)
     ///   • two user-named persons never merge — that would delete one name.
-    ///     (audit F-C3-005)
+    ///     (005)
     static func tightPairAutoMerge(
         database: Database,
         searchLimits: ExactCosineJoin.Limits = .autoMerge
@@ -1158,7 +1156,7 @@ public enum FaceClustering {
         }
 
         // Deterministic cluster order (sorted by person id) so the edge sweep,
-        // union targets, and persist are stable across runs. (audit F-C3-007)
+        // union targets, and persist are stable across runs. (007)
         var clusters: [Cluster] = []
         clusters.reserveCapacity(rows.count)
         for row in rows.sorted(by: { $0.personID < $1.personID }) {
@@ -1192,7 +1190,7 @@ public enum FaceClustering {
         // Carried up to each root: true iff the set already contains a named
         // person. Rejecting a union of two named roots blocks named↔named merges
         // transitively, where the old per-pair `ci.named && cj.named` guard was
-        // defeated by a bridge singleton chaining them. (audit F-C3-005)
+        // defeated by a bridge singleton chaining them. (005)
         var hasNamed = clusters.map { $0.named }
         // Explicit "different people" verdicts as sparse component adjacency.
         var forbidden = Array(repeating: Set<Int>(), count: clusters.count)
@@ -1298,11 +1296,11 @@ public enum FaceClustering {
         do {
             merged = try await database.pool.write { db -> Int in
                 _ = try Self.compatibleEmbeddingSpace(from: db, expected: data.space)
-                // R3-11: re-read identity UNDER the writer lock before deleting. A
+                // re-read identity UNDER the writer lock before deleting. A
                 // rename / mark-unknown the user committed during the lock-free
                 // compute window (on macOS the app writes the persons table on its
                 // own connection) must not be clobbered by the now-stale plan.
-                // Mirrors the phase-4 persist's F-C3-002 under-lock re-read,
+                // Mirrors the phase-4 persist's under-lock re-read,
                 // extended to the auto-merge polish path.
                 let freshByID = Dictionary(uniqueKeysWithValues:
                     try Self.priorAnchors(from: db).map { ($0.id, $0) })
@@ -1377,7 +1375,7 @@ public enum FaceClustering {
     /// Repoint any persons.representative_face_id that is NULL or references a
     /// face no longer assigned to that person (e.g. cascade-deleted mid-pass) at
     /// a surviving member face, else NULL — mirrors `reconcilePersons`. Must run
-    /// inside the caller's write transaction. (audit F-C3-041)
+    /// inside the caller's write transaction. (041)
     static func repairDanglingRepresentativeFaces(_ db: GRDB.Database) throws {
         try db.execute(sql: """
             UPDATE persons
@@ -1408,7 +1406,7 @@ public enum FaceClustering {
     /// Snapshot of an existing persons row + the face_ids that were
     /// assigned to it in the prior clustering run. Drives name
     /// inheritance after a re-cluster. Internal (not fileprivate) so the
-    /// under-lock re-read seam can be unit-tested. (audit F-C3-002)
+    /// under-lock re-read seam can be unit-tested. (002)
     struct PriorAnchor: Sendable {
         let id: Int64
         let centroid: [Float]?
@@ -1484,7 +1482,7 @@ public enum FaceClustering {
     /// anchors on the sharpest / most-frontal crop. Mirrors the Windows anchor pick
     /// (face_clustering.rs `max_by quality`). Falls back to the first face id when no member
     /// carries a measured quality; strict `>` keeps the earliest of any ties so the rep is
-    /// stable across runs. (audit parity)
+    /// stable across runs.
     fileprivate static func representativeFaceID(
         _ faceIDs: [Int64], quality: [Int64: Double]
     ) -> Int64 {
@@ -1512,7 +1510,7 @@ public enum FaceClustering {
 
     /// Synchronous identity snapshot from a live `db` handle — usable inside the
     /// persist write transaction so the name carry-forward reads the state under
-    /// the lock, not a stale PHASE-0 capture. (audit F-C3-002)
+    /// the lock, not a stale PHASE-0 capture. (002)
     static func priorAnchors(from db: GRDB.Database) throws -> [PriorAnchor] {
         let personRows = try GRDB.Row.fetchAll(db, sql: """
             SELECT id, centroid, anchor_radius, title, first_name,
@@ -1709,7 +1707,7 @@ public enum FaceClustering {
                     // Cooperative cancel at the file boundary: once Cancel/shutdown
                     // fires, every file still waiting on the limiter skips its ANE
                     // inference here and drains fast, so a queued command isn't
-                    // blocked for the whole extraction window. (audit R-07)
+                    // blocked for the whole extraction window.
                     if Self.clusterShouldCancel(
                         baseline: cancelBaseline,
                         current: ScanCoordinator.isCancelledSync(),

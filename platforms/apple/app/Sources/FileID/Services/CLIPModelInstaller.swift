@@ -28,7 +28,7 @@ public final class CLIPModelInstaller {
     /// transitions (appear / install / uninstall) via refreshStatus — never on
     /// download ticks. The Settings card reads this instead of calling
     /// FileManager.fileExists in its row builder, so an active download no longer
-    /// fires a stat() syscall on the main thread on every progress tick. (R7)
+    /// fires a stat() syscall on the main thread on every progress tick.
     public private(set) var presentFilePaths: Set<String> = []
     /// Flips once the text encoder's ORT session finishes its
     /// multi-second build — Library observes it to drop the

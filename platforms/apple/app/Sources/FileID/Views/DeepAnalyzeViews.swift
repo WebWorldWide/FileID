@@ -207,7 +207,7 @@ struct DeepAnalyzeView: View {
     // it behind a confirmation that states the count. (HIGH #5)
     @State private var confirmApplyAll = false
 
-    // R6-02: cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
+    // Cached. body re-evaluates at the 4 Hz deepAnalyzeProgress rate during
     // a run, and these fed synchronous SQLite COUNT(*) on the main thread on every
     // pass (multi-hour overnight runs). Refreshed on the same coarse triggers as
     // pendingRenameCount, plus active-model changes (pending is keyed by model).
@@ -225,7 +225,7 @@ struct DeepAnalyzeView: View {
     @State private var refreshDebounce: Task<Void, Never>?
 
     // Engine is alive (not crashed / mid-respawn); the live run cards key
-    // off this so a crash mid-run tears them down at once (F-C4-016).
+    // off this so a crash mid-run tears them down at once.
     private var engineLive: Bool {
         if case .ready = engine.state { return true }
         return false
@@ -276,7 +276,7 @@ struct DeepAnalyzeView: View {
                 }
                 // Suppress the prior run's caption while a fresh run spins
                 // up — otherwise a stale caption sits beside "Starting…"
-                // (F-C4-014; deepAnalyzeLast is private(set) on EngineClient
+                // (deepAnalyzeLast is private(set) on EngineClient
                 // so it can't be cleared from here).
                 if let lastFile = engine.deepAnalyzeLast, !isStartingDeepAnalyze {
                     lastFileCard(lastFile)
@@ -293,7 +293,7 @@ struct DeepAnalyzeView: View {
         }
         .onChange(of: store.version) { _, _ in throttledRefresh() }
         .onChange(of: settings.activeKind.rawValue) { _, _ in
-            refreshStatusCounts()   // pending is keyed by active model (R6-02)
+            refreshStatusCounts()   // pending is keyed by active model
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshPendingRenameCount) {
             BulkRenameSheet(store: store)
@@ -330,7 +330,7 @@ struct DeepAnalyzeView: View {
         }
     }
 
-    // R6-02: refresh the cached status counts off the 4 Hz body-eval path.
+    // Refresh the cached status counts off the 4 Hz body-eval path.
     private func refreshStatusCounts() {
         pendingTotals = store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
         hasNamedAnyone = store.namedPersonCount() > 0
@@ -795,7 +795,7 @@ struct DeepAnalyzeView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1).truncationMode(.middle)
                     }
-                    // V14.9-L1: live caption stream — engine emits the
+                    // Live caption stream — engine emits the
                     // partial caption text at 4 Hz as the VLM generates.
                     // Empty/nil while pre-inference; fills word-by-word
                     // once tokens start flowing.

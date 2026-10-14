@@ -1,4 +1,4 @@
-// C12 regression: the migration chains forked at v14 (macOS registered
+// The migration chains forked at v14 (macOS registered
 // "v14_fts_sync_triggers" while Windows registered
 // "v14_files_kind_scanned_index"), which made a macOS-touched library fail
 // every Windows scan with SQLITE_CORRUPT. Both platforms now pin the same
@@ -114,7 +114,7 @@ struct MigrationParityTests {
         try q.close()
     }
 
-    // R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
+    // A "different people" verdict's churn-stable (file_id, bbox)
     // key must still resolve to the CURRENT face after a faces_evaluated re-scan
     // DELETE+re-INSERTs face_prints with fresh ids (the legacy face_a/face_b id is
     // then dangling). Mirrors the Windows verdict_stable_key_survives_face_print_churn.
@@ -165,7 +165,7 @@ struct MigrationParityTests {
         try q.close()
     }
 
-    // L7: a DB stamped by a newer engine (identifiers beyond this
+    // A DB stamped by a newer engine (identifiers beyond this
     // registry) must refuse to open rather than silently write into a
     // schema it doesn't understand. Windows mirror:
     // migrations.rs newer_db_with_unknown_migration_is_refused.

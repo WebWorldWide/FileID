@@ -82,7 +82,6 @@ impl Default for Hyperparameters {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClusterResult {
     /// `cluster_ids[i]` = dense cluster ID for embedding i. Always
     /// non-negative; every face gets a cluster (singleton if alone).
@@ -228,7 +227,7 @@ where
         core_sums.iter().map(|s| normalize_sum(s, dim)).collect();
     let mut outliers_assigned = 0;
     let mut outliers_as_singletons = 0;
-    // R4-02/R4-08: snapshot the Pass-1 core count. An outlier may only join a
+    // Snapshot the Pass-1 core count. An outlier may only join a
     // genuine size>=2 Pass-1 core, never a singleton appended below. Without the
     // bound the inner scan grows by every appended singleton (O(M^2) at scale)
     // AND an outlier can order-dependently merge into a PRIOR outlier's singleton.

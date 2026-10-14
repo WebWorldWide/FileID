@@ -44,7 +44,7 @@ pub fn resolve_model_path(model_dir: &Path, base_stem: &str) -> PathBuf {
 /// always binds the CPU EP, so resolving by `active_provider()` on an
 /// Intel-NPU/Snapdragon box would hand a CPU session an `_int8` OpenVINO graph
 /// or a QNN `.bin` it cannot consume. Resolving for the EP actually bound keeps
-/// the on-disk variant and the session in agreement. (audit E6)
+/// the on-disk variant and the session in agreement.
 pub fn resolve_model_path_for(
     model_dir: &Path,
     base_stem: &str,

@@ -6,9 +6,7 @@ impl Drop for Directory {
     }
 }
 fn fixture() -> (Directory, Arc<CatalogIndex>) {
-    let directory = Directory(
-        std::env::temp_dir().join(format!("fileid-catalog-index-{}", uuid::Uuid::new_v4())),
-    );
+    let directory = Directory(std::env::temp_dir().join(format!("fileid-catalog-index-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir(&directory.0).unwrap();
     let path = directory.0.join("catalog.sqlite");
     let writer = Arc::new(Mutex::new(db::open_writer(&path).unwrap()));
@@ -23,10 +21,7 @@ fn fixture() -> (Directory, Arc<CatalogIndex>) {
     ] {
         let conn = index.writer.lock();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,vlm_description,failed) VALUES(?1,?2,?1,100,10,0,'image','png',?3,?4)",params![id,format!("/internal/{id}.png"),if id==2 {"birthday gifts"} else {"fixture"},failed]).unwrap();
-        let blob = vector(axis)
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect::<Vec<_>>();
+        let blob = vector(axis).iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
         conn.execute(
             "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)",
             params![id, blob, model],
@@ -44,26 +39,17 @@ fn request(value: serde_json::Value) -> CatalogRequest {
     serde_json::from_value(value).unwrap()
 }
 fn seed() -> CatalogRequest {
-    request(
-        serde_json::json!({"requestID":"semantic","action":"search","searchMode":"semantic","fileID":1}),
-    )
+    request(serde_json::json!({"requestID":"semantic","action":"search","searchMode":"semantic","fileID":1}))
 }
 fn control(action: &str) -> CatalogRequest {
-    request(
-        serde_json::json!({"requestID":"control","action":action,"jobID":CatalogIndex::job_id()}),
-    )
+    request(serde_json::json!({"requestID":"control","action":action,"jobID":CatalogIndex::job_id()}))
 }
 fn wait(index: &CatalogIndex) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut state = index.state.lock();
     while state.worker.is_some() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "catalog worker timed out"
-        );
-        index
-            .changed
-            .wait_for(&mut state, std::time::Duration::from_millis(20));
+        assert!(std::time::Instant::now() < deadline, "catalog worker timed out");
+        index.changed.wait_for(&mut state, std::time::Duration::from_millis(20));
     }
 }
 fn state(index: &CatalogIndex) -> String {
@@ -133,17 +119,11 @@ fn semantic_hybrid_scope_exclusions_and_changed_sources_are_real() {
             .collect::<Vec<_>>(),
         vec![3]
     );
-    assert!(
-        crate::commands::catalog::search(&index.writer.lock(), "birthday", &[])
-            .unwrap()
-            .iter()
-            .all(|h| h.evidence_id.is_none())
-    );
-    index
-        .writer
-        .lock()
-        .execute("DELETE FROM files WHERE id=3", [])
-        .unwrap();
+    assert!(crate::commands::catalog::search(&index.writer.lock(), "birthday", &[])
+        .unwrap()
+        .iter()
+        .all(|h| h.evidence_id.is_none()));
+    index.writer.lock().execute("DELETE FROM files WHERE id=3", []).unwrap();
     ready(&index);
     assert!(index.search(&seed()).unwrap().hits.is_empty());
     index.shutdown();
@@ -200,9 +180,7 @@ fn graph_roundtrip_is_restored_and_corruption_rebuilds() {
         checkpoint
     );
     let manifest: Manifest = serde_json::from_slice(&manifest).unwrap();
-    let graph_path = index
-        .directory
-        .join(format!("{}.graph", manifest.graph_hash));
+    let graph_path = index.directory.join(format!("{}.graph", manifest.graph_hash));
     std::fs::write(&graph_path, b"corrupt").unwrap();
     let rebuilding = CatalogIndex::with_scheduler(
         index.writer.clone(),
@@ -250,9 +228,7 @@ fn incompatible_model_nonce_dimension_and_topology_never_restore() {
     }
     std::fs::write(index.manifest_path(), &original).unwrap();
     let manifest: Manifest = serde_json::from_slice(&original).unwrap();
-    let graph_path = index
-        .directory
-        .join(format!("{}.graph", manifest.graph_hash));
+    let graph_path = index.directory.join(format!("{}.graph", manifest.graph_hash));
     let bytes = std::fs::read(graph_path).unwrap();
     assert!(validate_graph(&bytes).is_ok());
     let mut graph: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -280,18 +256,14 @@ fn coalesced_jobs_pause_resume_cancel_and_restart_without_writer_lock() {
     assert_eq!(index.search(&seed()).unwrap().status, "error");
     let worker = index.state.lock().worker.clone().unwrap();
     assert_eq!(index.search(&seed()).unwrap().status, "error");
-    assert!(Arc::ptr_eq(
-        &worker,
-        index.state.lock().worker.as_ref().unwrap()
-    ));
+    assert!(Arc::ptr_eq(&worker, index.state.lock().worker.as_ref().unwrap()));
     assert!(index.writer.try_lock().is_some());
     assert!(index.control(&control("resumeJob")).is_err());
     index.control(&control("pauseJob")).unwrap();
     assert_eq!(state(&index), "paused");
     assert!(index.search(&seed()).is_err());
     drop(lease);
-    let keyword =
-        request(serde_json::json!({"requestID":"keyword","action":"search","query":"birthday"}));
+    let keyword = request(serde_json::json!({"requestID":"keyword","action":"search","query":"birthday"}));
     assert_eq!(index.search(&keyword).unwrap().hits.len(), 1);
     let lease = index
         .scheduler
@@ -426,8 +398,7 @@ fn admission_defers_durably_without_false_completion_or_keyword_loss() {
     wait(&unavailable);
     assert_eq!(state(&unavailable), "paused");
     assert!(unavailable.state.lock().cache.is_none());
-    let keyword =
-        request(serde_json::json!({"requestID":"keyword","action":"search","query":"birthday"}));
+    let keyword = request(serde_json::json!({"requestID":"keyword","action":"search","query":"birthday"}));
     assert_eq!(unavailable.search(&keyword).unwrap().hits.len(), 1);
     assert!(!unavailable.manifest_path().exists());
     unavailable.shutdown();
@@ -444,16 +415,10 @@ fn cold_responses_match_schema_and_do_not_claim_similarity_completion() {
     assert_eq!(response.status, "ok");
     assert_eq!(response.hits.len(), 1);
     assert_eq!(response.hits[0].file_id, 2);
-    assert!(response
-        .message
-        .as_deref()
-        .unwrap()
-        .contains("Keyword results only"));
+    assert!(response.message.as_deref().unwrap().contains("Keyword results only"));
     assert!(response.jobs.iter().any(|job| job.kind == "catalogIndex"));
-    let schema: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../shared/ipc-schema/ipc.schema.json"
-    ))
-    .unwrap();
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../../shared/ipc-schema/ipc.schema.json")).unwrap();
     let statuses = schema["$defs"]["CatalogResponse"]["properties"]["status"]["enum"]
         .as_array()
         .unwrap();
@@ -464,11 +429,7 @@ fn cold_responses_match_schema_and_do_not_claim_similarity_completion() {
     let response = semantic.search(&seed()).unwrap();
     assert_eq!(response.status, "error");
     assert!(response.hits.is_empty());
-    assert!(response
-        .message
-        .as_deref()
-        .unwrap()
-        .contains("not available yet"));
+    assert!(response.message.as_deref().unwrap().contains("not available yet"));
     assert!(!response.jobs.is_empty());
     assert!(statuses.contains(&serde_json::to_value(&response).unwrap()["status"]));
     semantic.close();
@@ -544,11 +505,8 @@ fn invalid_cache_candidates_are_rejected_before_constrained_memory_admission() {
     let (_directory, original) = fixture();
     ready(&original);
     for invalid in ["oversized", "model", "dimension", "revision"] {
-        let mut manifest: Manifest =
-            serde_json::from_slice(&std::fs::read(original.manifest_path()).unwrap()).unwrap();
-        let graph = original
-            .directory
-            .join(format!("{}.graph", manifest.graph_hash));
+        let mut manifest: Manifest = serde_json::from_slice(&std::fs::read(original.manifest_path()).unwrap()).unwrap();
+        let graph = original.directory.join(format!("{}.graph", manifest.graph_hash));
         std::fs::OpenOptions::new()
             .write(true)
             .open(graph)
@@ -565,11 +523,7 @@ fn invalid_cache_candidates_are_rejected_before_constrained_memory_admission() {
             "revision" => manifest.revision.nonce = "wrong".into(),
             _ => {}
         }
-        std::fs::write(
-            original.manifest_path(),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(original.manifest_path(), serde_json::to_vec(&manifest).unwrap()).unwrap();
         let index = CatalogIndex::with_scheduler(
             original.writer.clone(),
             original.database.clone(),
@@ -588,13 +542,9 @@ fn invalid_cache_candidates_are_rejected_before_constrained_memory_admission() {
             vec![2, 3]
         );
         assert!(
-            std::fs::metadata(
-                original
-                    .directory
-                    .join(format!("{}.graph", manifest.graph_hash))
-            )
-            .unwrap()
-            .len()
+            std::fs::metadata(original.directory.join(format!("{}.graph", manifest.graph_hash)))
+                .unwrap()
+                .len()
                 < MAX_GRAPH_BYTES
         );
         index.close();
@@ -606,11 +556,8 @@ fn invalid_cache_candidates_are_rejected_before_constrained_memory_admission() {
 fn bounded_corrupt_graph_with_compatible_manifest_rebuilds_under_constrained_memory() {
     let (_directory, original) = fixture();
     ready(&original);
-    let manifest: Manifest =
-        serde_json::from_slice(&std::fs::read(original.manifest_path()).unwrap()).unwrap();
-    let graph = original
-        .directory
-        .join(format!("{}.graph", manifest.graph_hash));
+    let manifest: Manifest = serde_json::from_slice(&std::fs::read(original.manifest_path()).unwrap()).unwrap();
+    let graph = original.directory.join(format!("{}.graph", manifest.graph_hash));
     std::fs::OpenOptions::new()
         .write(true)
         .open(&graph)
@@ -619,9 +566,7 @@ fn bounded_corrupt_graph_with_compatible_manifest_rebuilds_under_constrained_mem
         .unwrap();
     assert_eq!(std::fs::metadata(&graph).unwrap().len(), MAX_GRAPH_BYTES);
     let conn = db::open_read(&original.database).unwrap();
-    assert!(original
-        .cache_candidate(&conn, &revision(&conn).unwrap())
-        .is_ok());
+    assert!(original.cache_candidate(&conn, &revision(&conn).unwrap()).is_ok());
     drop(conn);
     let index = CatalogIndex::with_scheduler(
         original.writer.clone(),
@@ -641,10 +586,7 @@ fn bounded_corrupt_graph_with_compatible_manifest_rebuilds_under_constrained_mem
         vec![2, 3]
     );
     assert!(std::fs::metadata(&graph).unwrap().len() < MAX_GRAPH_BYTES);
-    assert_eq!(
-        clip_space::digest(&std::fs::read(&graph).unwrap()),
-        manifest.graph_hash
-    );
+    assert_eq!(clip_space::digest(&std::fs::read(&graph).unwrap()), manifest.graph_hash);
     index.close();
     original.close();
 }

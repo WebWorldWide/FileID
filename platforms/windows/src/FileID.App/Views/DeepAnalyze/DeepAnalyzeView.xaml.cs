@@ -461,7 +461,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamCaptionText.Text = starting.Message ?? string.Empty;
             StreamProposedNameText.Text = string.Empty;
             // Reset the smart-rename tally at the start of each run so the pill
-            // reflects only THIS run, not a cumulative count across runs. (audit A13)
+            // reflects only THIS run, not a cumulative count across runs.
             _proposedNameCount = 0;
             _lastConsumedFileDone = null;
             SyncProposedNamesPill();
@@ -511,7 +511,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // across every subsequent progress tick for the *next* file; without
         // this reference guard those ticks would re-increment _proposedNameCount
         // (inflated pill) and clobber the current file's live caption / proposed
-        // name with the previous file's finished text. (audit A13 follow-up)
+        // name with the previous file's finished text.
         if (last is not null && !ReferenceEquals(last, _lastConsumedFileDone))
         {
             _lastConsumedFileDone = last;

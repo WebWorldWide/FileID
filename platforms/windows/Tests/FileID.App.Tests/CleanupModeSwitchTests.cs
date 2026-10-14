@@ -1,4 +1,4 @@
-﻿// F11: when a Similar-mode load fails (e.g. LoadSimilar's >20k image cap
+﻿// When a Similar-mode load fails (e.g. LoadSimilar's >20k image cap
 // exception), the previously loaded Exact groups must not stay rendered under
 // the Similar header. RefreshAsync clears the list via MergeByContentHash with
 // an empty row set — verify that path really empties a populated collection.

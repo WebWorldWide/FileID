@@ -1,9 +1,9 @@
 // DB-backed correctness for the auto-merge + persist guards: unknown persons
-// never merge (F-C3-003), "different people" verdicts block a merge (F-C3-004),
-// a bridge singleton can't transitively merge two named persons (F-C3-005), the
-// persist re-reads identity under the writer lock (F-C3-002), a dangling
-// representative_face_id is reconciled (F-C3-041), and permanently-failing
-// extraction rows are skipped so newer faces progress (F-C3-033).
+// never merge, "different people" verdicts block a merge,
+// a bridge singleton can't transitively merge two named persons, the
+// persist re-reads identity under the writer lock, a dangling
+// representative_face_id is reconciled, and permanently-failing
+// extraction rows are skipped so newer faces progress.
 import Testing
 import Foundation
 import GRDB
@@ -264,7 +264,7 @@ struct FaceClusteringMergeTests {
         #expect(await FaceClustering.currentPersonCount(database: db) == 1)
     }
 
-    // F-C3-003 — an is_unknown person is excluded from auto-merge entirely; the
+    // An is_unknown person is excluded from auto-merge entirely; the
     // "don't identify these" verdict is never overwritten by a cosine match.
     @Test("an is_unknown person is never auto-merged")
     func unknownNeverMerged() async throws {
@@ -287,7 +287,7 @@ struct FaceClusteringMergeTests {
         #expect(stillUnknown == 1)
     }
 
-    // F-C3-004 — a face_verifications "different people" verdict blocks the merge
+    // A face_verifications "different people" verdict blocks the merge
     // even when the two centroids are identical.
     @Test("a 'different' verdict pair is never auto-merged")
     func verdictBlocksMerge() async throws {
@@ -344,7 +344,7 @@ struct FaceClusteringMergeTests {
         #expect(remaining.count == 3)
     }
 
-    // F-C3-005 — a bridge singleton high-cosine to two distinct NAMED persons
+    // A bridge singleton high-cosine to two distinct NAMED persons
     // must not chain them into one identity (which would delete a name).
     @Test("a bridge singleton cannot transitively merge two named persons")
     func namedBridgeStaysSeparate() async throws {
@@ -364,7 +364,7 @@ struct FaceClusteringMergeTests {
         #expect(names.contains("Adam") && names.contains("Bob"))
     }
 
-    // R3-10 — a person named ONLY via a structured field other than first/last/
+    // A person named ONLY via a structured field other than first/last/
     // name (title / middle_name / suffix) must still count as NAMED, so two such
     // persons never auto-merge (the merge would delete one identity). The `named`
     // SQL predicate previously checked only first_name/last_name/name.
@@ -402,7 +402,7 @@ struct FaceClusteringMergeTests {
         #expect(ids.contains(a) && ids.contains(b), "neither structured-named identity is deleted")
     }
 
-    // F-C3-002 — the persist's identity carry-forward re-reads persons UNDER the
+    // The persist's identity carry-forward re-reads persons UNDER the
     // writer lock, so an edit committed during the lock-free clustering window
     // survives. `priorAnchors(from:)` is that under-lock read; it must reflect a
     // change made earlier in the same transaction (not a pre-captured snapshot).
@@ -418,7 +418,7 @@ struct FaceClusteringMergeTests {
         #expect(!observed.contains("Old"), "the stale pre-edit name is gone")
     }
 
-    // F-C3-041 — a representative_face_id that points at a missing/foreign face
+    // A representative_face_id that points at a missing/foreign face
     // (e.g. cascade-deleted mid-pass) is repaired to a surviving member face, or
     // NULL when none remain — never left dangling.
     @Test("a dangling representative_face_id is reconciled")

@@ -43,7 +43,7 @@ fn perf_trace(stage: &str, path: &std::path::Path, elapsed_ms: f64) {
 
 use crate::coordinator::ScanCoordinator;
 use crate::models::runtime::error_has_device_removed_marker;
-use crate::models::{bge_text::BgeText, face_align, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, scrfd, sface::SFace, yunet::YuNet};
+use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::MobileClipImage, scene_vocab::SceneLabeler, sface::SFace, yunet::YuNet};
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
@@ -185,14 +185,14 @@ pub struct TaggedFile {
     pub file_ref: Option<u64>,
     pub content_hash: Option<[u8; 32]>,
 
-    /// BGE-small text embedding (Phase 4b) — 384-d L2-normalized float vector
+    /// BGE-small text embedding — 384-d L2-normalized float vector
     /// for the document's extracted text. Persisted by the dbwriter into
     /// `text_embeddings` (parallel to `clip_embeddings`); enables semantic
     /// search beyond the doc_fts keyword match. `None` when BGE isn't
     /// installed or no doc text was extracted.
     pub text_embedding: Option<Vec<f32>>,
 
-    /// Plain-text extraction of the file's content (Phase 4) for Doc-kind
+    /// Plain-text extraction of the file's content for Doc-kind
     /// inputs (.txt / .md / .docx / .pptx / .xlsx; .pdf is a Phase-4b
     /// follow-up). Persisted to `doc_text` + the `doc_fts` FTS5 index by
     /// the dbwriter so the user can full-text-search their docs. Capped at
@@ -237,10 +237,8 @@ pub struct TaggedFile {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DetectedFace {
     pub bbox: [f32; 4],          // x, y, w, h in image pixels
-    pub landmarks: [[f32; 2]; 5],
     pub embedding: Vec<f32>,
     pub embedding_model: Option<String>,
     pub roll: f32,
@@ -315,7 +313,7 @@ pub struct ModelStack {
     /// text model isn't installed the per-file `tags` Vec is populated only
     /// from enriched extras.
     pub scene_labeler: Option<Arc<SceneLabeler>>,
-    /// BGE-small text embedder (Phase 4b) — computes a 384-d vector for each
+    /// BGE-small text embedder — computes a 384-d vector for each
     /// document's extracted text so the library can do semantic search beyond
     /// FTS5 keyword match. Optional: missing model → no embedding emitted.
     pub bge_text: Option<Mutex<BgeText>>,
@@ -462,7 +460,7 @@ impl ModelStack {
         // to ~1-3 Sessions on a 6 GB card, and the separate CLIP_CONCURRENCY=2
         // semaphore caps concurrent CLIP inferences regardless, so a pool
         // larger than 2 is partly wasted. The batch coordinator drives ONE
-        // Session with batched (N, 3, 256, 256) tensors, amortizing per-call
+        // Session with batched (N, 3, 224, 224) tensors, amortizing per-call
         // DirectML dispatch overhead. This default is PENDING hardware
         // confirmation — run the A/B (default vs `FILEID_CLIP_USE_BATCH=0`) and
         // compare clip_p95_ms + files_per_second. Set `FILEID_CLIP_USE_BATCH=0`
@@ -474,12 +472,12 @@ impl ModelStack {
 
         // The scene labeler matrix is loaded from precomputed embeddings
         // (scene_embeddings_precomputed.rs) and is the canonical auto-tagger.
-        // The per-file MobileCLIP embedding for semantic search uses the same
+        // The per-file CLIP embedding for semantic search uses the same
         // image encoder; if ENABLE_CLIP_SCENE_TAGS is off, the labeler is skipped.
         let scene_labeler = if crate::models::scene_vocab::ENABLE_CLIP
             && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS
         {
-            crate::models::scene_vocab::shared_scene_labeler()
+            Some(crate::models::scene_vocab::shared_scene_labeler())
         } else {
             None
         };
@@ -763,7 +761,7 @@ impl Tagger {
         drop(raw_rx);
         drop(predecoded_tx);
 
-        // P3: derive the GPU-inference concurrency caps from the active EP. On
+        // Derive the GPU-inference concurrency caps from the active EP. On
         // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
         // to the VRAM-clamped pool size so the semaphore doesn't throttle below
         // the number of loaded Sessions.
@@ -898,10 +896,10 @@ impl Tagger {
 pub struct PreDecoded {
     pub file: DiscoveredFile,
     pub decoded: Option<anyhow::Result<(Vec<u8>, u32, u32)>>,
-    /// Phase 4 doc-kind text extraction (txt/md/docx/pptx/xlsx). `None` on
+    /// Doc-kind text extraction (txt/md/docx/pptx/xlsx). `None` on
     /// non-doc kinds, online-only files, and extraction failures.
     pub doc_text: Option<String>,
-    /// Phase 5 audio-kind metadata tags (artist/album/title/genre/year).
+    /// Audio-kind metadata tags (artist/album/title/genre/year).
     /// Empty for non-audio kinds + online-only + extraction failures.
     pub audio_tags: Vec<(String, Option<f32>)>,
     pub content_hash: Option<[u8; 32]>,
@@ -1065,7 +1063,7 @@ fn run_decoder_thread(
                 // rename-heal content_hash HERE on the decoder thread via the
                 // bounded composite (head + interior samples + tail + size — no
                 // full read), so the async worker's `or_else` fallback never
-                // re-opens the file as blocking IO on a tokio worker. (F-C1-025)
+                // re-opens the file as blocking IO on a tokio worker.
                 _ => {
                     content_hash =
                         crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
@@ -1089,7 +1087,7 @@ fn run_decoder_thread(
         if decoded.is_some() {
             STATS_DECODE_US.fetch_add(decode_started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
-        // Phase 4: for Doc-kind files, extract text on the same decoder
+        // For Doc-kind files, extract text on the same decoder
         // thread (cheap I/O; same online_only gate as content read). Re-uses
         // the file_bytes buffer (≤ 16 MB) when the doc/pdf branch above
         // pre-read it; otherwise the extractor falls back to opening the
@@ -1106,7 +1104,7 @@ fn run_decoder_thread(
                 _ => None,
             }
         };
-        // Phase 5: for Audio-kind files, read container metadata via symphonia
+        // For Audio-kind files, read container metadata via symphonia
         // (artist/album/title/genre/year). Pure-Rust, no system ffmpeg.
         // Reuses file_bytes when present (same 16 MB cap as docs).
         let audio_tags = if file.online_only {
@@ -1370,7 +1368,7 @@ async fn process_file_predecoded(
     // computed `content_hash` for every non-online kind (image/doc/pdf/audio
     // via the single read; video/over-cap/other via the bounded composite),
     // so this async worker NEVER re-opens the file — the previous `.or_else`
-    // fallback was blocking filesystem IO on a tokio worker. (F-C1-025) On a
+    // fallback was blocking filesystem IO on a tokio worker. On a
     // decoder-thread read error the row simply lacks a content_hash and the
     // heal-by-file_ref path still applies; cloud placeholders stay None so we
     // never hydrate a OneDrive online-only file.
@@ -1378,7 +1376,7 @@ async fn process_file_predecoded(
         tagged.content_hash = content_hash;
     }
 
-    // Document content (Phase 4): the decoder thread already pulled the text
+    // Document content: the decoder thread already pulled the text
     // for FileKind::Doc. Run a cheap RAKE-style keyword extractor → tag chips
     // (source='auto'), and stash the text on the row so the dbwriter can
     // persist it into doc_text/doc_fts for full-text search.
@@ -1393,7 +1391,7 @@ async fn process_file_predecoded(
             for (label, score) in crate::util::keywords::extract(&text) {
                 tagged.tags.push((label, Some(score)));
             }
-            // BGE-small semantic embedding for the doc text (Phase 4b). Runs on
+            // BGE-small semantic embedding for the doc text. Runs on
             // the calling worker thread under a single-Session Mutex (sync
             // inference). Skipped when BGE isn't installed — FTS5 still
             // serves keyword search.
@@ -1418,16 +1416,16 @@ async fn process_file_predecoded(
         }
     }
 
-    // Audio metadata (Phase 5): artist/album/title/genre/year, surfaced as
+    // Audio metadata: artist/album/title/genre/year, surfaced as
     // tag chips so the user can filter their library by these facts. Each
     // tag carries score=None — these are facts, not model probabilities.
     tagged.tags.extend(audio_tags);
 
-    // SEC/perf: once the GPU is marked dead (TDR or device-removed),
-    // skip the whole ML pipeline for the rest of this process lifetime.
-    // mark_gpu_dead is one-shot (see coordinator.rs:96 — never reset),
-    // so this also prevents the remaining Discovery queue from queueing
-    // up tens of thousands of doomed inference calls behind us.
+    // Once the GPU is marked dead (TDR or device-removed), skip the whole ML
+    // pipeline for the rest of this process lifetime. The latch is
+    // process-wide and never reset, so this also keeps the remaining
+    // Discovery queue from stacking up tens of thousands of doomed inference
+    // calls behind us.
     //
     // Mark the row failed=true (NOT false): this file never reached the ML
     // stages, so it has no faces/tags/embeddings. The incremental skip-set
@@ -1454,7 +1452,7 @@ async fn process_file_predecoded(
             // doc keywords) before the GPU died. Mark the set authoritative so
             // the dbwriter persists it — otherwise tags_evaluated stays false,
             // the dbwriter drops the freshly-extracted tags, AND failed=false
-            // strands the row in the skip-set, losing them permanently. (audit E2)
+            // strands the row in the skip-set, losing them permanently.
             tagged.tags_evaluated = true;
         }
         tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1527,7 +1525,7 @@ async fn process_file_predecoded(
                             Ok(dets) => {
                                 for det in dets {
                                     if coord.is_gpu_dead() { break; }
-                                    let quality = match scrfd::validate_face_geometry(&det, w, h) {
+                                    let quality = match face_geometry::validate_face_geometry(&det, w, h) {
                                         Some(q) => q,
                                         None => continue,
                                     };
@@ -1555,7 +1553,7 @@ async fn process_file_predecoded(
                                         };
                                         match embed_result {
                                             Ok((emb, embedding_model)) => {
-                                                let pose = scrfd::estimate_pose(&det.landmarks);
+                                                let pose = face_geometry::estimate_pose(&det.landmarks);
                                                 let img_area = (w as f32) * (h as f32);
                                                 let area_fraction = if img_area > 0.0 {
                                                     (bbox_xywh[2] * bbox_xywh[3]) / img_area
@@ -1564,7 +1562,6 @@ async fn process_file_predecoded(
                                                 };
                                                 tagged.faces.push(DetectedFace {
                                                     bbox: bbox_xywh,
-                                                    landmarks: det.landmarks,
                                                     embedding: emb,
                                                     embedding_model: Some(embedding_model),
                                                     roll: pose.roll,
@@ -1800,7 +1797,7 @@ async fn process_file_predecoded(
                             );
                             tagged.tags.push((label.to_string(), Some(score)));
                         }
-                        // V16.29: one-line per-file summary at info level so a user
+                        // one-line per-file summary at info level so a user
                         // who sees "only year" chips on images can grep the engine
                         // log to confirm whether scene tags are being emitted vs
                         // gated out.
@@ -1839,11 +1836,11 @@ async fn process_file_predecoded(
                     let ocr_started = Instant::now();
                     // Move (not clone) the decoded frame into OCR: this is the
                     // last use of `rgb` in the block, so the clone was a wasted
-                    // full-frame allocation + memcpy per OCR'd file. (audit P5)
-                    if let Ok(Some(ocr)) = run_ocr_blocking(rgb, w, h).await {
-                        if !ocr.text.trim().is_empty() {
+                    // full-frame allocation + memcpy per OCR'd file.
+                    if let Ok(Some(text)) = run_ocr_blocking(rgb, w, h).await {
+                        if !text.trim().is_empty() {
                             tagged.has_text = true;
-                            tagged.ocr_text = Some(ocr.text);
+                            tagged.ocr_text = Some(text);
                         }
                     }
                     STATS_OCR_RAN.fetch_add(1, Ordering::Relaxed);
@@ -1897,7 +1894,7 @@ async fn process_file_predecoded(
     // complete face-detect nor embed. Mark it failed so the incremental
     // skip-set re-processes it next scan instead of stranding it at
     // failed=false (scanned-fine-but-face-less forever, same class as the
-    // pre-ML bail). (audit E1)
+    // pre-ML bail).
     if coord.is_gpu_dead()
         && matches!(file.kind, FileKind::Image | FileKind::Video)
         && !tagged.failed
@@ -1913,7 +1910,7 @@ async fn process_file_predecoded(
     // (labeler missing, or this file's embed failed transiently), `tags` holds
     // only the Year/camera enriched extras — not an authoritative empty — so
     // setting tags_evaluated would make the dbwriter delete-then-reinsert wipe
-    // the file's previously-persisted content tags. (audit R3-19)
+    // the file's previously-persisted content tags. (19)
     let visual_tagger_ran = models.ram_plus.is_some()
         || models.ram_plus_batch.is_some()
         || (models.scene_labeler.is_some() && tagged.clip_embedding.is_some());
@@ -2052,8 +2049,8 @@ const MAX_DECODED_PIXELS: u64 = 50_000_000;
 
 /// Run OCR on an RGB buffer. Returns None if no text or OCR isn't
 /// available on this system.
-async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option<shell::ocr::OcrResult>> {
-    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<shell::ocr::OcrResult>> {
+async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option<String>> {
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
         match shell::ocr::recognize(&rgb, w, h) {
             Ok(r) => Ok(Some(r)),
             Err(err) => {
@@ -2308,7 +2305,6 @@ mod tests {
         // Sanity: the field exists + defaults to None when constructed without it.
         let f = DetectedFace {
             bbox: [0.0; 4],
-            landmarks: [[0.0; 2]; 5],
             embedding: vec![0.0; 512],
             embedding_model: None,
             roll: 0.0,
@@ -2327,7 +2323,7 @@ mod tests {
         assert_eq!(compute_dhash(&rgb, 64, 64), 0);
     }
 
-    /// C6: the predecode bound is byte-weighted by each frame's ACTUAL
+    /// The predecode bound is byte-weighted by each frame's ACTUAL
     /// decoded size — a third frame that would overflow the budget must wait
     /// until an earlier reservation is dropped.
     #[test]
@@ -2371,7 +2367,7 @@ mod tests {
         assert!(budget.acquire(50, &coord).is_none());
     }
 
-    /// C5: over-cap images get EXIF from `exif_from_head` (a bounded head
+    /// over-cap images get EXIF from `exif_from_head` (a bounded head
     /// read) — there is no later fallback. A minimal JPEG whose APP1 segment
     /// carries a TIFF IFD with a Model tag must yield the camera model.
     #[test]
@@ -2476,7 +2472,7 @@ mod tests {
     }
 
     // Aspect tags (Wide/Tall/Square) were intentionally dropped from
-    // enriched-extras in V16.2 — they dominated `TopTwoTags` on files
+    // enriched-extras — they dominated `TopTwoTags` on files
     // without classifier output (every photo got Wide/Tall as a top chip,
     // pushing the more useful Year/Camera/HasFaces tags out of the
     // 2-chip slot). These four tests now assert the absence of those
@@ -2508,7 +2504,7 @@ mod tests {
     #[test]
     fn enriched_does_not_emit_aspect_at_boundary() {
         // The borderline case used to emit "Square" for 1.30 ratio
-        // (boundary not >1.30). After the V16.2 drop, no aspect tag
+        // (boundary not >1.30). After the drop, no aspect tag
         // is emitted at any ratio.
         let mut t = stub_tagged(1300, 1000, 5_000_000);
         push_enriched_extras(&mut t);
@@ -2517,7 +2513,7 @@ mod tests {
         assert!(!t.tags.iter().any(|(s, _)| s == "Tall"));
     }
 
-    // F-C1-019: the Year_ tag is pinned to the macOS `extraTags` rule —
+    // The Year_ tag is pinned to the macOS `extraTags` rule —
     // creation date (when present) in local time, year strictly inside
     // (1990, 2100). These vectors use mid-year noon-UTC timestamps so the
     // resolved calendar year is identical in every real-world timezone

@@ -3839,3 +3839,12 @@ Hold the Windows File Tools export request in a dedicated state object until its
 ## 2026-10-13 — Pause decorative Mac motion by native window activity
 
 Use a local monotonic clock and native AppKit window activity notifications to suspend the existing SwiftUI LavaLamp and shimmer timelines when the window is inactive, hidden, or occluded, when Reduce Motion is enabled, or when the user pauses motion. Keep the gold visual language and native SwiftUI canvas. This avoids animating invisible windows and makes motion controllable without adding a dependency or telemetry. Verify source behavior on hosted Swift CI and later on the owner’s Mac.
+
+## 2026-10-14 — Latch GPU device removal for the whole engine process
+
+A DirectML device-removed error invalidates every ORT session in the process. `ScanCoordinator::mark_gpu_dead` now also sets the process-wide flag, and new coordinators start dead when it is set, so a later scan skips GPU stages, marks images for retry and ends with the existing `gpu_device_removed` error instead of re-submitting work to a dead driver. `ensure_gpu_inference_alive` and the VLM backend fallback read the same flag. Recovery remains an engine restart.
+
+## 2026-10-14 — Dead-code policy for the dual bin/lib engine crate
+
+The engine compiles each module twice: as the `FileIDEngine` binary and as the `fileid_engine` library used by the CLI, TUI, GTK app, examples and tests. The library keeps a crate-wide `allow(dead_code)` because items only `main.rs` calls look unused there. Dead code is judged against the binary on both Windows and Linux: an item the binary never uses must either have a named external consumer (stated on its `allow`), be `#[cfg(test)]`, or be deleted. Unwired "foundation" code with no roadmap entry is deleted rather than kept for a future integration. Formatting stays opted out via `rustfmt.toml`, except files with no hand layout to preserve, which may be formatted individually.
+

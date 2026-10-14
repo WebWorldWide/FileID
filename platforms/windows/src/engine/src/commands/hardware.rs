@@ -57,7 +57,7 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
     HardwareInfo {
         gpu_vendor: vendor_str.into(),
         adapter_name: probe.adapter_name.clone(),
-        // F-C5-005: report the EP this process ACTUALLY bound (the memoized
+        // Report the EP this process ACTUALLY bound (the memoized
         // `active_provider()`), not a fresh `probe.provider`. They agree at
         // startup, but on a `verifyCudaPack` reprobe AFTER the user installs a
         // pack, a fresh probe would advertise the now-available GPU EP even

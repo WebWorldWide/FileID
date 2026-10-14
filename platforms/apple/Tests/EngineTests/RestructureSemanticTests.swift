@@ -58,7 +58,7 @@ struct RestructureSemanticTests {
         #expect(cats.count == 2)
     }
 
-    /// F-C3-013/014: two distinct content clusters whose distinctive tags differ
+    /// Two distinct content clusters whose distinctive tags differ
     /// ONLY in characters componentSafe maps to "_" ("16:9" vs "16/9" → "16_9")
     /// must back DISTINCT physical directories (sanitize + dedup in the sanitized
     /// namespace), not collapse into one — and the numeric-suffix loop must
@@ -81,7 +81,7 @@ struct RestructureSemanticTests {
         #expect(dirs.allSatisfy { !($0 as NSString).lastPathComponent.contains(":") })
     }
 
-    /// F-C3-015: a prototype that matches strongly but lives OUTSIDE libraryRoot
+    /// A prototype that matches strongly but lives OUTSIDE libraryRoot
     /// is not a valid routing target (the apply layer would reject a move that
     /// canonicalizes outside root); the cluster falls through to a new in-root
     /// group instead.

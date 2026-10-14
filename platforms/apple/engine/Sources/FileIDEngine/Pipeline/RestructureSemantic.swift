@@ -301,7 +301,7 @@ public enum RestructureSemantic {
         // distinct folders (BL-01, #9). Consulted ONLY by the new-group branch;
         // the existing-folder branch legitimately routes many clusters into one
         // user folder. Tracked in the SANITIZED namespace that actually backs
-        // the directory. (F-C3-014)
+        // the directory.
         // Stable cluster iteration (smallest id first) so the dedup below is
         // deterministic across runs.
         for cid in clusters.keys.sorted() {
@@ -325,7 +325,7 @@ public enum RestructureSemantic {
             // Containment guard: only an in-root prototype is a valid
             // destination — routing to a folder outside libraryRoot would be
             // rejected by the apply layer (canonicalizes outside root), so such
-            // a match falls through to a new in-root group instead. (E12, F-C3-015)
+            // a match falls through to a new in-root group instead.
             if let (proto, sim, runnerUp) = nearestTwoFolders(centroid, prototypes),
                sim >= profile.folderMatchCos, Self.pathContained(proto.path, in: libraryRoot) {
                 // Learn-your-style: route to the nearest confident existing
@@ -351,7 +351,7 @@ public enum RestructureSemantic {
                 // cluster so distinct clusters get distinct folders (#9). Work in
                 // the SANITIZED namespace (#2): two pretty names that differ only
                 // in chars componentSafe maps to "_" (e.g. "16:9" and "16/9" →
-                // "16_9") must still back two physical directories. (F-C3-013/014)
+                // "16_9") must still back two physical directories.
                 var pretty = base
                 let safeBase = FilesystemNameSafe.componentSafe(base)
                 var safe = safeBase
@@ -366,7 +366,7 @@ public enum RestructureSemantic {
                 // "{base} {n}" to the SAME string, so the uniqueness check never
                 // clears and the loop spins forever. Reserve room on the
                 // already-sanitized base — distinct n ⇒ distinct candidate ⇒
-                // guaranteed termination. (F-C3-014)
+                // guaranteed termination.
                 let safeNameMax = 200  // mirrors FilesystemNameSafe default maxLength
                 var n = 2
                 while usedGroupNames.contains(safe) {
@@ -559,7 +559,7 @@ public enum RestructureSemantic {
             // the Rust engine's `chars().count()` — a String's `.count` counts
             // graphemes, so an NFD multi-scalar single-grapheme token (e.g. a decomposed
             // Hangul syllable) would pass the ≥3 gate on Windows but fail it on macOS,
-            // diverging the token set used for feedback + name-routing. (audit — lockstep)
+            // diverging the token set used for feedback + name-routing. (lockstep)
             .filter { $0.unicodeScalars.count >= 3 && $0.contains(where: { $0.isLetter })
                 && !filenameStopwords.contains($0) }
     }
@@ -646,7 +646,7 @@ public enum RestructureSemantic {
         // Can't request more neighbors than other points exist; k_nn >= n made the
         // kNN over an all-tied set arch-sensitive (see nonImageSignatures). (lockstep)
         let k = min(params.kNN, max(1, n - 1))
-        // R3-12: brute-force cosine kNN below HNSW_MIN; an approximate HNSW index
+        // brute-force cosine kNN below HNSW_MIN; an approximate HNSW index
         // above it, so the O(n²) searcher can't stall the Restructure tab at the
         // documented "tens of thousands of files" scale. Mirrors the Windows
         // engine's restructure_semantic::cluster (HNSW_MIN = 5_000) and reuses the
@@ -661,7 +661,7 @@ public enum RestructureSemantic {
             // A truncated/corrupt blob or a stale different-dim embedding (the loader
             // only checks `count % 4 == 0`, not == dim) can produce a ragged vector,
             // so fall back to the dim-tolerant brute-force path in that case rather
-            // than trusting "insert order == node id". (audit R3-12 delta fix)
+            // than trusting "insert order == node id". (12 delta fix)
             guard n >= hnswMin, let dim = fused.first?.count, dim > 0,
                   fused.allSatisfy({ $0.count == dim }) else { return nil }
             let idx = HNSWIndex(dim: dim, M: 16, efConstruction: 200, efSearch: 50)
@@ -748,7 +748,6 @@ public enum RestructureSemantic {
 
     /// Component-wise containment: is `path` the root itself or a descendant of
     /// it? Mirrors Rust `Path::starts_with` (so `/lib2` doesn't match `/lib`).
-    /// (F-C3-015)
     static func pathContained(_ path: String, in root: String) -> Bool {
         if path == root { return true }
         let rootPrefix = root.hasSuffix("/") ? root : root + "/"

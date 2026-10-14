@@ -12,18 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 
+/// Process-wide device-removed latch. Once DirectML reports the device gone,
+/// every later ORT session in this process is invalid, so new scans and VLM
+/// launches must stay off the GPU until the engine restarts.
 static GLOBAL_GPU_DEAD: AtomicBool = AtomicBool::new(false);
 
 /// Check if GPU device was removed in this process.
 pub fn process_gpu_device_removed() -> bool {
-    GLOBAL_GPU_DEAD.load(Ordering::Relaxed)
-}
-
-/// Mark global GPU dead flag.
-#[allow(dead_code)]
-pub fn mark_global_gpu_dead() -> bool {
-    let was = GLOBAL_GPU_DEAD.swap(true, Ordering::AcqRel);
-    !was
+    GLOBAL_GPU_DEAD.load(Ordering::Acquire)
 }
 
 #[derive(Clone)]
@@ -52,7 +48,7 @@ impl ScanCoordinator {
             inner: Arc::new(Inner {
                 paused: AtomicBool::new(false),
                 cancelled: AtomicBool::new(false),
-                gpu_dead: AtomicBool::new(false),
+                gpu_dead: AtomicBool::new(process_gpu_device_removed()),
                 resume_notify: Notify::new(),
             }),
         }
@@ -68,6 +64,7 @@ impl ScanCoordinator {
     /// checkpoint exits at the next poll. Returns true on the FIRST caller
     /// so the IPC event fires exactly once across N racing workers.
     pub fn mark_gpu_dead(&self) -> bool {
+        GLOBAL_GPU_DEAD.store(true, Ordering::Release);
         let was = self.inner.gpu_dead.swap(true, Ordering::AcqRel);
         if !was {
             self.inner.cancelled.store(true, Ordering::Relaxed);
@@ -98,18 +95,6 @@ impl ScanCoordinator {
         self.inner.cancelled.store(true, Ordering::Relaxed);
         // Wake any pause-waiting worker so they observe the cancel and exit.
         self.inner.resume_notify.notify_waiters();
-    }
-
-    /// Reset for a new scan session. Must only be called when no tasks are
-    /// observing the coordinator.
-    /// NOTE: `gpu_dead` is intentionally NOT reset. Once the GPU device
-    /// has been removed in this process, every subsequent ORT session is
-    /// invalid — a full engine restart is required to recover. Resetting
-    /// would lure us back into the cascade-spam failure mode.
-    #[allow(dead_code)]
-    pub fn reset(&self) {
-        self.inner.paused.store(false, Ordering::Relaxed);
-        self.inner.cancelled.store(false, Ordering::Relaxed);
     }
 
     /// Workers call this between batches; if paused, awaits resume. Returns

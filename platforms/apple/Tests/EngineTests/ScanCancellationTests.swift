@@ -1,8 +1,8 @@
-// C1 regression, end-to-end: cancelling a scan mid-flight must still
+// End-to-end: cancelling a scan mid-flight must still
 // produce the terminal scanComplete event and leave the engine
 // responsive (the original deadlock left an unbuffered channel producer
 // uncancelled, wedging shutdown). Spawns the real engine binary, so
-// this also exercises the U4 fd-2 transport split: every wire line must
+// this also exercises the fd-2 transport split: every wire line must
 // be a parseable JSON event.
 import Testing
 import Foundation
@@ -178,7 +178,7 @@ struct ScanCancellationTests {
         }
         #expect(!proc.isRunning, "engine must exit cleanly on shutdown after a cancelled scan")
 
-        // U4: every line on the wire must be a JSON object — no library
+        // Every line on the wire must be a JSON object — no library
         // chatter may reach the IPC stream.
         for line in collector.snapshot() {
             #expect(line.hasPrefix("{"), "non-JSON line on the IPC wire: \(line.prefix(120))")

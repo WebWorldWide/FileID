@@ -54,7 +54,7 @@ async fn build_thumbnail_b64(path: &str) -> anyhow::Result<String> {
     let p = std::path::PathBuf::from(path);
     let frame = tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p)).await??;
 
-    let crate::shell::video::VideoFrame { width, height, rgb, .. } = frame;
+    let crate::shell::video::VideoFrame { width, height, rgb } = frame;
     let src = image::RgbImage::from_raw(width, height, rgb)
         .ok_or_else(|| anyhow::anyhow!("video frame buffer mismatch"))?;
 

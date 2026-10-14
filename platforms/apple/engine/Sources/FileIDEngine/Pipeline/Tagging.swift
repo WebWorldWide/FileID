@@ -217,7 +217,7 @@ public enum Tagging {
                     // facesEvaluated being false — and (b) strand the file at
                     // failed=false so the incremental skip never re-tags it. Mark
                     // it failed (gates all stay false) so the next scan retries it,
-                    // mirroring the Windows per-file-timeout row. (F-C3-001/036)
+                    // mirroring the Windows per-file-timeout row.
                     if !pass.didComplete {
                         JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
                         return TaggedFile(
@@ -527,7 +527,7 @@ public enum Tagging {
                     // CGPDFDocument rasterize + first-pages OCR (the macOS recovery the
                     // Windows pdfium path lacks).
                     guard let pdf = CGPDFDocument(url as CFURL) else {
-                        // R3-13: a transient open failure must be recorded as a
+                        // A transient open failure must be recorded as a
                         // FAILURE (not a success with tagsEvaluated:true) — mirrors
                         // the image-decode branch. failed:true keeps the row out of
                         // the next scan's `failed = 0` skip set so the PDF is
@@ -624,7 +624,7 @@ public enum Tagging {
         // Discovery (Stage A) already stat'd instead of a second
         // attributesOfItem — one fewer SMB/NFS round-trip per image on NAS.
         //
-        // R-13: a 0/absent discovered size means UNKNOWN, not tiny — Discovery's
+        // A 0/absent discovered size means UNKNOWN, not tiny — Discovery's
         // .fileSizeKey can come back empty on some SMB/NFS volumes (which this
         // project targets), leaving sizeBytes 0 on a perfectly valid image. Only
         // re-stat in that case so we don't mark a decodable file decode-failed;

@@ -36,7 +36,7 @@ struct TagWriterMergeTests {
 
 @Suite("TagWriter — bulk batch results")
 struct TagWriterBatchTests {
-    /// New "added vs unchanged" shape (P9).
+    /// New "added vs unchanged" shape.
     @Test("addTagsBulk distinguishes added from unchanged")
     func addedVsUnchanged() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())

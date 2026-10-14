@@ -6,11 +6,8 @@
 # Layout produced under platforms/windows/dist/x64/:
 #   FileID/
 #     FileIDEngine.exe
-#     (DLL companions land here once ORT + llama.cpp + pdfium integration
-#      lands in Phase 1+. Phase 0 ships only the engine binary.)
 #
-# Phase 1+ extends this script to build FileID.App via `dotnet publish`,
-# stage acrylic shaders + Win2D companions, and stamp version metadata.
+# The full app + runtime bundle is assembled by build-all.ps1.
 
 param(
     [switch]$Clean,

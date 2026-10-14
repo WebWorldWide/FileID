@@ -11,21 +11,15 @@
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct AnalyzeOutcome {
     pub file_id: i64,
     pub description: Option<String>,
     pub proposed_name: Option<String>,
-    pub model: String,
-    pub elapsed_ms: u64,
 }
 
-/// What we want from this file: caption, smart filename, or both.
+/// Which VLM passes run for a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum AnalyzeMode {
-    CaptionOnly,
-    RenameOnly,
     /// Tags only — the fast path for background auto-tagging. One VLM call per
     /// file (tags) instead of three (caption + tags + rename), so a whole-library
     /// pass is ~3× faster. Caption + proposed-name columns are left untouched.
@@ -85,7 +79,6 @@ pub(crate) async fn analyze_file_scoped(
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
 
-    let started = std::time::Instant::now();
 
     let verified = runner.verified_weights(model_kind, cancel.clone()).await?;
     let (gguf, mmproj) = verified.paths();
@@ -100,7 +93,7 @@ pub(crate) async fn analyze_file_scoped(
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
+    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -136,7 +129,7 @@ pub(crate) async fn analyze_file_scoped(
         let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
         tags = parse_vlm_tags(&result.text);
     }
-    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+    if mode == AnalyzeMode::Both {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -173,8 +166,6 @@ pub(crate) async fn analyze_file_scoped(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 
@@ -206,7 +197,7 @@ pub(crate) async fn rasterize_for_vlm(
     }
     match kind.as_str() {
         "image" => {
-            // C3: llama.cpp's image loader (stb_image) reads JPEG/PNG natively
+            // Llama.cpp's image loader (stb_image) reads JPEG/PNG natively
             // — pass those through untouched (the overwhelming common case).
             // Everything else (webp, bmp, tiff, gif, …) gets transcoded to a
             // temp JPEG so the VLM's mmproj doesn't silently reject it: the
@@ -239,7 +230,7 @@ pub(crate) async fn rasterize_for_vlm(
     }
 }
 
-/// C3: decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
+/// Decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
 /// temp JPEG the VLM's stb_image-based loader can read. Caller cleans up the
 /// temp file. Runs on a blocking thread (image-rs decode/encode is CPU-bound).
 async fn transcode_image_to_jpeg(
@@ -343,9 +334,9 @@ fn persist_vlm_results(
     Ok(())
 }
 
-/// A2: one-shot probe that the persistent llama-server actually accepts our
+/// one-shot probe that the persistent llama-server actually accepts our
 /// multimodal `image_url` data-URI payload shape. This payload format was never
-/// hardware-verified (see NEXT.md V16.8); if the server build rejects it (e.g.
+/// hardware-verified; if the server build rejects it (e.g.
 /// 400 on the request), EVERY file in the batch would fail identically and
 /// silently. Sending one tiny throwaway JPEG up front lets the batch detect the
 /// incompatibility and fall back to the per-file CLI path (a different,
@@ -383,8 +374,8 @@ async fn complete_cancellable(
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
 /// with NO per-call model reload. `mode` selects which VLM calls run: `Both`
 /// does caption + tags + smart-rename (3 HTTP calls); `TagsOnly` does just the
-/// tag call (1 call → ~3× faster — the background auto-tag path); CaptionOnly /
-/// RenameOnly do their single call. The caption (or, in TagsOnly, the joined
+/// tag call (1 call → ~3× faster — the background auto-tag path);
+/// `CaptionAndTags` skips the rename call. The caption (or, in TagsOnly, the joined
 /// tags) is handed to `on_token` in one shot (these server calls are
 /// non-streaming). Mirrors `analyze_file`'s outputs so the batch loop is
 /// backend-agnostic.
@@ -400,7 +391,6 @@ pub(crate) async fn analyze_file_via_server(
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
-    let started = std::time::Instant::now();
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id, scope).await?;
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
@@ -410,7 +400,7 @@ pub(crate) async fn analyze_file_via_server(
     let mut proposed_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
+    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -433,7 +423,7 @@ pub(crate) async fn analyze_file_via_server(
         }
     }
 
-    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+    if mode == AnalyzeMode::Both {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -465,8 +455,6 @@ pub(crate) async fn analyze_file_via_server(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 

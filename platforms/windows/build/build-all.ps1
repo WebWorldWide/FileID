@@ -65,9 +65,6 @@ param(
     # aarch64-pc-windows-msvc and the .NET app for win-arm64. Implies
     # -Release because debug ARM64 + WinAppSDK has rough edges.
     [switch]$Arm64,
-    # Native llama.cpp bindings (in-process VLM). Adds ~150 MB of build
-    # artifacts + needs cmake. Off by default; enable for ship builds.
-    [switch]$VlmNative,
     # Sign every built binary using `build/sign.ps1`. Requires either
     # -Thumbprint to be set or FILEID_EV_THUMBPRINT env var.
     [switch]$Sign,
@@ -288,31 +285,23 @@ if (-not $SkipApp) {
 }
 
 if (-not $SkipEngine) {
-    Write-Host "Building engine ($RustProfile, $($RustTarget))$(if ($VlmNative) { ' [vlm-native]' })..." -ForegroundColor Cyan
-    if ($VlmNative) {
-        Write-Host "  vlm-native feature: requires cmake + ~150 MB build artifacts" -ForegroundColor DarkGray
-        if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-            Write-Host "ERROR: cmake not found in PATH. Install via 'winget install Kitware.CMake' before -VlmNative." -ForegroundColor Red
-            exit 1
-        }
-    }
+    Write-Host "Building engine ($RustProfile, $($RustTarget))..." -ForegroundColor Cyan
     Push-Location $EngineDir
     try {
-        $featureArgs = if ($VlmNative) { @("--features", "vlm-native") } else { @() }
         # Cargo uses every CPU by default; `-j` is redundant but explicit
         # makes the intent obvious. The big win is the profile choice
         # ($RustProfile = release-fast under -Fast).
         $jobsArg = @("-j", [Environment]::ProcessorCount.ToString())
         if ($Fast -and $Release) {
-            & cargo build --profile release-fast --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --profile release-fast --target $($RustTarget) @jobsArg
         } elseif ($Release) {
-            & cargo build --release --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --release --target $($RustTarget) @jobsArg
         } else {
-            & cargo build --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --target $($RustTarget) @jobsArg
         }
         if ($RunTests) {
             Write-Host "Running cargo tests..." -ForegroundColor Cyan
-            & cargo test --target $($RustTarget) @featureArgs @jobsArg
+            & cargo test --target $($RustTarget) @jobsArg
         }
     } finally {
         Pop-Location

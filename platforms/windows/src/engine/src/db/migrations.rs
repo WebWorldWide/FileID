@@ -131,13 +131,13 @@ CREATE TRIGGER IF NOT EXISTS doc_text_au AFTER UPDATE ON doc_text BEGIN
 END;
 ";
 
-/// v16: normalization-insensitive filename search (C15). SQLite LIKE compares
+/// v16: normalization-insensitive filename search. SQLite LIKE compares
 /// bytes, so an NFC query can never match an NFD-stored name (Mac/NAS/Dropbox-
 /// synced files). `path_search` holds the NFC form of `path_text`; the app
 /// NFC-normalizes the query and LIKEs against it. Both the Windows dbwriter
 /// (`nfc_path_search`) and macOS (`precomposedStringWithCanonicalMapping`)
 /// apply real NFC at their writers so the contract is symmetric across
-/// platforms (F-C2-005 — the prior verbatim `path_search = path_text`
+/// platforms (the prior verbatim `path_search = path_text`
 /// asymmetry left NFD filenames unsearchable on Windows only). This migration
 /// itself is append-only and unchanged: the bulk `UPDATE` backfills the
 /// identity case (ASCII / already-NFC rows are correct verbatim) and any
@@ -149,7 +149,7 @@ ALTER TABLE files ADD COLUMN path_search TEXT;
 UPDATE files SET path_search = path_text;
 ";
 
-/// v17: churn-stable face-verification keys (R3-15). v13's face_a/face_b are
+/// v17: churn-stable face-verification keys. v13's face_a/face_b are
 /// face_print ids, which a faces_evaluated re-scan DELETE+re-INSERTs with fresh
 /// ids — after which a stored "different people" verdict's faces no longer
 /// resolve and the anti-merge guard silently no-ops (data loss). Add (file_id,
@@ -196,7 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedbac
 pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_TABLE_DDL).context("creating grdb_migrations")?;
 
-    // L7: a DB stamped by a NEWER engine carries identifiers this
+    // A DB stamped by a NEWER engine carries identifiers this
     // registry doesn't know; writing to it could silently break the
     // newer schema's invariants. Refuse to open instead. macOS mirror:
     // Database.swift DatabaseOpenError.newerThanEngine.
@@ -410,7 +410,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 "#;
 
 // v10: document text extracted by `pipeline::doc_extract` for txt/md/docx/
-// pptx/xlsx (and a future Phase 4b pdf step). Mirrors the `ocr_text` /
+// pptx/xlsx. Mirrors the `ocr_text` /
 // `ocr_fts` shape so the dbwriter inserts are near copy-paste and the
 // existing search ranker can search `doc_fts` with the same query syntax.
 const V10_DOC_TEXT: &str = r#"
@@ -427,12 +427,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
 );
 "#;
 
-// v9: per-volume USN journal cursor. Provisioned by the Phase 3 foundation;
-// the (Windows-only) scan-driver integration that reads
-// `FSCTL_READ_USN_JOURNAL` since `next_usn` and prunes the skip-set
-// accordingly is a follow-up — until then this table stays unwritten and the
-// scan uses the (always-allowed) `jwalk` + timestamp-skip path. `journal_id`
-// detects deletion/recreation so a stale cursor never reads garbage.
+// v9: per-volume USN journal cursor. Never written: scans use the `jwalk` +
+// timestamp-skip path. Kept because applied migrations are immutable.
 const V9_USN_STATE: &str = r#"
 CREATE TABLE IF NOT EXISTS usn_state (
     volume_id       TEXT    PRIMARY KEY,
@@ -493,7 +489,7 @@ mod tests {
             .unwrap();
         assert_eq!(verify_cols, 2, "v13 must add face_a + face_b columns");
 
-        // v17 (R3-15) added the churn-stable (file_id, bbox) keys.
+        // v17 added the churn-stable (file_id, bbox) keys.
         let stable_cols: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('face_verifications') \
@@ -553,7 +549,7 @@ mod tests {
         assert_eq!(n, 24);
     }
 
-    /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
+    /// A "different people" verdict's churn-stable (file_id, bbox)
     /// key must still resolve to the CURRENT face after a faces_evaluated re-scan
     /// DELETE+re-INSERTs face_prints with fresh ids (the legacy face_a/face_b id is
     /// then dangling). macOS mirror: MigrationParityTests.verdictSurvivesFaceChurn.
@@ -589,7 +585,7 @@ mod tests {
              (101, 1, x'00', '0.1,0.1,0.2,0.2'), (202, 2, x'00', '0.3,0.3,0.2,0.2')",
             [],
         ).unwrap();
-        // The legacy face id is now dangling (the pre-R3-15 failure mode)…
+        // The legacy face id is now dangling (the earlier failure mode)…
         let legacy_resolves: i64 = conn
             .query_row("SELECT COUNT(*) FROM face_prints WHERE id IN (10, 20)", [], |r| r.get(0))
             .unwrap();
@@ -617,7 +613,7 @@ mod tests {
         assert_eq!(new_b, 202, "stable key B must resolve to the re-scanned face");
     }
 
-    /// L7 regression: a DB stamped by a newer engine must refuse to open
+    /// A DB stamped by a newer engine must refuse to open
     /// rather than silently write into a schema this build doesn't know.
     /// macOS mirror: MigrationParityTests.newerDatabaseRefusesToOpen.
     #[test]
@@ -634,7 +630,7 @@ mod tests {
         assert!(err.to_string().contains("v99_from_the_future"));
     }
 
-    /// C12 regression: the migration chains forked at v14 (macOS registered
+    /// The migration chains forked at v14 (macOS registered
     /// "v14_fts_sync_triggers" while this engine registered
     /// "v14_files_kind_scanned_index"), which made a macOS-touched library
     /// fail every Windows scan with SQLITE_CORRUPT. Both platforms pin the

@@ -64,7 +64,7 @@ public struct IPCCommand: Codable, Sendable {
         /// `fileIDs` is present — an explicit selection is a deliberate
         /// per-file action and is never silently filtered. Optional; nil/empty
         /// means no folder exclusions.
-        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
+        /// ( — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
         /// excludedFolders mirrors schema 1.3.0 / Rust `exclusion_where_clause`.)
         case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?, excludedFolders: [String]?)
         case deepAnalyzeCancel
@@ -78,7 +78,7 @@ public struct IPCCommand: Codable, Sendable {
         /// fetch loop — usually within ~1 s. Safe no-op if no prewarm
         /// is active. `modelKind` is OPTIONAL (schema): a value cancels that
         /// one model's download; `nil`/absent cancels ALL in-flight prewarms.
-        /// (audit F-C2-002 — mirrors Rust CancelPrewarmPayload + C# CancelPrewarmCommand.)
+        /// (mirrors Rust CancelPrewarmPayload + C# CancelPrewarmCommand.)
         case cancelPrewarm(modelKind: String?)
 
         // ── Windows-originated commands ───────────────────────────
@@ -437,7 +437,7 @@ public struct EngineInfo: Codable, Sendable {
 
 /// CPU/GPU/NPU detection snapshot. Mirrors the schema's HardwareInfo +
 /// the Windows engine's `HardwareInfo`. Every field is optional/defaulted so
-/// an older engine that omits the V15.9 adaptive-utilization fields (or omits
+/// an older engine that omits the adaptive-utilization fields (or omits
 /// `hardware` entirely) still decodes cleanly.
 public struct HardwareInfo: Codable, Sendable {
     /// "nvidia" / "amd" / "intel" / "qualcomm" / "other" / "none".
@@ -453,7 +453,7 @@ public struct HardwareInfo: Codable, Sendable {
     public let qnnPackPresent: Bool
     /// Contextual recommendation; empty when already on the optimal path.
     public let recommendation: String
-    // ── V15.9 adaptive-utilization diagnostics (all optional/defaulted). ──
+    // ── Adaptive-utilization diagnostics (all optional/defaulted). ──
     public let pCores: Int
     public let eCores: Int
     public let logicalCpuCores: Int
@@ -609,7 +609,7 @@ public struct FileDoneEvent: Codable, Sendable {
     /// `Decodable` (which requires the key) would throw `keyNotFound` on such a frame.
     /// Defaults to `[]` when absent, matching the schema + the C# DTO. Mirrors the
     /// `RestructureMove.confidence` pattern; `encode(to:)` stays auto-synthesized.
-    /// (audit — cross-platform IPC drift)
+    /// (cross-platform IPC drift)
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         path = try c.decode(String.self, forKey: .path)
@@ -744,7 +744,7 @@ public struct DeepAnalyzeProgress: Codable, Sendable {
     public let etaSeconds: Double?
     public let currentPath: String?
     public let modelKind: String
-    /// V14.9-L1: partial caption text accumulated from per-token streaming.
+    /// Partial caption text accumulated from per-token streaming.
     /// Engine throttles emission to 4 Hz so a fast VLM doesn't flood the
     /// sink. nil on pre-inference progress events ("starting file N").
     public let currentCaption: String?

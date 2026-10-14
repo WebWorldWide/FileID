@@ -54,13 +54,7 @@
     "gemma3_mmproj": "Gemma",
     "whisper_base_model": "MIT",
     "bge_model": "MIT",
-    "bge_vocab": "MIT",
-    "florence2_vision": "MIT",
-    "florence2_embed": "MIT",
-    "florence2_encoder": "MIT",
-    "florence2_decoder": "MIT",
-    "florence2_tokenizer": "MIT",
-    "florence2_config": "MIT"
+    "bge_vocab": "MIT"
   },
   "vlmRepoLicenses": {
     "mlx-community/Qwen2.5-VL-7B-Instruct-4bit": "Apache-2.0",
@@ -302,66 +296,6 @@
       "url": "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/vocab.txt",
       "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
       "approxBytes": 232000
-    },
-    {
-      "id": "florence2_vision",
-      "kind": "florence2_base",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/vision_encoder.onnx",
-      "sha256": "2c7464fce495ea43b415b48afe7dbe84a9ebbe0cfe3c31fdd81c6dd66b39ff75",
-      "approxBytes": 110000000
-    },
-    {
-      "id": "florence2_embed",
-      "kind": "florence2_base",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/embed_tokens.onnx",
-      "sha256": "fec0fd20276af861afb6a23a11544bf1378c05e2a41001b610cc281e244c4b20",
-      "approxBytes": 25000000
-    },
-    {
-      "id": "florence2_encoder",
-      "kind": "florence2_base",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/encoder_model.onnx",
-      "sha256": "b155b5a0e56a4244c62060751bb1b70dfe481015d0dbfa6d19b1912d9e58da0d",
-      "approxBytes": 110000000
-    },
-    {
-      "id": "florence2_decoder",
-      "kind": "florence2_base",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/decoder_model_merged.onnx",
-      "sha256": "6d6e1266d7f94f5d4ec9cc07d9c1f7b3e47049c9b0de7bbe82a91e62dfd152af",
-      "approxBytes": 200000000
-    },
-    {
-      "id": "florence2_tokenizer",
-      "kind": "florence2_base",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/tokenizer.json",
-      "sha256": "d69dcdb2323e124ac4f800cb9863ddccea0d7bb11e16125e8df3bd60f2f8aeac",
-      "approxBytes": 5000000
-    },
-    {
-      "id": "florence2_config",
-      "kind": "florence2_base",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/config.json",
-      "sha256": "74efbe2299e13cfcc9e083861eae4a943d76f784ddd595d85e779d189cf0a574",
-      "approxBytes": 10000
     }
   ],
   "vlmRepos": [

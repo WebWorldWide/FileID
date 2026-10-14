@@ -113,12 +113,6 @@ internal static class SentinelProbe
                 && TreeContains("llama.cpp-cuda", 1_000_000, "cublas64_12.dll"),
             "bge_text" => FilePresent(Path.Combine("bge_text", "bge_small.onnx"), 1_000_000)
                 && FilePresent(Path.Combine("bge_text", "vocab.txt"), 1_000),
-            "florence2_base" => FilePresent(Path.Combine("florence2", "vision_encoder.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "embed_tokens.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "encoder_model.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "decoder_model_merged.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "tokenizer.json"), 1_000)
-                && FilePresent(Path.Combine("florence2", "config.json"), 1_000),
             _ => false,
         };
     }

@@ -53,7 +53,7 @@ Behaviorally tested (logic covered; the ORT/codec leaf is mocked or skipped):
 - `pipeline/tagging` — RAM++ generic-tag suppress-list + scene fallback gating.
 - `pipeline/dbwriter` — batch + rename-heal lookup.
 - `pipeline/face_clustering`, `pipeline/identity_clustering` — cluster stability + uncertain-band behavior.
-- `pipeline/restructure`, `pipeline/restructure_apply`, `pipeline/restructure_semantic`, `pipeline/cluster_suggestions` — category/folder classification, containment, semantic fusion, cluster summaries.
+- `pipeline/restructure`, `pipeline/restructure_apply`, `pipeline/restructure_semantic` — category/folder classification, containment, semantic fusion, cluster summaries.
 - `pipeline/doc_extract`, `pipeline/audio_meta` — doc keyword + audio-metadata extraction.
 - `models/registry`, `models/variants`, `models/runtime` — registry URL/alias/sentinel invariants, per-EP variant resolution, session tuning.
 - `models/ram_plus`, `models/sface`, `models/yunet`, `models/face_align` — preprocessing + L2-normalize + alignment math (the `Session::run` call itself is not unit-tested).
@@ -93,13 +93,9 @@ macOS coverage is not separately tracked here.
 |---|---|
 | `Theme/LavaLampBackground.swift` + `Motion/LavaLampBackground.cs`, Win2D canvases (Sankey, IridescentBorder), Metal/Win2D shaders | GPU-resident visuals; no CPU-runnable assertion path. |
 | `shell/video.rs` Media Foundation keyframe path | Needs a real codec; covered via `iterate.ps1` only. |
-| `models/{ram_plus,sface,yunet,clip_text,vlm,florence2}.rs` ORT `Session` run paths | Need shipped model DLLs; covered via on-hardware `iterate.ps1`. |
+| `models/{ram_plus,sface,yunet,mobileclip,clip_text,vlm}.rs` ORT `Session` run paths | Need shipped model DLLs; covered via on-hardware `iterate.ps1`. |
 | `main.rs` `main()` / `async_main()` | Covered by the engine-startup CI smoke, not unit tests. |
 | WinUI `*.xaml.cs` wiring, `MainWindow` Mica/Acrylic + drag region | UI-thread-bound; covered by the app-startup smoke + manual verification. |
-
-> `models/scrfd.rs` and `models/mobileclip.rs` still carry tests but are dead reference code — the
-> shipped pipeline is YuNet + SFace (faces) and CLIP ViT-B/32 (embeddings). They are slated for
-> removal; until then their tests still run.
 
 ## On-hardware verification
 

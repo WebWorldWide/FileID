@@ -59,7 +59,7 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     if parts.is_empty() {
         return "…".to_string();
     }
-    // Home-anchored masking (F-C2-004): for a file directly under a home dir
+    // Home-anchored masking: for a file directly under a home dir
     // (`…/Users/<user>/file` or `…/home/<user>/file`), the last-two-components
     // tail would be `<user>/file` and leak the username. Detect a home-root
     // keyword + username and, when the username would otherwise fall inside the
@@ -77,10 +77,10 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
             // (a) The path ends AT the home dir itself (`C:\Users\<user>`,
             // `/home/<user>`) — the username is the terminal component. Only a
             // GENUINE home root (the keyword is the first component, anchor == 0)
-            // qualifies; fully mask it (baseline F-C2-004 behavior). A nested
+            // qualifies; fully mask it (baseline behavior). A nested
             // backup tree whose terminal IS a real file (anchor > 0, e.g.
             // `E:\Backups\Users\file.txt`) is NOT a home dir and falls through
-            // so its filename survives. (audit R-06)
+            // so its filename survives.
             if user_idx == parts.len() - 1 && anchor == 0 {
                 return "…".to_string();
             }
@@ -200,7 +200,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// F-C2-004: a file directly under a home dir must NOT expose the username.
+    /// A file directly under a home dir must NOT expose the username.
     /// Keeping the last two components alone would emit `…/Adam/resume.pdf` and
     /// leak the username — home-anchored masking drops the user component.
     #[test]
@@ -211,7 +211,7 @@ mod redaction_tests {
         assert!(r.ends_with("resume.pdf"), "filename lost: {r}");
     }
 
-    /// F-C2-004 (POSIX shape): `/home/<user>/file` and `/Users/<user>/file`
+    /// POSIX shape: `/home/<user>/file` and `/Users/<user>/file`
     /// must likewise mask the username. Runs on every host (the components
     /// parse the same on non-Windows).
     #[test]
@@ -225,7 +225,7 @@ mod redaction_tests {
         assert!(r2.ends_with("notes.txt"), "filename lost: {r2}");
     }
 
-    /// R-06 regression: a path that ENDS at the home dir itself (the scan root
+    /// Regression: a path that ENDS at the home dir itself (the scan root
     /// is the home directory — no file under it) must fully mask the username,
     /// not fall through to the generic tail and leak it. Genuine home root only
     /// (keyword is the first component); a nested backup tree is handled below.
@@ -235,7 +235,7 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log("/home/adam"), "…");
     }
 
-    /// F-C2-004 must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
+    /// Must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
     /// already pushes the username off the kept tail, so the deeper context
     /// (Pictures/Vacation) survives unchanged.
     #[test]
@@ -246,7 +246,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// R-06: a directory literally named `Users`/`home` sitting DIRECTLY above a
+    /// A directory literally named `Users`/`home` sitting DIRECTLY above a
     /// file (a backup tree, a NAS share) is not a home root and the next part is
     /// the FILENAME, not a username. Home-anchored masking must fall through to
     /// the generic tail and preserve the filename instead of collapsing to "…".
@@ -260,12 +260,12 @@ mod redaction_tests {
 
 // The dedicated-thread set/clear semantics only exist on Windows; off-Windows
 // SleepGuard is a no-op unit struct, so these thread-handoff tests run on the
-// Windows target (where the assertion is real). (F-C1-008)
+// Windows target (where the assertion is real).
 #[cfg(all(test, windows))]
 mod sleep_guard_tests {
     use super::*;
 
-    /// F-C1-008: SetThreadExecutionState is thread-scoped, so the assertion
+    /// SetThreadExecutionState is thread-scoped, so the assertion
     /// must be set AND cleared on the same thread. The guard owns a dedicated
     /// thread for the whole lifecycle, so acquiring on one thread and dropping
     /// on another (the real-world Tokio-worker case) still releases cleanly.
@@ -346,7 +346,7 @@ pub fn cpu_topology() -> CpuTopology {
         // We cast u64* → struct* directly so clippy sees the alignment is
         // satisfied; intermediate u8* hides the source alignment.
         let words = bytes.div_ceil(8) as usize;
-        // R4-03: over-allocate one full fixed-size struct of slack. windows-rs
+        // over-allocate one full fixed-size struct of slack. windows-rs
         // models SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX at its largest union
         // variant (~80 B), but a single-group RelationProcessorCore record is only
         // ~48 B. Without slack, `&*rec_ptr` on the FINAL record forms an 80-byte
@@ -521,16 +521,9 @@ pub fn dbwriter_batch_size_for(tier: MemoryTier) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub enum StorageType {
+    /// Any non-rotational fixed drive; the seek-penalty descriptor can't tell
+    /// NVMe from SATA SSD.
     Nvme,
-    /// Reserved for a future BusType-discriminator pass (would use
-    /// `STORAGE_ADAPTER_DESCRIPTOR.BusType` to distinguish NVMe from
-    /// SATA SSD; the seek-penalty descriptor alone can't tell them
-    /// apart). `walk_concurrency_for` returns a smaller budget here
-    /// than NVMe (8 vs 16 threads). Kept in the enum so call sites
-    /// don't need a non-exhaustive update when bus-type detection
-    /// lands.
-    #[allow(dead_code)]
-    SsdSata,
     Hdd,
     Removable,
     Network,
@@ -541,7 +534,6 @@ impl StorageType {
     pub fn as_str(self) -> &'static str {
         match self {
             StorageType::Nvme => "nvme",
-            StorageType::SsdSata => "ssd_sata",
             StorageType::Hdd => "hdd",
             StorageType::Removable => "removable",
             StorageType::Network => "network",
@@ -557,7 +549,6 @@ pub fn walk_concurrency_for(path: &Path) -> usize {
     let logical = num_cpus::get().max(1);
     match storage {
         StorageType::Nvme => logical.clamp(4, 16),
-        StorageType::SsdSata => logical.clamp(2, 8),
         StorageType::Hdd => 2,
         StorageType::Removable => 2,
         StorageType::Network => 2,
@@ -934,15 +925,19 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     }
 }
 
+/// POSIX: when the parent exits the engine is reparented (to init or a
+/// subreaper), so a changed `getppid()` means the app is gone.
 #[cfg(not(windows))]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
-    // POSIX fallback: poll getppid every 5 s; if it changes (i.e. our parent
-    // was reaped and we got reparented to init) trigger shutdown.
-    let _ = parent_pid;
-    let _ = shutdown;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        // TODO(linux): real implementation.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // SAFETY: getppid has no preconditions and cannot fail.
+        let current = unsafe { libc::getppid() };
+        if u32::try_from(current).ok() != Some(parent_pid) {
+            tracing::info!(parent_pid, current, "parent process exited; signaling shutdown");
+            shutdown.notify_waiters();
+            return;
+        }
     }
 }
 
@@ -959,7 +954,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 // future is polled across Tokio worker threads — so a naive acquire-here /
 // clear-in-Drop would SET on one worker and CLEAR on another, leaving the
 // assertion permanently armed and the machine unable to sleep after a scan
-// (F-C1-008). We therefore pin the whole set→hold→clear lifecycle to one
+// . We therefore pin the whole set→hold→clear lifecycle to one
 // dedicated thread the guard owns; the assertion clears on the thread that set
 // it no matter which Tokio worker runs Drop.
 
@@ -1395,7 +1390,7 @@ mod adaptive_tests {
     #[test]
     fn storage_type_string_round_trip() {
         for s in [
-            StorageType::Nvme, StorageType::SsdSata, StorageType::Hdd,
+            StorageType::Nvme, StorageType::Hdd,
             StorageType::Removable, StorageType::Network, StorageType::Unknown,
         ] {
             assert!(!s.as_str().is_empty());

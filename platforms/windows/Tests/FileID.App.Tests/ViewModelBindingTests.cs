@@ -419,6 +419,21 @@ public class FileTileKindChipTests
     }
 
     [Fact]
+    public void AccessibleName_AnnouncesFaceAndTextIndicators()
+    {
+        var tile = Tile("image");
+        Assert.Equal("x.jpg, Image", tile.AccessibleName);
+
+        var changed = new List<string>();
+        tile.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+        tile.HasFaces = true;
+        tile.HasText = true;
+
+        Assert.Equal("x.jpg, Image, contains faces, contains text", tile.AccessibleName);
+        Assert.Equal(2, changed.Count(name => name == nameof(FileTile.AccessibleName)));
+    }
+
+    [Fact]
     public void HasChips_TrueWhenOnlyKindChipPresent()
     {
         Assert.True(Tile("image").HasChips);
@@ -659,7 +674,7 @@ public class EngineWarningClassificationTests
 }
 
 /// <summary>
-/// F-C5-011: People multi-select must survive a background re-cluster that
+/// People multi-select must survive a background re-cluster that
 /// REPLACES a selected cluster's object instance. <c>PeopleViewModel.MergeByClusterId</c>
 /// reuses an instance only when anchor/count/name are unchanged; otherwise it
 /// swaps in a fresh <see cref="PersonCluster"/> with IsSelected=false, silently
@@ -719,7 +734,7 @@ public class PeopleSelectionReprojectTests
 }
 
 /// <summary>
-/// F-C5-006: PersonDetailSheet must validate the target person still exists
+/// PersonDetailSheet must validate the target person still exists
 /// before sending renamePerson. A background re-cluster can merge the person
 /// away while the sheet is open; the engine's renamePerson reports succeeded=1
 /// even on a 0-row UPDATE, so without this pre-write probe the dialog closes on

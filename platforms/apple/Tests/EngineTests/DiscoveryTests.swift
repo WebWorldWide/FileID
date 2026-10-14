@@ -153,7 +153,7 @@ struct DiscoveryTests {
         #expect(!resultPaths.contains(nestedFile.resolvingSymlinksInPath().path))
     }
 
-    // re-audit R-08: a file the incremental skip set DROPS is still present on
+    // A file the incremental skip set DROPS is still present on
     // disk, so discovery must refresh its `scanned_at`; otherwise the post-scan
     // orphan sweep (which prunes rows with `scanned_at < scanStart`) would treat
     // every skipped-but-present file as a deletion candidate and stop pruning the
@@ -176,7 +176,7 @@ struct DiscoveryTests {
         let root = realResolved(tmp)
 
         // A fully-processed doc: it already HAS its BGE text_embedding (seeded below),
-        // so it's skippable regardless of whether BGE is installed. The R-14 carve-outs
+        // so it's skippable regardless of whether BGE is installed. The carve-outs
         // force only an embeddingLESS image (CLIP) or doc/pdf (BGE) to stay in the
         // pipeline for backfill; without the embedding row this test would flake on a
         // machine that has BGE installed (the carve-out would keep report.pdf resident).
@@ -228,7 +228,7 @@ struct DiscoveryTests {
     }
 }
 
-// re-audit R-09: the incremental-skip predicate must match DBWriter's `unchanged`
+// The incremental-skip predicate must match DBWriter's `unchanged`
 // contract — skip ONLY when size matches AND the current mtime EQUALS the stored
 // modified_at. The prior `scanned_at >= mtime` form was looser and skipped
 // same-size, backdated-mtime edits forever.

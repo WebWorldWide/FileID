@@ -28,9 +28,7 @@ use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum SessionPhase {
-    Idle,
     Discovering,
     Tagging,
     PostScan,
@@ -42,7 +40,6 @@ pub enum SessionPhase {
 impl SessionPhase {
     fn as_ipc_phase(self) -> ScanPhase {
         match self {
-            SessionPhase::Idle => ScanPhase::Idle,
             SessionPhase::Discovering => ScanPhase::Discovering,
             SessionPhase::Tagging => ScanPhase::Tagging,
             SessionPhase::PostScan => ScanPhase::PostScan,
@@ -54,7 +51,6 @@ impl SessionPhase {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct SessionResult {
     pub processed: u64,
     pub failed: u64,
@@ -74,18 +70,7 @@ pub struct ScanSession {
 }
 
 impl ScanSession {
-    #[allow(dead_code)]
     pub fn new(
-        coordinator: ScanCoordinator,
-        db_conn: Arc<Mutex<Connection>>,
-        worker_count: usize,
-        sink: Sink,
-        models: Arc<ModelStack>,
-    ) -> Self {
-        Self::new_with_options(coordinator, db_conn, worker_count, sink, models, false)
-    }
-
-    pub fn new_with_options(
         coordinator: ScanCoordinator,
         db_conn: Arc<Mutex<Connection>>,
         worker_count: usize,
@@ -127,7 +112,7 @@ impl ScanSession {
             // could pile up unbounded tasks waiting on a full sink.
             // try_send bounds the engine's worst-case memory.
             //
-            // C1-002: this droppable path is for NON-terminal phases only.
+            // This droppable path is for NON-terminal phases only.
             // Terminal phases (Cancelled / Failed / Completed) MUST go through
             // `emit_phase_guaranteed` below — a dropped terminal PhaseChanged
             // makes the app render a cancelled/failed scan as Completed and
@@ -137,7 +122,7 @@ impl ScanSession {
             let _ = sink.try_send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(p))));
         };
 
-        // C1-002: guaranteed (blocking/backpressuring) terminal-phase emit.
+        // Guaranteed (blocking/backpressuring) terminal-phase emit.
         // Awaits channel capacity rather than dropping, so a cancelled/failed
         // terminal state can never be silently lost under sink backpressure.
         let emit_phase_guaranteed = |sink: &Sink, phase: SessionPhase| {
@@ -182,7 +167,7 @@ impl ScanSession {
             std::sync::Arc::new(std::collections::HashMap::new())
         } else {
             let conn = self.db_conn.lock();
-            // R4-01: carry (size_bytes, modified_at) per path so discovery can
+            // Carry (size_bytes, modified_at) per path so discovery can
             // revalidate against the LIVE file mtime — a bare path set skipped any
             // file edited after its last scan.
             let mut set =
@@ -195,7 +180,7 @@ impl ScanSession {
                 .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
                 .unwrap_or(0);
             let lo = root_prefix.trim_end_matches(['\\', '/']).to_string();
-            // P16: a BINARY range seek (`>= lo AND < hi`) is sargable on the
+            // A BINARY range seek (`>= lo AND < hi`) is sargable on the
             // implicit UNIQUE index on path_text, unlike `LIKE 'lo%'` (which is
             // non-sargable because LIKE defaults to case-insensitive and forces
             // a full table scan). Stored paths derive from THIS root so they
@@ -218,7 +203,7 @@ impl ScanSession {
             // are NULL → treated as false in WHERE, so the row is omitted from
             // the skip set and gets reprocessed.
             //
-            // C1-013: a content-bearing file scanned as an online-only
+            // A content-bearing file scanned as an online-only
             // (dehydrated OneDrive Files-On-Demand) placeholder records
             // content_hash=NULL — the tagger skips the content read so it
             // never triggers a network hydration. Hydration does NOT bump
@@ -228,7 +213,7 @@ impl ScanSession {
             // dehydrated→hydrated file is reprocessed; a transient hash failure
             // re-scans too, which is the skip set's documented fail-safe.
             let content_hash_gate = SKIP_SET_CONTENT_HASH_GATE;
-            // R4-01: drop the tautological `scanned_at >= modified_at` predicate
+            // Drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
             // discovery compare them against the live file.
@@ -306,7 +291,7 @@ impl ScanSession {
         // sleeps 250 ms before its first wake-up, so a folder that discovers and
         // drains faster than that (empty folder / fully-current rescan) would be
         // aborted before the tick emits its notice. Whichever path wins the swap
-        // emits; the other skips. (audit E3)
+        // emits; the other skips.
         let notice_emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let notice_emitted_for_tick = notice_emitted.clone();
         // discoveryComplete must fire EXACTLY ONCE on every scan terminal path
@@ -315,12 +300,12 @@ impl ScanSession {
         // The tick emits it on the normal path; the post-drain backstop below
         // covers the paths where the tick is aborted mid-sleep or returns early
         // on cancel. This shared single-shot flag keeps the two from double-
-        // emitting. (audit F-C2-006)
+        // emitting. (006)
         let discovery_complete_emitted =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let discovery_complete_emitted_for_tick = discovery_complete_emitted.clone();
         // The tick takes `discovered_done` by move (async move); keep a clone for
-        // the post-drain fallback's done-check below. (audit E3)
+        // the post-drain fallback's done-check below.
         let discovered_done_post = discovered_done.clone();
         let tick = tokio::spawn(async move {
             loop {
@@ -349,7 +334,7 @@ impl ScanSession {
                     // announce the discovery total once the walk ends —
                     // macOS emits it even for a cancel-truncated walk. Swap the
                     // shared flag first so the post-drain backstop never re-emits
-                    // what the tick already sent. (audit F-C2-006)
+                    // what the tick already sent. (006)
                     if !discovery_complete_emitted_for_tick
                         .swap(true, std::sync::atomic::Ordering::SeqCst)
                     {
@@ -366,7 +351,7 @@ impl ScanSession {
                     let errs = errors_for_tick.load(std::sync::atomic::Ordering::Relaxed);
                     // Build the notice this tick would emit (None when there's
                     // nothing to say) so the single-shot flag is only CLAIMED
-                    // when a notice is actually delivered. (audit R3-21)
+                    // when a notice is actually delivered. (21)
                     let notice = if count == 0 && skip_count > 0 {
                         // Incremental rescan where every file was already
                         // current — not an error. Non-fatal "already up to
@@ -409,7 +394,7 @@ impl ScanSession {
                         // Claim the single-shot, but RELEASE it if the droppable
                         // try_send drops under sink backpressure — otherwise a
                         // dropped notice would also suppress the reliable
-                        // post-drain .await fallback, losing it entirely. (R3-21)
+                        // post-drain .await fallback, losing it entirely.
                         if !notice_emitted_for_tick.swap(true, std::sync::atomic::Ordering::SeqCst)
                             && sink_for_tick
                                 .try_send(IpcEvent::now(EventPayload::Error(Wrap::new(err))))
@@ -484,7 +469,7 @@ impl ScanSession {
             }
         };
 
-        // discoveryComplete backstop (audit F-C2-006): the 250 ms tick emits this
+        // discoveryComplete backstop (006): the 250 ms tick emits this
         // on a normal scan, but a sub-250 ms drain (empty folder / fully-current
         // rescan) aborts the tick mid-first-sleep, and a cancel-during-discovery
         // returns the tick early — both BEFORE it emits. The walk has ended by
@@ -504,7 +489,7 @@ impl ScanSession {
         // finished but the tick was aborted before it could emit (drained inside
         // its 250 ms first sleep — empty folder or fully-current rescan), emit it
         // here so the UI never silently hangs on "Discovering…". Single-shot via
-        // the shared flag so we never double-emit what the tick already sent. (audit E3)
+        // the shared flag so we never double-emit what the tick already sent.
         if !self.coordinator.is_cancelled()
             && discovered_done_post.load(std::sync::atomic::Ordering::Acquire)
             && !notice_emitted.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -590,11 +575,11 @@ impl ScanSession {
             ))))
             .await;
             on_phase(SessionPhase::Failed);
-            // C1-002: terminal Failed phase via the guaranteed (backpressuring)
+            // Terminal Failed phase via the guaranteed (backpressuring)
             // path — a drop here would render the TDR-aborted scan as Completed
             // and auto-fire face clustering on a half-scanned library.
             //
-            // R-01: Failed emits NO terminal ScanComplete. The app's
+            // Failed emits NO terminal ScanComplete. The app's
             // ScanCompleteEvent handler only suppresses the Phase overwrite for
             // Cancelled, so a ScanComplete on this branch would immediately
             // clobber phaseChanged(Failed) back to Completed (relabeling a failed
@@ -603,7 +588,7 @@ impl ScanSession {
             emit_phase_guaranteed(&sink, SessionPhase::Failed).await;
         } else if self.coordinator.is_cancelled() {
             on_phase(SessionPhase::Cancelled);
-            // C1-002: terminal Cancelled phase via the guaranteed path — a drop
+            // Terminal Cancelled phase via the guaranteed path — a drop
             // makes the app treat a cancelled scan as Completed.
             emit_phase_guaranteed(&sink, SessionPhase::Cancelled).await;
             // IPC parity with macOS (markSessionFinal emits scanComplete
@@ -628,7 +613,7 @@ impl ScanSession {
             on_phase(SessionPhase::PostScan);
             emit_phase(SessionPhase::PostScan);
             on_phase(SessionPhase::Completed);
-            // C1-002: terminal Completed phase via the guaranteed path so the
+            // Terminal Completed phase via the guaranteed path so the
             // app's terminal state can never be lost under backpressure.
             emit_phase_guaranteed(&sink, SessionPhase::Completed).await;
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
@@ -728,7 +713,7 @@ fn emit_batch_summary(sink: &Sink, stats: &BatchStats) {
     let _ = sink.try_send(IpcEvent::now(EventPayload::BatchSummary(Wrap::new(summary))));
 }
 
-/// C1-013 skip-set guard: drop any content-bearing row that was scanned
+/// skip-set guard: drop any content-bearing row that was scanned
 /// without a content_hash (the signature of an online-only OneDrive
 /// placeholder, whose content read is skipped to avoid a network hydration).
 /// Because hydration doesn't bump `modified_at`, this is the only durable
@@ -851,7 +836,7 @@ mod tests {
         assert!(eta > 3000.0, "eta should be ~hours ({eta}s)");
     }
 
-    /// P16: the prefix upper bound must select exactly the rows `LIKE
+    /// The prefix upper bound must select exactly the rows `LIKE
     /// 'prefix%'` would under BINARY collation — i.e. lo <= x < hi iff x starts
     /// with prefix.
     #[test]
@@ -885,7 +870,7 @@ mod tests {
         assert!(held < 50.0, "a rapid sample (<0.5s) must not spike the rate, got {held}");
     }
 
-    /// C1-013: the incremental skip-set must NOT skip a file whose
+    /// The incremental skip-set must NOT skip a file whose
     /// reparse/placeholder state changed (dehydrated→hydrated). A OneDrive
     /// online-only placeholder is recorded with `content_hash = NULL` and
     /// `scanned_at >= modified_at`; after the user hydrates it, the modified

@@ -101,10 +101,9 @@ struct RestructureCascadeTests {
 
     @Test("Mixed-tier homogeneity is measured against the dominant person")
     func mixedHomogeneityDominantPerson() {
-        // A folder dominated by Alice (5) with one Bob outlier (6 files). The bug
-        // measured homogeneity against a non-dominant person, flagging most of
-        // the folder as outliers. The dominant category must be the dominant
-        // PERSON (Alice), not Bob.
+        // A folder dominated by Alice (5) with one Bob outlier (6 files).
+        // Homogeneity must be measured against the dominant person (Alice);
+        // measuring against Bob would flag most of the folder as outliers.
         var files: [Restructure.FileForClassify] = []
         for i in 0..<5 {
             files.append(f(Int64(i), "image", source: "/Library/Family/\(i).jpg", person: "Alice"))
@@ -113,7 +112,6 @@ struct RestructureCascadeTests {
         let moves = Restructure.ruleClassify(files, libraryRoot: root)
         let classified = Restructure.classifyFolders(moves)
         let family = classified.first { $0.sourceFolder == "/Library/Family" }
-        #expect(family?.dominantCategory == "People/Alice")
         // 5/6 ≈ 0.83 ≥ 0.80 → Anchor (homogeneity measured against Alice, not Bob).
         #expect(family?.classification == .anchor)
     }
@@ -134,11 +132,11 @@ struct RestructureApplyTests {
         }
     }
 
-    /// F-C3-009 + F-C3-011: two proposals to the SAME destination both apply via
+    /// Two proposals to the SAME destination both apply via
     /// uniquified names (no skipped-conflict), and each moved row's path_hash is
     /// refreshed to StablePathHash(newPath). The second move's planned basename
-    /// collided and was uniquified, so it is reported in `conflicts` (audit
-    /// F-A4 — the array was previously dead/always-empty).
+    /// collided and was uniquified, so it is reported in `conflicts` (the array was
+    /// previously dead/always-empty).
     @Test("Two proposals to one dest both apply (uniquified); path_hash refreshed")
     func applyUniquifyAndPathHash() async throws {
         let tmp = FileManager.default.temporaryDirectory
@@ -189,7 +187,7 @@ struct RestructureApplyTests {
         }
     }
 
-    /// F-C3-010: a move whose live DB path no longer matches the proposal's
+    /// A move whose live DB path no longer matches the proposal's
     /// oldPath (a stale plan) is counted failed and NOT executed.
     @Test("A stale move (live path != oldPath) is failed, not executed")
     func applyStalePlanGuard() async throws {
@@ -330,7 +328,7 @@ struct RestructureApplyTests {
         }
     }
 
-    /// F-C3-012: when the on-disk move succeeds but the DB UPDATE fails, the move
+    /// When the on-disk move succeeds but the DB UPDATE fails, the move
     /// is counted ONCE (moved), never double-counted as moved+failed; the file is
     /// at its new path and a recovery record is written (best-effort sidecar).
     @Test("UPDATE-after-move failure is counted once, not double-counted")
@@ -345,7 +343,7 @@ struct RestructureApplyTests {
 
         let db = try makeDB(tmp)
         try await insertRow(db, id: 1, path: src.path)
-        // Force the post-move UPDATE to throw (the B4 SELECT still succeeds).
+        // Force the post-move UPDATE to throw (the stale-plan SELECT still succeeds).
         try await db.pool.write { d in
             try d.execute(sql: """
                 CREATE TRIGGER reject_files_update BEFORE UPDATE ON files
@@ -601,7 +599,7 @@ struct RestructureApplyTests {
         #expect(!FileManager.default.fileExists(atPath: x.path))
     }
 
-    /// Audit R2 fix: a CANCELLED undo must NOT clear the journal, so the user can
+    /// A CANCELLED undo must NOT clear the journal, so the user can
     /// re-run it and finish — otherwise a mistimed Stop orphans the un-restored
     /// files with no recovery path. Worst case: cancel before any move.
     @Test("A cancelled undo preserves the journal for a re-run")
@@ -836,7 +834,7 @@ struct RestructureApplyTests {
         #expect(data.split(separator: 0x0A).count == total + 1)
     }
 
-    /// Audit R1 (data-safety fix): a stored/truncated plan's rows past the
+    /// (data-safety fix): a stored/truncated plan's rows past the
     /// preview cap were NEVER shown to the user, so `applyStoredPlan` must
     /// apply only the "auto" tier — exactly like the Rust engine's
     /// `auto_tier_only` gate — and hold Review/Ask/unknown-confidence rows

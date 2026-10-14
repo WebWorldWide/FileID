@@ -105,16 +105,6 @@ Files live under each platform's models directory. Downloads triggered by the we
 | Persistence | `text_embeddings(file_id, embedding BLOB, model)` (migration v11); the `model` column lets future text-embedding families coexist. |
 | Role | Semantic search over extracted document text (Phase 4). Skipped when not installed; FTS5 (`doc_fts`) still serves keyword search. |
 
-### Florence-2 base (Phase 7 — grounded regions, foundation only)
-
-| Aspect | Value |
-|---|---|
-| Source | [`onnx-community/Florence-2-base`](https://huggingface.co/onnx-community/Florence-2-base) — `onnx/{vision_encoder,embed_tokens,encoder_model,decoder_model_merged}.onnx` + `tokenizer.json` + `config.json` |
-| License | MIT (Microsoft Florence-2) |
-| Windows layout | `%LOCALAPPDATA%\FileID\Models\florence2\{vision_encoder,embed_tokens,encoder_model,decoder_model_merged}.onnx` + `tokenizer.json` + `config.json` |
-| Approx size | ~445 MB total (vision + embed + encoder + decoder + tokenizer) |
-| Role | **Phrase-grounded object detection** (`<OD>` / `<CAPTION_TO_PHRASE_GROUNDING>`) — the one capability not covered by the rest of the stack. |
-| Status | Registry arm + `models::florence2` skeleton. **Inference is Phase 7b**. Build out when grounded OD becomes a concrete product need. |
 
 ## Faces — commercial-clean (YuNet + SFace)
 

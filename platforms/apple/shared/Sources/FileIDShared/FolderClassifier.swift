@@ -196,7 +196,7 @@ public enum FolderClassifier {
             // at a word boundary ("Marie Curie's Laboratory"). Bare substring
             // containment in either direction misclassified unrelated folders
             // (e.g. a folder "Marie" matching person "Marie Curie", or any
-            // folder containing a short name as a substring). (F-C4-021)
+            // folder containing a short name as a substring).
             if lower == pn
                 || lower.hasPrefix(pn + " ")
                 || lower.hasPrefix(pn + "'")

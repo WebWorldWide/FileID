@@ -389,7 +389,7 @@ struct CLIPSemanticSearchCard: View {
                     await installer.uninstall()
                     // Drop the in-memory text encoder too — otherwise semantic
                     // search keeps running against the model we just deleted until
-                    // the next app launch, with no fallback. (F-C4-017)
+                    // the next app launch, with no fallback.
                     CLIPTextEncoder.shared.unload()
                 }
             }

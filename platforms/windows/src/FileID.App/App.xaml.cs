@@ -204,7 +204,7 @@ public partial class App : Application
             try { ScanCompleteToast.Start(); }
             catch (System.Exception ex) { Trace($"ScanCompleteToast.Start failed (non-fatal): {ex.Message}"); }
 
-            // SmolVLM removed (V16.29): scan-time scene tags come from CLIP
+            // SmolVLM removed: scan-time scene tags come from CLIP
             // zero-shot. The optional higher-quality VLM (Qwen / Gemma) is
             // installed manually from the Deep Analyze tab — no silent
             // multi-GB background fetch at engine-ready.

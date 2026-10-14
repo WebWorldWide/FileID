@@ -89,7 +89,7 @@ public enum TLSPinning {
         return (.cancelAuthenticationChallenge, nil)
     }
 
-    // MARK: - Redirect policy (Windows download.rs E11 parity)
+    // MARK: - Redirect policy (Windows downloader parity)
 
     /// Maximum redirect hops to follow before treating the chain as
     /// hostile. Mirrors the Windows downloader's 10-hop cap — an on-path
@@ -111,7 +111,7 @@ public enum TLSPinning {
     /// bounce to an off-allowlist host where `evaluate` would fall back to
     /// plain system-trust and CA pinning would silently stop applying.
     /// Tying the redirect allowlist to `hostMatches` keeps a single source
-    /// of truth — anything we follow is exactly the set we pin. (audit E11)
+    /// of truth — anything we follow is exactly the set we pin.
     public static func allowsRedirect(to url: URL?) -> Bool {
         allowsExternalRequest(to: url)
     }

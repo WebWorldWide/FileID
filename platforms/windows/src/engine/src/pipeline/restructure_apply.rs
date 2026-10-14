@@ -3,7 +3,7 @@
 // Two modes:
 //   * Real move (default): `MoveFileExW(MOVEFILE_COPY_ALLOWED)` — NO
 //     `MOVEFILE_REPLACE_EXISTING`, so an occupied destination fails the move
-//     instead of silently overwriting whatever is already there (B3). Atomic
+//     instead of silently overwriting whatever is already there. Atomic
 //     when same volume; copy+delete across volumes. The DB row's `path_text`
 //     is updated by a SEPARATE statement AFTER the move returns — this is NOT
 //     one transaction with the filesystem op (it can't be). A crash in the
@@ -15,12 +15,12 @@
 //     Lets the user preview the proposed structure without committing
 //     to actual moves.
 //
-// COLLISION SAFETY (B3): many distinct sources share a basename and the rule
+// COLLISION SAFETY: many distinct sources share a basename and the rule
 // cascade funnels them into one folder, so two planned moves can target the
 // same path. Each real-move destination is uniquified within its parent
 // (`name (2).ext`, …) so both files survive; nothing is ever clobbered.
 //
-// STALE-PLAN / IDENTITY GUARD (B4): a plan is built from a DB snapshot, then
+// STALE-PLAN / IDENTITY GUARD: a plan is built from a DB snapshot, then
 // applied after an arbitrary delay. Before each move the live DB row for
 // `file_id` is re-read and required to still name `source`, so a plan that
 // went stale (the file was renamed/moved/replaced meanwhile) can't move the
@@ -56,7 +56,7 @@ pub struct RestructureApply {
     db_conn: Arc<Mutex<Connection>>,
     library_root: PathBuf,
     use_symlinks: bool,
-    // F-C6-013: cooperative cancel polled between moves. Defaults to a fresh,
+    // Cooperative cancel polled between moves. Defaults to a fresh,
     // never-set flag; the dispatcher injects a shared flag via `with_cancel` so
     // a user "stop" aborts a 100k-move apply between moves (each completed move
     // is already durable, so stopping mid-batch preserves per-move atomicity).
@@ -75,7 +75,7 @@ impl RestructureApply {
 
     /// Inject a shared cancellation flag. `handle_apply_restructure` passes the
     /// flag that the CancelScan dispatch arm sets; `apply` polls it at the top of
-    /// each move so a long apply is stoppable. (F-C6-013)
+    /// each move so a long apply is stoppable.
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = cancel;
         self
@@ -126,12 +126,12 @@ impl RestructureApply {
         // before. Populated alongside the undo journal, so it is forward-applies-only
         // (empty on an undo run, record_undo=false). (R3 → learn-your-style)
         let mut applied_pairs: Vec<(String, PathBuf)> = Vec::new();
-        // B3: destinations claimed earlier in THIS batch, so two distinct
+        // Destinations claimed earlier in THIS batch, so two distinct
         // sources that map to the same basename don't collide before either
         // touches disk.
         let mut claimed: HashSet<PathBuf> = HashSet::new();
 
-        // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
+        // The apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop.
         let total = moves.len();
         for (idx, m) in moves.iter().enumerate() {
@@ -147,7 +147,7 @@ impl RestructureApply {
                 tracing::info!(applied, failed, processed, total, "[RESTRUCTURE] apply progress");
             }
 
-            // B4/S6/S7 + audit P1: bind the move to the planned file identity. The
+            // B4/S6/S7 +: bind the move to the planned file identity. The
             // payload `source` is not authoritative on its own — re-read the
             // live DB row for `file_id` and require it still names this
             // source AND still carries the identity the plan recorded. A stale
@@ -235,7 +235,7 @@ impl RestructureApply {
                 continue;
             }
 
-            // B3: real moves never clobber. `move_file` drops
+            // Real moves never clobber. `move_file` drops
             // MOVEFILE_REPLACE_EXISTING, and we additionally resolve a
             // collision-free name within the SAME parent (so containment +
             // the reparse checks above still hold) — both distinct files
@@ -260,7 +260,7 @@ impl RestructureApply {
                         // Only update DB on real moves. Symlinks leave
                         // `path_text` pointing at the original.
                         if let Err(err) = update_path_in_db(&self.db_conn, m.file_id, &final_dest) {
-                            // B5: the file is already relocated; do NOT silently
+                            // The file is already relocated; do NOT silently
                             // swallow. Record it durably for recovery and log at
                             // error. (It also self-heals on the next scan via
                             // rename-heal on the NTFS file_ref.)
@@ -373,7 +373,7 @@ impl RestructureApply {
     /// Append one inverse-move entry (NDJSON) to the open journal — the same
     /// on-disk format `read_undo_journal` parses: `{file_id, from, to}` per line.
     /// The plan-time identity travels with it so an undo run re-checks the same
-    /// file identity instead of trusting the path alone. (audit P1)
+    /// file identity instead of trusting the path alone.
     fn append_undo_entry(j: &mut BufWriter<File>, m: &RestructureMove, from: &str, to: &str) {
         let line = serde_json::json!({
             "file_id": m.file_id,
@@ -473,7 +473,7 @@ const APPLY_PROGRESS_INTERVAL: usize = 500;
 /// Apply-progress throttle: emit on the first move, on the last, and once per
 /// `interval` processed moves, so a 100k-move apply logs ~total/interval lines
 /// instead of none (silent) or one-per-move (flood). Pure → the cadence is
-/// unit-assertable. (F-C6-013)
+/// unit-assertable.
 fn should_emit_apply_progress(processed: usize, total: usize, interval: usize) -> bool {
     if interval == 0 || processed == 0 {
         return false;
@@ -511,7 +511,7 @@ fn move_file(src: &str, dst: &Path) -> std::result::Result<(), ApplyError> {
         .chain(std::iter::once(0))
         .collect();
     unsafe {
-        // B3: NO MOVEFILE_REPLACE_EXISTING. An occupied destination must fail
+        // NO MOVEFILE_REPLACE_EXISTING. An occupied destination must fail
         // the move (→ ApplyError::Other → failed++), never overwrite. The
         // caller has already resolved a collision-free `dst`, so a remaining
         // collision here means an unexpected race — fail safe rather than
@@ -609,7 +609,7 @@ fn update_path_in_db(conn: &Arc<Mutex<Connection>>, file_id: i64, new_path: &Pat
     // NFC-normalize path_search like the dbwriter insert + macOS do, so an
     // NFD-accented name stays findable by the app's NFC-normalized search query
     // (the v16 contract). Without this, a moved file is unsearchable by its
-    // accented name until the next rescan re-stamps it. (audit parity fix)
+    // accented name until the next rescan re-stamps it.
     let path_search = crate::pipeline::dbwriter::nfc_path_search(&path_text);
     conn.prepare_cached("UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3")?
         .execute(params![path_text, path_hash, file_id, path_search])
@@ -648,7 +648,7 @@ fn current_row(conn: &Arc<Mutex<Connection>>, file_id: i64) -> Result<Option<Liv
     .context("DB SELECT files row for restructure apply")
 }
 
-/// Audit P1: a plan is a snapshot taken at plan time and applied after an
+/// A plan is a snapshot taken at plan time and applied after an
 /// arbitrary delay, so `source` alone is not authoritative. Every identity field
 /// the plan recorded must still match the live row; a move from an older client
 /// that recorded nothing falls back to the path-only check.
@@ -679,7 +679,7 @@ fn plan_is_current(row: &LiveRow, m: &RestructureMove) -> bool {
     true
 }
 
-/// The other half of audit P1: a replacement file written at the same path is a
+/// The other half of: a replacement file written at the same path is a
 /// different file even when the catalog row is untouched, because the filesystem
 /// identity changes. One stat per move — no content re-read — so a 100k-move
 /// apply stays cheap while a swapped payload can never be moved under a stale plan.
@@ -719,7 +719,7 @@ fn paths_equal(a: &str, b: &str) -> bool {
     }
 }
 
-/// B3: resolve a destination that collides with neither an on-disk file nor a
+/// Resolve a destination that collides with neither an on-disk file nor a
 /// destination already claimed by an earlier move in this batch, by appending
 /// ` (2)`, ` (3)`, … before the extension — within the same parent so the
 /// containment/reparse checks already performed on `dest` still hold.
@@ -753,7 +753,7 @@ fn unique_destination(dest: &Path, claimed: &HashSet<PathBuf>) -> PathBuf {
     dest.to_path_buf()
 }
 
-/// B5: best-effort durable record of a successful on-disk move whose DB
+/// best-effort durable record of a successful on-disk move whose DB
 /// path-update failed, so the stale `path_text` is recoverable even if the
 /// next scan (which self-heals via rename-heal on the NTFS `file_ref`) never
 /// runs. NDJSON, append-only; a recovery hint, not a restore authority like
@@ -854,7 +854,6 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
         // canonical `D:\Library`) must still be recognized as inside it. Plain
         // `Path::starts_with` is case-sensitive and broke this walk after a single
         // level on any casing mismatch — silently reducing SEC-5 to one ancestor.
-        // (audit F-A2)
         let cur_norm = strip_extended_length(&cur);
         let under = ci_starts_with(&cur_norm, &root_norm);
         let at_root = under && ci_starts_with(&root_norm, &cur_norm);
@@ -869,7 +868,7 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
 /// Component-wise, case-insensitive prefix test (Windows NTFS is
 /// case-insensitive). Unlike a lowercased-string `starts_with`, this respects
 /// path-component boundaries so a sibling like `…\PhotosBackup` cannot
-/// prefix-match `…\Photos`. (audit F-A2)
+/// prefix-match `…\Photos`.
 ///
 /// Folds with full Unicode `to_lowercase`, not `eq_ignore_ascii_case`: an
 /// ASCII-only fold left a non-ASCII component (e.g. `Café` vs `CAFÉ`) compared
@@ -878,7 +877,7 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
 /// inspecting only the leaf parent — leaving every intermediate ancestor
 /// unchecked. Unicode folding keeps the component-wise structure (siblings
 /// still can't prefix-match) and only ever makes the walk continue further,
-/// the conservative/safe direction. (audit R3-18)
+/// the conservative/safe direction. (18)
 #[cfg(windows)]
 fn ci_starts_with(p: &Path, prefix: &Path) -> bool {
     let mut pc = p.components();
@@ -918,7 +917,7 @@ mod tests {
         assert!(!should_emit_apply_progress(501, 1000, 500));
     }
 
-    /// F-C6-013: a pre-cancelled apply must break before touching the filesystem
+    /// A pre-cancelled apply must break before touching the filesystem
     /// — no move, and a cancel is NOT counted as a failure. Cross-platform: the
     /// cancel poll sits at the top of the loop, ahead of the (Windows-only)
     /// move_file, so the loop exits without reaching it.
@@ -1039,7 +1038,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Audit P1 (2026-10-05): a plan is a snapshot. If the file at `source` is
+    /// (2026-10-05): a plan is a snapshot. If the file at `source` is
     /// REPLACED — same path, same catalog row, different bytes and a different
     /// filesystem identity — the old plan must not move the replacement. The
     /// path-only check passes in that case, so the move is bound to the identity
@@ -1141,7 +1140,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// B3: two distinct sources sharing a basename, funnelled to the same
+    /// Two distinct sources sharing a basename, funnelled to the same
     /// destination, must BOTH survive — the second is uniquified, never
     /// clobbered. Windows-only: exercises the real MoveFileExW path; the
     /// non-Windows move_file stub intentionally bails (Linux port deferred).
@@ -1187,7 +1186,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// R3-18: ci_starts_with must fold NON-ASCII case (NTFS is case-insensitive
+    /// ci_starts_with must fold NON-ASCII case (NTFS is case-insensitive
     /// for accented letters too), or the SEC-5 reparse-point walk breaks early
     /// on a library root with a case-differing accented component. The
     /// component-wise structure must still reject a sibling prefix.
@@ -1205,7 +1204,7 @@ mod tests {
         );
     }
 
-    /// B4: a move whose source no longer matches the live DB row for its
+    /// A move whose source no longer matches the live DB row for its
     /// file_id is a stale plan and must be skipped, not executed.
     #[test]
     fn apply_skips_stale_move_when_source_mismatches_db() {

@@ -1,4 +1,4 @@
-// C1 gate trio (F-C3-001) + timeout-retry (F-C3-036) regression.
+// C1 gate trio + timeout-retry regression.
 //
 // Port of the Windows tags_evaluated / faces_evaluated / ocr_stage_ran gates
 // (dbwriter.rs): a swallowed Vision/ANE/OCR timeout on a CHANGED file emits an
@@ -184,7 +184,7 @@ struct DBWriterStageGateTests {
         }
     }
 
-    /// Audit P1 parity: the `files` UPSERT must COALESCE phash/camera/GPS and gate
+    /// The `files` UPSERT must COALESCE phash/camera/GPS and gate
     /// has_faces/has_text by the stage-ran flags, so a CHANGED-file rescan that
     /// this pass found no phash/GPS/camera for (or that didn't run the face stage)
     /// does NOT clobber the previously-stored values. Mirrors the Rust engine's

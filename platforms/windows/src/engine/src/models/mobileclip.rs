@@ -1,6 +1,7 @@
-// MobileCLIP-S2 image encoder. Maps a 256×256 RGB image to a 512-d
-// L2-normalized float32 embedding for scan-time clustering and
-// query-time semantic search.
+// CLIP ViT-B/32 image encoder (OpenAI/OpenCLIP, MIT). The module, type and
+// `mobileclip/` install slot keep their pre-swap names as stable keys. Maps a
+// 224×224 RGB image to a 512-d L2-normalized float32 embedding for scan-time
+// clustering and query-time semantic search.
 //
 // Inference order: resize-and-letterbox → ImageNet mean/std normalize
 // → CHW float32 → ORT session.run → L2 normalize. Persisted as raw
@@ -59,7 +60,7 @@ impl MobileClipImage {
             .ok_or_else(|| anyhow::anyhow!("MobileCLIP ONNX has no inputs"))?
             .name
             .clone();
-        // Warmup with a zero 256×256 frame so first-call kernel compile
+        // Warmup with a zero 224×224 frame so first-call kernel compile
         // happens during load.
         let mut model = Self { session, input_name, input_size: 224 };
         let warmup_started = std::time::Instant::now();
@@ -72,28 +73,25 @@ impl MobileClipImage {
         Ok(model)
     }
 
-    /// Embed a 256×256 RGB8 image. Caller pre-resizes to 256×256 via
-    /// `tagging::resize_rgb_nearest` (or bilinear when we wire that).
-    /// Single-image embed. Kept for non-batched callers (e.g. interactive
-    /// semantic-search query embedding) — main scan pipeline goes through
-    /// `embed_batch` via `pipeline::batch_clip::ClipBatchCoordinator`.
-    #[allow(dead_code)]
-    pub fn embed(&mut self, rgb_256: &[u8]) -> Result<Vec<f32>> {
+    /// Embed one 224×224 RGB8 image (the caller pre-resizes). Used by the
+    /// pooled scan path and single-image queries; the batched scan path goes
+    /// through `embed_batch` via `pipeline::batch_clip::ClipBatchCoordinator`.
+    pub fn embed(&mut self, rgb: &[u8]) -> Result<Vec<f32>> {
         let n = self.input_size as usize;
-        if rgb_256.len() != 3 * n * n {
+        if rgb.len() != 3 * n * n {
             anyhow::bail!(
                 "MobileCLIP embed expects {} RGB8 bytes, got {}",
                 3 * n * n,
-                rgb_256.len()
+                rgb.len()
             );
         }
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
         for y in 0..n {
             for x in 0..n {
                 let i = (y * n + x) * 3;
-                let r = rgb_256[i] as f32 / 255.0;
-                let g = rgb_256[i + 1] as f32 / 255.0;
-                let b = rgb_256[i + 2] as f32 / 255.0;
+                let r = rgb[i] as f32 / 255.0;
+                let g = rgb[i + 1] as f32 / 255.0;
+                let b = rgb[i + 2] as f32 / 255.0;
                 chw[[0, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
                 chw[[0, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
                 chw[[0, 2, y, x]] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
@@ -120,8 +118,8 @@ impl MobileClipImage {
         Ok(emb)
     }
 
-    /// Batched inference. Takes N pre-resized 256×256 RGB8 buffers, packs
-    /// them into a single (N, 3, 256, 256) tensor, calls `session.run` ONCE,
+    /// Batched inference. Takes N pre-resized 224×224 RGB8 buffers, packs
+    /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
     /// and returns N L2-normalized embeddings.
     ///
     /// Per-call dispatch overhead through DirectML is sizable (kernel queue
@@ -130,14 +128,14 @@ impl MobileClipImage {
     /// without growing VRAM.
     pub fn embed_batch(
         &mut self,
-        rgb_256_images: &[Vec<u8>],
+        rgb_images: &[Vec<u8>],
     ) -> Result<Vec<Vec<f32>>> {
         let n = self.input_size as usize;
-        let batch = rgb_256_images.len();
+        let batch = rgb_images.len();
         if batch == 0 {
             return Ok(Vec::new());
         }
-        for (i, buf) in rgb_256_images.iter().enumerate() {
+        for (i, buf) in rgb_images.iter().enumerate() {
             if buf.len() != 3 * n * n {
                 anyhow::bail!(
                     "MobileCLIP embed_batch[{}] expects {} RGB8 bytes, got {}",
@@ -148,7 +146,7 @@ impl MobileClipImage {
             }
         }
         let mut chw = Array4::<f32>::zeros((batch, 3, n, n));
-        for (b, rgb) in rgb_256_images.iter().enumerate() {
+        for (b, rgb) in rgb_images.iter().enumerate() {
             for y in 0..n {
                 for x in 0..n {
                     let i = (y * n + x) * 3;

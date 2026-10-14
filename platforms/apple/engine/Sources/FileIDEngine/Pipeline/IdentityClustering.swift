@@ -63,8 +63,7 @@ public enum IdentityClustering {
         /// is default-ON there); here it DEFAULTS OFF pending on-Mac label
         /// calibration — macOS uses Apple Vision face quality (a different
         /// 0..1 scale) and a separate alignment path, so the Windows-calibrated
-        /// values do NOT transfer. See MACOS_LOCKSTEP_NOTES.
-        // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+        /// values do NOT transfer.
         public let mutualKNN: Bool
 
         // Defaults calibrated on-hardware for SFace (128-d) — the commercial-clean
@@ -85,7 +84,7 @@ public enum IdentityClustering {
             pass3MinMeanCosine: Float = 0.60,
             pass3MaxSplits: Int = 7,
             kNN: Int = 10,
-            mutualKNN: Bool = false // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            mutualKNN: Bool = false
         ) {
             self.pass1Cosine = pass1Cosine
             self.pass2Cosine = pass2Cosine
@@ -94,7 +93,7 @@ public enum IdentityClustering {
             self.pass3MinMeanCosine = pass3MinMeanCosine
             self.pass3MaxSplits = pass3MaxSplits
             self.kNN = kNN
-            self.mutualKNN = mutualKNN // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            self.mutualKNN = mutualKNN
         }
     }
 
@@ -166,7 +165,7 @@ public enum IdentityClustering {
             // the pairs whose reverse (j,i) is also present. Determinism
             // preserved: candidates are gathered in ascending-i / searcher order
             // and unioned in that same order. Pairs keyed as i*n+j (unique since
-            // both < n). UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
+            // both < n).
             var directed = Set<Int>()
             var candidates: [(Int, Int)] = []
             for i in 0..<n {
@@ -198,7 +197,7 @@ public enum IdentityClustering {
         // Iterate in sorted-root order so cluster-ID assignment is deterministic
         // across runs — otherwise HashMap iteration order leaks into People-tab
         // cluster numbers and a re-scan of the same library renumbers everyone.
-        // (mirrors the Windows engine's sort_by_key(root); audit F-C3-007)
+        // (mirrors the Windows engine's sort_by_key(root);)
         let sortedGroups = rootMembers.sorted { $0.key < $1.key }
         var cores: [[Int]] = []
         var outliers: [Int] = []
@@ -213,14 +212,14 @@ public enum IdentityClustering {
         // normalized centroid. Recomputing the centroid over the full membership
         // on every outlier add is O(S) per add → O(S²) over a pass; folding the
         // outlier into the running sum is O(dim) per add. Mathematically
-        // identical (only floating-point reassociation differs). (audit F-C3-008)
+        // identical (only floating-point reassociation differs). (008)
         var coreSums: [[Float]] = cores.map {
             centroidSum(of: $0, embeddings: embeddings, dim: dim)
         }
         var coreCentroids: [[Float]] = coreSums.map { normalizeSum($0, dim: dim) }
         var outliersAssigned = 0
         var outliersAsSingletons = 0
-        // R4-02/R4-08: snapshot the Pass-1 core count. An outlier may only join a
+        // Snapshot the Pass-1 core count. An outlier may only join a
         // genuine size>=2 Pass-1 core, never a singleton appended below — otherwise
         // the inner scan grows by every singleton (O(M^2) at scale) AND an outlier
         // can order-dependently merge into a PRIOR outlier's singleton. Assigned

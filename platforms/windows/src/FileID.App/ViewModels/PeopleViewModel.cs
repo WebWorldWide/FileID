@@ -218,7 +218,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
-        // started during the dispatch gap. Mirrors LibraryViewModel.ApplyOnUi (audit A4).
+        // started during the dispatch gap. Mirrors LibraryViewModel.ApplyOnUi.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;

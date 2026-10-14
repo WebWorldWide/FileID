@@ -43,7 +43,7 @@ pub(crate) fn build_with_search_limit<V: Clone + Send + Sync>(points: Vec<(Vec<f
     // RNG from `rand::random()`, so the HNSW topology — and thus the approximate
     // kNN neighbour sets — would differ run-to-run. Face clustering derives
     // cluster IDs and inherited People names from those neighbours, so an
-    // entropy seed makes identities hop on every re-cluster. Pin it. (audit E0)
+    // entropy seed makes identities hop on every re-cluster. Pin it.
     // A fixed RNG seed does not order instant-distance's parallel insertions.
     // Keep construction local to one worker; queries retain their caller's pool.
     static BUILDER_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn build_is_deterministic_across_runs() {
-        // Guards the fixed seed (audit E0): two builds of the same points must
+        // Guards the fixed seed: two builds of the same points must
         // return byte-identical kNN orderings, else face clustering is
         // nondeterministic on large libraries. A spread of near-collinear
         // vectors makes the approximate neighbour set seed-sensitive.

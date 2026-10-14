@@ -25,7 +25,7 @@ pub(crate) async fn bounded_read_line<R: AsyncBufRead + Unpin>(
 ) -> std::io::Result<BoundedRead> {
     buf.clear();
     loop {
-        // R4-04: pull the BufReader's already-buffered slice (<= 8 KiB) in one
+        // Pull the BufReader's already-buffered slice (<= 8 KiB) in one
         // shot instead of one ReadExact future per byte — O(bytes / 8192) polls,
         // not O(bytes). fill_buf returns an empty slice at EOF.
         let available = reader.fill_buf().await?;

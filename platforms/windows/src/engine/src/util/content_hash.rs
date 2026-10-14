@@ -1,4 +1,4 @@
-//! Content-identity hashing for rename/move detection (Phase 3 identity).
+//! Content-identity hashing for rename/move detection.
 //!
 //! A file's path is not a stable identity — a rename or move orphans its
 //! catalog row (tags, embeddings, faces) and forces a full recompute on the
@@ -7,7 +7,7 @@
 //! CPUs and pure-Rust (no C/C++ build dep). For large files we hash a
 //! composite of head + interior samples + tail + size rather than read
 //! gigabytes per file.
-#![allow(dead_code)] // wired into the rename/move rebind path within Phase 3.
+#![allow(dead_code)] // exact-duplicate grouping is consumed by the CLI, TUI and GTK app
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;

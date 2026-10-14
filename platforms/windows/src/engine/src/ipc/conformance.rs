@@ -1,7 +1,7 @@
 //! Schema-conformance suite: serializes an exemplar of every CommandPayload /
 //! EventPayload variant and structurally checks the wire JSON against
-//! `shared/ipc-schema/ipc.schema.json`. Guards the L1 finding class (key-casing
-//! drift like `fileID` vs `fileId`) that a pure Rust↔Rust round-trip can't see.
+//! `shared/ipc-schema/ipc.schema.json`. Guards against key-casing drift
+//! (`fileID` vs `fileId`) that a pure Rust↔Rust round-trip cannot see.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -9,21 +9,19 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{
-    HealthCheckPayload, HealthCheckResult, ListModelsPayload, ModelBenchmark, ModelCatalog, ModelCatalogItem, BenchmarkModelPayload, BenchmarkProgress, BenchmarkResult,
-    ApplyRestructurePayload, ApplyTagsPayload, BatchSummary, BulkActionItem, BulkActionResult,
-    CancelPrewarmPayload, ClipTextEmbedding, CommandPayload, DeepAnalyzeAllPayload,
-    DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload,
-    DeepAnalyzeProgress, DeepAnalyzeStarting, DeepAnalyzeStartingPhase, DiscoveryCompletePayload,
-    EmbedImageQueryPayload, EmbedTextQueryPayload, Empty, EngineError, EngineInfo, EventPayload,
-    FaceClusteringResult, FileDoneEvent, FolderClassificationCounts, GenerateVideoThumbnailPayload,
-    HardwareInfo, HardwareReprobed, IpcCommand, IpcEvent, JobCategory, LibraryWiped, LogLevel,
-    LogLine, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload, MergeClustersPayload,
-    MergeSuggestion, MergeSuggestions, ModelDownloadProgress, PlanRestructurePayload,
-    PrewarmModelPayload, QueueState, QueuedJob, RenameEntry, RenameFilesPayload,
-    RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
-    RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress,
-    GrantFolderAccessPayload, StartScanPayload, TagMode, ThumbnailGenerated, TrashFilesPayload,
-    UndoRestructurePayload, Wrap,
+    ApplyRestructurePayload, ApplyTagsPayload, BatchSummary, BenchmarkModelPayload, BenchmarkProgress, BenchmarkResult,
+    BulkActionItem, BulkActionResult, CancelPrewarmPayload, ClipTextEmbedding, CommandPayload, DeepAnalyzeAllPayload,
+    DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeFilePayload, DeepAnalyzeFolderPayload, DeepAnalyzeProgress,
+    DeepAnalyzeStarting, DeepAnalyzeStartingPhase, DiscoveryCompletePayload, EmbedImageQueryPayload,
+    EmbedTextQueryPayload, Empty, EngineError, EngineInfo, EventPayload, FaceClusteringResult, FileDoneEvent,
+    FolderClassificationCounts, GenerateVideoThumbnailPayload, GrantFolderAccessPayload, HardwareInfo,
+    HardwareReprobed, HealthCheckPayload, HealthCheckResult, IpcCommand, IpcEvent, JobCategory, LibraryWiped,
+    ListModelsPayload, LogLevel, LogLine, MarkPersonsAsUnknownPayload, MarkPersonsDifferentPayload,
+    MergeClustersPayload, MergeSuggestion, MergeSuggestions, ModelBenchmark, ModelCatalog, ModelCatalogItem,
+    ModelDownloadProgress, PlanRestructurePayload, PrewarmModelPayload, QueueState, QueuedJob, RenameEntry,
+    RenameFilesPayload, RenamePersonPayload, RestoreFromTrashPayload, RestructureApplyResult, RestructureCategoryCount,
+    RestructureMove, RestructurePlan, RevertMergePayload, ScanComplete, ScanPhase, ScanProgress, StartScanPayload,
+    TagMode, ThumbnailGenerated, TrashFilesPayload, UndoRestructurePayload, Wrap,
 };
 
 /// Schema tags with no Windows implementation. Empty today: the schema's
@@ -34,8 +32,7 @@ const SCHEMA_ONLY_COMMAND_TAGS: &[&str] = &[];
 const SCHEMA_ONLY_EVENT_TAGS: &[&str] = &[];
 
 fn load_schema() -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../shared/ipc-schema/ipc.schema.json");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../shared/ipc-schema/ipc.schema.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read ipc.schema.json at {}: {e}", path.display()));
     serde_json::from_str(&text).expect("ipc.schema.json is not valid JSON")
@@ -151,23 +148,25 @@ fn assert_conforms(root: &Value, schema_node: &Value, value: &Value, path: &str)
 
 fn wire_tag(payload: &Value) -> String {
     let obj = payload.as_object().expect("payload must be an object");
-    assert_eq!(obj.len(), 1, "externally-tagged payload must have exactly one key: {payload}");
+    assert_eq!(
+        obj.len(),
+        1,
+        "externally-tagged payload must have exactly one key: {payload}"
+    );
     obj.keys().next().expect("tag key").clone()
 }
 
 fn assert_payload_conforms(root: &Value, union_def: &str, payload: &Value, expected_tag: &str) {
     let tag = wire_tag(payload);
-    assert_eq!(tag, expected_tag, "serde rename drifted from the variant's expected wire tag");
+    assert_eq!(
+        tag, expected_tag,
+        "serde rename drifted from the variant's expected wire tag"
+    );
     let variant = variant_schema(root, union_def, &tag);
     assert_conforms(root, variant, payload, &format!("{union_def}.{tag}"));
 }
 
-fn assert_tag_sets_match(
-    root: &Value,
-    union_def: &str,
-    rust_tags: &BTreeSet<&str>,
-    schema_only_allowlist: &[&str],
-) {
+fn assert_tag_sets_match(root: &Value, union_def: &str, rust_tags: &BTreeSet<&str>, schema_only_allowlist: &[&str]) {
     let schema_set = schema_tags(root, union_def);
     for tag in &schema_set {
         assert!(
@@ -631,9 +630,11 @@ fn every_command_exemplar_matches_schema_shape() {
     let root = load_schema();
     for payload in command_exemplars() {
         let expected = command_tag(&payload);
-        let cmd = IpcCommand { id: "conf-1".into(), payload };
-        let v = serde_json::to_value(&cmd)
-            .unwrap_or_else(|e| panic!("encode failed for {expected}: {e}"));
+        let cmd = IpcCommand {
+            id: "conf-1".into(),
+            payload,
+        };
+        let v = serde_json::to_value(&cmd).unwrap_or_else(|e| panic!("encode failed for {expected}: {e}"));
         assert_conforms(&root, &root["$defs"]["IPCCommand"], &v, "IPCCommand");
         assert_payload_conforms(&root, "CommandPayload", &v["payload"], expected);
     }
@@ -645,8 +646,7 @@ fn every_event_exemplar_matches_schema_shape() {
     for payload in event_exemplars() {
         let expected = event_tag(&payload);
         let evt = IpcEvent::now(payload);
-        let v = serde_json::to_value(&evt)
-            .unwrap_or_else(|e| panic!("encode failed for {expected}: {e}"));
+        let v = serde_json::to_value(&evt).unwrap_or_else(|e| panic!("encode failed for {expected}: {e}"));
         assert_conforms(&root, &root["$defs"]["IPCEvent"], &v, "IPCEvent");
         assert_payload_conforms(&root, "EventPayload", &v["payload"], expected);
     }

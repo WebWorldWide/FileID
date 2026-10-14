@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-10-14 — Repository cleanup: dead code, junk files, audit tags
+
+Removed one-off artifacts (`artifacts/`, dated audit/lockstep reports, the Windows-port phase plan, branch-disposition logs, a bulk-rename example and three unused build scripts), stripped ~700 audit-campaign tags from comments, and dropped unused dependencies (`tokio-util`, `thiserror`, `windows-core`, the `vlm-native`/`llama-cpp-2` stub; GTK `tokio`, `serde`, `tracing-appender`). A bin-only dead-code scan on Linux and Windows with the per-item `allow(dead_code)` attributes stripped drove deletion of the unwired VLM face-comparison bridge (both platforms), the retired SCRFD detector (helpers now in `models/face_geometry.rs`), the never-integrated USN journal/elevation modules, unused Windows reveal/thumbnail wrappers, the superseded scene-label disk cache, OCR per-line boxes and assorted unused fields/variants. Florence-2 is gone from the registry and manifests. The WinUI dead-member analyzers (IDE0051/52/60, CS0169/0414) now report nothing.
+
+Fixes found along the way: a GPU device-removed failure now latches process-wide (the flag consulted by new scans and the VLM fallback was never set); POSIX `watch_parent` shuts the engine down when its parent exits; the macOS IPC sink cancels superseded drain backstops; Windows Library tiles announce name, kind, date and face/text indicators like macOS VoiceOver. Twenty-four engine files written as one-liners were rustfmt-formatted.
+
+Verified: Linux VM engine strict Clippy, 634 lib tests plus integration tests (including the new process-wide GPU latch test); GTK strict Clippy and 52 tests; Windows VM engine Clippy, .NET 54 IPC + 580 App tests and `dotnet format`; Mac `swift build --build-tests` and the affected Deep Analyze/Restructure/IPC sink suites.
 ## 2026-10-14 — Portable speech transcription on Windows and Linux
 
 Timeline jobs on the shared engine now transcribe speech with an installed catalog speech model (Qwen3-ASR preferred) through the same pinned llama.cpp runtime FileID already manages, so whisper.cpp is not needed. A speech pass runs after the visual pass with its own resident lease; FFmpeg extracts 16 kHz mono WAV in 30-second non-overlapping chunks sent as OpenAI `input_audio`; each chunk becomes a searchable passage with per-chunk coverage so resumed jobs skip verified chunks.

@@ -173,14 +173,14 @@ impl DbWriter {
         // restores the old face_prints rows) can't leave them crop-less.
         let mut crop_ids_to_prune: Vec<i64> = Vec::new();
         // (face_id, crop bytes) to encode + write AFTER commit, outside the writer
-        // lock — the JPEG encode + fs::write must not run inside the tx. (audit P1)
+        // lock — the JPEG encode + fs::write must not run inside the tx.
         let mut crops_to_write: Vec<(i64, Vec<u8>)> = Vec::new();
 
         // Recipe-v1 legacy digests for over-cap files (>FULL_HASH_MAX_BYTES):
         // computing one re-reads ~2 MB (head ‖ tail) off disk. Done BEFORE the
         // writer lock so the blocking IO never runs inside the single-writer tx —
         // a slow/sleeping disk on one over-cap file would otherwise stall every
-        // reader-blocking writer-lock holder for the whole batch. (F-C1-025)
+        // reader-blocking writer-lock holder for the whole batch.
         // Index-parallel to `buffer`; `None` for files that need no legacy probe.
         // Same guard the inline read used: only over-cap rows that carry a
         // content_hash can match the recipe-v1 fallback (?4) below.
@@ -206,7 +206,7 @@ impl DbWriter {
         // above and the post-commit crop write defend against. Enumerate
         // candidate old paths under a brief read lock, then stat them with the
         // writer lock RELEASED, into a path -> "gone" map the in-tx loop
-        // consults instead of statting. (audit R3-16)
+        // consults instead of statting. (16)
         let heal_old_path_gone: std::collections::HashMap<String, bool> = {
             let mut old_paths: Vec<String> = Vec::new();
             {
@@ -312,13 +312,13 @@ impl DbWriter {
                 // redact_path_for_log does two to_lowercase allocs + a paths::root()
                 // lookup, wasted on every row of a 140 files/s flush. The redacted
                 // (never raw) path is still what lands in the log + IPC wire on a
-                // real flush error. (audit P3)
+                // real flush error.
                 let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
                 // NFC-normalized search shadow of the path (v16 contract). macOS
                 // writers store `precomposedStringWithCanonicalMapping`; the
                 // Windows engine must match so an NFD filename (Mac/NAS/Dropbox-
                 // synced) is found by the app's NFC query. ASCII is the identity
-                // case (no alloc); only non-ASCII paths compose. (F-C2-005)
+                // case (no alloc); only non-ASCII paths compose.
                 let path_search = nfc_path_search(&path_text);
                 let extension = f
                     .path
@@ -341,7 +341,7 @@ impl DbWriter {
                     // blake3(head ‖ tail ‖ size) — a 2 MB read reproduces it so
                     // those rows still heal; the upsert below re-stamps the
                     // current recipe. The read was hoisted out of the writer lock
-                    // (computed into `legacy_hashes` before `conn.lock()`). (F-C1-025)
+                    // (computed into `legacy_hashes` before `conn.lock()`).
                     let legacy_hash = legacy_hashes[i];
                     let candidates: Vec<(i64, String, bool)> = heal_lookup_stmt
                         .query_map(
@@ -380,7 +380,7 @@ impl DbWriter {
                             // triggers, so the rowid entries would be left dangling). The
                             // moved-away orphan keeps its old path and is cleaned by
                             // orphan-pruning; the existing row is updated by the INSERT
-                            // ON CONFLICT below. (audit recheck: rename-heal FTS desync)
+                            // ON CONFLICT below.
                             Err(rusqlite::Error::SqliteFailure(sf, _))
                                 if sf.code == rusqlite::ErrorCode::ConstraintViolation =>
                             {
@@ -425,7 +425,7 @@ impl DbWriter {
                             f.file_ref.map(|r| r as i64),
                             path_search,
                             // ?21/?22 stage-ran gates for the has_faces/has_text
-                            // CASE WHEN in the upsert (R3-04).
+                            // CASE WHEN in the upsert.
                             f.faces_evaluated,
                             f.ocr_stage_ran || f.doc_stage_ran,
                         ],
@@ -441,7 +441,7 @@ impl DbWriter {
                         .with_context(|| format!("clip insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
-                // BGE-small text embeddings (Phase 4b) — parallel to clip
+                // BGE-small text embeddings — parallel to clip
                 // above but in a different vector space; persisted into
                 // `text_embeddings` keyed by model so future embeddings
                 // (BGE-m3, Nomic, ...) can coexist without table churn.
@@ -515,7 +515,7 @@ impl DbWriter {
                         if let Some(crop) = &face.crop_rgb_112 {
                             let face_id = tx.last_insert_rowid();
                             // Defer the JPEG encode + fs::write to after commit so it
-                            // never runs inside the tx under the writer lock. (audit P1)
+                            // never runs inside the tx under the writer lock.
                             crops_to_write.push((face_id, crop.clone()));
                         }
                     }
@@ -544,7 +544,7 @@ impl DbWriter {
                     }
                 }
 
-                // Phase 4: document text — same stage-ran-gated
+                // Document text — same stage-ran-gated
                 // delete-then-conditional-insert as ocr_text above (#11).
                 if f.doc_stage_ran {
                     doc_text_delete
@@ -641,7 +641,7 @@ impl DbWriter {
 
         // Encode + write the batch's face-crop JPEGs now — AFTER the tx committed
         // and the writer lock dropped — so per-face JPEG encode + fs::write never
-        // blocks the engine's only writer (or a concurrent scan flush). (audit P1)
+        // blocks the engine's only writer (or a concurrent scan flush).
         for (face_id, crop) in &crops_to_write {
             if let Err(err) = save_face_crop(*face_id, crop) {
                 tracing::warn!(?err, face_id = *face_id, "face crop write failed");
@@ -683,8 +683,8 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
 /// below, which is identical plus a `RETURNING id` suffix.
 /// `path_search` (?20) is bound the NFC-normalized path (`nfc_path_search`),
 /// NOT the verbatim `path_text` (?1) — the v16 contract, so NFD filenames are
-/// found by the app's NFC query (F-C2-005).
-#[allow(dead_code)]  // used by test fixtures only; bin path uses the RETURNING variant.
+/// found by the app's NFC query.
+#[cfg(test)] // the bin path uses the RETURNING variant
 const INSERT_FILE_SQL: &str = r#"
     INSERT INTO files (
         path_text, path_hash, size_bytes,
@@ -709,7 +709,7 @@ const INSERT_FILE_SQL: &str = r#"
         -- produced no value (decode failed, file lock, mid-scan GPU TDR, or an
         -- online-only/dehydrated placeholder leaves these NULL). A genuine
         -- content change bumps modified_at and the successful re-decode supplies
-        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash. (R3-04)
+        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash.
         phash        = COALESCE(excluded.phash, phash),
         camera_model = COALESCE(excluded.camera_model, camera_model),
         location_lat = COALESCE(excluded.location_lat, location_lat),
@@ -718,7 +718,7 @@ const INSERT_FILE_SQL: &str = r#"
         -- Only overwrite when the producing stage actually ran this session
         -- (?21 = faces_evaluated, ?22 = ocr/doc text stage ran) — keeps the
         -- files row consistent with its still-present face_prints/ocr_text
-        -- children on a models-missing / GPU-dead / online-only re-scan. (R3-04)
+        -- children on a models-missing / GPU-dead / online-only re-scan.
         has_faces    = CASE WHEN ?21 THEN excluded.has_faces ELSE has_faces END,
         has_text     = CASE WHEN ?22 THEN excluded.has_text  ELSE has_text  END,
         failed       = excluded.failed,
@@ -756,7 +756,7 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         -- produced no value (decode failed, file lock, mid-scan GPU TDR, or an
         -- online-only/dehydrated placeholder leaves these NULL). A genuine
         -- content change bumps modified_at and the successful re-decode supplies
-        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash. (R3-04)
+        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash.
         phash        = COALESCE(excluded.phash, phash),
         camera_model = COALESCE(excluded.camera_model, camera_model),
         location_lat = COALESCE(excluded.location_lat, location_lat),
@@ -765,7 +765,7 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         -- Only overwrite when the producing stage actually ran this session
         -- (?21 = faces_evaluated, ?22 = ocr/doc text stage ran) — keeps the
         -- files row consistent with its still-present face_prints/ocr_text
-        -- children on a models-missing / GPU-dead / online-only re-scan. (R3-04)
+        -- children on a models-missing / GPU-dead / online-only re-scan.
         has_faces    = CASE WHEN ?21 THEN excluded.has_faces ELSE has_faces END,
         has_text     = CASE WHEN ?22 THEN excluded.has_text  ELSE has_text  END,
         failed       = excluded.failed,
@@ -807,7 +807,7 @@ const HEAL_LOOKUP_SQL: &str = r#"
 // FK-cascades its tags/embeddings/faces, then the healed row wins.
 // ?4 is the NFC-normalized search shadow (v16 contract) — bound separately
 // from ?1 (verbatim path_text) so a healed NFD path is still found by an NFC
-// query, mirroring the INSERT path. (F-C2-005)
+// query, mirroring the INSERT path.
 const HEAL_UPDATE_SQL: &str = r#"
     UPDATE files
        SET path_text = ?1, path_hash = ?2, path_search = ?4
@@ -873,7 +873,7 @@ fn floats_to_le_bytes(v: &[f32]) -> Vec<u8> {
 /// already-composed paths return unchanged via the fast path (no allocation),
 /// so the 140 files/s hot loop pays nothing on the common case. Stacked
 /// multi-mark sequences (vanishingly rare in filenames) are left as-is — still
-/// no worse than the prior verbatim behavior. (F-C2-005)
+/// no worse than the prior verbatim behavior.
 ///
 /// `pub(crate)` so the other path-mutating writers (restructure-apply, bulk
 /// rename, trash-restore) can reuse this single canonical normalizer instead
@@ -1118,7 +1118,7 @@ mod tests {
     /// freshly-inserted and ON CONFLICT DO UPDATE branches. The hot-path
     /// flush relies on this — if RETURNING only fired on insert, every
     /// repeat-scan row would error with QueryReturnedNoRows. Guards the
-    /// V15.9 redundant-SELECT elimination.
+    /// redundant-SELECT elimination.
     #[test]
     fn insert_returning_id_yields_same_id_on_conflict() {
         let conn = in_memory_db();
@@ -1156,7 +1156,7 @@ mod tests {
         assert_eq!(n, 1);
     }
 
-    /// R3-04: a re-scan whose vision/EXIF stage produced no values (decode
+    /// A re-scan whose vision/EXIF stage produced no values (decode
     /// failed / online-only placeholder / GPU dead) must NOT null out
     /// previously-computed phash/camera/GPS, nor flip has_faces/has_text off
     /// while their child rows still exist. COALESCE protects the nullable
@@ -1307,7 +1307,7 @@ mod tests {
         assert!(bytes.iter().all(|&b| b == 0));
     }
 
-    // ---- B1 rename-heal data-loss regression --------------------------------
+    // ---- rename-heal data-loss regression -----------------------------------
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1325,7 +1325,7 @@ mod tests {
 
     /// Mirror of the heal+insert per-file body in `flush`, exercising the
     /// real HEAL_LOOKUP_SQL / `heal_candidate_moved` / HEAL_UPDATE_SQL /
-    /// INSERT_FILE_RETURNING_ID_SQL so the B1 guard is under test end-to-end.
+    /// INSERT_FILE_RETURNING_ID_SQL so the old-path-gone heal guard is under test end-to-end.
     fn ingest_with_heal(conn: &Connection, f: &TaggedFile) -> i64 {
         let path_text = f.path.to_string_lossy();
         let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
@@ -1429,7 +1429,7 @@ mod tests {
         assert!(!by_ref_none, "content_hash-only match must clear by_ref");
     }
 
-    /// C4: an over-cap row stamped by a pre-interior-sample build carries the
+    /// An over-cap row stamped by a pre-interior-sample build carries the
     /// recipe-v1 digest. The lookup must match it via the ?4 fallback even
     /// though the current-recipe digest (?2) differs, or the row never heals.
     #[test]
@@ -1457,7 +1457,7 @@ mod tests {
         assert!(!by_ref, "legacy-hash match is a content match, not a ref match");
     }
 
-    /// B1 core: two byte-identical files that COEXIST (a copy, not a move)
+    /// Two byte-identical files that COEXIST (a copy, not a move)
     /// must each get their own row. Before the fix the second file's
     /// content_hash heal stole the first's row and dropped it from the
     /// library.
@@ -1488,7 +1488,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// B1: a genuine MOVE (content_hash match, old path gone from disk) heals
+    /// A genuine MOVE (content_hash match, old path gone from disk) heals
     /// to a single row, preserving the row id and its FK-linked tags.
     #[test]
     fn genuine_move_heals_and_preserves_fks() {
@@ -1593,7 +1593,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// R3-17: a file_ref match while the old path is GONE but the candidate
+    /// A file_ref match while the old path is GONE but the candidate
     /// row's size DIFFERS is NOT a genuine move. An NTFS MFT reference is only
     /// volume-local, so a cross-volume collision (or a reused ref) whose old
     /// path happens to be absent must not re-bind an unrelated file's row and
@@ -1657,7 +1657,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// C12: the v15 sync triggers own ocr_fts/doc_fts; the writer only
+    /// The v15 sync triggers own ocr_fts/doc_fts; the writer only
     /// touches the content tables (explicit DELETE + INSERT — the flush
     /// pattern). FTS must follow through insert → re-process (delete+insert)
     /// → direct update → delete with no stale postings and no corruption.
@@ -1726,7 +1726,7 @@ mod tests {
         }
     }
 
-    /// C15: every writer path stamps `path_search` (= `path_text` on
+    /// Every writer path stamps `path_search` (= `path_text` on
     /// Windows — see the v16 migration note) so the app's normalization-
     /// insensitive LIKE never misses engine-written rows.
     #[test]
@@ -1758,7 +1758,7 @@ mod tests {
         assert_eq!(healed, r"C:\lib\renamed.jpg", "heal must re-stamp path_search");
     }
 
-    // F-C2-005: an NFD filename (decomposed — base letter + combining mark,
+    // An NFD filename (decomposed — base letter + combining mark,
     // the on-disk form for Mac/NAS/Dropbox-synced names) must be stored as
     // NFC in path_search so the app's NFC query (LIKE) finds it. Before the
     // write-side normalization the engine stored the verbatim NFD bytes, which
@@ -1830,7 +1830,6 @@ mod tests {
         embedding[0] = 1.0;
         file.faces.push(crate::pipeline::tagging::DetectedFace {
             bbox: [1.0, 2.0, 10.0, 10.0],
-            landmarks: [[0.0; 2]; 5],
             embedding,
             embedding_model: Some("fixture-weight-hash".to_owned()),
             roll: 0.0, yaw: 0.0, pitch: 0.0, quality: 0.9,
@@ -1858,7 +1857,7 @@ mod tests {
         assert_eq!(preserved, "manual marker");
     }
 
-    // F-C1-025: the recipe-v1 (legacy) content-hash re-read for an over-cap
+    // The recipe-v1 (legacy) content-hash re-read for an over-cap
     // (>16 MB) file is a ~2 MB blocking disk read. It must be computed BEFORE
     // the writer lock (into `legacy_hashes`), never inside the single-writer
     // transaction. This test drives the real `flush`: it seeds a row stamped

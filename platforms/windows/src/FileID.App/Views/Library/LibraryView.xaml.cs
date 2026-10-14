@@ -72,7 +72,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private readonly ClipSearchService _clip;
     // Owned so OnUnloaded can dispose its SQLite connection + SemaphoreSlim.
     // Neither ClipSearchService.Dispose nor LibraryViewModel.Dispose releases it,
-    // so without this it leaked one connection per tab navigation. (audit A7)
+    // so without this it leaked one connection per tab navigation.
     private readonly ReadStore _store;
     // One-shot tile-entrance gate. ItemsRepeater reuses element instances and
     // re-realizes them on every collection Reset — the throttled mid-scan
@@ -361,7 +361,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { _thumbnails.Dispose(); } catch { /* swallow */ }
         // Step 4: dispose the ReadStore LAST — after ViewModel + _clip, whose
         // in-flight reads use its connection — so the SQLite connection +
-        // SemaphoreSlim are released instead of leaking per tab nav. (audit A7)
+        // SemaphoreSlim are released instead of leaking per tab nav.
         try { _store.Dispose(); } catch { /* swallow */ }
     }
 
@@ -378,7 +378,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // selected tiles; the VM drops them from its selection set and raises
         // SelectedCount, but the selection toolbar otherwise only re-reads the
         // count on direct user input — so it would keep showing the stale,
-        // pre-prune number. Re-sync the bar here too. (F-C5-012)
+        // pre-prune number. Re-sync the bar here too.
         if (e.PropertyName is nameof(LibraryViewModel.SelectedCount))
         {
             DispatcherQueue.TryEnqueue(UpdateSelectionBar);
@@ -1087,7 +1087,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { await dialog.ShowAsync(); } catch { /* dialog already open */ }
         // The grid still shows the pre-commit tag chips until we re-query the
         // engine's now-updated rows; the identity-stable merge folds the new
-        // tags onto the surviving tiles via MergeMutableFrom. (F-C5-004)
+        // tags onto the surviving tiles via MergeMutableFrom.
         if (committed) RequestLibraryRefresh(force: true);
     }
 
@@ -1130,7 +1130,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             // refresh merge keeps the OLD instance for a surviving id — so it
             // would keep the OLD name. Evict the renamed tiles first so the
             // re-query rebuilds them as fresh tiles carrying the new on-disk
-            // name (a failed per-file rename just re-lands unchanged). (F-C5-004)
+            // name (a failed per-file rename just re-lands unchanged).
             foreach (var t in selected) ViewModel.Items.Remove(t);
             RequestLibraryRefresh(force: true);
         }
@@ -1374,7 +1374,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
         dialog.Opened += (_, _) => sheet.SetFile(
-            tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
+            tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasText);
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
 
         // The ContentDialog — not the sheet — owns keyboard focus once shown, so

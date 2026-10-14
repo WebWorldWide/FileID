@@ -45,7 +45,7 @@ public sealed partial class RestructureView : UserControl
 
     private bool _unloaded;
     private bool _suppressRecompute;
-    // R6-04: static so the in-flight-apply guard survives the view's per-tab-switch
+    // Static so the in-flight-apply guard survives the view's per-tab-switch
     // recreation (mirrors the existing static _deselectedFileIds). _applyingPlan is
     // the plan currently being applied; SyncPlan compares against it to tell a
     // genuine post-apply re-plan (release the guard) from a returning instance
@@ -125,7 +125,7 @@ public sealed partial class RestructureView : UserControl
         {
             _ = RefreshDeepAnalyzeHintAsync();
             if (_unloaded) return;
-            SyncUndoAffordance();   // R2: reflect any pending undoable run on open
+            SyncUndoAffordance();   // Reflect any pending undoable run on open
             if (ShouldReleaseApplyGuardOnEngineChange(
                     _applying, _applyingGeneration, EngineClient.Instance.SpawnGeneration))
             {
@@ -495,7 +495,7 @@ public sealed partial class RestructureView : UserControl
         bool hasWork = selected > 0;
         // Single-flight: while an apply is in flight the buttons stay disabled
         // even if a checkbox toggle re-runs this, so a stale plan can't be
-        // re-applied (F-C5-003).
+        // re-applied.
         ApplySymlinkButton.IsEnabled = hasWork && !_applying;
         ApplyMovesButton.IsEnabled = hasWork && !_applying;
         ApplyBarSelectedCount.Text = selected.ToString("N0");
@@ -845,7 +845,7 @@ public sealed partial class RestructureView : UserControl
         }
         if (sel.Count == 0) return;
         _applying = true;
-        _applyingPlan = plan;   // R6-04: record the in-flight plan (see SyncPlan)
+        _applyingPlan = plan;   // Record the in-flight plan (see SyncPlan)
         _applyRequestInFlight = true;
         _awaitingFreshPlan = false;
         _applyingGeneration = EngineClient.Instance.SpawnGeneration;
@@ -1030,7 +1030,7 @@ public sealed partial class RestructureView : UserControl
         // updated the DB; applied rows must leave the view). Re-plan, exactly as
         // macOS applySelected() does via regenerate(), and KEEP the single-flight
         // guard engaged across the re-plan so the stale plan can't be re-applied
-        // in the gap before the fresh one lands (the F-C5-003 false-alarm window);
+        // in the gap before the fresh one lands (the false-alarm window);
         // SyncPlan releases the guard when the new plan arrives. When nothing
         // moved, release it now so the user can retry.
         if (r.Applied > 0)
@@ -1109,7 +1109,7 @@ public sealed partial class RestructureView : UserControl
         _lastHandledError = err;
 
         // The apply itself, or the post-apply re-plan, failed - release the
-        // single-flight guard so the buttons aren't stuck disabled (F-C5-003).
+        // single-flight guard so the buttons aren't stuck disabled.
         if (err.Kind == "apply_restructure" || (!_applyRequestInFlight && !_awaitingFreshPlan))
         {
             ReleaseApplyGuard();
