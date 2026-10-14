@@ -157,14 +157,14 @@ pub async fn caption(
         }
         // Don't print the prompt back at us; we only want the completion.
         cmd.arg("--no-display-prompt");
-        // P2: offload all layers to the GPU, mirroring the persistent server
+        // Offload all layers to the GPU, mirroring the persistent server
         // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
         // this the per-file CLI path ran the entire VLM decode + vision
         // projector on the CPU — many-fold slower. Quality-neutral (same
         // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
         // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
         // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
-        // recovery), evacuating the GPU for the per-file CLI path too. (F-C1-006)
+        // recovery), evacuating the GPU for the per-file CLI path too.
         let forced_cpu = crate::models::runtime::user_forced_cpu();
         cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);

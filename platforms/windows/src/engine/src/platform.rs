@@ -59,7 +59,7 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     if parts.is_empty() {
         return "…".to_string();
     }
-    // Home-anchored masking (F-C2-004): for a file directly under a home dir
+    // Home-anchored masking: for a file directly under a home dir
     // (`…/Users/<user>/file` or `…/home/<user>/file`), the last-two-components
     // tail would be `<user>/file` and leak the username. Detect a home-root
     // keyword + username and, when the username would otherwise fall inside the
@@ -77,10 +77,10 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
             // (a) The path ends AT the home dir itself (`C:\Users\<user>`,
             // `/home/<user>`) — the username is the terminal component. Only a
             // GENUINE home root (the keyword is the first component, anchor == 0)
-            // qualifies; fully mask it (baseline F-C2-004 behavior). A nested
+            // qualifies; fully mask it (baseline behavior). A nested
             // backup tree whose terminal IS a real file (anchor > 0, e.g.
             // `E:\Backups\Users\file.txt`) is NOT a home dir and falls through
-            // so its filename survives. (audit R-06)
+            // so its filename survives.
             if user_idx == parts.len() - 1 && anchor == 0 {
                 return "…".to_string();
             }
@@ -200,7 +200,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// F-C2-004: a file directly under a home dir must NOT expose the username.
+    /// A file directly under a home dir must NOT expose the username.
     /// Keeping the last two components alone would emit `…/Adam/resume.pdf` and
     /// leak the username — home-anchored masking drops the user component.
     #[test]
@@ -211,7 +211,7 @@ mod redaction_tests {
         assert!(r.ends_with("resume.pdf"), "filename lost: {r}");
     }
 
-    /// F-C2-004 (POSIX shape): `/home/<user>/file` and `/Users/<user>/file`
+    /// POSIX shape: `/home/<user>/file` and `/Users/<user>/file`
     /// must likewise mask the username. Runs on every host (the components
     /// parse the same on non-Windows).
     #[test]
@@ -225,7 +225,7 @@ mod redaction_tests {
         assert!(r2.ends_with("notes.txt"), "filename lost: {r2}");
     }
 
-    /// R-06 regression: a path that ENDS at the home dir itself (the scan root
+    /// Regression: a path that ENDS at the home dir itself (the scan root
     /// is the home directory — no file under it) must fully mask the username,
     /// not fall through to the generic tail and leak it. Genuine home root only
     /// (keyword is the first component); a nested backup tree is handled below.
@@ -235,7 +235,7 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log("/home/adam"), "…");
     }
 
-    /// F-C2-004 must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
+    /// Must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
     /// already pushes the username off the kept tail, so the deeper context
     /// (Pictures/Vacation) survives unchanged.
     #[test]
@@ -246,7 +246,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// R-06: a directory literally named `Users`/`home` sitting DIRECTLY above a
+    /// A directory literally named `Users`/`home` sitting DIRECTLY above a
     /// file (a backup tree, a NAS share) is not a home root and the next part is
     /// the FILENAME, not a username. Home-anchored masking must fall through to
     /// the generic tail and preserve the filename instead of collapsing to "…".
@@ -260,12 +260,12 @@ mod redaction_tests {
 
 // The dedicated-thread set/clear semantics only exist on Windows; off-Windows
 // SleepGuard is a no-op unit struct, so these thread-handoff tests run on the
-// Windows target (where the assertion is real). (F-C1-008)
+// Windows target (where the assertion is real).
 #[cfg(all(test, windows))]
 mod sleep_guard_tests {
     use super::*;
 
-    /// F-C1-008: SetThreadExecutionState is thread-scoped, so the assertion
+    /// SetThreadExecutionState is thread-scoped, so the assertion
     /// must be set AND cleared on the same thread. The guard owns a dedicated
     /// thread for the whole lifecycle, so acquiring on one thread and dropping
     /// on another (the real-world Tokio-worker case) still releases cleanly.
@@ -346,7 +346,7 @@ pub fn cpu_topology() -> CpuTopology {
         // We cast u64* → struct* directly so clippy sees the alignment is
         // satisfied; intermediate u8* hides the source alignment.
         let words = bytes.div_ceil(8) as usize;
-        // R4-03: over-allocate one full fixed-size struct of slack. windows-rs
+        // over-allocate one full fixed-size struct of slack. windows-rs
         // models SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX at its largest union
         // variant (~80 B), but a single-group RelationProcessorCore record is only
         // ~48 B. Without slack, `&*rec_ptr` on the FINAL record forms an 80-byte
@@ -959,7 +959,7 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 // future is polled across Tokio worker threads — so a naive acquire-here /
 // clear-in-Drop would SET on one worker and CLEAR on another, leaving the
 // assertion permanently armed and the machine unable to sleep after a scan
-// (F-C1-008). We therefore pin the whole set→hold→clear lifecycle to one
+// . We therefore pin the whole set→hold→clear lifecycle to one
 // dedicated thread the guard owns; the assertion clears on the thread that set
 // it no matter which Tokio worker runs Drop.
 

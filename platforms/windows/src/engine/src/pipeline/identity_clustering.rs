@@ -228,7 +228,7 @@ where
         core_sums.iter().map(|s| normalize_sum(s, dim)).collect();
     let mut outliers_assigned = 0;
     let mut outliers_as_singletons = 0;
-    // R4-02/R4-08: snapshot the Pass-1 core count. An outlier may only join a
+    // Snapshot the Pass-1 core count. An outlier may only join a
     // genuine size>=2 Pass-1 core, never a singleton appended below. Without the
     // bound the inner scan grows by every appended singleton (O(M^2) at scale)
     // AND an outlier can order-dependently merge into a PRIOR outlier's singleton.

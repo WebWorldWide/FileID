@@ -80,8 +80,8 @@ public actor IPCSink {
         // deepAnalyzeComplete, faceClusteringComplete, restructurePlan,
         // restructureApplyResult, error) plus ready / discoveryComplete /
         // phaseChanged — is NEVER
-        // evicted: dropping a buffered terminal strands that tab's UI forever
-        // (F-C3-029/030). The old code's `removeFirst()` ignored criticality
+        // evicted: dropping a buffered terminal strands that tab's UI forever.
+        // The old code's `removeFirst()` ignored criticality
         // and could drop exactly such an entry sitting at the front.
         if buffer.count >= maxBuffer {
             // For progress events, overwrite the most recent buffered PROGRESS
@@ -130,7 +130,7 @@ public actor IPCSink {
     /// shutdown right before `Darwin._exit(0)`, and by tests right before closing
     /// the pipe's write end: the detached drainer can be parked between batches
     /// (or mid-250 ms timeout) with a terminal event still buffered, and `_exit`
-    /// would drop it (F-C3-040).
+    /// would drop it.
     ///
     /// The drainer's own writes now run OFF the actor on `writeQueue`, so this
     /// routes through that SAME serial queue via `.sync` — which (a) serializes
@@ -273,14 +273,14 @@ public actor IPCSink {
     // MARK: - Critical-event policy
 
     // `internal` (not `private`) so the eviction-policy regression tests can
-    // assert every terminal completion is pinned. (F-C3-029/030)
+    // assert every terminal completion is pinned.
     static func isCritical(_ p: IPCEvent.Payload) -> Bool {
         switch p {
         // Terminal completions — every one strands a tab's UI if lost.
         // restructurePlan is the success-path terminal reply for planRestructure
         // (its error twin, plan_restructure_failed, is .error and already pinned);
         // omitting it let a successful plan be evicted while a failed one always
-        // landed — the asymmetry the re-audit flagged (R-15).
+        // landed — the asymmetry the re-audit flagged.
         case .toolResponse, .catalogResponse, .scanComplete, .deepAnalyzeComplete, .faceClusteringComplete,
              .restructurePlan, .restructureApplyResult, .error,
         // Non-terminal but still must never be coalesced away.

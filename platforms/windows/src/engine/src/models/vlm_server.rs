@@ -132,7 +132,7 @@ impl VlmServer {
         let port = pick_free_port()?;
         let api_key = new_api_key();
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
-        // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
+        // the GPU for Deep Analyze too (not just the ORT scan path).
         let forced_cpu = crate::models::runtime::user_forced_cpu();
         // Flags kept by `fileid-bench --tune` for this model on this machine.
         // Forced CPU always wins over a tuned GPU offload.
@@ -192,7 +192,7 @@ impl VlmServer {
             }
             // Short per-request timeout so a server that accepts the connection
             // but stalls the /health response can't defeat the 120s deadline by
-            // hanging on the client's 300s default. (audit E13)
+            // hanging on the client's 300s default.
             if let Ok(resp) = client
                 .get(&health_url)
                 .bearer_auth(&api_key)

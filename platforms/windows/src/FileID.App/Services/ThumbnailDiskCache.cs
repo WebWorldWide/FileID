@@ -278,7 +278,7 @@ internal static class ThumbnailDiskCache
 
     /// <summary>Decode raw bytes into a BitmapImage on the UI dispatcher.
     /// Eager decode (SetSourceAsync from an InMemoryRandomAccessStream)
-    /// avoids the V15.5 lazy-UriSource bug where ImageOpened never
+    /// avoids the lazy-UriSource bug where ImageOpened never
     /// fired.</summary>
     private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
         byte[] bytes,
@@ -306,7 +306,7 @@ internal static class ThumbnailDiskCache
                 }
                 stream.Seek(0);
                 // Match ThumbnailService.ThumbnailRequestPx (192). DPI-aware
-                // sampling was reverted in V16.1 — see the comment in
+                // sampling was reverted — see the comment in
                 // ThumbnailService.cs for the rationale.
                 var bmp = new BitmapImage { DecodePixelWidth = 192 };
                 await bmp.SetSourceAsync(stream).AsTask(ct);

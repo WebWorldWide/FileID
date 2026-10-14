@@ -18,7 +18,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTME
 /// error was silently swallowed by the caller — OCR produced nothing. Mirrors
 /// `shell::tags::with_com`. `is_ok()` is true for S_OK/S_FALSE (uninit to
 /// balance), false for RPC_E_CHANGED_MODE (thread already in another apartment;
-/// don't touch it — WinRT activation works on MTA too). (audit recheck: OCR COM)
+/// don't touch it — WinRT activation works on MTA too).
 fn with_com<R>(body: impl FnOnce() -> R) -> R {
     unsafe {
         let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

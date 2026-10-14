@@ -1,7 +1,7 @@
 // Discovery — walks the user-picked root, emitting one DiscoveredFile per
 // readable file the scan should consider.
 //
-// V15.9 rewrite: jwalk (rayon-backed parallel walk) + process_read_dir
+// Rewrite: jwalk (rayon-backed parallel walk) + process_read_dir
 // directory-level pruning + atomic count-before-send. The previous
 // walkdir + tx.blocking_send implementation tied the discovery counter
 // to tagging throughput; if the ML pipeline stalled (GPU saturation,
@@ -206,7 +206,7 @@ impl Discovery {
             // dropped with a single name check per directory rather than
             // per-file component traversal).
             //
-            // C6-017: the per-file metadata + file_ref opens used to run on
+            // The per-file metadata + file_ref opens used to run on
             // the single consumer thread (the for-loop below), capping
             // discovery throughput at one stat/open per file once the ML
             // stage stopped being the bottleneck. We now do that work INSIDE
@@ -319,7 +319,7 @@ impl Discovery {
                 // Increment the FS-walk counter BEFORE the channel send so
                 // the "Discovered N" sidebar reflects walk progress even if
                 // the channel briefly backs up. Order matters: this is the
-                // V15.9 decoupling fix — under the old code, blocking_send
+                // Decoupling fix — under the old code, blocking_send
                 // could stall a file's count when ML stalled. The count +
                 // send stay on this single consumer thread so the counter is
                 // monotonic and the test_file_cap stop condition is exact.
@@ -344,7 +344,7 @@ impl Discovery {
 /// Build the `DiscoveredFile` payload for one file entry, doing the stat +
 /// `file_ref` opens. Runs on the jwalk/rayon pool (one task per directory) so
 /// these syscalls fan out instead of serializing on the consumer thread
-/// (C6-017). Returns `None` for any file the pipeline should skip
+/// . Returns `None` for any file the pipeline should skip
 /// (non-Unicode name, already-current, metadata failure, zero-byte,
 /// unsupported kind); skip-with-error cases bump `error_count` here so the
 /// consumer's terminal accounting is unchanged.
@@ -393,7 +393,7 @@ fn classify_entry(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
-    // R4-01 incremental skip: drop a file only when the DB row for THIS path is
+    // Incremental skip: drop a file only when the DB row for THIS path is
     // genuinely current — same size AND same on-disk mtime as the stored values.
     // Mirrors the macOS reference (Discovery.isAlreadyCurrent) and the dbwriter
     // "unchanged" contract. The previous bare path-membership skip stranded any
@@ -617,7 +617,7 @@ mod tests {
     ///   2. Prune noise directories (no recursion into node_modules / .git).
     ///   3. Skip zero-byte files.
     ///
-    /// This is the smoke test guarding the V15.9 rewrite. The full
+    /// This is the smoke test guarding the rewrite. The full
     /// throughput benchmark lives in tests/discovery_throughput.rs and
     /// runs under `cargo test --release --test discovery_throughput
     /// -- --ignored`.
@@ -710,7 +710,7 @@ mod tests {
         });
     }
 
-    /// C6-017: the per-file stat + `file_ref` work must live in a standalone
+    /// The per-file stat + `file_ref` work must live in a standalone
     /// function the parallel walk stage can call (jwalk's process_read_dir, on
     /// the rayon pool) — NOT inline on the single consumer loop. Calling it
     /// directly proves the syscall work was lifted off the consumer thread and
@@ -742,7 +742,7 @@ mod tests {
         fs::write(&other, b"data").unwrap();
         assert!(classify_entry(&other, &skip, &errors).is_none());
 
-        // R4-01: skip honors size+mtime, not bare membership. An entry whose
+        // Skip honors size+mtime, not bare membership. An entry whose
         // stored size+mtime MATCH the live file is skipped (unchanged)...
         let mut skip2 = HashMap::new();
         skip2.insert(p.clone(), (df.size_bytes as i64, Some(df.modified_unix)));
@@ -757,7 +757,7 @@ mod tests {
         assert!(classify_entry(&p, &skip4, &errors).is_some(), "size change defeats the skip");
     }
 
-    /// C6-017 end-to-end guard: every file the receiver gets must already
+    /// end-to-end guard: every file the receiver gets must already
     /// carry a complete payload (size + modified + kind) built in the walk
     /// stage, and the whole set must be produced (done flag set) before the
     /// consumer drains a single item. With the stat/file_ref work parallelized

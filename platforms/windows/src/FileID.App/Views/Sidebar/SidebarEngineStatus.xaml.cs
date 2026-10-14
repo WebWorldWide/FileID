@@ -18,7 +18,7 @@ public sealed partial class SidebarEngineStatus : UserControl
     // inside ApplyStatus per call. `SolidColorBrush` is a `DispatcherObject`;
     // naked construction on a teardown-race path (Unloaded firing while a
     // PropertyChanged was already in-flight on the UI dispatcher) is a known
-    // native fast-fail shape — see V15.2 / V15.2.1 / V15.4 in CLAUDE.md.
+    // native fast-fail shape — in CLAUDE.md.
     // Allocating once at ctor time guarantees the brushes were constructed
     // on the dispatcher this control owns.
     private readonly SolidColorBrush _goldDot;
@@ -97,7 +97,7 @@ public sealed partial class SidebarEngineStatus : UserControl
     /// is the same RGB as the dot but at 22% alpha — gives a soft Fluent
     /// "reveal-style" halo without using a real shadow primitive. Brushes
     /// are pre-cached at ctor (see field declarations above) to avoid the
-    /// V15.2-class DispatcherObject construction race on view teardown.
+    /// DispatcherObject construction race on view teardown.
     /// </summary>
     private void ApplyStatus(StatusAccent accent, string text, string tip)
     {

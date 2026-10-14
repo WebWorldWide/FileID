@@ -20,7 +20,7 @@ struct WelcomeSheet: View {
 
     @State private var vlmRequested = false
     @State private var vlmRequestedAt: Date?
-    @State private var vlmLastProgressAt: Date?   // R6-07: progress-stall watchdog
+    @State private var vlmLastProgressAt: Date?   // progress-stall watchdog
     @State private var installAllRequested = false
     @State private var vlmLockedTotalBytes: Int64?
     @State private var vlmLastError: String?
@@ -186,7 +186,7 @@ struct WelcomeSheet: View {
             // Once everything "Install all" kicked off has settled without
             // completing the full set — a cancel or a failure leaves models
             // missing and idle — re-enable the button instead of latching it
-            // disabled for the rest of the session. (F-C4-017)
+            // disabled for the rest of the session.
             if !inProgress && !allInstalled { installAllRequested = false }
         }
         .onChange(of: selectedVLM) { _, kind in
@@ -210,10 +210,10 @@ struct WelcomeSheet: View {
             guard vlmRequested,
                   let p = engine.modelDownloadProgress,
                   p.modelKind == selectedVLM.rawValue else { return }
-            vlmLastProgressAt = Date()   // R6-07: feed the stall watchdog
+            vlmLastProgressAt = Date()   // Feed the stall watchdog
             updateVLMRate(progress: p)
         }
-        // R6-07: key on `lastErrorSignal` (bumps on EVERY error write) not the
+        // Key on `lastErrorSignal` (bumps on EVERY error write) not the
         // message string, so a retry that fails with the identical message still
         // flips the row to Failed instead of spinning forever.
         .onChange(of: engine.lastErrorSignal) { _, _ in
@@ -227,7 +227,7 @@ struct WelcomeSheet: View {
             if ModelInstallStatus.isInstalled(kind: selectedVLM) { return }
             // `unknown_model` is the canonical unrecognized-model-kind error
             // (renamed from the macOS-only `prewarm_invalid_kind` for cross-
-            // platform parity, audit F-C2-003); route it like the prewarm_*
+            // platform parity,); route it like the prewarm_*
             // family so the row flips to Failed instead of spinning.
             if err.kind.hasPrefix("prewarm_") || err.kind == "unknown_model"
                 || err.message.contains(selectedVLM.displayName) {
@@ -336,7 +336,7 @@ struct WelcomeSheet: View {
         // Clear any residual progress from a just-cancelled attempt at the same
         // model so both watchdogs below arm against a clean slate — otherwise a
         // lingering fraction makes the 30 s "no response" guard see the old
-        // modelKind and bail, and a genuinely-hung retry spins forever. (R6-07)
+        // modelKind and bail, and a genuinely-hung retry spins forever.
         engine.clearModelDownloadProgress(forModelKind: selectedVLM.rawValue)
         vlmRequested = true
         let started = Date()
@@ -354,14 +354,14 @@ struct WelcomeSheet: View {
             vlmLastError = "No response from engine — try again."
             vlmRequested = false
         }
-        // R6-07: started-then-stalled watchdog. A download that emits ≥1 progress
+        // started-then-stalled watchdog. A download that emits ≥1 progress
         // event then goes silent (server hang / dropped link without RST) defeats
         // the 30 s "never started" timer above. Poll for progress staleness.
         Task { @MainActor in
             while vlmRequested, vlmRequestedAt == started {
                 try? await Task.sleep(for: .seconds(5))
                 guard vlmRequested, vlmRequestedAt == started, !vlmInstalled else { return }
-                // R6-07 delta: only treat silence as a stall while the DOWNLOAD is
+                // Only treat silence as a stall while the DOWNLOAD is
                 // still in flight. Once it hits 100%, the post-download MLX cold-load
                 // (~10s+, no progress events, sentinel not yet written) is silent by
                 // design — without this gate the watchdog false-fired "Download
@@ -620,7 +620,7 @@ struct WelcomeSheet: View {
         vlmSmoothedBytesPerSec = 0
         vlmLastFraction = 0
         vlmLockedTotalBytes = nil
-        vlmLastProgressAt = nil   // R6-07
+        vlmLastProgressAt = nil
         vlmLastError = nil
     }
 
@@ -630,7 +630,7 @@ struct WelcomeSheet: View {
 
     /// True while any of the three onboarding downloads is still running.
     /// Drives "Install all" re-enablement once a cancel/failure settles
-    /// everything back to idle. (F-C4-017)
+    /// everything back to idle.
     private var anyInProgress: Bool {
         clipInProgress || ramplusInProgress || arcfaceInProgress || bgeInProgress || vlmInProgress
     }

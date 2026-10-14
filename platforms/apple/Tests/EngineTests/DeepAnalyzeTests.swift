@@ -1,12 +1,12 @@
 // Deep Analyze regression suite.
 //
-// Covers: parseFaceComparison negation (F-C3-022), 50 MP decode cap
-// (F-C3-044), recursive HF tree listing (F-C3-043), escaped folder-scope
-// LIKE (F-C3-027), COALESCE persist (F-C3-044), and the queued-cancel /
-// exactly-one-terminal-complete run() invariant (F-C3-025, F-C3-028).
+// Covers: parseFaceComparison negation, 50 MP decode cap,
+// recursive HF tree listing, escaped folder-scope
+// LIKE, COALESCE persist, and the queued-cancel /
+// exactly-one-terminal-complete run() invariant.
 //
-// The single-flight load coalescing (F-C3-023) and in-flight-download
-// cancel (F-C3-024) need a live VLM download + MLX load and so are verified
+// The single-flight load coalescing and in-flight-download
+// cancel need a live VLM download + MLX load and so are verified
 // on-device, not here — see the structured result for the skip rationale.
 import Testing
 import Foundation
@@ -142,11 +142,11 @@ struct DeepAnalyzePureLogicTests {
         #expect(DeepAnalyze.hasMinimumGeneratedFilenameWords("adam-family-holiday"))
     }
 
-    // F-C3-022 — a negated verdict must parse as DIFFERENT, never an
+    // A negated verdict must parse as DIFFERENT, never an
     // affirmative SAME at the defaulted 0.80 (> 0.75 auto-merge threshold).
     @Test("parseFaceComparison: negated 'same' is DIFFERENT, never auto-merges")
     func negatedVerdictNeverMerges() {
-        // R-12: only LOOSE free-text negations parse as DIFFERENT here. A reply
+        // Only LOOSE free-text negations parse as DIFFERENT here. A reply
         // with an explicit "VERDICT: SAME" line is authoritative and is covered
         // in `affirmativeVerdictPreserved` — the negated-same override must not
         // reach the explicit-verdict branch.
@@ -182,7 +182,7 @@ struct DeepAnalyzePureLogicTests {
         let diff = DeepAnalyze.parseFaceComparison("VERDICT: DIFFERENT\nCONFIDENCE: 0.9")
         #expect(diff.sameClass == false)
 
-        // R-12: an explicit "VERDICT: SAME" line is authoritative — incidental
+        // An explicit "VERDICT: SAME" line is authoritative — incidental
         // negation about lighting/angle must NOT be picked up by the
         // negated-same heuristic and flip the verdict to DIFFERENT.
         let incidental = DeepAnalyze.parseFaceComparison(
@@ -218,7 +218,7 @@ struct DeepAnalyzePureLogicTests {
                 == ["sushi platter", "mountain lake"])
     }
 
-    // R-11 — the shared single-flight load must be cancelled only when its LAST
+    // The shared single-flight load must be cancelled only when its LAST
     // joined waiter bails, so cancelling a prewarm can't abort a run joined to
     // the same download (and vice-versa). The load lifecycle needs a live MLX
     // load (verified on-device), but the waiter ref-count that gates the
@@ -241,7 +241,7 @@ struct DeepAnalyzePureLogicTests {
         #expect(none.bail() == false)
     }
 
-    // F-C3-044 — refuse a decompression bomb above 50 MP (Windows parity).
+    // Refuse a decompression bomb above 50 MP (Windows parity).
     @Test("pixelsExceedDecodeCap: 50 MP cap")
     func decodeCap() {
         #expect(DeepAnalyze.pixelsExceedDecodeCap(width: 8000, height: 7000))   // 56 MP
@@ -260,7 +260,7 @@ struct DeepAnalyzePureLogicTests {
         #expect(abs(DeepAnalyze.representativeVideoTime(durationSeconds: .infinity).seconds - 1) < 0.001)
     }
 
-    // F-C3-043 — the HF tree listing must be recursive, or a repo with any
+    // The HF tree listing must be recursive, or a repo with any
     // subfolder installs incomplete yet writes the verified sentinel.
     @Test("video duration loading has a wall-clock timeout")
     func videoDurationTimeout() async {
@@ -315,7 +315,7 @@ struct DeepAnalyzePureLogicTests {
         #expect(!missingIsValid)
     }
 
-    // F-C3-027 — folder-scope LIKE must escape `_`/`%`.
+    // folder-scope LIKE must escape `_`/`%`.
     @Test("escapeLike: backslashes LIKE metacharacters")
     func escapeLikeMetacharacters() {
         #expect(DeepAnalyzeRunner.escapeLike("a_b") == #"a\_b"#)
@@ -346,7 +346,7 @@ struct DeepAnalyzeRunnerTests {
         }
     }
 
-    // F-C3-027 — a folder whose name contains `_` must not over-match a
+    // A folder whose name contains `_` must not over-match a
     // sibling subtree where any character sits in the `_` position.
     @Test("batch proposed names use source stems to avoid duplicates")
     func batchProposedNamesAreDistinct() {
@@ -624,7 +624,7 @@ struct DeepAnalyzeRunnerTests {
         }
     }
 
-    // F-C3-025 + F-C3-028 — a cancel issued while the job was queued must
+    // A cancel issued while the job was queued must
     // abort the run before any model load, and that exit must still emit
     // exactly one terminal deepAnalyzeComplete (cancelled = true).
     @Test("run(): a cancel issued while queued aborts before load and emits one terminal complete")

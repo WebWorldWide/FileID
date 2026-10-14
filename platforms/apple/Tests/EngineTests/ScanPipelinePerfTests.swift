@@ -1,10 +1,10 @@
 // C6 scan-pipeline performance regressions. These assert the *mechanism* of the
 // perf fixes (work avoided / behavior preserved), not wall-clock throughput
 // (which is hardware-bound and verified on the dev Mac / RTX 2060 rig):
-//   - F-C6-001: discovery-time incremental skip set drops unchanged files
+//   - discovery-time incremental skip set drops unchanged files
 //     UPSTREAM of the ANE/Vision/CLIP/OCR pass; forceReprocess re-runs all.
-//   - F-C6-005: streaming discovery yields the same file set as the array walk.
-//   - F-C6-004: the decoupled DB-writer committer commits every batch (no loss
+//   - streaming discovery yields the same file set as the array walk.
+//   - the decoupled DB-writer committer commits every batch (no loss
 //     across the >2-batch boundary) — the throughput win itself is hardware.
 import Testing
 import Foundation
@@ -17,7 +17,7 @@ private typealias Database = FileIDEngine.Database
 @Suite("C6 scan pipeline perf")
 struct ScanPipelinePerfTests {
 
-    // MARK: - F-C6-001: pure skip predicate
+    // MARK: - Pure skip predicate
 
     @Test("isAlreadyCurrent: unchanged file (same size, mtime == stored modified_at) skips")
     func skipPredicateUnchanged() {
@@ -35,7 +35,7 @@ struct ScanPipelinePerfTests {
 
     @Test("isAlreadyCurrent: a backdated same-size edit (mtime != stored) reprocesses")
     func skipPredicateBackdatedMtime() {
-        // R-09: an archive extract / rsync -a / Time Machine restore can move a
+        // An archive extract / rsync -a / Time Machine restore can move a
         // file's mtime to a value still <= the prior scan time but != the stored
         // modified_at. The old `scanned_at >= mtime` test skipped it forever
         // (stale tags/OCR); DBWriter would have reprocessed (M1 != M2), so the
@@ -61,7 +61,7 @@ struct ScanPipelinePerfTests {
             dbModifiedAt: nil, dbSize: 100, currentModified: nil, currentSize: 100))
     }
 
-    // MARK: - F-C6-001: end-to-end discovery skip set
+    // MARK: - end-to-end discovery skip set
 
     /// Creates a small tree, records DB rows for a subset, and asserts discovery
     /// drops only the rows that are genuinely current — so the expensive tagging
@@ -104,7 +104,7 @@ struct ScanPipelinePerfTests {
         let sizeByName = sizeByNameBuild
         let modByName = modByNameBuild
 
-        // scanned_at far in the future: proves the R-08 touch fired (it bumps
+        // scanned_at far in the future: proves the touch fired (it bumps
         // scanned_at DOWN to the current scan time for the skipped row).
         let future = Date().timeIntervalSince1970 + 1_000_000
         func insert(name: String, size: Int64, modified: Double?, failed: Int) throws {
@@ -123,7 +123,7 @@ struct ScanPipelinePerfTests {
         try insert(name: "b.jpg", size: sizeByName["b.jpg"]! + 1, modified: modByName["b.jpg"]!, failed: 0)
         try insert(name: "c.jpg", size: sizeByName["c.jpg"]!,     modified: modByName["c.jpg"]!, failed: 1)
         // a.jpg is an image and the skip candidate: give it a CLIP embedding so
-        // the R-14 backfill carve-out (active whenever a CLIP model is installed
+        // the backfill carve-out (active whenever a CLIP model is installed
         // on the host — true on a dev box that ran a real scan) doesn't force the
         // embeddingless image to stay in the pipeline. Without this the test is
         // green only on a CLIP-less runner — env-fragile.
@@ -140,7 +140,7 @@ struct ScanPipelinePerfTests {
         let got = Set(incremental.map { $0.url.lastPathComponent })
         #expect(got == ["b.jpg", "c.jpg", "d.jpg"], "only the genuinely-current file is skipped")
 
-        // R-08: the skipped row's scanned_at must be bumped to the current scan
+        // The skipped row's scanned_at must be bumped to the current scan
         // time (touched down from `future`), so the post-scan orphan sweep —
         // which treats `scanned_at < scanStart` as deleted — counts it present.
         let touchedA = try await db.pool.read { d in
@@ -155,7 +155,7 @@ struct ScanPipelinePerfTests {
         #expect(Set(forced.map { $0.url.lastPathComponent }) == Set(names))
     }
 
-    // MARK: - F-C6-005: streaming yields the same set as the array walk
+    // MARK: - Streaming yields the same set as the array walk
 
     @Test("walkStreaming emits exactly the files walk returns")
     func streamingMatchesWalk() async throws {
@@ -186,7 +186,7 @@ struct ScanPipelinePerfTests {
         func append(_ p: String) { paths.append(p) }
     }
 
-    // MARK: - F-C6-004: decoupled committer loses no rows across batch boundaries
+    // MARK: - Decoupled committer loses no rows across batch boundaries
 
     @Test("Draining >2 batches through the decoupled committer commits every row")
     func decoupledCommitNoLoss() async throws {

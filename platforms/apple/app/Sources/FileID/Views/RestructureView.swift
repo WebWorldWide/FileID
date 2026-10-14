@@ -10,7 +10,7 @@
 //   Junk folder (generic name OR fully heterogeneous):
 //     Every file dissolves — re-buckets via the heuristic.
 //
-// F-C3-021-app: the plan + apply now route through the ENGINE butler
+// The plan + apply now route through the ENGINE butler
 // (Restructure.proposeAll / Restructure.apply via IPC), not the app-side
 // classifier. `requestPlan()` sends `planRestructure`; the engine's
 // `restructurePlan` event is mapped onto the view's `Proposal`/`AssistantSummary`
@@ -44,7 +44,7 @@ struct RestructureView: View {
     /// irreversible inside the app, so a double-click must never run apply
     /// twice — the bar buttons disable while this is set.
     @State private var applying = false
-    /// R6-01: moves frozen at the instant the apply-confirmation dialog is
+    /// Moves frozen at the instant the apply-confirmation dialog is
     /// presented. A background re-plan (e.g. Deep Analyze finishing mid-review)
     /// rewrites proposals/selectedIDs/engine.restructurePlan while the dialog
     /// stays open; the confirm action must apply exactly what the user reviewed,
@@ -195,10 +195,10 @@ struct RestructureView: View {
                             // Only the Auto tier actually applies from a stored
                             // plan (applyStoredPlan filters to auto-only) — the
                             // confirmation must promise exactly that, not the
-                            // full stored count. (audit R1)
+                            // full stored count.
                             pendingApplyCount = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
                         } else {
-                            pendingMoves = eligibleMoves() // R6-01: freeze reviewed set
+                            pendingMoves = eligibleMoves() // Freeze reviewed set
                             pendingPlanID = nil
                             pendingApplyCount = pendingMoves.count
                         }
@@ -211,7 +211,7 @@ struct RestructureView: View {
                 .padding(.top, 14)
                 .padding(.bottom, 10)
                 .transition(.move(edge: .top).combined(with: .opacity))
-                // F-C3-021-app: the apply action routes through the engine
+                // The apply action routes through the engine
                 // butler, which performs real on-disk moves (it has no macOS
                 // symlink-preview mode). The apply bar is now a single honest
                 // "Apply moves" action; this confirmation states the real,
@@ -276,7 +276,7 @@ struct RestructureView: View {
                     .padding(.top, 18)
                     .padding(.bottom, 12)
                 }
-                // R2: after an apply that moved files, offer a one-click reversal. The
+                // After an apply that moved files, offer a one-click reversal. The
                 // engine replays its on-disk undo journal to put every file back.
                 if engine.canUndoRestructure {
                     HStack(spacing: 10) {
@@ -292,7 +292,7 @@ struct RestructureView: View {
                             statusIsError = false
                             // A failed send (engine respawning) would otherwise wedge
                             // `applying` true forever — no result event ever arrives to
-                            // clear it, leaving the button permanently disabled. (audit R2-app)
+                            // clear it, leaving the button permanently disabled. (app)
                             if !engine.undoRestructure(libraryRoot: root.path) {
                                 applying = false
                                 status = "Engine is unavailable — try again in a moment."
@@ -336,7 +336,7 @@ struct RestructureView: View {
             store.notifyChanged()
             requestPlan()
         }
-        // Engine-authoritative plan arrived (F-C3-021-app) — map it onto the
+        // Engine-authoritative plan arrived — map it onto the
         // view's proposal model + summary and rebuild the render caches.
         .onChange(of: engine.restructurePlanSignal) { _, _ in
             applyPlan()
@@ -383,7 +383,7 @@ struct RestructureView: View {
             // the engine stays alive, so NO restructureApplyResult and NO reset
             // event arrives) would wedge `applying` true forever — the apply bar +
             // Undo button stay disabled and re-entry-guarded. Release it here,
-            // mirroring the engineResetSignal handler above. (audit P1)
+            // mirroring the engineResetSignal handler above.
             if applying, kind == "db_unavailable" {
                 applying = false
                 status = "The engine isn't ready — try again in a moment."
@@ -570,7 +570,7 @@ struct RestructureView: View {
             SankeyFlowView(
                 proposals: proposals,
                 onTapSource: { folder in
-                    // R6-03: `folder` is now the FULL source path (SankeyFlowView
+                    // `folder` is now the FULL source path (SankeyFlowView
                     // passes node.identityKey), so use it directly — the old
                     // basename reverse-map collapsed same-basename folders to the
                     // first match, making the others unreachable for review.
@@ -756,7 +756,7 @@ struct RestructureView: View {
                     // confidence tier — most rows in a plan this size were never
                     // shown to the user, so Review/Ask/unknown-confidence rows
                     // stay put for individual review rather than being applied
-                    // sight-unseen. (audit R1)
+                    // sight-unseen.
                     if let counts = storedPlanConfidenceCounts {
                         let heldBack = counts.review + counts.ask + counts.unknown
                         Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Ready to apply \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) Review, Needs approval, or unknown-confidence move\(heldBack == 1 ? "" : "s") stay put for you to review first.")
@@ -1052,7 +1052,7 @@ struct RestructureView: View {
 
     private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
-    // MARK: - Engine-routed plan + apply (F-C3-021-app)
+    // MARK: - Engine-routed plan + apply
 
     /// Ask the engine butler for a fresh restructure plan. The reply arrives
     /// asynchronously on `engine.restructurePlan`; `applyPlan()` (driven by
@@ -1169,9 +1169,9 @@ struct RestructureView: View {
     }
 
     /// Apply the selected, non-skipped moves through the engine butler.
-    /// Single-flight (F-C4-003): `applying` gates the apply-bar buttons and is
+    /// Single-flight: `applying` gates the apply-bar buttons and is
     /// cleared when `restructureApplyResult` arrives (or the engine resets).
-    /// R6-01: selected ∧ not-skipped (F-C4-012) moves from the CURRENT
+    /// Selected ∧ not-skipped moves from the CURRENT
     /// plan/selection. Snapshotted into `pendingMoves` at dialog-present time so a
     /// background re-plan can't change the set the confirm action applies.
     /// Belt-and-suspenders: filter the engine plan's own moves so a skipped
@@ -1192,7 +1192,7 @@ struct RestructureView: View {
             statusIsError = true
             return
         }
-        // R6-01: apply exactly the set frozen when the dialog was presented, not
+        // Apply exactly the set frozen when the dialog was presented, not
         // a set a mid-dialog re-plan may have rewritten.
         let moves = pendingMoves
         guard pendingPlanID != nil || !moves.isEmpty else {

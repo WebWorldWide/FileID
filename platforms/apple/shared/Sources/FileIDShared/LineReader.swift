@@ -118,7 +118,7 @@ public enum LineReader {
 final class LineBuffer: @unchecked Sendable {
     /// Cap a single in-flight line to 64 MiB. A peer that fails to send
     /// '\n' would otherwise grow the buffer without bound and OOM us. 64 MiB
-    /// (R3-07B/R5-12) is symmetric with the IPC frame caps elsewhere so a
+    /// is symmetric with the IPC frame caps elsewhere so a
     /// whole-library applyRestructure command (~200k moves) isn't rejected
     /// here on the engine's stdin command-read path (FileIDEngineMain).
     static let maxLineBytes = 64 * 1024 * 1024
@@ -129,7 +129,7 @@ final class LineBuffer: @unchecked Sendable {
     /// Lets `append` resume the newline search from where it left off so a
     /// large un-terminated frame arriving across many reads is scanned once
     /// (O(total)) instead of re-scanned from the front every read (the old
-    /// O(n²)). (R3-07B)
+    /// O(n²)).
     private var scannedPrefix = 0
 
     init() { buffer.reserveCapacity(64 * 1024) }

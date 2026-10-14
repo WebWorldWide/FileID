@@ -133,7 +133,7 @@ impl BgeText {
         // The reported sequence length must match the tokens we fed (a malformed
         // or wrong-variant ONNX re-export can disagree). Validate before pooling
         // so a hostile/buggy model is a clean per-file error, not an index-OOB
-        // panic that kills the scan worker. (audit E9 / S1)
+        // panic that kills the scan worker.
         let seq = shape[1] as usize;
         if shape[0] != 1 || seq != enc.attention_mask.len() || data.len() < seq * HIDDEN {
             anyhow::bail!(
@@ -180,7 +180,7 @@ pub fn default_weights_path() -> Result<PathBuf> {
     // BGE always binds the CPU EP (see `load`), so resolve the CPU variant
     // (= the base .onnx) explicitly rather than via active_provider(), which on
     // an Intel-NPU/Snapdragon box would pick an _int8/_qnn variant a CPU session
-    // can't consume. (audit E6)
+    // can't consume.
     Ok(super::variants::resolve_model_path_for(
         &crate::paths::models_dir()?.join("bge_text"),
         "bge_small",

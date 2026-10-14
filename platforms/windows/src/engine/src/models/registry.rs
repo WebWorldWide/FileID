@@ -497,13 +497,13 @@ fn revision_token(model: &Model) -> String {
 /// name. The old `{id}-<oldtoken>.installed` no longer matches, so the install
 /// gate falls through to a re-fetch instead of trusting the stale artifact on
 /// disk. This mirrors the macOS revision-keyed sentinel that self-heals across
-/// a pin change (audit C1-024; the b4404→b9254 episode).
+/// a pin change (024; the b4404→b9254 episode).
 ///
 /// Pre-revision-key Windows builds dropped a bare `{id}.installed` with no token.
 /// [`migrate_legacy_sentinel`] renames that legacy marker to the current keyed
 /// name on first read so an already-present (multi-GB) install isn't reported as
-/// not-installed and re-downloaded merely because the naming scheme changed
-/// (R-04). A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
+/// not-installed and re-downloaded merely because the naming scheme changed.
+/// A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
 /// is not the legacy name and is left for the re-fetch path.
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     let dir = paths::models_dir().ok()?.join(".sentinels");
@@ -628,10 +628,10 @@ fn migrate_legacy_sentinel(dir: &Path, model: &Model, keyed: &Path) {
     if !legacy.exists() {
         return;
     }
-    // R5-05: a legacy bare marker carries no revision token, so it cannot signal
+    // A legacy bare marker carries no revision token, so it cannot signal
     // a pin bump on its own. Re-validate the on-disk artifacts against the CURRENT
     // pins before vouching, or a stale pre-bump install masquerades as the current
-    // one (C1-024). approx_bytes is a rounded estimate, so SHA256 (the exact,
+    // one. approx_bytes is a rounded estimate, so SHA256 (the exact,
     // mandatory pin) is the check. Runs at most once per legacy install (this
     // branch is unreachable once keyed exists or the marker is gone), so the
     // one-time hash is off the hot path.
@@ -819,7 +819,7 @@ mod tests {
                 let s = p.to_string_lossy();
                 assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
                 let name = p.file_name().unwrap().to_string_lossy();
-                // Revision-keyed: `ram_plus-<token>.installed` (audit C1-024).
+                // Revision-keyed: `ram_plus-<token>.installed` (024).
                 assert!(name.starts_with("ram_plus-"), "sentinel not id-prefixed: {s}");
                 assert!(name.ends_with(".installed"), "unexpected sentinel: {s}");
             }
@@ -829,7 +829,7 @@ mod tests {
     /// A pin bump (revision/sha256 change on any file) must move the sentinel
     /// filename so the stale `.installed` no longer matches and the install gate
     /// re-fetches. Before the revision-key fix the name was a bare
-    /// `{id}.installed` that survived the b4404→b9254 hash bump. (audit C1-024)
+    /// `{id}.installed` that survived the b4404→b9254 hash bump. (024)
     #[test]
     fn pin_bump_invalidates_sentinel() {
         let LookupResult::Found(model) = lookup_full("ram_plus") else {
@@ -887,9 +887,9 @@ mod tests {
         dir
     }
 
-    /// R-04: a pre-revision-key install has a bare `{id}.installed`. On first read
+    /// A pre-revision-key install has a bare `{id}.installed`. On first read
     /// it must be migrated (renamed) to the current keyed name — BUT only when the
-    /// on-disk artifacts still satisfy the current pins (R5-05). Here the lone file
+    /// on-disk artifacts still satisfy the current pins. Here the lone file
     /// is present (sha256=None → existence is the gate), so migration proceeds.
     #[test]
     fn legacy_sentinel_is_migrated_when_pins_valid() {
@@ -906,7 +906,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// R5-05: a legacy marker whose on-disk artifacts no longer satisfy the
+    /// A legacy marker whose on-disk artifacts no longer satisfy the
     /// current pins (missing file, or sha256 mismatch after a pin bump) must NOT
     /// be promoted — it is DELETED so the install gate re-fetches.
     #[test]

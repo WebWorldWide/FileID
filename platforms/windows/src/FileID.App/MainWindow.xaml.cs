@@ -840,7 +840,7 @@ public sealed partial class MainWindow : Window
             e.AcceptedOperation = DataPackageOperation.Copy;
             // Show the overlay. e.DragUIOverride is provided by the OS and CAN be
             // null (some drag sources / shell states don't supply it); guard it so
-            // we don't NRE and lose the accepted-operation + overlay. (audit A15)
+            // we don't NRE and lose the accepted-operation + overlay.
             if (e.DragUIOverride is { } dragUi)
             {
                 dragUi.IsCaptionVisible = false;

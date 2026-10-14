@@ -1,4 +1,4 @@
-// F-C6-008 regression: loadImageAndEXIF must reuse the size Discovery already
+// loadImageAndEXIF must reuse the size Discovery already
 // stat'd (DiscoveredFile.sizeBytes) instead of issuing a second
 // FileManager.attributesOfItem per image — an extra SMB/NFS round-trip on NAS.
 //
@@ -93,7 +93,7 @@ struct TaggingLoadSizeTests {
         #expect(result != nil)
     }
 
-    // R-13: a 0/absent discovered size means UNKNOWN, not tiny — Discovery's
+    // A 0/absent discovered size means UNKNOWN, not tiny — Discovery's
     // .fileSizeKey can come back empty on some SMB/NFS volumes, leaving a valid
     // image at sizeBytes 0. The loader must re-stat and decode it rather than
     // short-circuit to decode-failed via the <256 B guard.

@@ -111,7 +111,7 @@ public enum TLSPinning {
     /// bounce to an off-allowlist host where `evaluate` would fall back to
     /// plain system-trust and CA pinning would silently stop applying.
     /// Tying the redirect allowlist to `hostMatches` keeps a single source
-    /// of truth — anything we follow is exactly the set we pin. (audit E11)
+    /// of truth — anything we follow is exactly the set we pin.
     public static func allowsRedirect(to url: URL?) -> Bool {
         allowsExternalRequest(to: url)
     }

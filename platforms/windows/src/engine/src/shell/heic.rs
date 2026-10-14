@@ -37,7 +37,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 /// message loop and the blocking `.get()` waits below would risk an STA deadlock;
 /// `did_init` is true only when WE init'd (S_OK/S_FALSE) — on RPC_E_CHANGED_MODE an
 /// outer caller owns the apartment so we must NOT uninit. Mirrors `shell::video::ComScope`.
-/// (audit — HEIC COM init)
+/// (HEIC COM init)
 struct ComScope {
     did_init: bool,
 }

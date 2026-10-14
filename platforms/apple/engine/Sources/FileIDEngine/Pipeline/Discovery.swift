@@ -10,12 +10,12 @@
 //     It preserves the enumerator's depth-first, directory-by-directory
 //     traversal (the dominant prefetch win) but drops the cross-directory
 //     global sort `walk` adds — matching the Windows jwalk streaming path
-//     (pipeline/discovery.rs). (F-C6-005)
+//     (pipeline/discovery.rs).
 //
 // On a non-forced (incremental) rescan, both paths consult a read-only skip
 // set built once from the DB so a file the DB already holds UNCHANGED never
 // reaches the expensive ANE/Vision/CLIP/OCR pass + NAS content read. Mirrors
-// the Windows discovery skip set (scan_session.rs / discovery.rs). (F-C6-001)
+// the Windows discovery skip set (scan_session.rs / discovery.rs).
 //
 // Filters: hidden files, files >500 MB (Vision adds little for
 // huge videos / archives and decode can OOM on 16 GB), and
@@ -146,7 +146,7 @@ public actor Discovery {
     /// enumerator's depth-first traversal already groups same-directory files
     /// (the dominant NAS-prefetch win); the cross-directory alphabetical sort
     /// `walk` adds is intentionally traded away here for the streaming start.
-    /// Honors the same incremental skip set as `walk`. (F-C6-005)
+    /// Honors the same incremental skip set as `walk`.
     @discardableResult
     public func walkStreaming(
         root: URL,
@@ -300,7 +300,7 @@ public actor Discovery {
         let maxBytes = Int64(maxSizeMB) * 1024 * 1024
         var kept = 0
         var sinceLastProgress = 0
-        // re-audit R-08: paths skipped this scan whose `scanned_at` must still be
+        // Paths skipped this scan whose `scanned_at` must still be
         // bumped to "now" so the post-scan orphan sweep doesn't mistake a present-
         // but-skipped file for a deletion. Captured once at the walk's start
         // (always > the upstream scanStart), flushed in bounded batches.
@@ -330,19 +330,19 @@ public actor Discovery {
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
                 continue
             }
-            // F-C6-001 incremental skip: a DB row that succeeded before and still
+            // Incremental skip: a DB row that succeeded before and still
             // has the same size AND the same mtime as on disk (the DBWriter
-            // "unchanged" contract, R-09) means we already captured this content —
+            // "unchanged" contract) means we already captured this content —
             // skip the whole ANE/Vision/CLIP/OCR + NAS-read pass. The set holds
             // only `failed = 0` rows (prior failures always reprocess) and excludes
-            // embeddable images still lacking a CLIP row (R-14); a lookup miss
+            // embeddable images still lacking a CLIP row; a lookup miss
             // fails safe (the file is processed).
             if let skip, let entry = skip[PathFingerprint(url.path)],
                Self.isAlreadyCurrent(
                    dbModifiedAt: entry.modifiedAt, dbSize: entry.size,
                    currentModified: values?.contentModificationDate?.timeIntervalSince1970,
                    currentSize: size) {
-                // re-audit R-08: the file is PRESENT (just unchanged) — record it
+                // The file is PRESENT (just unchanged) — record it
                 // so its row's `scanned_at` is refreshed; otherwise the orphan
                 // sweep (scanned_at < scanStart) would treat it as deleted.
                 skippedTouch.append(url.path)
@@ -384,7 +384,7 @@ public actor Discovery {
         return kept
     }
 
-    /// re-audit R-08: bump `scanned_at` for files SKIPPED this scan. A skip never
+    /// Bump `scanned_at` for files SKIPPED this scan. A skip never
     /// reaches the DBWriter UPSERT that normally refreshes `scanned_at`, so without
     /// this the post-scan orphan sweep — which prunes rows whose `scanned_at`
     /// predates the scan — would saturate its candidate cap with present-but-skipped
@@ -424,7 +424,7 @@ public actor Discovery {
     /// Computed only for KEPT files (post incremental-skip), so the extra syscall
     /// is paid once per file already bound for the ANE/Vision/CLIP/OCR pass.
     ///
-    /// CAUTION (re-audit R-10): unlike the Windows NTFS file_ref, st_ino carries NO
+    /// CAUTION: unlike the Windows NTFS file_ref, st_ino carries NO
     /// sequence/generation number — APFS/HFS reuse an inode freely after a file is
     /// deleted. So the DBWriter rename/move heal MUST NOT trust file_ref equality
     /// alone; it must corroborate with a signal that survives a move but differs
@@ -447,7 +447,7 @@ public actor Discovery {
     /// (`scanned_at >= mtime`) was LOOSER than DBWriter — it skipped same-size
     /// edits whose mtime moved to a value still <= the last scan time (archive
     /// extract / `rsync -a` / git checkout / Time Machine restore), so the new
-    /// content was never re-tagged (re-audit R-09). A nil-vs-present mtime is a
+    /// content was never re-tagged. A nil-vs-present mtime is a
     /// change; both-nil matches DBWriter's both-nil "unchanged". `forceReprocess`
     /// and the prior-failure exclusion are handled where the skip set is built.
     static func isAlreadyCurrent(
@@ -470,7 +470,7 @@ public actor Discovery {
     /// mirroring the Windows skip-set query (scan_session.rs) and the macOS
     /// orphan-sweep range. Only `failed = 0` rows are loaded, and an embeddable
     /// image still lacking a `clip_embeddings` row (or a doc/pdf lacking a
-    /// `text_embeddings` row) is excluded (R-14) via the shared
+    /// `text_embeddings` row) is excluded via the shared
     /// `DBWriter.skipSetClipBackfillExclusionSQL` / `…TextBackfillExclusionSQL` so the
     /// post-install backfill branches in DBWriter.insertOne stay reachable on an
     /// incremental rescan instead of being filtered out here.
@@ -487,7 +487,7 @@ public actor Discovery {
             }
             return s + String(next)
         }()
-        // R-14: the CLIP-backfill exclusion keeps embeddingless images IN the
+        // The CLIP-backfill exclusion keeps embeddingless images IN the
         // pipeline so a post-install rescan backfills them — but only matters
         // when CLIP is actually installed. With no CLIP model on disk, no image
         // can ever get an embedding, so the exclusion would keep EVERY image out

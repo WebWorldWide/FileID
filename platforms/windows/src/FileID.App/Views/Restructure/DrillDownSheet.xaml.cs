@@ -50,7 +50,7 @@ public sealed partial class DrillDownSheet : UserControl
     // fires a shell thumbnail per move (ItemsRepeater over a UIElement list does
     // not virtualize), so an unbounded "See all" on a large outcome group froze
     // the UI thread and flooded the shell. 200 fills several screens; the rest
-    // are summarized in the count line (F-C5-002).
+    // are summarized in the count line.
     private const int MaxRenderedRows = 200;
 
     public DrillDownSheet()
@@ -98,7 +98,7 @@ public sealed partial class DrillDownSheet : UserControl
         // drills into the SAME moves it represented (the long tail), not an empty
         // set. MUST stay in sync with SankeyFlowControl.SourceBucket/CategoryBucket
         // (MaxNodes=12, long tail -> "Other"); TopLevel/TrimRoot already match the
-        // Sankey's SourceOf. (audit A10)
+        // Sankey's SourceOf.
         const int MaxNodes = 12;
         const string OtherKey = "Other";
         int distinctSources = all.Select(SrcRaw).Distinct(StringComparer.OrdinalIgnoreCase).Count();

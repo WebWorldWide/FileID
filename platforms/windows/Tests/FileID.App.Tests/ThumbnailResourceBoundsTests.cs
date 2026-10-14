@@ -53,7 +53,7 @@ public sealed class ThumbnailResourceBoundsTests
     /// the newest requests stay queued for real work and the evicted oldest
     /// are placeholder-completed by the drop callback — none may hang in the
     /// shimmer state, which is the failure the original unbounded design's
-    /// comment warned about. (audit 2026-07-14)
+    /// comment warned about.
     [Fact]
     public async Task BurstBeyondCapacityCompletesEveryRequestAndKeepsNewest()
     {

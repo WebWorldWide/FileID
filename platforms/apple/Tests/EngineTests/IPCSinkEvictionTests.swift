@@ -1,4 +1,4 @@
-// F-C3-029/030 regression: the IPCSink full-buffer eviction must pin EVERY
+// Regression: the IPCSink full-buffer eviction must pin EVERY
 // terminal completion (scanComplete, deepAnalyzeComplete, faceClusteringComplete,
 // restructureApplyResult, error) — not just scan completion — and must never
 // drop one via the old criticality-blind removeFirst(). The original critical
@@ -10,7 +10,7 @@ import Foundation
 @testable import FileIDEngine
 import FileIDShared
 
-@Suite("IPCSink terminal-event pinning (F-C3-029/030)")
+@Suite("IPCSink terminal-event pinning")
 struct IPCSinkEvictionTests {
 
     private static func line(_ p: IPCEvent.Payload) throws -> Data {
@@ -91,7 +91,7 @@ struct IPCSinkEvictionTests {
                 "restructureApplyResult must reach the wire under full-buffer pressure")
     }
 
-    // F-C3-040: the shutdown path calls drainAndClose() before Darwin._exit(0)
+    // The shutdown path calls drainAndClose() before Darwin._exit(0)
     // so a buffered terminal event isn't dropped on the hard exit.
     @Test("drainAndClose flushes a buffered terminal event and then closes the sink")
     func drainAndCloseFlushesThenCloses() async throws {

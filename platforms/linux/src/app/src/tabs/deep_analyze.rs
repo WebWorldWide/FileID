@@ -732,7 +732,7 @@ fn begin_run(ui: &Rc<DeepUi>) {
 }
 
 /// Tear down the live cards (crash / cancel / clean exit). Mirrors macOS
-/// F-C4-016 — a crash mid-run removes the live cards at once.
+/// A crash mid-run removes the live cards at once.
 fn end_run(ui: &Rc<DeepUi>) {
     ui.in_flight.set(false);
     ui.starting_card.set_visible(false);

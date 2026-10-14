@@ -1,4 +1,4 @@
-// H3 regression: when the IPC buffer is full (parent draining slowly),
+// When the IPC buffer is full (parent draining slowly),
 // progress-event coalescing must never clobber a buffered critical event.
 // The original bug matched on the literal '"' byte, so the overwrite hit
 // ANY newest entry — including a buffered scanComplete, leaving the UI

@@ -25,7 +25,7 @@ public enum RestructureFeedback {
         // "/" (a root-level destination's parent basename) is not a real folder key —
         // Rust's `dest.parent().file_name()` yields None there, so treat it as nil for
         // lockstep. Unreachable in production (destinations are always under the
-        // library root), defensive only. (audit — lockstep)
+        // library root), defensive only. (lockstep)
         return (name.isEmpty || name == "/") ? nil : name
     }
 

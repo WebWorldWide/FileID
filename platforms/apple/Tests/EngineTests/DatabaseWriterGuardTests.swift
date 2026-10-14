@@ -1,4 +1,4 @@
-// F-C3-031 + F-C3-039 regression for the engine's writer connection.
+// Regression for the engine's writer connection.
 //
 // 031: a cancelled scan still has to record its final scan_sessions status.
 // GRDB 7's async pool.write throws CancellationError on a cancelled task, so
@@ -15,7 +15,7 @@ import GRDB
 // Disambiguate from GRDB.Database (both modules export `Database`).
 private typealias Database = FileIDEngine.Database
 
-@Suite("Database writer guards (F-C3-031/039)")
+@Suite("Database writer guards")
 struct DatabaseWriterGuardTests {
 
     private func makeDB() throws -> (Database, URL) {

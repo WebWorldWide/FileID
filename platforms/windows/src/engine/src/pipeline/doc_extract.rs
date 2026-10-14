@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 /// extraction + a useful FTS5 snippet without bloating the DB on huge docs.
 pub(crate) const MAX_TEXT_BYTES: usize = 256 * 1024;
 
-/// C1: hard cap on the RAW bytes decompressed from any single zip member
+/// Hard cap on the RAW bytes decompressed from any single zip member
 /// (Office files are zips). Generous enough for legitimate XML markup overhead
 /// (a 256 KB-text slide carries far less than this), but bounds a zip bomb —
 /// a member that decompresses to gigabytes must never be fully materialized.
@@ -25,7 +25,7 @@ const MAX_MEMBER_BYTES: u64 = 16 * 1024 * 1024;
 /// limits alone let many individually small slides form a ZIP bomb.
 const MAX_TOTAL_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 
-/// C1: cap on the number of glob-matched members iterated (e.g. `ppt/slides/`
+/// Cap on the number of glob-matched members iterated (e.g. `ppt/slides/`
 /// slide parts). A crafted .pptx can list millions of `slideN.xml` entries; even
 /// with the per-member byte cap, sorting + parsing every one of them burns
 /// unbounded CPU on a decoder thread. No real presentation has tens of thousands
@@ -82,7 +82,7 @@ fn read_plain(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
         // and FTS5 snippets can handle U+FFFD replacement chars fine.
         return Ok(String::from_utf8_lossy(b).into_owned());
     }
-    // C4: read at most MAX_TEXT_BYTES (+ a small margin) instead of slurping
+    // Read at most MAX_TEXT_BYTES (+ a small margin) instead of slurping
     // the whole file and truncating afterward — a multi-GB .txt/.md must not
     // be fully materialized just to keep 256 KB. Lossy decode matches the
     // bytes=Some path above.

@@ -467,7 +467,7 @@ pub fn consolidate<S: std::hash::BuildHasher>(
 /// The caller MUST pass the snapshot read under the phase-3 persist lock (not a
 /// pre-clustering phase-1 capture): a rename committed in the lock-free window
 /// would otherwise leave a stale name in the guard and could unblock a
-/// wrong-cluster auto-merge. (audit C1-023) Same-named fragments and
+/// wrong-cluster auto-merge. (023) Same-named fragments and
 /// named+unnamed pairs are intentionally NOT blocked — they still consolidate.
 pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
     face_name: &HashMap<i64, String, S>,
@@ -513,7 +513,7 @@ pub fn name_blocked_pairs<S: std::hash::BuildHasher>(
 /// can't see it and `consolidate()` would otherwise fold the unknown cluster
 /// into a named/other person — reversing the user's verdict and, when the
 /// unknown owner wins the persist vote, overwriting a user-assigned name with
-/// NULL. (audit R3-03)
+/// NULL. (03)
 ///
 /// `face_owner` maps each carried-forward face to its prior person id;
 /// `unknown_persons` is the set of prior person ids with is_unknown=1. Each

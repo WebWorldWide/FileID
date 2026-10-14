@@ -467,7 +467,7 @@ pub struct ApplyRestructurePayload {
 #[serde(rename_all = "camelCase")]
 pub struct UndoRestructurePayload {
     /// Same library root the apply used — the destinations the undo writes back
-    /// to are containment-checked against it. (R2)
+    /// to are containment-checked against it.
     pub library_root: String,
 }
 
@@ -495,7 +495,7 @@ pub struct RestructureMove {
     /// applied after an arbitrary delay, so `source` alone is not authoritative:
     /// a file replaced at the same path is a DIFFERENT file. Apply re-checks the
     /// live DB row and stats the file on disk against these before moving.
-    /// (audit P1 — stale plan could move a replacement file)
+    /// (stale plan could move a replacement file)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -860,7 +860,7 @@ pub struct HardwareInfo {
     /// already on the optimal path.
     #[serde(default)]
     pub recommendation: String,
-    // ─── V15.9 adaptive-utilization diagnostics (Issue 3). All optional
+    // ─── Adaptive-utilization diagnostics. All optional
     //     so an older C# build talking to a newer engine still deserializes
     //     cleanly. ───
     /// CPU performance-core count (Intel hybrid 12th-gen+, future AMD
@@ -1296,7 +1296,7 @@ mod tests {
         assert_eq!(shutdown.as_object().unwrap().len(), 0);
     }
 
-    /// F-C2-001: a schema-conformant `deepAnalyzeAll` that OMITS `tagsOnly`
+    /// A schema-conformant `deepAnalyzeAll` that OMITS `tagsOnly`
     /// (and `proposeRenames`) must decode, defaulting `tags_only=false` and
     /// `propose_renames=true`. This is the contract the Swift mirror must match.
     #[test]
@@ -1355,7 +1355,7 @@ mod tests {
         }
     }
 
-    /// F-C2-002: `cancelPrewarm` must decode with `modelKind` OMITTED (the
+    /// `cancelPrewarm` must decode with `modelKind` OMITTED (the
     /// cancel-all form → `None`) and with it present (targeted per-model cancel).
     /// The empty-object form `{"cancelPrewarm":{}}` is the canonical cancel-all.
     #[test]

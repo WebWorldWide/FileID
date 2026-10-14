@@ -299,7 +299,7 @@ fn semantic_classify_profiled(
                 // destination — routing to a folder outside library_root would
                 // be silently rejected by the apply layer (canonicalizes
                 // outside root), so such a match falls through to a new in-root
-                // group instead. (audit E12)
+                // group instead.
                 Some((proto, sim, runner_up))
                     if sim >= profile.folder_match_cos && proto.path.starts_with(library_root) =>
                 {
@@ -742,7 +742,7 @@ fn distinctive_terms<'a>(
             // (can differ Windows↔macOS by ~1 ULP), which could flip the tie order of
             // two near-equal-score terms and pick a DIFFERENT group folder name across
             // platforms. f64 `ln` is consistently correctly-rounded, matching the macOS
-            // engine's `Float(log(Double(...)))`. (audit — lockstep)
+            // engine's `Float(log(Double(...)))`. (lockstep)
             (t, tf * (((total / df) as f64).ln().max(0.0) as f32))
         })
         .collect();
@@ -862,7 +862,7 @@ mod tests {
     fn sanitization_colliding_group_names_get_distinct_folders() {
         // Two distinct content clusters whose distinctive tags differ ONLY in
         // chars safe_filename_component maps to '_' ("16:9" vs "16/9" → "16_9").
-        // The dedup must back them with DISTINCT physical directories (E4), not
+        // The dedup must back them with DISTINCT physical directories, not
         // collapse both into one folder — and the numeric-suffix loop must
         // terminate.
         let mut files = Vec::new();

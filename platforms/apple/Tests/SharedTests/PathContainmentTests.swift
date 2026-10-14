@@ -1,5 +1,5 @@
 // SEC-7 containment guard (restructure apply, engine + app). Regression cover
-// for F-C3-021: a valid in-root destination whose intermediate folder doesn't
+// for: a valid in-root destination whose intermediate folder doesn't
 // exist yet was wrongly rejected when the root resolved through macOS's
 // `/private` shortening (it only strips `/private` when the path EXISTS, so an
 // existing root and a not-yet-created child landed in different canonical

@@ -72,7 +72,7 @@ struct BulkTagSheet: View {
             let result = await Task.detached(priority: .userInitiated) {
                 // journal: nil — the sheet owns the journal write so a
                 // total-failure batch can't clear a still-valid prior one
-                // (TagWriter clears on any empty batch). (F-C4-005)
+                // (TagWriter clears on any empty batch).
                 let detailed = TagWriter.addTagsBulkDetailed(tags, to: urls, journal: nil)
                 BulkTagSheet.recordOrPreserveJournal(outcomes: detailed.outcomes,
                                                      failed: detailed.failed)
@@ -101,9 +101,9 @@ struct BulkTagSheet: View {
     /// • successful additions → record them so "Undo last tags" strips ONLY
     ///   what FileID just added.
     /// • a clean all-unchanged batch (no failures, nothing new added) → clear
-    ///   it, so a stale earlier batch can't be undone by mistake (F-C3-034).
+    ///   it, so a stale earlier batch can't be undone by mistake.
     /// • a batch with failures and no successes → leave the prior journal
-    ///   intact; a failed batch must not destroy "Undo last tags". (F-C4-005)
+    ///   intact; a failed batch must not destroy "Undo last tags".
     nonisolated static func recordOrPreserveJournal(outcomes: [TagWriter.TagOutcome],
                                                     failed: Int,
                                                     in defaults: UserDefaults = .standard) {

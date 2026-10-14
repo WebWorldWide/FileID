@@ -19,7 +19,7 @@ internal static class DebugLog
     private static readonly object s_writeLock = new();
     private static bool s_traceEnabled;
     // NOTE: writes are intentionally SYNCHRONOUS. An async/batched sink was tried
-    // (audit P2) but the fix re-audit caught that it loses the last <200 ms of
+    //  but the fix re-audit caught that it loses the last <200 ms of
     // lines on a NATIVE fast-fail — exactly the [APPLY:N]/[ENGINE-SUB] tail this
     // log exists to capture (CLAUDE.md marks it load-bearing). Any future
     // off-thread sink MUST preserve per-line durability (e.g. a persistent

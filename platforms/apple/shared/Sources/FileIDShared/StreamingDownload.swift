@@ -516,7 +516,7 @@ func checkSizePlausible(actual: Int64, approxBytes: Int64) throws {
 }
 
 /// Streaming SHA256 of a file on disk — 4 MB autoreleasepool chunks so
-/// multi-GB models never load whole into RAM (M6). Hex, lowercase.
+/// multi-GB models never load whole into RAM. Hex, lowercase.
 public func sha256HexOfFile(at url: URL) throws -> String {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }

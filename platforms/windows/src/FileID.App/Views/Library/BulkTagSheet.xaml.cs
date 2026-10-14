@@ -21,7 +21,7 @@ public sealed partial class BulkTagSheet : UserControl
     // "Replace existing" wipes every user tag before writing the new set. A
     // nested ContentDialog can't open while this sheet's host dialog is
     // mid-deferral (WinUI allows only one open at a time), so the confirmation
-    // is an explicit second Apply click gated by this flag instead. (F-C5-004)
+    // is an explicit second Apply click gated by this flag instead.
     private bool _replaceConfirmed;
 
     public BulkTagSheet()

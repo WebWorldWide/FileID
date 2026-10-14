@@ -1,6 +1,6 @@
 // Worker-cap topology tests. The formula is factored into a pure function so
 // a known CPU topology can be supplied here regardless of the CI host's real
-// hardware. (F-C3-045)
+// hardware.
 import Testing
 import Foundation
 @testable import FileIDEngine

@@ -763,7 +763,7 @@ impl Tagger {
         drop(raw_rx);
         drop(predecoded_tx);
 
-        // P3: derive the GPU-inference concurrency caps from the active EP. On
+        // Derive the GPU-inference concurrency caps from the active EP. On
         // DirectML these stay at the TDR floor (4/2); on CUDA/TensorRT they rise
         // to the VRAM-clamped pool size so the semaphore doesn't throttle below
         // the number of loaded Sessions.
@@ -1065,7 +1065,7 @@ fn run_decoder_thread(
                 // rename-heal content_hash HERE on the decoder thread via the
                 // bounded composite (head + interior samples + tail + size — no
                 // full read), so the async worker's `or_else` fallback never
-                // re-opens the file as blocking IO on a tokio worker. (F-C1-025)
+                // re-opens the file as blocking IO on a tokio worker.
                 _ => {
                     content_hash =
                         crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
@@ -1370,7 +1370,7 @@ async fn process_file_predecoded(
     // computed `content_hash` for every non-online kind (image/doc/pdf/audio
     // via the single read; video/over-cap/other via the bounded composite),
     // so this async worker NEVER re-opens the file — the previous `.or_else`
-    // fallback was blocking filesystem IO on a tokio worker. (F-C1-025) On a
+    // fallback was blocking filesystem IO on a tokio worker. On a
     // decoder-thread read error the row simply lacks a content_hash and the
     // heal-by-file_ref path still applies; cloud placeholders stay None so we
     // never hydrate a OneDrive online-only file.
@@ -1454,7 +1454,7 @@ async fn process_file_predecoded(
             // doc keywords) before the GPU died. Mark the set authoritative so
             // the dbwriter persists it — otherwise tags_evaluated stays false,
             // the dbwriter drops the freshly-extracted tags, AND failed=false
-            // strands the row in the skip-set, losing them permanently. (audit E2)
+            // strands the row in the skip-set, losing them permanently.
             tagged.tags_evaluated = true;
         }
         tagged.total_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1800,7 +1800,7 @@ async fn process_file_predecoded(
                             );
                             tagged.tags.push((label.to_string(), Some(score)));
                         }
-                        // V16.29: one-line per-file summary at info level so a user
+                        // one-line per-file summary at info level so a user
                         // who sees "only year" chips on images can grep the engine
                         // log to confirm whether scene tags are being emitted vs
                         // gated out.
@@ -1839,7 +1839,7 @@ async fn process_file_predecoded(
                     let ocr_started = Instant::now();
                     // Move (not clone) the decoded frame into OCR: this is the
                     // last use of `rgb` in the block, so the clone was a wasted
-                    // full-frame allocation + memcpy per OCR'd file. (audit P5)
+                    // full-frame allocation + memcpy per OCR'd file.
                     if let Ok(Some(ocr)) = run_ocr_blocking(rgb, w, h).await {
                         if !ocr.text.trim().is_empty() {
                             tagged.has_text = true;
@@ -1897,7 +1897,7 @@ async fn process_file_predecoded(
     // complete face-detect nor embed. Mark it failed so the incremental
     // skip-set re-processes it next scan instead of stranding it at
     // failed=false (scanned-fine-but-face-less forever, same class as the
-    // pre-ML bail). (audit E1)
+    // pre-ML bail).
     if coord.is_gpu_dead()
         && matches!(file.kind, FileKind::Image | FileKind::Video)
         && !tagged.failed
@@ -1913,7 +1913,7 @@ async fn process_file_predecoded(
     // (labeler missing, or this file's embed failed transiently), `tags` holds
     // only the Year/camera enriched extras — not an authoritative empty — so
     // setting tags_evaluated would make the dbwriter delete-then-reinsert wipe
-    // the file's previously-persisted content tags. (audit R3-19)
+    // the file's previously-persisted content tags. (19)
     let visual_tagger_ran = models.ram_plus.is_some()
         || models.ram_plus_batch.is_some()
         || (models.scene_labeler.is_some() && tagged.clip_embedding.is_some());
@@ -2327,7 +2327,7 @@ mod tests {
         assert_eq!(compute_dhash(&rgb, 64, 64), 0);
     }
 
-    /// C6: the predecode bound is byte-weighted by each frame's ACTUAL
+    /// The predecode bound is byte-weighted by each frame's ACTUAL
     /// decoded size — a third frame that would overflow the budget must wait
     /// until an earlier reservation is dropped.
     #[test]
@@ -2371,7 +2371,7 @@ mod tests {
         assert!(budget.acquire(50, &coord).is_none());
     }
 
-    /// C5: over-cap images get EXIF from `exif_from_head` (a bounded head
+    /// over-cap images get EXIF from `exif_from_head` (a bounded head
     /// read) — there is no later fallback. A minimal JPEG whose APP1 segment
     /// carries a TIFF IFD with a Model tag must yield the camera model.
     #[test]
@@ -2476,7 +2476,7 @@ mod tests {
     }
 
     // Aspect tags (Wide/Tall/Square) were intentionally dropped from
-    // enriched-extras in V16.2 — they dominated `TopTwoTags` on files
+    // enriched-extras — they dominated `TopTwoTags` on files
     // without classifier output (every photo got Wide/Tall as a top chip,
     // pushing the more useful Year/Camera/HasFaces tags out of the
     // 2-chip slot). These four tests now assert the absence of those
@@ -2508,7 +2508,7 @@ mod tests {
     #[test]
     fn enriched_does_not_emit_aspect_at_boundary() {
         // The borderline case used to emit "Square" for 1.30 ratio
-        // (boundary not >1.30). After the V16.2 drop, no aspect tag
+        // (boundary not >1.30). After the drop, no aspect tag
         // is emitted at any ratio.
         let mut t = stub_tagged(1300, 1000, 5_000_000);
         push_enriched_extras(&mut t);
@@ -2517,7 +2517,7 @@ mod tests {
         assert!(!t.tags.iter().any(|(s, _)| s == "Tall"));
     }
 
-    // F-C1-019: the Year_ tag is pinned to the macOS `extraTags` rule —
+    // The Year_ tag is pinned to the macOS `extraTags` rule —
     // creation date (when present) in local time, year strictly inside
     // (1990, 2100). These vectors use mid-year noon-UTC timestamps so the
     // resolved calendar year is identical in every real-world timezone

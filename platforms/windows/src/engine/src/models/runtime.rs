@@ -283,7 +283,7 @@ pub fn execution_providers_for_chain(
         match ep {
             ExecutionProvider::Cuda => out.push(CUDAExecutionProvider::default().build()),
             ExecutionProvider::TensorRt => out.push(TensorRTExecutionProvider::default().build()),
-            // P4: pin the OpenVINO device to AUTO:GPU,CPU so Intel boxes target
+            // Pin the OpenVINO device to AUTO:GPU,CPU so Intel boxes target
             // the GPU (or NPU once detected) and only fall back to the OpenVINO
             // CPU plugin when no accelerator binds — instead of OpenVINO's
             // default possibly landing on CPU silently. AUTO keeps a safe
@@ -348,7 +348,7 @@ pub fn active_provider() -> ExecutionProvider {
 /// no-ops on DirectML/CPU. Without this, a user who forces `cuda`/`openvino` on
 /// a box whose auto-detected provider is DirectML armed the wrong (unguarded)
 /// EP, so a crash during that forced GPU bind left no breadcrumb and the engine
-/// crash-looped instead of reverting to DirectML (B6).
+/// crash-looped instead of reverting to DirectML.
 pub fn armed_provider() -> ExecutionProvider {
     // Only reads the Copy `vendor` field; the loop re-queries pack/disable state
     // live, so the memoized probe is byte-identical and skips a DXGI re-walk.
@@ -368,13 +368,13 @@ pub fn armed_provider() -> ExecutionProvider {
             _ => {}
         }
     }
-    // R4-09: no guarded EP is reachable in the override-aware bind chain, so the
+    // No guarded EP is reachable in the override-aware bind chain, so the
     // real session bind registers no cuda/openvino dispatch — nothing guarded will
     // bind. Return an UNGUARDED EP so `ep_guard::arm` no-ops. Must NOT fall back to
     // `active_provider()`: it ignores the user override, so on a forced-"cpu"
     // override (the GPU-TDR recovery path) it returns Cuda on an NVIDIA+pack box,
     // arming a CUDA breadcrumb around a CPU-only bind — an unrelated native crash
-    // then false-poisons a healthy CUDA pack. (B6 follow-up)
+    // then false-poisons a healthy CUDA pack.
     ExecutionProvider::Cpu
 }
 
@@ -445,7 +445,7 @@ fn read_user_ep_override() -> Option<ExecutionProvider> {
 /// True when the user pinned the execution provider to CPU via
 /// `gpuExecutionProviderOverride`. The VLM (llama.cpp) path consults this so the
 /// documented GPU-TDR recovery — evacuate the GPU — also evacuates Deep Analyze,
-/// not just the ORT scan path that already honors the override. (F-C1-006)
+/// not just the ORT scan path that already honors the override.
 pub fn user_forced_cpu() -> bool {
     matches!(read_user_ep_override(), Some(ExecutionProvider::Cpu))
 }
@@ -653,7 +653,7 @@ fn cuda_bin_from_default_install() -> Option<PathBuf> {
         return None;
     }
     // Pick the highest "v<MAJOR.MINOR>" sibling — newest CUDA wins.
-    // R4-12: parse the version NUMERICALLY. A lexicographic string sort ranks
+    // Parse the version NUMERICALLY. A lexicographic string sort ranks
     // "v9.0" above "v12.0" (and "v12.4" above "v12.10"), registering an older
     // toolkit's bin/ over a newer one. (u32,u32) tuple Ord compares major then
     // minor; non-parsing entries (e.g. "vlatest", bare "v12") are dropped rather

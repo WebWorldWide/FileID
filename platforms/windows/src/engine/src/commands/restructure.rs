@@ -39,7 +39,7 @@ const PLAN_FILES_SQL: &str = "SELECT
 /// tier. Each ViT-B/32 image embedding is ~2 KiB, so the Low cap bounds the
 /// transient to ~100 MiB; Balanced/High are effectively uncapped (preserving
 /// the prior full-table behavior on boxes with headroom). Files past the cap
-/// fall through to the rule cascade. (audit F-C6-016)
+/// fall through to the rule cascade. (016)
 fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
     match tier {
         crate::platform::MemoryTier::Low => 50_000,
@@ -50,7 +50,7 @@ fn embedding_load_cap(tier: crate::platform::MemoryTier) -> usize {
 /// Stream the image CLIP embeddings into a map, stopping at `cap` so the heavy
 /// blob transient never exceeds the memory-tier budget. The query streams
 /// row-by-row, so breaking early holds at most `cap` decoded vectors resident.
-/// (audit F-C6-016)
+/// (016)
 fn load_capped_embeddings(
     conn: &rusqlite::Connection,
     cap: usize,
@@ -183,7 +183,7 @@ pub(crate) async fn handle_plan_restructure(
 
     // Plan-time identity per file, carried onto every emitted move so apply can
     // bind the move to the file the plan actually saw rather than whatever
-    // happens to live at `source` when apply runs. (audit P1)
+    // happens to live at `source` when apply runs.
     let identities: std::collections::HashMap<i64, restructure::PlannedIdentity> = files
         .iter()
         .filter_map(|f| f.identity.clone().map(|i| (f.file_id, i)))
@@ -199,7 +199,7 @@ pub(crate) async fn handle_plan_restructure(
     // behavior (effectively uncapped). Files past the cap simply fall through to
     // the rule cascade — the same graceful degradation as a file with no
     // embedding. Tags are then loaded only for the ids we kept, so neither map
-    // grows unbounded under pressure. (audit F-C6-016)
+    // grows unbounded under pressure. (016)
     let embedding_cap = embedding_load_cap(crate::platform::memory_tier());
     let signals = tokio::task::spawn_blocking(
         move || -> rusqlite::Result<(
@@ -251,7 +251,7 @@ pub(crate) async fn handle_plan_restructure(
                 // through to the non-image pass below, which must still see its
                 // content tags. Tags are short strings, so keeping them in the map
                 // is cheap — only the heavy CLIP blob is drained (above). Matches
-                // macOS, which reads tags via a non-consuming lookup. (audit parity)
+                // macOS, which reads tags via a non-consuming lookup.
                 tags: tags_map.get(&f.file_id).cloned().unwrap_or_default(),
                 time_unix: f.created_unix.unwrap_or(f.modified_unix),
             })
@@ -261,7 +261,7 @@ pub(crate) async fn handle_plan_restructure(
     // Source folders the semantic butler actively claimed (every file relocated
     // into a content group). These classify Anchor on destination-category
     // homogeneity but are real relocations, not in-place anchors — exempt them
-    // from the anchor strip so their highest-confidence moves survive. (F-C1-004)
+    // from the anchor strip so their highest-confidence moves survive.
     let mut semantic_source_folders: std::collections::HashSet<PathBuf> =
         std::collections::HashSet::new();
     let mut proposed = Vec::new();
@@ -336,7 +336,7 @@ pub(crate) async fn handle_plan_restructure(
         // An exempted Anchor folder is the butler actively relocating its files
         // into a content group — it is NOT kept in place, so it must not inflate
         // the "Keep" tile or label its moves Anchor. Count + tier it as Mixed so
-        // the tile and the surviving moves agree. (F-C1-004)
+        // the tile and the surviving moves agree.
         let classification = if matches!(f.classification, FolderClassification::Anchor)
             && semantic_source_folders.contains(&f.source_folder)
         {
@@ -369,7 +369,7 @@ pub(crate) async fn handle_plan_restructure(
     // would stay put — without this, default-selected Anchor rows were applied.
     // Folders the semantic butler actively claimed are exempt: their homogeneity
     // is a real relocation, not an in-place anchor, so stripping would eat the
-    // best proposals. (audit A1/A3, F-C1-004)
+    // best proposals. (004)
     let proposed = restructure::strip_anchor_folder_moves_except(
         proposed,
         &folder_class,
@@ -475,7 +475,7 @@ pub(crate) async fn handle_apply_restructure(
 ) {
     let result = tokio::task::spawn_blocking(
         move || -> anyhow::Result<ipc::RestructureApplyResult> {
-            // F-C6-013 wiring: inject the shared cancel flag the CancelScan
+            // Wiring: inject the shared cancel flag the CancelScan
             // dispatch arm sets, so a long apply is actually stoppable. Before
             // this, the apply built a fresh never-set flag and the cooperative
             // cancel poll was dead in production. (The flag is reset to false in
@@ -589,7 +589,7 @@ mod tests {
     }
 
     /// The embedding load must be tier-gated: Low caps the resident map, while
-    /// Balanced/High preserve the prior full-table behavior. (audit F-C6-016)
+    /// Balanced/High preserve the prior full-table behavior. (016)
     #[test]
     fn embedding_load_cap_is_bounded_on_low_only() {
         use crate::platform::MemoryTier;
@@ -602,7 +602,7 @@ mod tests {
     /// The load streams and stops at the cap, so a large corpus never
     /// materializes a full-table HashMap under memory pressure. Before the fix
     /// the load was unconditional (one HashMap holding every row); this asserts
-    /// the cap actually bounds the resident map. (audit F-C6-016)
+    /// the cap actually bounds the resident map. (016)
     #[test]
     fn capped_embedding_load_bounds_the_resident_map() {
         let conn = Connection::open_in_memory().unwrap();
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(full.len(), 100, "uncapped load returns every qualifying row");
     }
 
-    /// F-C6-013 dispatch wiring: `handle_apply_restructure` must honor the
+    /// Dispatch wiring: `handle_apply_restructure` must honor the
     /// cancel flag the CancelScan arm sets. Before the wiring it built a fresh
     /// never-set flag and ignored cancellation entirely — this calls the
     /// dispatch entry with a pre-set flag and asserts NOTHING moves.

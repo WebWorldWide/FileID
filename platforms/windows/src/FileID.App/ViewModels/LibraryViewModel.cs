@@ -30,7 +30,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     /// in-flight ClipSearchService.SearchAsync resumes against a disposed
     /// service → ObjectDisposedException escapes to AppDomain.Unhandled".</summary>
     private readonly CancellationTokenSource _disposalCts = new();
-    // Refresh coordination (audit A4/A5): every public refresh entry point bumps
+    // Refresh coordination: every public refresh entry point bumps
     // _refreshGen and captures it; ApplyOnUi discards a result whose generation is
     // no longer current, so a slow earlier refresh can't clobber the latest grid.
     // _activeLoads counts in-flight refreshes so the spinner stays on until the
@@ -441,7 +441,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
-        // started during the dispatch gap. (audit A4)
+        // started during the dispatch gap.
         void Apply()
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;

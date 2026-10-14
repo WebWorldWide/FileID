@@ -659,7 +659,7 @@ public class EngineWarningClassificationTests
 }
 
 /// <summary>
-/// F-C5-011: People multi-select must survive a background re-cluster that
+/// People multi-select must survive a background re-cluster that
 /// REPLACES a selected cluster's object instance. <c>PeopleViewModel.MergeByClusterId</c>
 /// reuses an instance only when anchor/count/name are unchanged; otherwise it
 /// swaps in a fresh <see cref="PersonCluster"/> with IsSelected=false, silently
@@ -719,7 +719,7 @@ public class PeopleSelectionReprojectTests
 }
 
 /// <summary>
-/// F-C5-006: PersonDetailSheet must validate the target person still exists
+/// PersonDetailSheet must validate the target person still exists
 /// before sending renamePerson. A background re-cluster can merge the person
 /// away while the sheet is open; the engine's renamePerson reports succeeded=1
 /// even on a 0-row UPDATE, so without this pre-write probe the dialog closes on

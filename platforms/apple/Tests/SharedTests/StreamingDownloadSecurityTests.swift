@@ -1,6 +1,6 @@
 // Pins the C3-DOWNLOAD fixes:
-//   F-C3-037 — free-disk-space preflight before a multi-GB VLM download.
-//   F-C3-038 — redirect hardening (https-only + host allowlist + hop cap,
+//   free-disk-space preflight before a multi-GB VLM download.
+//   Redirect hardening (https-only + host allowlist + hop cap,
 //              ported from Windows download.rs E11) and the no-hash size
 //              gate (port of check_size_plausible) for VLM non-LFS files.
 // The redirect/pinning wiring lives in URLSession delegates that need a
@@ -90,7 +90,7 @@ struct SizePlausibilityTests {
         }
     }
 
-    // R-17: the size gate is a *no-hash* fallback. After a passing SHA256 the
+    // The size gate is a *no-hash* fallback. After a passing SHA256 the
     // bytes are provably correct, so the loose estimate must NOT run — an
     // over-estimated approxBytes would otherwise delete a hash-verified file.
     @Test("size gate runs only when no hash is pinned")
@@ -135,7 +135,7 @@ struct DiskPreflightTests {
         #expect(err.errorDescription?.isEmpty == false)
     }
 
-    // R-18: the single-stream path only lands ~1× on the destination volume,
+    // The single-stream path only lands ~1× on the destination volume,
     // so its peakMultiplier:1 must accept a fetch the 2× parallel guard rejects
     // (free space between 1× and 2× of the file).
     @Test("single-stream 1x multiplier accepts a fetch the 2x parallel guard rejects")

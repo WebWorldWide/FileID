@@ -1,4 +1,4 @@
-﻿// R6-05 regression: leaving the Restructure tab mid-apply unsubscribes the view,
+﻿// Leaving the Restructure tab mid-apply unsubscribes the view,
 // dropping the apply-completion event; the static single-flight guard would then
 // stay engaged for the session (Apply buttons stuck disabled). OnLoaded replays
 // the handlers, which gate on IsUnhandledCompletion: a NEW completion reference

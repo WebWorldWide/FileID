@@ -15,7 +15,7 @@ import Foundation
 /// rejecting a valid in-root move whose intermediate folder hasn't been
 /// created yet (check-before-create). Resolving only existing paths keeps the
 /// canonicalization symmetric while still resolving any real symlink in the
-/// existing prefix — the actual SEC-7 escape vector. (F-C3-021)
+/// existing prefix — the actual SEC-7 escape vector.
 public func pathIsContained(_ dir: URL, inResolvedRoot resolvedRoot: String) -> Bool {
     let fm = FileManager.default
     var existing = dir

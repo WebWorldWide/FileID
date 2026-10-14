@@ -1,4 +1,4 @@
-// F-2 / F-C7-001: macOS rename/move heal regression.
+// macOS rename/move heal regression.
 //
 // Port of the Windows B1 heal tests (dbwriter.rs heal_candidate_moved). When a
 // file is renamed/moved on the same volume, a rescan finds it at a NEW path; the
@@ -182,7 +182,7 @@ struct DBWriterRenameHealTests {
         }
     }
 
-    /// audit F-A2: st_ino carries no generation number, so APFS/HFS reuse a
+    /// st_ino carries no generation number, so APFS/HFS reuse a
     /// deleted file's inode freely. Without a second signal a reused inode would
     /// re-bind the deleted row onto an UNRELATED new file and hand it the prior
     /// file's tags / named person / OCR. The heal candidate now also requires a

@@ -161,7 +161,7 @@ struct BulkRenameSheet: View {
             let result = storeRef.applyProposedNamesBulk(toRename)
             // Persist the batch to UserDefaults so the user can undo.
             BulkRenameSheet.saveLastBatch(result.renamed)
-            // R5-09: run the up-to-1000-row SELECT * off-main (we're already in a
+            // Run the up-to-1000-row SELECT * off-main (we're already in a
             // detached task); only the assignment hops to the main actor.
             let refreshed = storeRef.filesWithProposedNames()
             await MainActor.run {
@@ -191,7 +191,7 @@ struct BulkRenameSheet: View {
         // A zero-success batch (e.g. a bulk rename where every file failed)
         // must NOT overwrite a still-valid prior journal — that would silently
         // destroy "Undo last rename" for the earlier batch the user can still
-        // legitimately revert. (F-C4-005)
+        // legitimately revert.
         guard !entries.isEmpty else { return }
         let batch = PersistedRenameBatch(savedAt: Date(), entries: entries)
         guard let data = try? JSONEncoder().encode(batch) else { return }
@@ -217,7 +217,7 @@ struct BulkRenameSheet: View {
         UserDefaults.standard.removeObject(forKey: legacyBatchKey)
     }
 
-    // MARK: - Person tag history (P10)
+    // MARK: - Person tag history
     //
     // Track which Finder tag we last applied per person so that when
     // the user renames a cluster ("Alex" → "Alex Doe") we can offer

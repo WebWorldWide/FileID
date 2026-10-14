@@ -39,18 +39,18 @@ public actor DeepAnalyze {
     /// JobQueue dispatches the work.
     private var prewarmCancelPending: Bool = false
 
-    /// Single-flight handle for an in-progress model load (F-C3-023). A
+    /// Single-flight handle for an in-progress model load. A
     /// prewarm and a Deep Analyze run that race share THIS one task instead
     /// of each downloading + loading their own container (double model RAM,
     /// mis-attributed vlm_model). It's also the cancellation handle for an
-    /// in-flight download (F-C3-024): a cancel aborts the multi-GB fetch
+    /// in-flight download: a cancel aborts the multi-GB fetch
     /// promptly. Unstructured by design (shared across callers), so
     /// cancellation is wired explicitly, not inherited.
     private var loadTask: Task<Void, Error>?
     private let residencyGate = ExclusiveResourceGate()
     private var modelMemoryLease: ResourceScheduler.MemoryLease?
     private var loadTaskKind: AIModelKind?
-    /// Waiter ref-count for the shared single-flight load (R-11). The shared
+    /// Waiter ref-count for the shared single-flight load. The shared
     /// loadTask is cancelled only when its LAST joined waiter bails, so a
     /// prewarm cancel can't abort a concurrent Deep Analyze run that joined the
     /// same download (and vice-versa). Created with each loadTask, cleared with it.
@@ -99,7 +99,7 @@ public actor DeepAnalyze {
         let wasCancelled = cancelRequested
         cancelRequested = true
         currentAnalysisTask?.cancel()
-        // F-C3-024 + R-11: abort an in-flight cold load/download so the
+        // Abort an in-flight cold load/download so the
         // single-lane JobQueue doesn't stay wedged for the whole multi-GB fetch
         // after the user cancels — but only when THIS run is the last waiter on
         // the shared single-flight load, so a concurrent prewarm of the same
@@ -146,7 +146,7 @@ public actor DeepAnalyze {
     }
 
     public func cancelPrewarm() {
-        // R-11: cancel only the prewarm's outer task — its awaitLoad bails from
+        // Cancel only the prewarm's outer task — its awaitLoad bails from
         // the shared single-flight load and, via the waiter ref-count, cancels
         // the shared load only when no other caller (a concurrent run) is still
         // joined to it. Cancelling loadTask directly here would abort a joined
@@ -214,7 +214,7 @@ public actor DeepAnalyze {
             loadState = .ready(kind)
             return
         }
-        // F-C3-023 single-flight: if a load is already running, JOIN it rather
+        // single-flight: if a load is already running, JOIN it rather
         // than starting a second download + container load.
         if let existing = loadTask {
             if loadTaskKind == kind {
@@ -254,7 +254,7 @@ public actor DeepAnalyze {
     /// cancellation into it — so a cancel that arrives before the load starts,
     /// or a prewarm cancel, still aborts the in-flight download.
     ///
-    /// R-11: each caller is one waiter on the shared load. If THIS caller's
+    /// Each caller is one waiter on the shared load. If THIS caller's
     /// enclosing task is cancelled (e.g. cancelPrewarm cancelled the prewarm
     /// task), it bails from the load — but the shared task is cancelled only
     /// when the LAST waiter bails, so a concurrent run/prewarm joined to the
@@ -497,7 +497,7 @@ public actor DeepAnalyze {
         guard let container else {
             return FaceComparison(sameClass: false, confidence: 0)
         }
-        // F-C3-026: decode OFF the actor so a crop on an unreachable volume
+        // Decode OFF the actor so a crop on an unreachable volume
         // can't pin the executor and stall every queued IPC command.
         let boxA = await Self.decodeImageOffActor(url: cropA, maxPixelSize: 256)
         let boxB = await Self.decodeImageOffActor(url: cropB, maxPixelSize: 256)
@@ -572,11 +572,11 @@ public actor DeepAnalyze {
     static func parseFaceComparison(_ raw: String) -> FaceComparison {
         let upper = raw.uppercased()
         let saidDifferent = upper.contains("DIFFERENT")
-        // F-C3-022: a negated "same" ("not the same person", "isn't the
+        // A negated "same" ("not the same person", "isn't the
         // same") is a DIFFERENT verdict. Without this it parsed as SAME at
         // the defaulted 0.80 confidence — above the 0.75 auto-merge
         // threshold — and force-merged two distinct people.
-        // R-12: the negated-same override applies ONLY to the loose free-text
+        // The negated-same override applies ONLY to the loose free-text
         // branch — an explicit "VERDICT: SAME" line is authoritative, so
         // incidental phrasing like "not in the same lighting" can't flip a
         // compliant affirmative verdict to DIFFERENT (an explicit DIFFERENT
@@ -695,7 +695,7 @@ public actor DeepAnalyze {
         guard let container else {
             return AnalysisResult(description: "Model not loaded.", proposedName: nil)
         }
-        // F-C3-026: decode OFF the actor. A synchronous decode here pins the
+        // Decode OFF the actor. A synchronous decode here pins the
         // DeepAnalyze actor's executor, so a file on an unreachable volume
         // would block deepAnalyzeCancel (and every queued IPC command) behind
         // it. The detached task does the (possibly hanging) read; the actor
@@ -756,13 +756,13 @@ public actor DeepAnalyze {
         // FAILURE, not a successful empty caption: parse("") yields description=""
         // and the runner's COALESCE(?, vlm_description) persist would then OVERWRITE
         // a previously-good caption with "". The runner's isFailure check keys off
-        // the "Inference failed" prefix, so surface it in that shape. (audit F-A6)
+        // the "Inference failed" prefix, so surface it in that shape.
         guard !raw.isEmpty else {
             return AnalysisResult(description: "Inference failed: empty model output",
                                    proposedName: nil)
         }
         let parsed = Self.parse(rawOutput: raw)
-        // F-A6 (extended, R3-01): a NON-empty raw whose DESCRIPTION section parses
+        // F-A6 (extended): a NON-empty raw whose DESCRIPTION section parses
         // to "" (e.g. "DESCRIPTION:\nFILENAME: x", or a bare "DESCRIPTION:") must
         // ALSO be a failure. The runner's isFailure check keys off the "Inference
         // failed" prefix, and persist's COALESCE(?, vlm_description) only guards
@@ -1322,7 +1322,7 @@ public actor DeepAnalyze {
     }
 
     /// Decode `url` on a detached task so a hung/slow read can't block the
-    /// DeepAnalyze actor (F-C3-026). Returns the CGImage in a Sendable box —
+    /// DeepAnalyze actor. Returns the CGImage in a Sendable box —
     /// CGImage isn't Sendable, but the box's lock makes the hand-off safe and
     /// the CIImage is built on the actor afterward.
     private nonisolated static func decodeImageOffActor(url: URL, maxPixelSize: Int) async -> ImageBox {
@@ -1353,7 +1353,7 @@ public actor DeepAnalyze {
         }
         // Try ImageIO first — fast for images via thumbnail decode.
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
-            // F-C3-044: refuse a decompression bomb — a small file that decodes
+            // Refuse a decompression bomb — a small file that decodes
             // to a huge raster. Peek the source pixel dimensions and bail above
             // the 50 MP cap (Windows parity: MAX_DECODED_PIXELS in deep_analyze.rs).
             if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
@@ -1672,7 +1672,7 @@ public actor DeepAnalyze {
     }
 }
 
-// MARK: - Shared-load waiter ref-count (R-11)
+// MARK: - Shared-load waiter ref-count
 
 /// Ref-counts the callers joined to the shared single-flight model load so the
 /// load is cancelled only when its LAST waiter bails — a prewarm cancel must not

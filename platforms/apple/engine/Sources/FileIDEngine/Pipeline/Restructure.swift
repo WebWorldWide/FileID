@@ -28,7 +28,7 @@ public struct RestructureProposal: Sendable {
     /// "video"/"audio"/"misc") or a "People/<name>" / "Places/<bucket>" /
     /// semantic-group label. Drives the Sankey grouping AND the source-folder
     /// homogeneity classification, so it must be the category (NOT the full
-    /// destination path). (audit F-C3-019)
+    /// destination path). (019)
     public let bucket: String
     /// Butler confidence band — "auto" / "review" / "ask" (RESTRUCTURE.md §6).
     public let confidence: String
@@ -467,7 +467,7 @@ public enum Restructure {
         // Source folders the semantic butler actively claimed (every file
         // relocated into a content group). They classify Anchor on destination
         // homogeneity but are real relocations, not in-place anchors — exempt
-        // them from the anchor strip so their best moves survive. (F-C1-004)
+        // them from the anchor strip so their best moves survive.
         var semanticSourceFolders = Set<String>()
         if semanticFiles.count >= 2 {
             let protos = RestructureSemantic.folderPrototypes(semanticFiles, minFiles: 4)
@@ -573,14 +573,14 @@ public enum Restructure {
         // (Windows A1/A3): classify each source folder, then strip every move out
         // of an Anchor folder so files the UI promised would "stay put" are never
         // silently relocated. Semantic-claimed folders are exempt — their
-        // homogeneity is a real relocation, not an in-place anchor. (F-C3-016)
+        // homogeneity is a real relocation, not an in-place anchor.
         //
         // The tiers + Keep/Tidy/Junk counts are computed HERE, on the full PRE-strip
         // set with the same exemption — NOT later on the stripped set. The strip
         // removes every move out of a (non-exempt) Anchor folder, so a post-strip
         // recompute can't see those folders at all and the "Keep" tile would silently
         // undercount the folders actually being left alone. Mirrors the Windows engine,
-        // which computes folder_class on the full proposed set before stripping. (audit)
+        // which computes folder_class on the full proposed set before stripping.
         let folderClass = classifyFolders(proposals)
         let tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
         let stripped = stripAnchorFolderMovesExcept(
@@ -635,7 +635,7 @@ public enum Restructure {
     /// `exempt` (the semantic butler actively relocating its files into a content
     /// group — NOT kept in place) is remapped to Mixed so it neither inflates the
     /// "Keep" tile nor labels its surviving moves Anchor. Byte-faithful with the
-    /// Windows engine's handle_plan_restructure loop (F-C1-004). (audit — lockstep)
+    /// Windows engine's handle_plan_restructure loop. (lockstep)
     static func folderTiersAndCounts(
         classified: [ClassifiedFolder], exempt: Set<String>
     ) -> (tierByFolder: [String: String], anchor: Int, mixed: Int, junk: Int) {
@@ -828,7 +828,7 @@ public enum Restructure {
     /// Classify each source folder by destination-category homogeneity. The
     /// dominant category is the most frequent (so a folder of one person's
     /// photos is dominated by "People/<that person>" — homogeneity is measured
-    /// against the DOMINANT person, F-C3-035). ≤2 files or a generic name →
+    /// against the DOMINANT person). ≤2 files or a generic name →
     /// Junk; ≥80% one category → Anchor; else Mixed.
     static func classifyFolders(_ moves: [RestructureProposal]) -> [ClassifiedFolder] {
         var byFolder: [String: [RestructureProposal]] = [:]
@@ -870,7 +870,7 @@ public enum Restructure {
 
     /// Drop every move whose source folder classified Anchor — those files stay
     /// put — except folders in `exempt` (the semantic butler's real
-    /// relocations). (Windows strip_anchor_folder_moves_except, F-C3-016)
+    /// relocations). (Windows strip_anchor_folder_moves_except)
     static func stripAnchorFolderMovesExcept(
         _ moves: [RestructureProposal],
         classified: [ClassifiedFolder],
@@ -889,7 +889,7 @@ public enum Restructure {
     /// (year, month) from a Unix-seconds timestamp in UTC (byte-faithful with
     /// the Windows chrono `Utc` path). An out-of-range timestamp coerces to
     /// (1970, 1), so a file with no capture time still gets a deterministic
-    /// year bucket instead of being silently omitted. (F-C3-020)
+    /// year bucket instead of being silently omitted.
     static func yearMonth(_ unix: Double) -> (year: Int, month: Int) {
         guard unix.isFinite else { return (1970, 1) }
         let date = Date(timeIntervalSince1970: unix)
@@ -920,10 +920,10 @@ public enum Restructure {
 
     /// Apply the user-selected proposals on disk + update the DB. For each move:
     /// re-reads the live `files.path_text` and requires it to still name the
-    /// proposal's `oldPath` (B4 stale-plan guard, F-C3-010); uniquifies a
-    /// colliding destination to `name (n).ext` instead of skipping (F-C3-011);
+    /// proposal's `oldPath` (B4 stale-plan guard); uniquifies a
+    /// colliding destination to `name (n).ext` instead of skipping;
     /// and on a move whose DB update fails, records a recovery sidecar and
-    /// counts the move once — never double-counts moved+failed (F-C3-012).
+    /// counts the move once — never double-counts moved+failed.
     public struct ApplyResult: Sendable {
         public let moved: Int
         public let skipped: Int
@@ -931,12 +931,12 @@ public enum Restructure {
         public let conflicts: [String]
         /// True iff cooperative cancellation (`isCancelled()`) stopped the loop
         /// before every eligible row was processed. Mirrors the wire
-        /// `RestructureApplyResult.cancelled` field (IPCProtocol.swift). (audit R2)
+        /// `RestructureApplyResult.cancelled` field (IPCProtocol.swift).
         public let cancelled: Bool
         /// Rows a stored/truncated plan held back from this apply because they
         /// were NOT "auto" confidence — mirrors the Rust engine's
         /// eligible_auto/held_review/held_ask/held_unknown accounting
-        /// (commands/restructure.rs). Zero outside `applyStoredPlan`. (audit R1)
+        /// (commands/restructure.rs). Zero outside `applyStoredPlan`.
         public let heldReview: Int
         public let heldAsk: Int
         public let heldUnknown: Int
@@ -998,7 +998,7 @@ public enum Restructure {
         let totalMoves: Int
         /// Full-plan confidence tallies, computed once at plan time and reused by
         /// `applyStoredPlan` so its auto-tier filter doesn't need a second pass
-        /// over the spool just to know the eligible count. (audit R1)
+        /// over the spool just to know the eligible count.
         let confidenceCounts: RestructureConfidenceCounts
     }
 
@@ -1082,7 +1082,7 @@ public enum Restructure {
     }
 
     static let storedPlanPreviewCap = 5_000
-    // Bumped 1 → 2 when `confidenceCounts` was added to the header (audit R1) —
+    // Bumped 1 → 2 when `confidenceCounts` was added to the header —
     // a stale version-1 spool from a prior engine build lacks the field, and the
     // version guard in `applyStoredPlan` rejects it cleanly instead of failing
     // a raw JSONDecoder error deep in the auto-tier filter.
@@ -1198,7 +1198,7 @@ public enum Restructure {
         // Review/Ask/unknown-confidence rows must stay put for explicit review.
         // Mirrors the Rust engine's `auto_tier_only` gate — the source of truth
         // for this invariant (commands/restructure.rs: `apply_iter(auto_tier_only(
-        // stored_moves), Some(tiers.auto))`). (audit R1 — data-safety fix)
+        // stored_moves), Some(tiers.auto))`). (data-safety fix)
         var heldReview = 0
         var heldAsk = 0
         var heldUnknown = 0
@@ -1315,14 +1315,14 @@ public enum Restructure {
         // Destinations whose planned basename already existed and were resolved to
         // a ` (2)`-style sibling by uniqueDestination — surfaced so the app can
         // tell the user which moves were renamed rather than placed verbatim.
-        // Was a dead `let [] ` despite the uniquify path below. (audit F-A4)
+        // Was a dead `let [] ` despite the uniquify path below.
         var conflicts: [String] = []
         let resolvedRoot = libraryRoot.resolvingSymlinksInPath().path
-        // B3: destinations claimed by an earlier move in THIS batch, so two
+        // Destinations claimed by an earlier move in THIS batch, so two
         // distinct sources mapping to the same basename don't collide before
         // either touches disk.
         var claimed = Set<DestinationClaim>()
-        // F-C6-013: the apply loop was a silent, unstoppable serial walk — at
+        // The apply loop was a silent, unstoppable serial walk — at
         // 100k+ moves the user got no feedback and no stop. Poll the cancel
         // signal at the TOP of every iteration (each completed move is already
         // durable, so stopping BETWEEN moves preserves per-move atomicity) and
@@ -1332,7 +1332,7 @@ public enum Restructure {
         // `nextProposal()` read failure or plan exhaustion, which also `break`
         // but aren't a user cancel. Threaded into `ApplyResult.cancelled` so the
         // IPC event (and the UI's "Stopped — N already moved" copy) can tell the
-        // difference. (audit R2)
+        // difference.
         var wasCancelled = false
 
         while true {
@@ -1376,7 +1376,7 @@ public enum Restructure {
             // authoritative on its own. Re-read the live row for this fileID and
             // require it still names `oldPath`, so a plan that went stale (the
             // file was renamed/moved/replaced since planning) can't move the
-            // wrong bytes. (F-C3-010)
+            // wrong bytes.
             let live: (path: String, fileRef: Int64?)? =
                 try? await database.pool.read { db -> (path: String, fileRef: Int64?)? in
                     guard let row = try GRDB.Row.fetchOne(
@@ -1432,7 +1432,7 @@ public enum Restructure {
             // No-op (file already sits at its PLANNED destination) — skip BEFORE
             // uniquifying, else unique_destination would see the file itself
             // occupying the slot and bump it to a ` (2)` sibling, churning an
-            // already-correctly-placed file. (ENG-42, F-C3-011)
+            // already-correctly-placed file. (ENG-42)
             if oldURL == plannedURL { skipped += 1; continue }
 
             // SEC-7 port: the destination's resolved parent must stay inside
@@ -1452,7 +1452,7 @@ public enum Restructure {
                 failed += 1
                 // Mirror the moveItem/DB-update sites: a swallowed mkdir failure
                 // left a `failed` count with no breadcrumb. Domain+code only — the
-                // NSError text embeds the full path. (audit F-A5)
+                // NSError text embeds the full path.
                 let ns = error as NSError
                 JSONLog.shared.warn(ev: "restructure_mkdir_failed",
                                     path: redactPathForLog(
@@ -1470,10 +1470,10 @@ public enum Restructure {
                 continue
             }
 
-            // B3: never clobber. Resolve a collision-free name within the SAME
+            // Never clobber. Resolve a collision-free name within the SAME
             // parent (so the containment checks above still hold), claim it, and
             // move there. moveItem never overwrites, so a remaining collision
-            // fails safe rather than destroying data. (F-C3-011)
+            // fails safe rather than destroying data.
             let finalURL = Self.uniqueDestination(plannedURL, claimed: claimed, fm: fm)
             // Store case-folded: APFS (and NTFS) are case-INSENSITIVE by default, so
             // "Photo.jpg" and "photo.jpg" are the SAME on-disk slot. A case-sensitive
@@ -1519,7 +1519,7 @@ public enum Restructure {
             }
             // The file is now relocated — count it once. A DB-update failure does
             // NOT also count it failed (no double-count); it's recorded for
-            // recovery (and self-heals on the next scan). (F-C3-012)
+            // recovery (and self-heals on the next scan).
             moved += 1
             if recordUndo {
                 // Credit every successful move to the feedback memory regardless
@@ -1540,7 +1540,6 @@ public enum Restructure {
                 // ENG-91: refresh path_hash too (notNull, indexed StablePathHash
                 // column) so cross-run/cross-platform path identity stays valid —
                 // a move that touched only path_text/path_search left it stale.
-                // (F-C3-009)
                 let pathHash = StablePathHash.hash(finalPath)
                 try await database.pool.write { db in
                     try db.execute(
@@ -1780,19 +1779,19 @@ public enum Restructure {
     /// Apply-progress throttle: log on the first move, on the last, and once per
     /// `interval` processed moves, so a 100k-move apply emits ~total/interval log
     /// lines instead of none (silent) or one-per-move (flood). Pure → the cadence
-    /// is unit-assertable. (F-C6-013)
+    /// is unit-assertable.
     static let applyProgressInterval = 500
     static func shouldEmitApplyProgress(processed: Int, total: Int, interval: Int) -> Bool {
         guard interval > 0, processed > 0 else { return false }
         return processed == 1 || processed == total || processed % interval == 0
     }
 
-    /// B3: resolve a destination that collides with neither an on-disk entry nor
+    /// Resolve a destination that collides with neither an on-disk entry nor
     /// a destination already claimed this batch, by appending ` (2)`, ` (3)`, …
     /// before the extension — within the same parent so the containment checks
     /// already performed on `dest` still hold. Occupancy is the in-batch claimed
     /// set ∪ an `lstat` (does not follow the final symlink, so a broken symlink
-    /// occupying the slot is still detected). (F-C3-011)
+    /// occupying the slot is still detected).
     static func uniqueDestination(
         _ dest: URL, claimed: Set<DestinationClaim>, fm: FileManager
     ) -> URL {
@@ -1861,10 +1860,10 @@ public enum Restructure {
         return UInt64(bitPattern: dbRef) == currentRef
     }
 
-    /// B5: best-effort durable record of a successful on-disk move whose DB
+    /// best-effort durable record of a successful on-disk move whose DB
     /// path-update failed, so the stale `path_text` is recoverable even if the
     /// next scan (which self-heals the row) never runs. NDJSON, append-only;
-    /// written beside the engine log. (F-C3-012)
+    /// written beside the engine log.
     static func recordPathUpdateFailure(fileID: Int64, src: String, dst: String) {
         guard let dir = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
@@ -1886,7 +1885,7 @@ public enum Restructure {
     }
 
     /// Full English month name (Windows is canonical for this cosmetic parity;
-    /// macOS converged from "01-Jan".."12-Dec"). (F-C3-018)
+    /// macOS converged from "01-Jan".."12-Dec").
     static func monthName(_ m: Int) -> String {
         let names = ["", "January", "February", "March", "April", "May", "June",
                      "July", "August", "September", "October", "November", "December"]

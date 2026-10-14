@@ -105,7 +105,7 @@ impl RamPlusBatchCoordinator {
         let (sender, receiver) = bounded::<RamPlusRequest>(channel_cap);
         // Degrade gracefully on spawn failure (mirrors the sibling model-load
         // sites) — batch tagging becomes unavailable and the caller falls back
-        // to the single-image pool, rather than panicking the engine. (F-C1-016)
+        // to the single-image pool, rather than panicking the engine.
         if let Err(err) = std::thread::Builder::new()
             .name("fileid-ramplus-batch".to_string())
             .spawn(move || run_coordinator(&mut tagger, receiver, batch_size, batch_timeout_ms))

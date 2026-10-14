@@ -13,7 +13,7 @@ import FileIDShared
 
 /// A DB touched by a NEWER engine carries migration identifiers this
 /// build doesn't know; writing to it could silently break the newer
-/// schema's invariants, so the engine refuses to open it (L7). Mirrors
+/// schema's invariants, so the engine refuses to open it. Mirrors
 /// the Windows engine's db_newer_than_engine guard in migrations.rs.
 public enum DatabaseOpenError: Error, CustomStringConvertible {
     case newerThanEngine(unknownMigrations: [String])
@@ -29,7 +29,7 @@ public enum DatabaseOpenError: Error, CustomStringConvertible {
 
 /// Single owner of the database. Constructed once in main; passed to the DB
 /// Writer task as the only writer. The SwiftUI app reads via its own
-/// read-only DatabaseQueue (M4) — never via this writer.
+/// read-only DatabaseQueue — never via this writer.
 public final class Database: @unchecked Sendable {
     public let pool: DatabasePool
     let vectorIndex: CatalogVectorIndex
@@ -42,7 +42,7 @@ public final class Database: @unchecked Sendable {
         )
         var config = Configuration()
         config.qos = .userInitiated
-        // R4-10: the app is a concurrent cross-process writer (ReadStore.writeQueue
+        // The app is a concurrent cross-process writer (ReadStore.writeQueue
         // opens People edits / Cleanup deletes / renames with busyMode=.timeout(5)).
         // Without a busy timeout the engine writer uses GRDB's default
         // .immediateError and gets SQLITE_BUSY the instant the app holds the WAL
@@ -61,8 +61,8 @@ public final class Database: @unchecked Sendable {
             // Windows-parity: keep dirty pages pinned in the page cache for the
             // life of a transaction instead of spilling them to a temp file
             // mid-write under memory pressure (a spill can leave a transient
-            // -journal alongside the WAL and slows the writer). (F-C3-039,
-            // mirrors db/mod.rs SETUP_PRAGMAS).
+            // -journal alongside the WAL and slows the writer). Mirrors
+            // db/mod.rs SETUP_PRAGMAS.
             try db.execute(sql: "PRAGMA cache_spill = 0")
         }
         self.pool = try DatabasePool(path: url.path, configuration: config)
@@ -463,7 +463,7 @@ public final class Database: @unchecked Sendable {
             }
         }
 
-        // v17 (R3-15): churn-stable face-verification keys. v13's face_a/face_b are
+        // v17: churn-stable face-verification keys. v13's face_a/face_b are
         // face_print ids, which a faces_evaluated re-scan DELETE+re-INSERTs with fresh
         // ids — after which a stored "different people" verdict's faces no longer
         // resolve and the anti-merge guard silently no-ops. Add (file_id, bbox) keys
@@ -542,7 +542,7 @@ public final class Database: @unchecked Sendable {
     /// row stuck `'running'` and mislabeled `'crashed'` on the next launch.
     /// Detaching breaks cancellation inheritance so the write runs to
     /// completion on the writer queue. Use ONLY for short terminal writes that
-    /// must not be lost — normal writes should stay cancellable. (F-C3-031)
+    /// must not be lost — normal writes should stay cancellable.
     public func writeUncancellable<T: Sendable>(
         _ updates: @escaping @Sendable (GRDB.Database) throws -> T
     ) async throws -> T {
@@ -563,7 +563,7 @@ public final class Database: @unchecked Sendable {
     /// every tagging worker for its duration. PASSIVE never blocks readers or
     /// writers; a transient SQLITE_BUSY just leaves the WAL slightly larger and
     /// is retried at the next cadence. Mirrors the Windows engine's
-    /// per-32-batch `wal_checkpoint(PASSIVE)` (pipeline/dbwriter.rs). (F-C6-004)
+    /// per-32-batch `wal_checkpoint(PASSIVE)` (pipeline/dbwriter.rs).
     public func checkpointPassive() async {
         try? await pool.writeWithoutTransaction { db in
             _ = try db.checkpoint(.passive)
@@ -572,7 +572,7 @@ public final class Database: @unchecked Sendable {
 
     // MARK: - Convenience reads
 
-    /// Total file count — used by the read-side UI (M4) and quick health checks.
+    /// Total file count — used by the read-side UI and quick health checks.
     public func totalFileCount() throws -> Int {
         try pool.read { db in
             try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0

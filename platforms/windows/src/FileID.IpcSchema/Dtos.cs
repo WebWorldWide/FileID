@@ -148,7 +148,7 @@ public sealed record HardwareInfo(
     bool OpenvinoPackPresent,
     bool QnnPackPresent,
     string Recommendation,
-    // V15.9 adaptive-utilization diagnostics. All optional with sensible
+    // adaptive-utilization diagnostics. All optional with sensible
     // defaults so an old engine talking to a new app still deserializes.
     uint PCores = 0,
     uint ECores = 0,

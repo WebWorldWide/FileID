@@ -320,7 +320,7 @@ struct PeopleView: View {
     }
 
     private func bulkMarkUnknown() {
-        // R5-02: one batched transaction off the main thread (the per-id
+        // One batched transaction off the main thread (the per-id
         // updatePerson loop opened N connections + ran N main-thread transactions,
         // freezing the UI for crowd-sized selections), mirroring the merge paths.
         let ids = Array(unknownChecked)
@@ -1031,7 +1031,7 @@ private struct PersonDetailSheet: View {
                 .disabled(tagBatchInFlight || tagName.isEmpty)
                 .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
 
-                // P10 — re-tag affordance. Shows only when this person
+                // re-tag affordance. Shows only when this person
                 // was previously tagged with a DIFFERENT name (e.g. user
                 // renamed "Alex" → "Alex Doe" after a tag pass).
                 if let oldTag = previousTagIfDifferent(currentTag: tagName) {

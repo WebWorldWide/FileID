@@ -1,4 +1,4 @@
-// H2 regression: re-scan must preserve files.id and face_prints.person_id
+// re-scan must preserve files.id and face_prints.person_id
 // for unchanged files (id-preserving UPSERT, never delete+reinsert), and the
 // v15 FTS sync triggers must keep ocr_fts postings consistent across change
 // and delete — the old INSERT OR REPLACE wiped manual person assignments and

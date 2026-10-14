@@ -134,11 +134,11 @@ struct RestructureApplyTests {
         }
     }
 
-    /// F-C3-009 + F-C3-011: two proposals to the SAME destination both apply via
+    /// Two proposals to the SAME destination both apply via
     /// uniquified names (no skipped-conflict), and each moved row's path_hash is
     /// refreshed to StablePathHash(newPath). The second move's planned basename
-    /// collided and was uniquified, so it is reported in `conflicts` (audit
-    /// F-A4 — the array was previously dead/always-empty).
+    /// collided and was uniquified, so it is reported in `conflicts` (the array was
+    /// previously dead/always-empty).
     @Test("Two proposals to one dest both apply (uniquified); path_hash refreshed")
     func applyUniquifyAndPathHash() async throws {
         let tmp = FileManager.default.temporaryDirectory
@@ -189,7 +189,7 @@ struct RestructureApplyTests {
         }
     }
 
-    /// F-C3-010: a move whose live DB path no longer matches the proposal's
+    /// A move whose live DB path no longer matches the proposal's
     /// oldPath (a stale plan) is counted failed and NOT executed.
     @Test("A stale move (live path != oldPath) is failed, not executed")
     func applyStalePlanGuard() async throws {
@@ -330,7 +330,7 @@ struct RestructureApplyTests {
         }
     }
 
-    /// F-C3-012: when the on-disk move succeeds but the DB UPDATE fails, the move
+    /// When the on-disk move succeeds but the DB UPDATE fails, the move
     /// is counted ONCE (moved), never double-counted as moved+failed; the file is
     /// at its new path and a recovery record is written (best-effort sidecar).
     @Test("UPDATE-after-move failure is counted once, not double-counted")
@@ -601,7 +601,7 @@ struct RestructureApplyTests {
         #expect(!FileManager.default.fileExists(atPath: x.path))
     }
 
-    /// Audit R2 fix: a CANCELLED undo must NOT clear the journal, so the user can
+    /// A CANCELLED undo must NOT clear the journal, so the user can
     /// re-run it and finish — otherwise a mistimed Stop orphans the un-restored
     /// files with no recovery path. Worst case: cancel before any move.
     @Test("A cancelled undo preserves the journal for a re-run")
@@ -836,7 +836,7 @@ struct RestructureApplyTests {
         #expect(data.split(separator: 0x0A).count == total + 1)
     }
 
-    /// Audit R1 (data-safety fix): a stored/truncated plan's rows past the
+    /// (data-safety fix): a stored/truncated plan's rows past the
     /// preview cap were NEVER shown to the user, so `applyStoredPlan` must
     /// apply only the "auto" tier — exactly like the Rust engine's
     /// `auto_tier_only` gate — and hold Review/Ask/unknown-confidence rows

@@ -205,7 +205,7 @@ mod tests {
         assert_eq!(accepted_batches, vec!["real-batch".to_string()]);
     }
 
-    // C1-018: once an entry is appended (signed), restore can FIND it by batch
+    // Once an entry is appended (signed), restore can FIND it by batch
     // id. This is the recoverability guarantee the bulk trash path now orders
     // BEFORE the irreversible DELETE commit — so a trashed file always has a
     // findable undo-journal entry (or the whole batch is rolled back + surfaced

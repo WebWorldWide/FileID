@@ -179,7 +179,7 @@ public final class MobileCLIPService: @unchecked Sendable {
 
     public static func blobToEmbedding(_ data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.stride
-        // S8: guard the empty/corrupt blob — a nil baseAddress force-unwrap
+        // Guard the empty/corrupt blob — a nil baseAddress force-unwrap
         // would crash the engine.
         guard count > 0 else { return [] }
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in

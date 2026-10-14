@@ -308,7 +308,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 // ResetForRetry nulled CurrentModelKind and PrewarmAsync only
                 // restamps it after WaitForReadyAsync, so during engine
                 // cold-start a pre-stamped Downloading row was kind-less and
-                // its Cancel button lost the cancel (C7). Stamp the slot's
+                // its Cancel button lost the cancel. Stamp the slot's
                 // primary kind now; PrewarmAsync overwrites with the live kind.
                 slot.CurrentModelKind = PrimaryKindFor(slot);
             }
@@ -403,7 +403,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// cancelling one row no longer aborts every other concurrent install. For a
     /// multi-kind slot (CLIP, Accelerator) this cancels every kind the slot owns.
     /// A null kind (slot never got a kind stamped) is a logged no-op — it used to
-    /// fall through to CancelPrewarmAsync(null), the cancel-EVERYTHING path (C7).
+    /// fall through to CancelPrewarmAsync(null), the cancel-EVERYTHING path.
     public Task CancelModelAsync(string? modelKind)
     {
         if (modelKind is null)
@@ -456,7 +456,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // Route through the shared singleton, NOT a fresh AppSettings.Load():
             // a fresh instance shares the static debounce CTS, so its Save() cancels
             // the singleton's pending write and persists a snapshot loaded from disk
-            // that lacks the singleton's in-memory changes (lost update). (audit A8)
+            // that lacks the singleton's in-memory changes (lost update).
             var s = FileID.ViewModels.AppViewModel.Instance.Settings;
             if (s.SelectedVlmModelKind == kind) return;
             s.SelectedVlmModelKind = kind;
@@ -638,7 +638,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // A per-row Cancel during the wait above only sets the app-side mark —
         // its CancelPrewarm IPC faults because the engine isn't Ready, so the
         // engine never hears about it. Honor the mark here instead of
-        // dispatching a download the user already cancelled (C9). The next
+        // dispatching a download the user already cancelled. The next
         // explicit Install/Retry click clears the mark (ClearCancelMarks).
         if (EngineClient.Instance.IsPrewarmCancelled(modelKind))
         {
@@ -704,7 +704,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
                 // Read-only check off-thread is fine (status/timestamp are
                 // primitives + DateTime; no torn-read risk on x64/ARM64).
                 if (slot.Status != ModelInstallStatus.Downloading) return;
-                // B2: this slot OR any other download progressed after we
+                // This slot OR any other download progressed after we
                 // scheduled → the engine is alive; don't false-fail.
                 if (slot.LastProgressAt > sentAt || _lastAnyProgressAt > sentAt) return;
                 DebugLog.Warn($"[INSTALL] {modelKind} no-progress watchdog firing (no events in {NoProgressTimeout.TotalSeconds:0}s)");
@@ -850,7 +850,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     private void HandleProgress(ModelDownloadProgress? p)
     {
         if (p is null) return;
-        // B2: any download making progress means the engine is alive. The
+        // Any download making progress means the engine is alive. The
         // no-progress watchdog consults this so one model going briefly
         // silent under multi-download contention isn't false-failed while
         // another model is actively streaming bytes. Set for EVERY progress
@@ -907,7 +907,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // sentinel_rename_failed: the bytes all landed but the engine
             // couldn't register the install marker, and it emits NO terminal
             // progress event after these — without routing them the row spins
-            // at ~100% "Downloading" forever with no Retry (C10).
+            // at ~100% "Downloading" forever with no Retry.
             || kind.StartsWith("sentinel_", StringComparison.OrdinalIgnoreCase)
             || kind.StartsWith("prewarm_", StringComparison.OrdinalIgnoreCase);
         if (!isInstallError) return;
@@ -951,7 +951,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // but the engine's unconditional Queued event already flipped it
             // to Downloading — and the auto-install bypasses PrewarmAsync, so
             // no watchdog ever rescues it. Restore the Intel DirectML state
-            // instead of leaving the row downloading forever (C11). Only
+            // instead of leaving the row downloading forever. Only
             // CudaAutoInstaller's Intel path prewarms this kind, so the
             // hard-coded vendor is safe.
             if (Accelerator.Status == ModelInstallStatus.Downloading)
@@ -997,7 +997,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
         // fire there. Reset()/SeedFromSentinels (and other engine-driven paths)
         // can run on a thread-pool continuation; marshal through the captured UI
         // dispatcher to avoid an RPC_E_WRONG_THREAD native fast-fail — the same
-        // pattern ModelSlot.Set uses. (audit A2)
+        // pattern ModelSlot.Set uses.
         var handler = PropertyChanged;
         if (handler is null) return;
         var args = new PropertyChangedEventArgs(propertyName);

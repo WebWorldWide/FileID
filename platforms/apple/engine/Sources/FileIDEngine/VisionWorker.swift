@@ -103,7 +103,7 @@ public final class VisionWorker: @unchecked Sendable {
         /// abandoned (empty result). The tagging stage keys its stage-ran gates
         /// (tagsEvaluated / facesEvaluated) on this so a timed-out pass never
         /// wipes previously-persisted auto-tags or faces (incl. manual
-        /// person_id) on a rescan, and marks the file for retry. (F-C3-001/036)
+        /// person_id) on a rescan, and marks the file for retry.
         public var didComplete: Bool
     }
 
@@ -268,7 +268,7 @@ public actor VisionWorkerPool {
     /// growing `waiters` (and stranding the awaiting task) across every
     /// cancelled scan. Now the cancellation handler removes the waiter and
     /// resumes it with nil, so each continuation resumes exactly once and a
-    /// cancelled acquirer frees its slot cleanly. (audit F-A7)
+    /// cancelled acquirer frees its slot cleanly.
     public func acquire() async -> VisionWorker? {
         if let worker = available.popLast() { return worker }
         let id = nextWaiterID

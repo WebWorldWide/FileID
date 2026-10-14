@@ -799,7 +799,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         // acquiring it here guarantees no thread-pool read is mid-query against
         // the connection we're about to Dispose — otherwise the close frees it
         // out from under the reader, a use-after-dispose native crash (mirror of
-        // macOS ReadStore F-C4-002). Reads ConfigureAwait(false) throughout and
+        // macOS ReadStore). Reads ConfigureAwait(false) throughout and
         // never re-enter the gate, so this can't self-deadlock.
         await _gate.WaitAsync().ConfigureAwait(false);
         try

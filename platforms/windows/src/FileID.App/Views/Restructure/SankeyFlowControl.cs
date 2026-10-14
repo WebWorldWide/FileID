@@ -54,7 +54,7 @@ public sealed class SankeyFlowControl : Control
     // 288 SolidColorBrush allocations per Render call, and Render fires on
     // Loaded + SizeChanged — including during tab-swap mid-scan when the
     // dispatcher is under burst load from EngineClient. Per CLAUDE.md's
-    // V15.2/V15.4 history, naked DispatcherObject construction on a
+    // History, naked DispatcherObject construction on a
     // mid-transition XAML tree is a fast-fail shape. Cache once at ctor
     // (UI thread, dispatcher healthy) and reuse.
     private readonly Brush[] _ribbonIdleBrushes;
@@ -194,7 +194,7 @@ public sealed class SankeyFlowControl : Control
         // per move across the distinct-count, top-N, group and flow-matrix passes
         // below, all on the UI thread on every plan arrival. Parse each move's
         // source ONCE here and tally the raw source/category counts in the same
-        // pass; every pass after this reads the precomputed arrays (F-C5-010).
+        // pass; every pass after this reads the precomputed arrays.
         int n = moves.Count;
         var srcOf = new string[n];
         var srcRawCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);

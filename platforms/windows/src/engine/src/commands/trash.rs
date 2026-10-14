@@ -9,7 +9,7 @@ use super::bulk::emit_bulk_result;
 use super::trash_log;
 
 /// Per-target restore decision, made BEFORE touching the Recycle Bin.
-/// Keeps the C1-003 conflict rule and the SEC-7 containment rule in one
+/// Keeps the conflict rule and the SEC-7 containment rule in one
 /// pure, unit-testable place.
 #[derive(Debug, PartialEq, Eq)]
 enum RestoreDisposition {
@@ -17,7 +17,7 @@ enum RestoreDisposition {
     Restore,
     /// Outside every authorized library root (SEC-7).
     Refused,
-    /// Destination already occupied by another file (C1-003) — restoring would
+    /// Destination already occupied by another file — restoring would
     /// clobber it / the bin's Undelete is a no-op, so report a conflict rather
     /// than a false success.
     Conflict,
@@ -53,7 +53,7 @@ pub(crate) async fn handle_restore_from_trash(
         // stripped-down DB row so the Library tab shows it again.
         let conn = db.lock();
 
-        // C1-003: capture each destination's pre-restore occupancy. A path that
+        // Capture each destination's pre-restore occupancy. A path that
         // is ALREADY occupied (by a DIFFERENT file the user re-created) cannot be
         // restored without clobbering it — the bin's Undelete is a no-op there and
         // the bytes stay trapped. We must surface that as a conflict error rather
@@ -93,7 +93,7 @@ pub(crate) async fn handle_restore_from_trash(
 
         let tx = conn.unchecked_transaction()?;
 
-        // C1-007: partition into (allowed-to-restore, conflict, refused) WITHOUT
+        // Partition into (allowed-to-restore, conflict, refused) WITHOUT
         // spawning PowerShell per item. The allowed set is restored in a SINGLE
         // bin enumeration below so a large undo batch can't blow the app's 30s
         // waiter (each old per-item spawn re-walked the entire Recycle Bin).
@@ -121,7 +121,7 @@ pub(crate) async fn handle_restore_from_trash(
                         )),
                     });
                 }
-                // C1-003: a destination already occupied by a DIFFERENT file is a
+                // A destination already occupied by a DIFFERENT file is a
                 // conflict — restoring would clobber it (or, as the bin's no-op
                 // Undelete does, silently leave the bytes trapped). Report a
                 // conflict instead of a false success.
@@ -257,7 +257,7 @@ pub(crate) async fn handle_restore_from_trash(
 /// DB-stored `original_path` even when their casing diverges (drive-letter /
 /// Shell path normalization). The default parameterless HashSet[string] ctor is
 /// ordinal case-SENSITIVE, which regressed the case-insensitive `-eq` match the
-/// per-item helper used and silently failed recoverable restores. (R-02)
+/// per-item helper used and silently failed recoverable restores.
 #[cfg(any(windows, test))]
 const RESTORE_BATCH_SCRIPT: &str = "\
 $shell = New-Object -ComObject Shell.Application; \
@@ -275,7 +275,7 @@ foreach ($i in $bin.Items()) { \
     if ($wanted.Count -eq 0) { break } \
 }";
 
-/// C1-007: restore a WHOLE batch of paths with ONE Recycle Bin enumeration.
+/// Restore a WHOLE batch of paths with ONE Recycle Bin enumeration.
 /// The old per-item helper spawned a fresh PowerShell (each re-walking the
 /// entire bin) for every path; a large undo batch ran them serially and blew
 /// the app's 30s waiter. Here a single PowerShell pass walks the bin once,
@@ -295,7 +295,7 @@ fn restore_batch_from_recycle_bin(wanted_paths: &[&str]) {
     // folders aren't confused. NUL-separate so a path containing a newline
     // can't inject a spurious entry. Restore the FIRST bin entry that matches a
     // given target path and then remove it from the wanted set — deterministic
-    // when multiple bin entries share one original path (C1-003).
+    // when multiple bin entries share one original path.
     let joined = wanted_paths.join("\0");
     let script = RESTORE_BATCH_SCRIPT;
     // SEC: pin -ExecutionPolicy Bypass so the script runs even when group
@@ -354,7 +354,7 @@ pub(crate) async fn handle_revert_merge(
         // `WHERE id IN (?1, ?2)` with the subquery bound to ?1 set the
         // destination person's count to the SOURCE person's face count (the
         // subquery's person_id is fixed to ?1 for both rows) — a wrong count
-        // until the next re-cluster. Two correlated updates fix each row. (audit recheck)
+        // until the next re-cluster. Two correlated updates fix each row.
         for pid in [new_pid, payload.destination_person_id] {
             let _ = tx.execute(
                 "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) \
@@ -385,7 +385,7 @@ pub(crate) async fn handle_revert_merge(
 mod tests {
     use super::*;
 
-    // C1-003: an occupied destination must be a Conflict (not a Restore that
+    // An occupied destination must be a Conflict (not a Restore that
     // later reads the occupant via Path::exists() and falsely reports success).
     #[test]
     fn occupied_destination_is_a_conflict_not_success() {
@@ -414,7 +414,7 @@ mod tests {
         );
     }
 
-    // C1-003 deterministic multi-entry: when two log items share one original
+    // Deterministic multi-entry: when two log items share one original
     // path, both classify identically (the batch enumeration restores the
     // first matching bin entry per path and removes it from the wanted set, so
     // the pick is deterministic rather than arbitrary). Here we assert the
@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(a, RestoreDisposition::Conflict);
     }
 
-    // R-02: the batch-restore wanted set must match paths case-INSENSITIVELY,
+    // The batch-restore wanted set must match paths case-INSENSITIVELY,
     // restoring the case-insensitive `-eq` semantics the per-item helper had.
     // A parameterless HashSet[string] is ordinal case-SENSITIVE, which fails to
     // match (and so fails to restore) a recoverable file whenever the bin's

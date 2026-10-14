@@ -1,4 +1,4 @@
-// Re-audit R-15 regression: the F-C3-029/030 terminal-pinning fix pinned
+// The terminal-pinning fix pinned
 // restructureApplyResult but omitted restructurePlan — the success-path terminal
 // reply for the planRestructure flow. Its error twin (plan_restructure_failed)
 // rides .error and was already pinned, so a FAILED plan always reached the app

@@ -48,14 +48,14 @@ const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// command cap (MaxIpcFrameBytes) and its inbound read cap (MaxFrameChars).
 /// A large applyRestructure carries the same multi-MB move set the engine
 /// emitted in restructurePlan; the old 1 MiB cap silently rejected + drained
-/// it. Bumped 32→64 MiB (R3-07B/R5-12) to hold a ~200k-move whole-library
+/// it. Bumped 32→64 MiB to hold a ~200k-move whole-library
 /// plan. Still bounded vs a runaway line; the engine already holds the whole
-/// plan in memory. (audit E10)
+/// plan in memory.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// Human-readable rejection message for an oversized inbound frame. Derives the
 /// cap from MAX_FRAME_BYTES so the text can never drift from the real limit
-/// (F-C1-010: the old message hardcoded "1 MB" while the cap was 32 MiB).
+/// (the old message hardcoded "1 MB" while the cap was 32 MiB).
 fn oversized_frame_message(seen: usize) -> String {
     format!(
         "Command frame exceeded {} MiB cap (saw {} bytes before reject).",
@@ -295,7 +295,7 @@ async fn async_main() -> Result<()> {
     // OpenProcess handle + creation-time captured here at startup, NOT by the
     // bare PID — a PID can be reused by an unrelated process the instant the
     // real parent exits, and a watchdog bound to a bare PID would then wait on
-    // a stranger (F-C1-015 TOCTOU).
+    // a stranger (TOCTOU).
     let parent_pid = platform::get_parent_pid();
     if let Some(ppid) = parent_pid {
         let s = shutdown.clone();
@@ -351,7 +351,7 @@ async fn async_main() -> Result<()> {
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_face_cluster_active = face_cluster_active.clone();
-    // Restructure-apply cancel flag (F-C6-013 wiring). CancelScan sets it; the
+    // Restructure-apply cancel flag. CancelScan sets it; the
     // ApplyRestructure arm resets it to false before each apply so a stale
     // cancel can't pre-stop a fresh apply; the apply loop polls it per move.
     let restructure_apply_cancel: Arc<std::sync::atomic::AtomicBool> =
@@ -577,7 +577,7 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
 
     // Pin identity: capture the opened process' creation time, then re-sample
     // who our parent actually is. Three cases, kept distinct so a TRANSIENT
-    // re-sample miss can't shut a live parent down (R-03):
+    // re-sample miss can't shut a live parent down:
     //   * Some(other != ppid): concrete proof the real parent exited and its PID
     //     was reused between get_parent_pid() and OpenProcess — the handle points
     //     at a stranger. Bail to shutdown.
@@ -855,7 +855,7 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             // Same cancellable, fresh-flag treatment as apply — undo does real
-            // on-disk moves too. (R2)
+            // on-disk moves too.
             restructure_apply_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let cancel_c = restructure_apply_cancel.clone();
             tokio::spawn(async move {
@@ -1174,7 +1174,7 @@ async fn emit_db_unavailable(sink: &Sink, command: &str) {
 mod tests {
     use super::*;
 
-    // F-C1-010: the oversize-frame rejection text must report the REAL cap
+    // The oversize-frame rejection text must report the REAL cap
     // (MAX_FRAME_BYTES, now 64 MiB — R3-07B), not the stale hardcoded "1 MB".
     // Pre-fix this said "exceeded 1 MB cap"; post-fix it derives from MAX_FRAME_BYTES.
     #[test]
@@ -1182,7 +1182,7 @@ mod tests {
         let msg = oversized_frame_message(99_999);
 
         let expected_mib = MAX_FRAME_BYTES / (1024 * 1024);
-        assert_eq!(expected_mib, 64, "cap is 64 MiB (R3-07B/R5-12)");
+        assert_eq!(expected_mib, 64, "cap is 64 MiB");
 
         assert!(
             msg.contains(&format!("{expected_mib} MiB")),
@@ -1197,7 +1197,7 @@ mod tests {
         assert!(msg.contains("99999"), "message must include the seen byte count: {msg}");
     }
 
-    // F-C1-015: parent identity is pinned by an OpenProcess handle + the
+    // Parent identity is pinned by an OpenProcess handle + the
     // process creation time, not a bare PID. A creation time is a per-process-
     // object value: two processes that ever share a PID cannot share it, so
     // capturing it at startup closes the PID-reuse TOCTOU. Here we prove the

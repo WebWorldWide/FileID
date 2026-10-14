@@ -178,7 +178,7 @@ struct ScanCancellationTests {
         }
         #expect(!proc.isRunning, "engine must exit cleanly on shutdown after a cancelled scan")
 
-        // U4: every line on the wire must be a JSON object — no library
+        // Every line on the wire must be a JSON object — no library
         // chatter may reach the IPC stream.
         for line in collector.snapshot() {
             #expect(line.hasPrefix("{"), "non-JSON line on the IPC wire: \(line.prefix(120))")

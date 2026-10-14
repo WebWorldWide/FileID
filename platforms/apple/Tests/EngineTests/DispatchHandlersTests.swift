@@ -1,4 +1,4 @@
-// F-C3-032 + F-C3-021-wiring regression for the engine command dispatcher.
+// Regression for the engine command dispatcher.
 //
 // 032: startScan rejected for a db-unavailable engine must emit a scan-TERMINAL
 // event (scanComplete), not only an error — otherwise the app's auto-pilot is
@@ -12,7 +12,7 @@ import Foundation
 @testable import FileIDEngine
 import FileIDShared
 
-@Suite("Engine dispatch handlers (F-C3-032/021)", .serialized)
+@Suite("Engine dispatch handlers", .serialized)
 struct DispatchHandlersTests {
 
     @Test("database-open UI errors never expose local paths")
@@ -91,7 +91,7 @@ struct DispatchHandlersTests {
                 "applyRestructure must emit a restructureApplyResult event")
     }
 
-    // Audit R3: the schema promises shortcutUndoToken "undo[es] only the
+    // The schema promises shortcutUndoToken "undo[es] only the
     // shortcut-mode run identified by this opaque token; never consume the
     // real-move undo journal" — but macOS has no shortcut/symlink-apply mode
     // at all, so there is no shortcut journal to replay. The engine must fail
@@ -124,7 +124,7 @@ struct DispatchHandlersTests {
         // is ExpressibleByStringLiteral — a `+` concatenation is an expression, not
         // a literal, so it fails to convert.
         #expect(out.range(of: resultNeedle) != nil,
-                "the rejection must still emit a terminal restructureApplyResult so EngineClient's undoRestructureInFlight flag clears (audit R2-app) instead of latching forever")
+                "the rejection must still emit a terminal restructureApplyResult so EngineClient's undoRestructureInFlight flag clears instead of latching forever")
 
         // Exactly ONE terminal result must appear — if the rejection had fallen
         // through to undoLast() instead of returning early, THAT call would emit
@@ -228,11 +228,11 @@ struct DispatchHandlersTests {
         #expect(counts.auto + counts.review + counts.ask + counts.unknown == plan.moves.count)
     }
 
-    // F-C1-004 lockstep: a homogeneous source folder the semantic butler actively
+    // Lockstep: a homogeneous source folder the semantic butler actively
     // relocated classifies Anchor, but because it is being EMPTIED (not kept) it must
     // be remapped to Mixed when exempt — so it neither inflates the "Keep" tile nor
     // badges its surviving moves Anchor. Mirrors the Windows engine's
-    // handle_plan_restructure exemption loop. (audit)
+    // handle_plan_restructure exemption loop.
     @Test("folderTiersAndCounts remaps an exempt (semantic-claimed) Anchor folder to Mixed")
     func exemptAnchorFolderBecomesMixed() {
         // 5 files in /inbox/dogs all routed into one content group → the source folder

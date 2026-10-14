@@ -73,7 +73,7 @@ pub fn trash_path(path: &Path) -> Result<()> {
         // them either) — so a long path the verbatim probe found can fail the delete
         // with a cryptic HRESULT. Surface a clear, actionable error instead of the
         // raw HRESULT so the caller/user knows WHY. (A longPathAware exe manifest is
-        // the real fix but needs a build/dependency change — owner's call.) (audit E15)
+        // the real fix but needs a build/dependency change — owner's call.)
         if let Err(e) = result {
             let path_len = wide.len().saturating_sub(1); // wide units, excluding NUL
             if path_len > 260 {

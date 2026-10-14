@@ -143,10 +143,9 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
 /// applies, even though the per-file classifier computes a canonical destination
 /// for them. The anchor COUNT for the informational "Keep" tile is the caller's
 /// responsibility, computed from the same `classified` slice BEFORE stripping.
-/// (audit A1/A3)
 ///
 /// Test-only convenience: production now calls [`strip_anchor_folder_moves_except`]
-/// directly (the semantic butler exempts its claimed source folders, F-C1-004).
+/// directly (the semantic butler exempts its claimed source folders).
 #[cfg(test)]
 pub fn strip_anchor_folder_moves(
     moves: Vec<ProposedMove>,
@@ -165,7 +164,7 @@ pub fn strip_anchor_folder_moves(
 /// stripping it would silently eat the highest-confidence proposals. The caller
 /// passes the source folders the butler claimed as `exempt_folders` so those
 /// real relocations survive; genuine in-place anchor folders still drop.
-/// (audit F-C1-004)
+/// (004)
 pub fn strip_anchor_folder_moves_except<S: std::hash::BuildHasher>(
     moves: Vec<ProposedMove>,
     classified: &[ClassifiedFolder],
@@ -326,7 +325,7 @@ pub struct FileForClassify {
     pub vlm_proposed: Option<String>,
     /// The source identity as it existed when the plan was built. Carried onto
     /// the emitted move so apply can bind the move to THIS file rather than to
-    /// whatever happens to live at `source` now. (audit P1)
+    /// whatever happens to live at `source` now.
     pub identity: Option<PlannedIdentity>,
 }
 
@@ -377,7 +376,7 @@ pub fn category_counts(moves: &[ProposedMove]) -> Vec<CategorySummary> {
     // a HashMap (arbitrary, run-to-run-randomized iteration), so a count-only sort left
     // equal-count categories in nondeterministic order — both unstable across runs on
     // Windows AND divergent from the macOS engine, which tie-breaks on category. The
-    // Sankey ribbon order is now deterministic and lockstep. (audit)
+    // Sankey ribbon order is now deterministic and lockstep.
     out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.category.cmp(&b.category)));
     out
 }
@@ -432,7 +431,7 @@ mod tests {
         // Three same-month photos in one well-named folder => that folder
         // classifies Anchor (>=80% one category, >2 files, non-generic name).
         // The macOS reference leaves anchor folders untouched, so their moves
-        // must be dropped before the plan reaches the app. (audit A1/A3)
+        // must be dropped before the plan reaches the app.
         let ts = 1_710_504_000.0;
         let files = vec![
             img(1, "D:/Library/Vacation2019/a.jpg", ts),
@@ -459,7 +458,7 @@ mod tests {
         // destination-category homogeneity — but it is a real relocation, not an
         // in-place anchor. When the caller exempts that source folder, its moves
         // must survive the strip; without the exemption they would be eaten.
-        // (audit F-C1-004)
+        // (004)
         let src_folder = PathBuf::from("D:/Library/inbox/dogs");
         let moves = vec![
             ProposedMove {

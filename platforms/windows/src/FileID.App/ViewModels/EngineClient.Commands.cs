@@ -25,7 +25,7 @@ internal sealed partial class EngineClient
     // and the inbound read cap (MaxFrameChars). The old 1 MiB cap rejected a large
     // applyRestructure (>~3.5k moves) — the same move set the engine just sent in
     // restructurePlan — leaving a big reorganize unappliable. Bumped 32→64 MiB
-    // (R3-07B/R5-12) to carry a ~200k-move whole-library apply. (audit E10)
+    // to carry a ~200k-move whole-library apply.
     private const int MaxIpcFrameBytes = 64 * 1024 * 1024;
     private sealed record ScanStartRequest(
         ScanPhase? PreviousPhase,
@@ -272,7 +272,7 @@ internal sealed partial class EngineClient
         "discovery_partial" => true,
         "checkpoint_failed_at_shutdown" => true,
         "cuda_dll_registration_failed" => true,
-        // A2: the VLM server rejected our image payload but the batch fell back
+        // The VLM server rejected our image payload but the batch fell back
         // to the per-file CLI path — tags still land, just slower. Surface as a
         // warning, not a scary error.
         "vlm_server_payload_rejected" => true,
@@ -504,7 +504,7 @@ internal sealed partial class EngineClient
         }
     }
 
-    // R7: BulkActionResult replies are correlated only by `actionPrefix` against
+    // BulkActionResult replies are correlated only by `actionPrefix` against
     // the single shared LastBulkAction slot — the engine echoes no per-request id
     // (only trashFiles carries an undo-batch suffix, which the StartsWith match
     // ignores). Two concurrent same-prefix waits would both subscribe a handler
@@ -752,7 +752,7 @@ internal sealed partial class EngineClient
     /// the mark must survive a prewarm dispatch that was REQUESTED before the
     /// cancel — during engine cold start the dispatch parks in
     /// WaitForReadyAsync for up to 75 s while the CancelPrewarm IPC faults, so
-    /// the mark is the only record the cancel ever happened (C9).</summary>
+    /// the mark is the only record the cancel ever happened.</summary>
     internal void ClearPrewarmCancelMark(string modelKind) =>
         _prewarmCancelledKinds.TryRemove(modelKind, out _);
 
@@ -765,7 +765,7 @@ internal sealed partial class EngineClient
         // ModelInstallerService.PrewarmAsync passes false: its installAction
         // cleared the mark at click time, and clearing again at dispatch would
         // erase a Cancel that arrived while the dispatch was parked waiting
-        // for engine Ready — the lost-cancel half of C7 (C9).
+        // for engine Ready — the lost-cancel half of C7.
         if (clearCancelMark)
         {
             Interlocked.Exchange(ref _prewarmCancelAllRequested, 0);
@@ -935,7 +935,7 @@ internal sealed partial class EngineClient
         LastError = null;
         LastWarning = null;
         // Clear the flag if the send faults (engine not Ready) — else it latches and
-        // mis-attributes the next apply's result as the undo's. (audit R2-app)
+        // mis-attributes the next apply's result as the undo's. (app)
         UndoRestructureInFlight = true;
         try
         {

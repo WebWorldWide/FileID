@@ -68,7 +68,7 @@ public struct TaggedFile: Sendable {
     public var ramMs: Double = 0
     public var ocrMs: Double = 0
 
-    // M3 — CLIP image embedding (raw float32 little-endian bytes). nil for
+    // CLIP image embedding (raw float32 little-endian bytes). nil for
     // non-images, files where the model isn't loaded, or inference failures.
     public var clipEmbeddingBlob: Data?
 
@@ -178,7 +178,7 @@ public actor DBWriter {
     /// Batch ceiling scales with the machine's RAM tier (mirrors the Windows
     /// engine): a high-memory box commits in bigger chunks (fewer transactions,
     /// less WAL churn, more of its headroom used), a low-RAM box stays small.
-    /// M1 Pro 16 GB → .balanced → 250. The decoupled committer (F-C6-004) keeps
+    /// M1 Pro 16 GB → .balanced → 250. The decoupled committer keeps
     /// at most ~2 batches resident, so even 500 is a low-MB buffer.
     private let maxBatchFiles: Int = {
         switch Hardware.memoryTier {
@@ -223,7 +223,6 @@ public actor DBWriter {
     /// commits while one assembles (bounded memory ≈ two batches); a full batch
     /// assembled before the prior commit finishes still blocks on
     /// `commitChan.send`, which preserves back-pressure and the batch bounds.
-    /// (F-C6-004)
     public func drain(_ channel: AsyncChannel<TaggedFile>) async {
         let commitChan = AsyncChannel<PendingBatch>()
         let committer = Task { [self] in
@@ -283,7 +282,7 @@ public actor DBWriter {
             // drop the entire in-flight batch (up to 100 files) silently.
             // `batchFiles` is a value copy, so retrying re-runs the same inserts
             // safely (each is an idempotent upsert).
-            // R3-14: resolve rename/move heal old-path existence OFF the writer
+            // Resolve rename/move heal old-path existence OFF the writer
             // transaction (one read query + off-tx lstat per fileRef-carrying
             // file), so no filesystem syscall runs while the write lock is held.
             let oldPathExists = await self.healOldPathExistence(batchFiles)
@@ -444,7 +443,7 @@ public actor DBWriter {
         // transaction, so the -wal file is trimmed incrementally instead of
         // hitting the 10000-page autocheckpoint ceiling and doing one large
         // synchronous checkpoint copy inside a future commit. Best-effort and
-        // non-blocking; mirrors the Windows per-32-batch cadence. (F-C6-004)
+        // non-blocking; mirrors the Windows per-32-batch cadence.
         if self.batchIndex % Self.walCheckpointBatches == 0 {
             await self.db.checkpointPassive()
         }
@@ -491,7 +490,7 @@ public actor DBWriter {
         // every call; `cachedStatement` reuses one compiled plan per SQL for the
         // life of the (pool-reused) writer connection, so the hot per-file path
         // re-binds instead of re-parsing — the macOS analogue of the Windows
-        // prepared/cached-statement path (dbwriter.rs). (F-C6-010)
+        // prepared/cached-statement path (dbwriter.rs).
         var existing = try Row.fetchOne(
             db.cachedStatement(sql: """
                 SELECT id, size_bytes, modified_at, failed FROM files WHERE path_text = ?
@@ -619,7 +618,7 @@ public actor DBWriter {
                 // clobber the prior value with this pass's default 0 (e.g. a forced
                 // rescan where Vision returns 0 faces, or EXIF GPS reads back nil).
                 // Plus COALESCE on phash/camera/GPS above. Mirrors the Rust engine's
-                // R3-04 hardening — was never ported to Swift. (audit P1 parity fix)
+                // Hardening — was never ported to Swift.
                 file.facesEvaluated ? 1 : 0,
                 file.ocrStageRan ? 1 : 0
             ])
@@ -633,7 +632,7 @@ public actor DBWriter {
         // Mark the doc/pdf text stage attempted (idempotent) so the BGE backfill carve-out
         // stops re-walking a doc that yields no embeddable text. Placed before the
         // unchanged early-return so it fires on BOTH the unchanged-backfill and full-write
-        // paths; the `= 0` guard avoids a redundant write once it's set. (R-14)
+        // paths; the `= 0` guard avoids a redundant write once it's set.
         if file.textStageDone {
             try db.cachedStatement(sql: """
                 UPDATE files SET text_stage_done = 1 WHERE id = ? AND text_stage_done = 0
@@ -649,8 +648,8 @@ public actor DBWriter {
         // discovery skip set must NOT drop an embeddable image that still lacks
         // a clip_embeddings row — it keeps such files in the pipeline by AND-ing
         // `skipSetClipBackfillExclusionSQL` (below) into its WHERE. Without that
-        // coordination F-C6-001's size+mtime skip filters these files out
-        // upstream and this backfill path is dead code (re-audit R-14).
+        // coordination the size+mtime skip filters these files out
+        // upstream and this backfill path is dead code.
         if unchanged {
             if let blob = file.clipEmbeddingBlob {
                 let hasEmbedding = try Bool.fetchOne(
@@ -690,7 +689,7 @@ public actor DBWriter {
         // (data loss). When the stage DID run, delete any prior `source='auto'`
         // rows and re-insert the fresh set atomically; user tags (`source='user'`)
         // are untouched either way. Mirrors the Windows `tags_evaluated` gate
-        // (dbwriter.rs) — F-C3-001.
+        // (dbwriter.rs).
         if file.tagsEvaluated {
             try db.cachedStatement(sql: """
                 DELETE FROM tags WHERE file_id = ? AND source = 'auto'
@@ -718,7 +717,7 @@ public actor DBWriter {
         // implicit delete fires the AFTER DELETE trigger only with recursive
         // triggers enabled, stranding the old text's FTS postings — clears any
         // now-empty text (covering a changed file that no longer yields OCR).
-        // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs) — F-C3-001.
+        // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs).
         if file.ocrStageRan {
             try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ?")
                 .execute(arguments: [fileID])
@@ -762,7 +761,7 @@ public actor DBWriter {
         // assignments — intact. The files row survives a rescan (ON CONFLICT DO
         // UPDATE, no cascade delete), so without this gate a swallowed timeout
         // would silently wipe a named person's faces. Mirrors the Windows
-        // `faces_evaluated` gate (dbwriter.rs) — F-C3-001.
+        // `faces_evaluated` gate (dbwriter.rs).
         if file.facesEvaluated {
             try db.cachedStatement(sql: """
                 DELETE FROM face_prints WHERE file_id = ?
@@ -794,7 +793,7 @@ public actor DBWriter {
             }
         }
 
-        // 5. CLIP embedding (M3) — only present for images/video where the model
+        // 5. CLIP embedding — only present for images/video where the model
         // was loaded and inference succeeded.
         if let blob = file.clipEmbeddingBlob {
             try insertClipEmbedding(fileID: fileID, blob: blob, db: db)
@@ -813,8 +812,8 @@ public actor DBWriter {
     /// model is installed post-scan — co-located with that branch so the two stay
     /// in sync. Keyed on `kind = 'image'` + NOT EXISTS, so ONLY images are forced,
     /// and only until they have an embedding (a backfilled image becomes skippable
-    /// again on the next scan). Re-audit R-14; analogous in spirit to the Windows
-    /// skip-set's content_hash carve-out (C1-013, scan_session.rs), which likewise
+    /// again on the next scan). analogous in spirit to the Windows
+    /// skip-set's content_hash carve-out (scan_session.rs), which likewise
     /// keeps a file whose derived data is still missing IN the pipeline.
     static let skipSetClipBackfillExclusionSQL = """
         NOT (files.kind IN ('image','video') AND NOT EXISTS (
@@ -859,7 +858,7 @@ public actor DBWriter {
         // `blob` is the worker's already-finalized Data; bind it straight to the
         // cached statement (no re-copy on the writer side). The remaining
         // tensor→loop→normalize→Data copies live in the embedding producer
-        // (MobileCLIPService), which is outside this writer's scope. (F-C6-010)
+        // (MobileCLIPService), which is outside this writer's scope.
         try db.cachedStatement(sql: """
             INSERT OR REPLACE INTO clip_embeddings (file_id, embedding, model)
             VALUES (?, ?, ?)
@@ -904,7 +903,7 @@ public actor DBWriter {
             // A still-present old path means a coexisting copy/hardlink — skip, so
             // both stay distinct rows (the exact-duplicate guard). Mirrors the
             // Windows heal_candidate_moved old-path-gone gate exactly.
-            // R3-14: existence resolved off-transaction (healOldPathExistence) so
+            // Existence resolved off-transaction (healOldPathExistence) so
             // no FS syscall runs while the writer transaction is open. Unknown ⇒
             // treat as PRESENT (skip heal): a rare same-batch race just inserts a
             // fresh row + leaves an orphan for the next prune, never an in-tx lstat.
@@ -946,7 +945,7 @@ public actor DBWriter {
     /// commitBatch's `pool.write` would hold the writer lock for the filesystem
     /// latency — unbounded on a slow/stale network mount — defeating the
     /// committer decoupling. Resolve existence here on a READ connection +
-    /// off-transaction `lstat`, keyed by old path. (R3-14, mirrors Windows R3-16)
+    /// off-transaction `lstat`, keyed by old path (mirrors Windows).
     private func healOldPathExistence(_ batchFiles: [TaggedFile]) async -> [String: Bool] {
         let oldPaths: Set<String> = (try? await db.pool.read { db -> Set<String> in
             var paths: Set<String> = []

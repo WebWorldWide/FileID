@@ -25,7 +25,7 @@ use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_COPY_ALLOWED};
 /// so an occupied destination fails the move atomically inside the kernel rather
 /// than being silently overwritten — closing the existence-check→rename TOCTOU.
 /// Both operands carry the `\\?\` extended-length prefix (the engine .exe has no
-/// longPathAware manifest); mirrors restructure_apply.rs::move_file (B3).
+/// longPathAware manifest); mirrors restructure_apply.rs::move_file.
 #[cfg(windows)]
 fn no_clobber_rename(src: &Path, dst: &Path) -> std::io::Result<()> {
     crate::util::read_only::require_source_mutation(src)?;
@@ -63,7 +63,7 @@ fn no_clobber_rename(src: &std::path::Path, dst: &std::path::Path) -> std::io::R
     )
 }
 
-/// C1-012: best-effort durable record of an on-disk rename whose DB row is
+/// best-effort durable record of an on-disk rename whose DB row is
 /// now stale (either the per-move UPDATE failed, or the end-of-batch commit
 /// rolled back every move's UPDATE). Mirrors restructure_apply.rs's B5
 /// `record_path_update_failure`: NDJSON, append-only, a recovery HINT (the
@@ -135,7 +135,7 @@ pub(crate) async fn handle_apply_tags(
         let mut failed = 0u32;
         let mut messages = Vec::new();
         // (path, tags) to persist to disk (sidecar JSON + IPropertyStore COM)
-        // AFTER the tx commits and the writer lock drops — never inside it. (audit P0)
+        // AFTER the tx commits and the writer lock drops — never inside it.
         let mut sidecar_writes: Vec<(String, Vec<String>)> = Vec::new();
         let conn = db.lock();
         let tx = conn.unchecked_transaction()?;
@@ -204,7 +204,7 @@ pub(crate) async fn handle_apply_tags(
                 // each) inside the open tx held the engine's only writer lock for the
                 // whole bulk op and grew the WAL; the sidecar has no transactional
                 // coupling to the DB rows (failures only log), so deferring is
-                // behavior-preserving. (audit P0)
+                // behavior-preserving.
                 sidecar_writes.push((path, tags));
                 succeeded += 1;
                 messages.push(BulkActionItem {
@@ -217,7 +217,7 @@ pub(crate) async fn handle_apply_tags(
         tx.commit()?;
         // Release the single writer lock BEFORE the per-file fs + COM sidecar
         // writes so a large bulk-tag can't wedge the engine's only writer (and
-        // any concurrent scan flush) for the whole operation. (audit P0)
+        // any concurrent scan flush) for the whole operation.
         drop(conn);
         let mut iprops_count = 0u32;
         let mut sidecar_only_count = 0u32;
@@ -268,7 +268,7 @@ pub(crate) async fn handle_rename_files(
         let mut succeeded = 0u32;
         let mut failed = 0u32;
         let mut messages = Vec::new();
-        // C1-012: every move that landed on disk, tracked so a failed
+        // Every move that landed on disk, tracked so a failed
         // end-of-batch commit (which rolls back ALL the per-move DB UPDATEs)
         // can be reconciled via the recovery sidecar — the disk is renamed but
         // the DB is stale across the whole batch otherwise.
@@ -327,7 +327,7 @@ pub(crate) async fn handle_rename_files(
             // overwritten. Here an occupied destination fails the move (failed++)
             // rather than destroying data. The un-prefixed `dest` is still used
             // for DB path_text + user messages so stored paths stay normal-form
-            // (#29). Mirrors restructure_apply.rs::move_file (B3).
+            // (#29). Mirrors restructure_apply.rs::move_file.
             if let Err(err) = no_clobber_rename(&path, &dest) {
                 failed += 1;
                 messages.push(BulkActionItem {
@@ -343,7 +343,7 @@ pub(crate) async fn handle_rename_files(
             crate::shell::tags::move_sidecar(&path, &dest);
             let dest_text = dest.to_string_lossy().to_string();
             let src_text = path.to_string_lossy().to_string();
-            // C1-012: the on-disk move is now committed but the DB row is only
+            // The on-disk move is now committed but the DB row is only
             // updated below (and the whole tx commits at end-of-batch). Track it
             // so a failed UPDATE or a failed end-of-batch commit is reconcilable.
             on_disk_moves.push((entry.file_id, src_text, dest_text.clone()));
@@ -355,7 +355,7 @@ pub(crate) async fn handle_rename_files(
             let dest_hash = crate::util::path_safety::stable_path_hash(&dest_text);
             match tx.execute(
                 // path_search NFC-normalized (not verbatim ?1) so an NFD-accented
-                // renamed/moved file stays findable by its accented name. (audit parity)
+                // renamed/moved file stays findable by its accented name.
                 "UPDATE files SET path_text = ?1, path_hash = ?2, path_search = ?4, vlm_proposed_name = NULL WHERE id = ?3",
                 rusqlite::params![
                     dest_text,
@@ -373,7 +373,7 @@ pub(crate) async fn handle_rename_files(
                     });
                 }
                 Err(err) => {
-                    // C1-012: file is renamed on disk but its row update failed.
+                    // File is renamed on disk but its row update failed.
                     // Record it to the recovery sidecar so the disk/DB desync is
                     // reconcilable even if the next scan never runs.
                     record_rename_recovery(entry.file_id, &path.to_string_lossy(), &dest_text);
@@ -386,7 +386,7 @@ pub(crate) async fn handle_rename_files(
                 }
             }
         }
-        // C1-012: a failed end-of-batch commit rolls back EVERY per-move UPDATE,
+        // A failed end-of-batch commit rolls back EVERY per-move UPDATE,
         // leaving every on-disk rename desynced from a now-stale DB across the
         // whole batch. Record all of them to the recovery sidecar before
         // surfacing the error so the batch is reconcilable (mirror restructure
@@ -570,7 +570,7 @@ pub(crate) async fn handle_trash_files(
                 });
             }
         }
-        // C1-018: write the undo journal BEFORE committing the row-DELETE. The
+        // Write the undo journal BEFORE committing the row-DELETE. The
         // bytes are already in the Recycle Bin (irreversible from here), and the
         // journal is the ONLY map back to them — `restoreFromTrash` reads it to
         // find which paths to bring back. If the append fails AFTER we delete the
@@ -656,7 +656,7 @@ pub(crate) async fn handle_merge_clusters(
         // person — otherwise findMergeSuggestions JOINs on a now-deleted persons
         // row and surfaces stale suggestions (orphan rows that never GC). The
         // "src != X" verdict is moot once src is folded into dst.
-        // R4-06: only GC legacy person-keyed rows that can't re-project (NULL
+        // Only GC legacy person-keyed rows that can't re-project (NULL
         // anchors). A v13 face-anchored verdict (face_a/face_b set) must SURVIVE
         // the merge so its (fa,fb) pair keeps re-projecting onto current cluster
         // membership (fa→dst, fb→other) — deleting it would let two
@@ -842,7 +842,7 @@ fn mark_persons_unknown(
     let mut messages = Vec::new();
     for id in &payload.person_ids {
         match tx.execute(
-            // R4-05: clear EVERY name-bearing column (name + all five
+            // Clear EVERY name-bearing column (name + all five
             // structured fields), not just name/first/last — otherwise a
             // title/middle_name/suffix survives, the re-cluster snapshot
             // carries a stale partial identity, and the editor pre-fills it.
@@ -912,7 +912,7 @@ pub(crate) async fn handle_mark_persons_different(
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0);
         let conn = db.lock();
-        // R3-15: resolve the churn-stable (file_id, bbox) key for each anchor face
+        // Resolve the churn-stable (file_id, bbox) key for each anchor face
         // so the verdict survives a faces_evaluated re-scan that DELETE+re-INSERTs
         // face_print ids. NULL when the face row is somehow already gone — the
         // apply path then falls back to the legacy face_a/face_b id.
@@ -1048,7 +1048,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             // `verified_persons` empty so the suppression below never fired and
             // already-rejected pairs resurfaced as suggestions — a silent
             // correctness loss. Failing visibly is correct: a broken verdicts
-            // read means the suggestion set can't be trusted. (audit F-A2)
+            // read means the suggestion set can't be trusted.
             let mut vstmt = conn.prepare(
                 "SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b \
                  FROM face_verifications WHERE same_person = 0",
@@ -1067,7 +1067,7 @@ pub(crate) async fn handle_find_merge_suggestions(
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            // R3-15: resolve each anchor by its churn-stable (file_id, bbox) key to
+            // Resolve each anchor by its churn-stable (file_id, bbox) key to
             // the face id that CURRENTLY occupies that slot (legacy face-id fallback),
             // so a verdict still suppresses the re-prompt after a faces_evaluated
             // re-scan churns face_print ids — mirroring the clustering-apply path.
@@ -1413,7 +1413,7 @@ mod tests {
         Ok(())
     }
 
-    // C1-012: the recovery line carries the file_id + src + dst so disk vs DB
+    // The recovery line carries the file_id + src + dst so disk vs DB
     // can be reconciled. Pure wire-shape check (no filesystem).
     #[test]
     fn rename_recovery_line_carries_id_src_dst() {
@@ -1424,7 +1424,7 @@ mod tests {
         assert_eq!(v["dst"], r"C:\a\new.jpg");
     }
 
-    // C1-012: a commit-failure path records EVERY on-disk move to the recovery
+    // A commit-failure path records EVERY on-disk move to the recovery
     // sidecar (NDJSON, append-only). Before the fix there was no sidecar at all,
     // so a failed end-of-batch commit left the whole batch silently desynced.
     #[test]
@@ -1455,7 +1455,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // C1-012: a second write appends rather than truncating (NDJSON growth).
+    // A second write appends rather than truncating (NDJSON growth).
     #[test]
     fn recovery_sidecar_appends() {
         let dir = unique_temp_dir("append");

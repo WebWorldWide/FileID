@@ -1,4 +1,4 @@
-// Learn-from-corrections parity (R3): the macOS RestructureFeedback must behave
+// Learn-from-corrections parity: the macOS RestructureFeedback must behave
 // identically to the Windows engine's restructure_feedback — record() credits an
 // applied move's filename tokens toward its destination folder, and boost() upgrades
 // a planned move to Auto once the summed weight clears FEEDBACK_AUTO_WEIGHT (3).

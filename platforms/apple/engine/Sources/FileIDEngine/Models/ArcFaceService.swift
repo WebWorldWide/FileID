@@ -221,7 +221,7 @@ public final class ArcFaceService: @unchecked Sendable {
             // mid-clustering — reachable via a corrupt/substituted .onnx whose output is
             // empty (load() only checks file existence, not shape). Bail to a clean
             // failure instead, exactly as the sibling MobileCLIPService.embedImage does
-            // before its identical unsafe read. (audit — empty-output guard)
+            // before its identical unsafe read. (empty-output guard)
             guard count > 0 else {
                 JSONLog.shared.error(ev: "arcface_inference_failed",
                                      error: "SFace produced an empty (0-length) output tensor")
@@ -277,7 +277,7 @@ public final class ArcFaceService: @unchecked Sendable {
 
     public static func blobToEmbedding(_ data: Data) -> [Float] {
         let count = data.count / MemoryLayout<Float>.stride
-        // S8: an empty/corrupt blob makes `baseAddress` nil; force-unwrapping it
+        // An empty/corrupt blob makes `baseAddress` nil; force-unwrapping it
         // would crash the engine. Bail to an empty vector (callers treat a
         // zero-length embedding as "no embedding").
         guard count > 0 else { return [] }

@@ -206,7 +206,7 @@ pub(crate) async fn rasterize_for_vlm(
     }
     match kind.as_str() {
         "image" => {
-            // C3: llama.cpp's image loader (stb_image) reads JPEG/PNG natively
+            // Llama.cpp's image loader (stb_image) reads JPEG/PNG natively
             // — pass those through untouched (the overwhelming common case).
             // Everything else (webp, bmp, tiff, gif, …) gets transcoded to a
             // temp JPEG so the VLM's mmproj doesn't silently reject it: the
@@ -239,7 +239,7 @@ pub(crate) async fn rasterize_for_vlm(
     }
 }
 
-/// C3: decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
+/// Decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
 /// temp JPEG the VLM's stb_image-based loader can read. Caller cleans up the
 /// temp file. Runs on a blocking thread (image-rs decode/encode is CPU-bound).
 async fn transcode_image_to_jpeg(
@@ -343,9 +343,9 @@ fn persist_vlm_results(
     Ok(())
 }
 
-/// A2: one-shot probe that the persistent llama-server actually accepts our
+/// one-shot probe that the persistent llama-server actually accepts our
 /// multimodal `image_url` data-URI payload shape. This payload format was never
-/// hardware-verified (see NEXT.md V16.8); if the server build rejects it (e.g.
+/// hardware-verified; if the server build rejects it (e.g.
 /// 400 on the request), EVERY file in the batch would fail identically and
 /// silently. Sending one tiny throwaway JPEG up front lets the batch detect the
 /// incompatibility and fall back to the per-file CLI path (a different,

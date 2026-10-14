@@ -36,7 +36,7 @@ pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
 /// EMA approach (scan_session.rs `maybe_emit_progress`): seconds-remaining =
 /// (total - completed) / rolling_fps, or None until there's a positive rate or
 /// when nothing remains. Keeps the Deep Analyze progress UI's ETA consistent
-/// with the scan sidebar (F-C2-008).
+/// with the scan sidebar.
 fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64> {
     let remaining = total.saturating_sub(completed);
     if rolling_fps > 0.01 && remaining > 0 {
@@ -133,7 +133,7 @@ pub(crate) async fn handle_deep_analyze_file(
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
                     // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    // (a load/query failure isn't a user cancel).
                     cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
@@ -260,7 +260,7 @@ pub(crate) async fn handle_deep_analyze_folder(
     payload: ipc::DeepAnalyzeFolderPayload,
     cancel: Arc<AtomicBool>,
 ) {
-    // P16: sargable range seek on the path_text index instead of a
+    // Sargable range seek on the path_text index instead of a
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
     let filter = deep_analyze_target_filter();
@@ -285,7 +285,7 @@ pub(crate) async fn handle_deep_analyze_folder(
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
                     // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    // (a load/query failure isn't a user cancel).
                     cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
@@ -351,8 +351,8 @@ pub(crate) async fn handle_deep_analyze_all(
 /// shares. `'pdf'` is included only when the `pdf-analyze` render path is
 /// compiled in (default-on) — without it `rasterize_for_vlm` returns a
 /// feature-gate error for every PDF, so queuing them would only manufacture
-/// failures (F-C1-005). `failed = 0` excludes rows a prior GPU death marked
-/// failed, parity with the macOS reference (F-C1-022).
+/// failures. `failed = 0` excludes rows a prior GPU death marked
+/// failed, parity with the macOS reference.
 pub(crate) fn deep_analyze_target_filter() -> &'static str {
     #[cfg(feature = "pdf-analyze")]
     {
@@ -618,7 +618,7 @@ async fn run_deep_analyze_batch(
         Some(_) => {
             match crate::models::resident_service::ResidentService::shared().acquire(model_kind, cancel.clone()).await {
                 Ok(s) => {
-                    // A2: verify the server accepts our multimodal payload shape
+                    // Verify the server accepts our multimodal payload shape
                     // BEFORE committing the whole batch to it. If it rejects the
                     // request (e.g. 400 on the image_url data-URI — a format that
                     // was never hardware-verified), fall back to the per-file CLI
@@ -676,12 +676,12 @@ async fn run_deep_analyze_batch(
     let mut failed = 0u64;
     // Use the persistent server until it errors; if it dies mid-batch and a CLI
     // runner exists, fall back to per-file CLI for the remaining files instead of
-    // failing every one. (audit E5)
+    // failing every one.
     let mut use_server = server.is_some();
     let started_at = Instant::now();
     // Rolling files/sec over completed files → the ETA shown on the NEXT file's
     // progress frames. EMA-smoothed (0.7 old / 0.3 new), mirroring the scan
-    // pipeline (scan_session.rs). (F-C2-008)
+    // pipeline (scan_session.rs).
     let mut rolling_fps = 0.0f64;
 
     // No runtime can run the (present) weights: the persistent server didn't
@@ -705,7 +705,7 @@ async fn run_deep_analyze_batch(
                 failed: 0,
                 total_seconds: started_at.elapsed().as_secs_f64(),
                 model_kind: model_kind.to_string(),
-                // Runtime-missing error, not a user cancel. (audit F-A2)
+                // Runtime-missing error, not a user cancel.
                 cancelled: cancel.load(Ordering::Relaxed),
             },
         ))))
@@ -794,7 +794,7 @@ async fn run_deep_analyze_batch(
         };
         // ETA from the rate of the files completed BEFORE this one. The IPC
         // currentPath carries the real path (not redacted) for parity with the
-        // macOS reference; we never log it here. (F-C2-008)
+        // macOS reference; we never log it here.
         let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
             DeepAnalyzeProgress {
@@ -812,7 +812,7 @@ async fn run_deep_analyze_batch(
         let model_kind_c = model_kind.to_string();
         // Carry ETA + the current file path onto the streamed caption frames too,
         // so the Deep Analyze UI keeps showing both while a caption renders
-        // token-by-token (the macOS schema usage). (F-C2-008)
+        // token-by-token (the macOS schema usage).
         let current_path_cb = current_path.clone();
         let caption_buf = Arc::new(Mutex::new(String::new()));
         let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
@@ -847,7 +847,7 @@ async fn run_deep_analyze_batch(
             )));
         };
         // Persistent server while it's healthy (model already resident); else
-        // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
+        // per-file CLI. `use_server` flips off below if the server dies.
         let server_active = if use_server { server.as_ref() } else { None };
         let file_started = Instant::now();
         let face_names = {
@@ -889,7 +889,7 @@ async fn run_deep_analyze_batch(
         };
 
         // Fold this file's wall time into the rolling rate driving the next
-        // file's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
+        // file's ETA (EMA, mirroring scan_session.rs).
         let dt = file_started.elapsed().as_secs_f64();
         if dt > 0.0 {
             let instant = 1.0 / dt;
@@ -925,7 +925,7 @@ async fn run_deep_analyze_batch(
                     return;
                 }
                 tracing::warn!(?err, file_id, "deep analyze file failed");
-                // F-C1-021: a per-file error (unreadable image, decode failure,
+                // A per-file error (unreadable image, decode failure,
                 // one rejected request) must NOT tear down a HEALTHY persistent
                 // server and downgrade the rest of the batch to the many-times
                 // slower per-file CLI. Only genuine server DEATH justifies the
@@ -1085,7 +1085,7 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    /// F-C1-005 + F-C1-022: the shared target filter selects renderable PDFs
+    /// The shared target filter selects renderable PDFs
     /// (when the pdf-analyze render path is compiled in) and excludes rows a
     /// prior GPU death marked failed=1 — parity with the macOS reference.
     #[test]
@@ -1115,7 +1115,7 @@ mod tests {
         assert!(!ids.contains(&dead), "failed=1 row must be excluded");
     }
 
-    /// F-C1-020: the full-pass skip predicate keys on (file, vlm_model). A file
+    /// The full-pass skip predicate keys on (file, vlm_model). A file
     /// captioned by an OLD model is NOT "already done" for a NEW model, so a
     /// VLM switch re-analyzes instead of skipping every prior file.
     #[test]

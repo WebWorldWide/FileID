@@ -105,7 +105,7 @@ impl WordPieceTokenizer {
         // Full Unicode lowering, not ASCII-only: lowercasing only the ASCII
         // range leaves accented/non-Latin text in its original case so it never
         // matches the (lowercased) vocab and collapses to [UNK]. Matches HF
-        // BertTokenizer(do_lower_case=True). (audit E8)
+        // BertTokenizer(do_lower_case=True).
         let lowered;
         let src: &str = if self.lower_case {
             lowered = text.to_lowercase();

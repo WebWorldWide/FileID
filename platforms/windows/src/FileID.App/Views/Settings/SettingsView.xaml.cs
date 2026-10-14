@@ -460,7 +460,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (hw is null) return "Detection pending…";
             if (hw.RamTotalMb == 0 && hw.RamAvailableMb == 0)
             {
-                return "(engine older than V15.9 — metrics not populated)";
+                return "(this engine does not report utilization metrics)";
             }
             string tier = string.IsNullOrEmpty(hw.MemoryTier) ? "unknown" : hw.MemoryTier;
             return $"{hw.RamAvailableMb / 1024.0:0.#} GB available of {hw.RamTotalMb / 1024.0:0.#} GB · tier: {tier}";
@@ -487,7 +487,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
             if (hw is null) return "Detection pending…";
             if (string.IsNullOrEmpty(hw.PowerSource))
             {
-                return "(engine older than V15.9 — metrics not populated)";
+                return "(this engine does not report utilization metrics)";
             }
             string source = hw.PowerSource switch
             {

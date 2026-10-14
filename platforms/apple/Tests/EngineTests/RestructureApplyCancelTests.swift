@@ -1,4 +1,4 @@
-// F-C6-013: Restructure.apply was a silent, unstoppable serial loop. The
+// Restructure.apply was a silent, unstoppable serial loop. The
 // apply-progress throttle is a pure function, so its cadence is unit-assertable
 // here (a 100k-move apply emits ~total/interval log lines, not zero or one per
 // move). The cancellation poll + throttled logging inside `apply` itself are
@@ -7,7 +7,7 @@
 import Testing
 @testable import FileIDEngine
 
-@Suite("Restructure apply progress throttle (F-C6-013)")
+@Suite("Restructure apply progress throttle")
 struct RestructureApplyProgressTests {
     @Test("Emits on first, last, and every interval-th move; silent otherwise")
     func cadence() {
