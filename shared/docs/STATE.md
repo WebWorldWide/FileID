@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-10-14 — Portable speech transcription on Windows and Linux
+
+Timeline jobs on the shared engine now transcribe speech with an installed catalog speech model (Qwen3-ASR preferred) through the same pinned llama.cpp runtime FileID already manages, so whisper.cpp is not needed. A speech pass runs after the visual pass with its own resident lease; FFmpeg extracts 16 kHz mono WAV in 30-second non-overlapping chunks sent as OpenAI `input_audio`; each chunk becomes a searchable passage with per-chunk coverage so resumed jobs skip verified chunks.
+
+Verified on the Linux VM with llama.cpp b9254 built from the pinned commit: the real `FileIDEngine` over IPC ran a timeline job on a 6.5-second clip with synthetic speech (SmolVLM-256M for frames, Qwen3-ASR-0.6B for speech) in 64 s; the stored passage reads "Happy birthday, Sam! Now blow out the candles on the cake. One, two, three.", speech coverage is verified, and catalog search for "birthday" and "candles" returns it. Engine lib tests (653) and strict Clippy pass. Limits: chunk-level timestamps (no word timing); silence-aligned chunk boundaries are a follow-up.
+
 ## 2026-10-13 — Extended model catalog, on-device benchmarking and tuning
 
 `shared/models/catalog.json` adds 333 opt-in, SHA256-pinned local models (113 vision, 195 text, 13 embedding, 10 speech, 2 reranker; Apache-2.0/MIT plus opt-in Gemma terms) generated from trusted Hugging Face publishers with upstream-chain license checks. The shared engine resolves runnable GGUF vision entries through the curated download/provenance/resident-server path; the runtime egress gate verifies every catalog URL. IPC 1.14.0 adds `listModels` (install state, hardware fit, local benchmark) and `benchmarkModel`/`cancelBenchmark` with progress and results, mirrored in Rust, Swift and C#. The benchmark measures load time, llama-server prefill/decode, caption latency, peak memory, moment-JSON validity and exact answers on locally rendered probes; tuning keeps the fastest allowlisted llama-server flags whose greedy output is unchanged. GTK Settings and a WinUI Models workbench expose the catalog, Install, Benchmark and Benchmark + tune.
