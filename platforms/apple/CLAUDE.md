@@ -33,8 +33,6 @@ Under `~/Library/Application Support/FileID/Models/`; VLMs use Documents in Deve
 - **Tagging** — RAM++ primary, CLIP zero-shot scene tags as fallback.
 - **Deep Analyze** — Qwen3-VL 4B is the measured recommendation for 8 GB Macs and Qwen3-VL 8B for 16 GB Macs; Qwen2.5-VL 7B, Gemma 3, and Mistral-Small-3.2 remain curated alternatives.
 
-> **Lockstep status (updated 2026-08):** the commercial-clean model swap (ArcFace→SFace, MobileCLIP-S2→ViT-B/32, Qwen-3B→Qwen3/Qwen2.5/Mistral) has **LANDED and is wired as the primary stack** — `FaceEmbedderKind` is SFace-only (128-d), RAM++ Swin-L is the primary tagger, `MobileCLIPService` loads ViT-B/32, and all three are prewarmed at engine startup. Native Apple-Silicon validation against Adlon is complete; an actual Windows-written/macOS-written embedding comparison and other hardware matrices remain external gates. See `platforms/apple/MACOS_LOCKSTEP_NOTES.md`.
-
 ## Build
 
 ```bash

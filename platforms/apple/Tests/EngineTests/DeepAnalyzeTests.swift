@@ -1,4 +1,4 @@
-// C3-DA regression suite — Deep Analyze fixes from audit-2026-06-10.
+// Deep Analyze regression suite.
 //
 // Covers: parseFaceComparison negation (F-C3-022), 50 MP decode cap
 // (F-C3-044), recursive HF tree listing (F-C3-043), escaped folder-scope

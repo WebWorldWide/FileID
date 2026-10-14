@@ -63,7 +63,7 @@ public enum IdentityClustering {
         /// is default-ON there); here it DEFAULTS OFF pending on-Mac label
         /// calibration — macOS uses Apple Vision face quality (a different
         /// 0..1 scale) and a separate alignment path, so the Windows-calibrated
-        /// values do NOT transfer. See MACOS_LOCKSTEP_NOTES.
+        /// values do NOT transfer.
         // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         public let mutualKNN: Bool
 

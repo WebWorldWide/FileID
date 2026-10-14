@@ -557,7 +557,7 @@ public enum FaceClustering {
         // calibrated gate is 0.35) — that value does NOT transfer. So the macOS
         // DEFAULT is 0.0 = OFF (zero regression); a Mac session must calibrate it
         // against labels before enabling. Only applied when > 0, so missing/NULL
-        // quality (-1 sentinel) is untouched at the default. (see MACOS_LOCKSTEP_NOTES)
+        // quality (-1 sentinel) is untouched at the default.
         // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         let clusterMinQuality = envDouble("FILEID_FACE_CLUSTER_MIN_QUALITY", 0.0, 0.0...1.0)
         let rows: [ClusteringFaceRow]
@@ -683,7 +683,7 @@ public enum FaceClustering {
             // Mutual-kNN Pass-1 gate — parity hook for the Rust FILEID_FACE_MUTUAL_KNN.
             // DEFAULT OFF on macOS (Windows is default-ON): the Vision quality scale +
             // separate alignment path mean the Windows calibration doesn't transfer, so
-            // enable only after on-Mac label validation. (see MACOS_LOCKSTEP_NOTES)
+            // enable only after on-Mac label validation.
             mutualKNN: envBool("FILEID_FACE_MUTUAL_KNN", false) // UNVERIFIED-UNTIL-MAC (2026-07-05 parity mirror)
         )
         let icResult = IdentityClustering.cluster(
