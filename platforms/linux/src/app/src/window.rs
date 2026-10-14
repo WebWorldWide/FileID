@@ -122,7 +122,10 @@ pub fn on_activate(app: &adw::Application) {
     let root = adw::ToolbarView::new();
     root.add_top_bar(&header);
     root.set_content(Some(&content));
-    window.set_content(Some(&root));
+    let backdrop = gtk::Overlay::new();
+    backdrop.set_child(Some(&crate::lavalamp::build()));
+    backdrop.add_overlay(&root);
+    window.set_content(Some(&backdrop));
 
     let restored_folder = crate::app_settings::last_folder();
     if let Some(folder) = restored_folder.as_ref() {

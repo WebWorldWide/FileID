@@ -100,6 +100,11 @@ window { background-color: @fileid_base; }
     padding: 16px;
     box-shadow: 0 4px 18px alpha(#000000, 0.38);
 }
+.fileid-glass {
+    background-color: alpha(#16161B, 0.64);
+    border: 1px solid alpha(#FFFFFF, 0.10);
+    border-radius: 12px;
+}
 
 /* ── Header bar floats over the LavaLamp like the macOS unified toolbar ───── */
 headerbar, .fileid-headerbar {
