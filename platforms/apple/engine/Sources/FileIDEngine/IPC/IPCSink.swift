@@ -36,6 +36,7 @@ public actor IPCSink {
 
     /// Wake the drainer when emit() adds work.
     private var drainerContinuation: CheckedContinuation<Void, Never>?
+    private var drainerBackstop: Task<Void, Never>?
 
     /// The wire the events go to. Captured at init: the U4 bootstrap dups the
     /// wire fd aside before the singleton exists; tests inject a pipe to capture
@@ -170,10 +171,9 @@ public actor IPCSink {
     /// stopped draining and the pipe is full. One drainer pulling batches in
     /// order + one serial write queue keeps frames ordered.
     ///
-    /// (Previously this write ran directly ON the actor via `wire.write`; the
-    /// old "only THIS task blocks — the actor is free" claim was FALSE — a
-    /// detached Task calling an actor method still runs under actor isolation,
-    /// so a full pipe held the actor and wedged the whole pipeline. audit HIGH #3.)
+    /// The write must stay off the actor: a detached Task calling an actor
+    /// method still runs under actor isolation, so a blocking write there
+    /// holds the actor and wedges the whole pipeline on a full pipe.
     private func drainLoop() async {
         while !self.isDoneDraining() {
             let batch = self.takeBatch()
@@ -213,8 +213,11 @@ public actor IPCSink {
             drainerContinuation?.resume()
             drainerContinuation = cont
             // Backstop timeout — wake after `timeoutMs` even if no emit fires.
-            Task { [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)
+            // Cancelling the previous backstop keeps a burst of short parks
+            // from piling up sleeping tasks.
+            drainerBackstop?.cancel()
+            drainerBackstop = Task { [weak self] in
+                guard (try? await Task.sleep(nanoseconds: UInt64(timeoutMs) * 1_000_000)) != nil else { return }
                 await self?.wakeDrainerIfWaiting()
             }
         }
@@ -279,8 +282,8 @@ public actor IPCSink {
         // Terminal completions — every one strands a tab's UI if lost.
         // restructurePlan is the success-path terminal reply for planRestructure
         // (its error twin, plan_restructure_failed, is .error and already pinned);
-        // omitting it let a successful plan be evicted while a failed one always
-        // landed — the asymmetry the re-audit flagged.
+        // omitting it would let a successful plan be evicted while a failed one
+        // always lands.
         case .toolResponse, .catalogResponse, .scanComplete, .deepAnalyzeComplete, .faceClusteringComplete,
              .restructurePlan, .restructureApplyResult, .error,
         // Non-terminal but still must never be coalesced away.

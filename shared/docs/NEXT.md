@@ -4,7 +4,7 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## Where things stand (2026-10-13)
 
-- `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags (`BRANCH_AUDIT.md`).
+- `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags.
 - The shared Rust engine (`platforms/windows/src/engine`) serves Windows, Linux, the CLI and the TUI. macOS has its own Swift engine and remains the behavioral reference.
 - Test hosts: the Linux VM (`adlon-ci-linux`), the Windows 11 VM (`ADLON-CI-WIN`, also a self-hosted CI runner) and the owner's Mac (headless `swift build`/`swift test` over SSH only; the owner does interactive macOS testing and package signing locally).
 
