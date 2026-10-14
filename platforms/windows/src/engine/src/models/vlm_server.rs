@@ -372,6 +372,10 @@ fn validate_sequence(image_paths: &[&Path], prompt: &str, max_tokens: u32) -> Re
     Ok(())
 }
 
+fn is_wav(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
 async fn multimodal_body_admitted(image_paths: &[&Path], prompt: &str, max_tokens: u32, host: Arc<crate::resource_scheduler::Lease>) -> Result<serde_json::Value> {
     validate_sequence(image_paths, prompt, max_tokens)?;
     let mut total = 0u64;
@@ -387,7 +391,12 @@ async fn multimodal_body_admitted(image_paths: &[&Path], prompt: &str, max_token
         let bytes = read_image_admitted(path, remaining, host.clone()).await?;
         if bytes.is_empty() { bail!("A visual-model frame is empty"); }
         remaining -= bytes.len() as u64;
-        content.push(serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", image_mime(&bytes), base64::engine::general_purpose::STANDARD.encode(&bytes))}}));
+        // Speech models take audio through the same multimodal channel.
+        if is_wav(&bytes) {
+            content.push(serde_json::json!({"type": "input_audio", "input_audio": {"data": base64::engine::general_purpose::STANDARD.encode(&bytes), "format": "wav"}}));
+        } else {
+            content.push(serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", image_mime(&bytes), base64::engine::general_purpose::STANDARD.encode(&bytes))}}));
+        }
     }
     Ok(serde_json::json!({"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "n_predict": max_tokens, "temperature": 0.0, "stream": false}))
 }

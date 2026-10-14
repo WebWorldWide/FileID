@@ -128,7 +128,7 @@ RAW_NETWORK_FILES = {
 REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/native_process.rs": "ab6b887dc2f1500bb80b510f333ddb0fc110a5e6234b6f57502330e67fd21ad3",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "4dca8812ea40edb2a39925693db2d8496d264b59557d42ecbf216aaff221e59a",
-  "platforms/windows/src/engine/src/commands/video_export.rs": "986212eb141859df8a63c3a34c7b6efcb0ea6da67c69b49d07cf9457c7eab0a1",
+  "platforms/windows/src/engine/src/commands/video_export.rs": "2bd14ef0d1f5afdf966572ebf4e0d2cea17f2dbb5b31be6cf3e518d89d989b18",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "b681e22dd5a9276b64371add52bc62917c68e60071cbb9cb0e720c14d86f9ba0",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "e3d9e5ec9ee7025c5103597f172c96a9abd5dec4980af5610a4369748eb931ec",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "a5b875ceb9c2e827778884c0f41dc1833eab00d1ee01d114ed89899556ce3482",
@@ -167,7 +167,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/main.rs": "48eb599d018907b2305dd2b29a93d44aaee7d42b52d718e6bb30e637d2f7c4fc",
   "platforms/windows/src/engine/src/models/runtime.rs": "fd973cd286227035d71a8db1ca47f27edf91da64caa06849041b1572460d7a03",
   "platforms/windows/src/engine/src/models/vlm.rs": "4ba0169c4f1cb5d78f6ae291034598f97d836d15ca9db71efa482bb457187cb2",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "a73ed34be1803686c5fa0e2a6f8c9f4e45f24494e53d4cbae2bb0d510d02a819",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "184fc330854ddb61dd4a4333b9673dc6bf414a137ac45518f3a6003a36c1b6d4",
   "platforms/windows/src/engine/src/models/whisper.rs": "c6c6c4b288e0a6327fde8944cda3fbcfcc1cf5b30f2dd21bfbe5f388713fc0c9",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "34b197b697d7d7356b5cf10f3f7b47208289df0f98ef092bd9b0a196fa908091",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "7f3416bdf1211778039666e25b13bf5d193724839cb298de8e27c436b4f91392",

@@ -394,7 +394,7 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
 /// (`vlm/<dir>/model.gguf` + `mmproj.gguf`) so discovery, provenance and the
 /// resident server treat it identically.
 fn catalog_model(models_root: &std::path::Path, model_kind: &str) -> Option<Model> {
-    let entry = super::catalog::runnable_vision(model_kind)?;
+    let entry = super::catalog::runnable(model_kind)?;
     let dir = models_root.join("vlm").join(super::catalog::directory(model_kind)?);
     let files = entry
         .files

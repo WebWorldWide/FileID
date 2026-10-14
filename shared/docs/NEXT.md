@@ -10,9 +10,8 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## In flight
 
-1. **Portable speech** (PR #244, `feat/portable-speech`): Qwen3-ASR through the existing llama.cpp runtime transcribes timeline audio in 30-second passages on Windows/Linux. Verified end to end over IPC on the Linux VM; merge when hosted CI is green.
-2. **Redesign** (FileID Prototype v3): blocked until the design files are exported into the repo or the Design connector is authorized from an interactive session; then port to SwiftUI, WinUI and GTK keeping the palette, springs and `LavaLampBackground`.
-3. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; add MLX benchmarking and catalog MLX loading on macOS.
+1. **Redesign** (FileID Prototype v3): blocked until the design files are exported into the repo or the Design connector is authorized from an interactive session; then port to SwiftUI, WinUI and GTK keeping the palette, springs and `LavaLampBackground`.
+2. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; add MLX benchmarking and catalog MLX loading on macOS.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 

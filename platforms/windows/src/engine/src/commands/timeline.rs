@@ -122,10 +122,38 @@ fn frames_root() -> PathBuf {
     std::env::temp_dir().join("fileid-timeline-frames")
 }
 
+/// The visual model for timelines: a curated model when installed, otherwise
+/// the smallest installed catalog vision model.
 pub(crate) fn installed_model() -> Option<&'static str> {
     VLM_PREFERENCE
         .into_iter()
         .find(|kind| crate::models::vlm::find_weights(kind).is_some())
+        .or_else(|| {
+            let mut installed: Vec<&'static crate::models::catalog::CatalogEntry> = crate::models::catalog::entries()
+                .iter()
+                .filter(|e| {
+                    crate::models::catalog::runnable_vision(&e.id).is_some()
+                        && crate::models::vlm::find_weights(&e.id).is_some()
+                })
+                .collect();
+            installed.sort_by(|a, b| a.estimated_resident_gb.total_cmp(&b.estimated_resident_gb));
+            installed.first().map(|e| e.id.as_str())
+        })
+}
+
+const SPEECH_PREFERENCE: [&str; 2] = ["qwen3_asr_0_6b_gguf_q8_0", "qwen3_asr_1_7b_gguf_q8_0"];
+
+/// An installed speech model, preferring the evaluated Qwen3-ASR sizes.
+pub(crate) fn installed_speech_model() -> Option<&'static str> {
+    let installed = |id: &str| {
+        crate::models::catalog::runnable_speech(id).is_some() && crate::models::vlm::find_weights(id).is_some()
+    };
+    SPEECH_PREFERENCE.into_iter().find(|id| installed(id)).or_else(|| {
+        crate::models::catalog::entries()
+            .iter()
+            .find(|e| installed(&e.id))
+            .map(|e| e.id.as_str())
+    })
 }
 
 /// Marks interrupted timeline jobs paused and removes abandoned frames.
@@ -198,12 +226,16 @@ pub(crate) fn enqueue(
         params![job_id, JOB_KIND, serde_json::to_string(&unique)?, serde_json::to_string(&recipe)?, stamp],
     )?;
     tx.commit()?;
-    let message = if mode == Some("moments") {
-        "Queued significant-moment drafts from overlapping frame sequences. Review every proposal; sampled frames can still miss actions or hidden outcomes. On-device speech transcription is not yet available on this platform."
-    } else {
-        "Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed. On-device speech transcription is not yet available on this platform."
+    let speech = match installed_speech_model() {
+        Some(_) => " Speech is transcribed on this device in 30-second passages after the visual pass.",
+        None => " Install a speech model from the model catalog to add searchable transcripts.",
     };
-    let mut response = super::catalog::response(&request.request_id, "ok", Some(message.into()));
+    let message = if mode == Some("moments") {
+        format!("Queued significant-moment drafts from overlapping frame sequences. Review every proposal; sampled frames can still miss actions or hidden outcomes.{speech}")
+    } else {
+        format!("Visual sampling uses low-resolution change signals to select a representative moment in each ten-second window, along with a starting frame. Fast events can still be missed.{speech}")
+    };
+    let mut response = super::catalog::response(&request.request_id, "ok", Some(message));
     response.jobs = super::catalog::jobs(conn)?;
     Ok((job_id, response))
 }
@@ -288,12 +320,23 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
             return Ok(());
         };
         publish(id, sink, database).await;
+        let speech = installed_speech_model();
+        let visual_share = if speech.is_some() { 0.8 } else { 1.0 };
         let lease = ResidentService::shared()
             .acquire(&job.recipe.model_kind, cancel.clone())
             .await?;
-        let result = process(id, &job, &lease, &frames, &cancel, sink, database).await;
+        let result = process(id, &job, &lease, &frames, &cancel, sink, database, visual_share).await;
         let cleanup = lease.finish(result.is_ok()).await;
-        result.and(cleanup)
+        result.and(cleanup)?;
+        // The speech model loads only after the visual model is released, so
+        // the two never need to be resident together.
+        if let Some(speech) = speech {
+            let lease = ResidentService::shared().acquire(speech, cancel.clone()).await?;
+            let result = transcribe(id, &job, speech, &lease, &frames, &cancel, sink, database, visual_share).await;
+            let cleanup = lease.finish(result.is_ok()).await;
+            result.and(cleanup)?;
+        }
+        Ok::<(), anyhow::Error>(())
     }
     .await;
     let _ = std::fs::remove_dir_all(&frames);
@@ -484,6 +527,7 @@ async fn process<M: FrameModel>(
     cancel: &Arc<AtomicBool>,
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
+    share: f64,
 ) -> Result<()> {
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
@@ -573,7 +617,7 @@ async fn process<M: FrameModel>(
                 &signals,
                 size,
                 version,
-                (index, total),
+                (index, total, share),
                 model,
                 frames,
                 cancel,
@@ -588,7 +632,12 @@ async fn process<M: FrameModel>(
             let conn = database.lock();
             conn.execute(
                 "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
-                params![(index + 1).to_string(), (index + 1) as f64 / total as f64, now(), id],
+                params![
+                    (index + 1).to_string(),
+                    share * (index + 1) as f64 / total as f64,
+                    now(),
+                    id
+                ],
             )?;
         }
         publish(id, sink, database).await;
@@ -660,7 +709,7 @@ async fn analyze_moments<M: FrameModel>(
     signals: &[analysis::Signal],
     size: (u32, u32),
     frame_version: &str,
-    (file_index, total_files): (usize, usize),
+    (file_index, total_files, share): (usize, usize, f64),
     model: &M,
     frames: &Path,
     cancel: &Arc<AtomicBool>,
@@ -749,10 +798,144 @@ async fn analyze_moments<M: FrameModel>(
             )?;
             tx.commit()?;
         }
-        let progress = (file_index as f64 + 0.7 * (index + 1) as f64 / windows.len() as f64) / total_files as f64;
+        let progress =
+            share * (file_index as f64 + 0.7 * (index + 1) as f64 / windows.len() as f64) / total_files as f64;
         set_progress(&database.lock(), id, progress)?;
         publish(id, sink, database).await;
     }
+    Ok(())
+}
+
+/// Speech pass: 16 kHz chunks of each video's first audio track are
+/// transcribed by the speech model; every chunk's coverage is recorded so a
+/// resumed job skips verified chunks and an unreadable one stays incomplete.
+#[allow(clippy::too_many_arguments)]
+async fn transcribe<M: FrameModel>(
+    id: &str,
+    job: &Job,
+    speech_model: &str,
+    model: &M,
+    frames: &Path,
+    cancel: &Arc<AtomicBool>,
+    sink: &Sink,
+    database: &Arc<Mutex<Connection>>,
+    visual_share: f64,
+) -> Result<()> {
+    std::fs::create_dir_all(frames)?;
+    let version = format!("timeline-speech-v1/{speech_model}");
+    let total = job.ids.len().max(1);
+    for (index, &file_id) in job.ids.iter().enumerate() {
+        require_running(&database.lock(), id)?;
+        let source = Source::load(&database.lock(), file_id)?;
+        source.verify(&database.lock(), file_id)?;
+        let probe = {
+            let (path, flag) = (source.path.clone(), cancel.clone());
+            blocking(move || video_export::analysis_probe(&path, &flag))
+                .await
+                .map_err(|error| interrupted_or(cancel, error))?
+        };
+        if !probe.has_audio {
+            continue;
+        }
+        let coverage = format!("speech-coverage:{file_id}:{}:{version}", source.revision);
+        conn_coverage_if_absent(
+            &database.lock(),
+            &coverage,
+            file_id,
+            probe.duration,
+            &source.revision,
+            &version,
+        )?;
+        let chunks = analysis::speech_chunks(probe.duration, analysis::SPEECH_CHUNK_SECONDS);
+        let mut complete = true;
+        for (chunk_index, &(start, end)) in chunks.iter().enumerate() {
+            require_running(&database.lock(), id)?;
+            let chunk_id = format!("{coverage}:chunk:{chunk_index}");
+            let verified: bool = database.lock().query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=?1 AND status='verified' AND source_revision=?2 AND model_version=?3)",
+                params![chunk_id, source.revision, version],
+                |r| r.get(0),
+            )?;
+            if !verified {
+                let (path, flag) = (source.path.clone(), cancel.clone());
+                let audio = blocking(move || video_export::audio_wav(&path, start, end - start, &flag)).await;
+                let text = match audio {
+                    Ok(audio) => {
+                        let wav = frames.join(format!("speech-{file_id}-{chunk_index}.wav"));
+                        std::fs::write(&wav, audio)?;
+                        let reply = model.caption(&wav, analysis::SPEECH_PROMPT, 400, cancel.clone()).await;
+                        let _ = std::fs::remove_file(&wav);
+                        Some(analysis::transcript_text(
+                            &reply.map_err(|error| interrupted_or(cancel, error))?,
+                        ))
+                    }
+                    Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
+                    Err(_) => None,
+                };
+                let conn = database.lock();
+                require_running(&conn, id)?;
+                source.verify(&conn, file_id)?;
+                match text {
+                    Some(text) => {
+                        if !text.is_empty() {
+                            conn.execute(
+                                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?4,?5,?6,?7,0.5)",
+                                params![format!("speech:{file_id}:{}:{version}:{}", source.revision, analysis::millis(start)), file_id, start, end, text, source.revision, version],
+                            )?;
+                        }
+                        upsert_coverage(
+                            &conn,
+                            &chunk_id,
+                            file_id,
+                            start,
+                            end,
+                            "verified",
+                            &source.revision,
+                            &version,
+                        )?;
+                    }
+                    None => {
+                        complete = false;
+                        upsert_coverage(
+                            &conn,
+                            &chunk_id,
+                            file_id,
+                            start,
+                            end,
+                            "incomplete",
+                            &source.revision,
+                            &version,
+                        )?;
+                    }
+                }
+            }
+            let progress = visual_share
+                + (1.0 - visual_share) * (index as f64 + (chunk_index + 1) as f64 / chunks.len() as f64) / total as f64;
+            set_progress(&database.lock(), id, progress)?;
+            publish(id, sink, database).await;
+        }
+        let conn = database.lock();
+        source.verify(&conn, file_id)?;
+        conn.execute(
+            "UPDATE catalog_coverage SET status=?1 WHERE id=?2",
+            params![if complete { "verified" } else { "incomplete" }, coverage],
+        )?;
+    }
+    Ok(())
+}
+
+fn conn_coverage_if_absent(
+    conn: &Connection,
+    id: &str,
+    file_id: i64,
+    duration: f64,
+    revision: &str,
+    version: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?1,?2,0,?3,'incomplete',?4,?5)",
+        params![id, file_id, duration, revision, version],
+    )?;
     Ok(())
 }
 
