@@ -27,7 +27,13 @@ const FRAME_SIDE: u32 = 768;
 const CAPTION_TOKENS: u32 = 80;
 const MOMENT_TOKENS: u32 = 400;
 const MAX_FILES: usize = 1_000;
-const VLM_PREFERENCE: [&str; 5] = ["qwen3_vl_4b", "qwen3_vl_8b", "qwen2_5_vl_7b", "gemma_3_4b", "mistral_small_3_2"];
+const VLM_PREFERENCE: [&str; 5] = [
+    "qwen3_vl_4b",
+    "qwen3_vl_8b",
+    "qwen2_5_vl_7b",
+    "gemma_3_4b",
+    "mistral_small_3_2",
+];
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -51,15 +57,39 @@ impl std::error::Error for Interrupted {}
 /// The visual model the worker consults. The resident VLM lease is the real
 /// implementation; tests substitute a scripted model to exercise the worker.
 pub(crate) trait FrameModel: Sync {
-    fn caption(&self, image: &Path, prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send;
-    fn sequence(&self, images: &[&Path], prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send;
+    fn caption(
+        &self,
+        image: &Path,
+        prompt: &str,
+        tokens: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send;
+    fn sequence(
+        &self,
+        images: &[&Path],
+        prompt: &str,
+        tokens: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send;
 }
 
 impl FrameModel for ResidentLease {
-    fn caption(&self, image: &Path, prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+    fn caption(
+        &self,
+        image: &Path,
+        prompt: &str,
+        tokens: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send {
         self.complete_with_cancel(image, prompt, tokens, cancel)
     }
-    fn sequence(&self, images: &[&Path], prompt: &str, tokens: u32, cancel: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+    fn sequence(
+        &self,
+        images: &[&Path],
+        prompt: &str,
+        tokens: u32,
+        cancel: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send {
         self.complete_sequence_with_cancel(images, prompt, tokens, cancel)
     }
 }
@@ -93,7 +123,9 @@ fn frames_root() -> PathBuf {
 }
 
 pub(crate) fn installed_model() -> Option<&'static str> {
-    VLM_PREFERENCE.into_iter().find(|kind| crate::models::vlm::find_weights(kind).is_some())
+    VLM_PREFERENCE
+        .into_iter()
+        .find(|kind| crate::models::vlm::find_weights(kind).is_some())
 }
 
 /// Marks interrupted timeline jobs paused and removes abandoned frames.
@@ -109,15 +141,26 @@ pub fn recover(conn: &Connection) -> Result<()> {
 
 pub(crate) fn is_timeline_job(conn: &Connection, id: &str) -> Result<bool> {
     Ok(conn
-        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
+        .query_row("SELECT kind FROM catalog_jobs WHERE id=?1", [id], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()?
         .is_some_and(|kind| kind == JOB_KIND))
 }
 
 /// Validates and records a new timeline job; returns its id for scheduling.
-pub(crate) fn enqueue(conn: &mut Connection, request: &CatalogRequest, model: Option<&str>, ffmpeg: bool) -> Result<(String, CatalogResponse)> {
+pub(crate) fn enqueue(
+    conn: &mut Connection,
+    request: &CatalogRequest,
+    model: Option<&str>,
+    ffmpeg: bool,
+) -> Result<(String, CatalogResponse)> {
     let ids = request.file_ids.as_deref().unwrap_or_default();
-    if request.request_id.is_empty() || request.request_id.chars().count() > 200 || ids.is_empty() || ids.len() > MAX_FILES {
+    if request.request_id.is_empty()
+        || request.request_id.chars().count() > 200
+        || ids.is_empty()
+        || ids.len() > MAX_FILES
+    {
         bail!("Invalid catalog request")
     }
     let mode = request.timeline_mode.as_deref();
@@ -135,7 +178,9 @@ pub(crate) fn enqueue(conn: &mut Connection, request: &CatalogRequest, model: Op
     unique.dedup();
     let tx = conn.transaction()?;
     for id in &unique {
-        let kind: Option<String> = tx.query_row("SELECT kind FROM files WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM files WHERE id=?1", [id], |r| r.get(0))
+            .optional()?;
         if kind.as_deref() != Some("video") {
             bail!("Timeline analysis accepts catalogued videos only")
         }
@@ -191,7 +236,8 @@ async fn publish(job_id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) {
     if let Ok(jobs) = jobs {
         let mut response = super::catalog::response(job_id, "ok", None);
         response.jobs = jobs;
-        sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response)))).await;
+        sink.send(IpcEvent::now(EventPayload::CatalogResponse(Wrap::new(response))))
+            .await;
     }
 }
 
@@ -209,13 +255,26 @@ fn start(conn: &Connection, id: &str) -> Result<Option<Job>> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Option<String>>(2)?.unwrap_or_default())),
         )
         .optional()?;
-    let Some((ids, recipe, checkpoint)) = row else { return Ok(None) };
-    conn.execute("UPDATE catalog_jobs SET state='running',error=NULL,updated_at=?1 WHERE id=?2", params![now(), id])?;
+    let Some((ids, recipe, checkpoint)) = row else {
+        return Ok(None);
+    };
+    conn.execute(
+        "UPDATE catalog_jobs SET state='running',error=NULL,updated_at=?1 WHERE id=?2",
+        params![now(), id],
+    )?;
     let recipe: Recipe = serde_json::from_str(&recipe)?;
-    if recipe.timeline_mode.as_deref().is_some_and(|mode| !["sampled", "moments"].contains(&mode)) {
+    if recipe
+        .timeline_mode
+        .as_deref()
+        .is_some_and(|mode| !["sampled", "moments"].contains(&mode))
+    {
         bail!("Invalid timeline analysis mode")
     }
-    Ok(Some(Job { ids: serde_json::from_str(&ids)?, recipe, index: checkpoint.parse().unwrap_or(0) }))
+    Ok(Some(Job {
+        ids: serde_json::from_str(&ids)?,
+        recipe,
+        index: checkpoint.parse().unwrap_or(0),
+    }))
 }
 
 /// Runs one job to a terminal or paused state. Returns true when the job was
@@ -225,9 +284,13 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     *worker().running.lock() = Some((id.to_owned(), cancel.clone()));
     let frames = frames_root().join(id);
     let outcome = async {
-        let Some(job) = start(&database.lock(), id)? else { return Ok(()) };
+        let Some(job) = start(&database.lock(), id)? else {
+            return Ok(());
+        };
         publish(id, sink, database).await;
-        let lease = ResidentService::shared().acquire(&job.recipe.model_kind, cancel.clone()).await?;
+        let lease = ResidentService::shared()
+            .acquire(&job.recipe.model_kind, cancel.clone())
+            .await?;
         let result = process(id, &job, &lease, &frames, &cancel, sink, database).await;
         let cleanup = lease.finish(result.is_ok()).await;
         result.and(cleanup)
@@ -253,12 +316,16 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     publish(id, sink, database).await;
     database
         .lock()
-        .query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| r.get::<_, String>(0))
+        .query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| {
+            r.get::<_, String>(0)
+        })
         .is_ok_and(|state| state == "queued")
 }
 
 fn require_running(conn: &Connection, id: &str) -> Result<()> {
-    let state: Option<String> = conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| r.get(0)).optional()?;
+    let state: Option<String> = conn
+        .query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| r.get(0))
+        .optional()?;
     if state.as_deref() != Some("running") {
         return Err(Interrupted.into());
     }
@@ -267,14 +334,28 @@ fn require_running(conn: &Connection, id: &str) -> Result<()> {
 
 pub(crate) fn revision(conn: &Connection, file_id: i64) -> Result<String> {
     let (size, modified): (i64, Option<f64>) =
-        conn.query_row("SELECT size_bytes,modified_at FROM files WHERE id=?1", [file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    Ok(format!("{}:{}", size, modified.map(|m| m.to_bits().to_string()).unwrap_or_else(|| "unknown".into())))
+        conn.query_row("SELECT size_bytes,modified_at FROM files WHERE id=?1", [file_id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    Ok(format!(
+        "{}:{}",
+        size,
+        modified
+            .map(|m| m.to_bits().to_string())
+            .unwrap_or_else(|| "unknown".into())
+    ))
 }
 
 /// True when the file on disk still matches the catalogued size and mtime.
 fn on_disk_matches(path: &Path, size: i64, modified: Option<f64>) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else { return false };
-    let disk = metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs_f64());
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let disk = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64());
     metadata.len() as i64 == size && matches!((modified, disk), (Some(a), Some(b)) if (a - b).abs() < 0.000_001)
 }
 
@@ -288,9 +369,18 @@ struct Source {
 impl Source {
     fn load(conn: &Connection, file_id: i64) -> Result<Self> {
         let (path, size, modified): (String, i64, Option<f64>) = conn
-            .query_row("SELECT path_text,size_bytes,modified_at FROM files WHERE id=?1", [file_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_row(
+                "SELECT path_text,size_bytes,modified_at FROM files WHERE id=?1",
+                [file_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .context("The video is no longer in the catalog")?;
-        Ok(Self { path: PathBuf::from(path), size, modified, revision: revision(conn, file_id)? })
+        Ok(Self {
+            path: PathBuf::from(path),
+            size,
+            modified,
+            revision: revision(conn, file_id)?,
+        })
     }
 
     fn verify(&self, conn: &Connection, file_id: i64) -> Result<()> {
@@ -302,14 +392,29 @@ impl Source {
 }
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
-    tokio::task::spawn_blocking(work).await.map_err(|error| anyhow!(error))?
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| anyhow!(error))?
 }
 
 fn interrupted_or(cancel: &AtomicBool, error: anyhow::Error) -> anyhow::Error {
-    if cancel.load(Ordering::Acquire) { Interrupted.into() } else { error }
+    if cancel.load(Ordering::Acquire) {
+        Interrupted.into()
+    } else {
+        error
+    }
 }
 
-fn upsert_coverage(conn: &Connection, id: &str, file_id: i64, start: f64, end: f64, status: &str, revision: &str, model: &str) -> Result<()> {
+fn upsert_coverage(
+    conn: &Connection,
+    id: &str,
+    file_id: i64,
+    start: f64,
+    end: f64,
+    status: &str,
+    revision: &str,
+    model: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![id, file_id, start, end, status, revision, model],
@@ -331,7 +436,12 @@ pub(crate) fn upsert_chapter(conn: &Connection, chapter: &CatalogChapter) -> Res
 }
 
 fn user_edited(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn.query_row("SELECT user_edited FROM catalog_chapters WHERE id=?1", [id], |r| r.get(0)).optional()?.unwrap_or(false))
+    Ok(conn
+        .query_row("SELECT user_edited FROM catalog_chapters WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or(false))
 }
 
 fn set_progress(conn: &Connection, id: &str, progress: f64) -> Result<()> {
@@ -348,7 +458,13 @@ fn write_jpeg(path: &Path, rgb: Vec<u8>, width: u32, height: u32) -> Result<()> 
     Ok(())
 }
 
-async fn decode_jpeg(source: &Path, seconds: f64, size: (u32, u32), output: PathBuf, cancel: &Arc<AtomicBool>) -> Result<PathBuf> {
+async fn decode_jpeg(
+    source: &Path,
+    seconds: f64,
+    size: (u32, u32),
+    output: PathBuf,
+    cancel: &Arc<AtomicBool>,
+) -> Result<PathBuf> {
     let (source, flag) = (source.to_owned(), cancel.clone());
     blocking(move || {
         let rgb = video_export::frame_rgb(&source, seconds, size.0, size.1, &flag)?;
@@ -377,18 +493,33 @@ async fn process<M: FrameModel>(
         source.verify(&database.lock(), file_id)?;
         let probe = {
             let (path, flag) = (source.path.clone(), cancel.clone());
-            blocking(move || video_export::analysis_probe(&path, &flag)).await.map_err(|error| interrupted_or(cancel, error))?
+            blocking(move || video_export::analysis_probe(&path, &flag))
+                .await
+                .map_err(|error| interrupted_or(cancel, error))?
         };
         let duration = probe.duration;
         let version = job.recipe.model_version.as_str();
-        upsert_coverage(&database.lock(), &format!("{id}-{file_id}-coverage"), file_id, 0.0, duration, "incomplete", &source.revision, version)?;
+        upsert_coverage(
+            &database.lock(),
+            &format!("{id}-{file_id}-coverage"),
+            file_id,
+            0.0,
+            duration,
+            "incomplete",
+            &source.revision,
+            version,
+        )?;
 
         let signals = scan_signals(id, file_id, &source, duration, cancel, database).await?;
         let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
         let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
         for seconds in analysis::sample_times(duration, job.recipe.interval_seconds, &signals) {
             require_running(&database.lock(), id)?;
-            let evidence = format!("frame:{file_id}:{}:{version}:{}", source.revision, analysis::millis(seconds));
+            let evidence = format!(
+                "frame:{file_id}:{}:{version}:{}",
+                source.revision,
+                analysis::millis(seconds)
+            );
             let exists: bool = database.lock().query_row(
                 "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
                 params![evidence, source.revision],
@@ -397,8 +528,17 @@ async fn process<M: FrameModel>(
             if exists {
                 continue;
             }
-            let frame = decode_jpeg(&source.path, seconds.min((duration - 0.05).max(0.0)), size, frames.join(format!("{}.jpg", analysis::millis(seconds))), cancel).await?;
-            let caption = model.caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone()).await;
+            let frame = decode_jpeg(
+                &source.path,
+                seconds.min((duration - 0.05).max(0.0)),
+                size,
+                frames.join(format!("{}.jpg", analysis::millis(seconds))),
+                cancel,
+            )
+            .await?;
+            let caption = model
+                .caption(&frame, &caption_prompt, CAPTION_TOKENS, cancel.clone())
+                .await;
             let _ = std::fs::remove_file(&frame);
             let caption = caption.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
             let caption = caption.trim();
@@ -412,11 +552,35 @@ async fn process<M: FrameModel>(
                 "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
                 params![evidence, file_id, seconds, caption.chars().take(4_000).collect::<String>(), source.revision, version],
             )?;
-            upsert_coverage(&conn, &evidence, file_id, seconds, duration.min(seconds + 0.001).max(seconds + 0.000_001), "sampled", &source.revision, version)?;
+            upsert_coverage(
+                &conn,
+                &evidence,
+                file_id,
+                seconds,
+                duration.min(seconds + 0.001).max(seconds + 0.000_001),
+                "sampled",
+                &source.revision,
+                version,
+            )?;
         }
 
         if job.recipe.timeline_mode.as_deref() == Some("moments") {
-            analyze_moments(id, file_id, &source, duration, &signals, size, version, (index, total), model, frames, cancel, sink, database).await?;
+            analyze_moments(
+                id,
+                file_id,
+                &source,
+                duration,
+                &signals,
+                size,
+                version,
+                (index, total),
+                model,
+                frames,
+                cancel,
+                sink,
+                database,
+            )
+            .await?;
         }
         require_running(&database.lock(), id)?;
         persist_chapter_suggestions(&database.lock(), file_id, &source, version, duration)?;
@@ -432,15 +596,35 @@ async fn process<M: FrameModel>(
     Ok(())
 }
 
-async fn scan_signals(id: &str, file_id: i64, source: &Source, duration: f64, cancel: &Arc<AtomicBool>, database: &Arc<Mutex<Connection>>) -> Result<Vec<analysis::Signal>> {
+async fn scan_signals(
+    id: &str,
+    file_id: i64,
+    source: &Source,
+    duration: f64,
+    cancel: &Arc<AtomicBool>,
+    database: &Arc<Mutex<Connection>>,
+) -> Result<Vec<analysis::Signal>> {
     let mut signals = Vec::new();
     let mut previous: Option<Vec<u8>> = None;
     let mut start = 0.0;
     while start < duration {
         require_running(&database.lock(), id)?;
         let end = duration.min(start + SIGNAL_CHUNK_SECONDS);
-        let coverage = format!("visual-change:{file_id}:{}:signal-v1:{}", source.revision, analysis::millis(start));
-        upsert_coverage(&database.lock(), &coverage, file_id, start, end, "incomplete", &source.revision, analysis::SIGNAL_MODEL_VERSION)?;
+        let coverage = format!(
+            "visual-change:{file_id}:{}:signal-v1:{}",
+            source.revision,
+            analysis::millis(start)
+        );
+        upsert_coverage(
+            &database.lock(),
+            &coverage,
+            file_id,
+            start,
+            end,
+            "incomplete",
+            &source.revision,
+            analysis::SIGNAL_MODEL_VERSION,
+        )?;
         let (path, flag) = (source.path.clone(), cancel.clone());
         let chunk = match blocking(move || video_export::signal_frames(&path, start, end, &flag)).await {
             Ok(chunk) => chunk,
@@ -450,7 +634,16 @@ async fn scan_signals(id: &str, file_id: i64, source: &Source, duration: f64, ca
             Err(_) => break,
         };
         source.verify(&database.lock(), file_id)?;
-        upsert_coverage(&database.lock(), &coverage, file_id, start, end, "sampled", &source.revision, analysis::SIGNAL_MODEL_VERSION)?;
+        upsert_coverage(
+            &database.lock(),
+            &coverage,
+            file_id,
+            start,
+            end,
+            "sampled",
+            &source.revision,
+            analysis::SIGNAL_MODEL_VERSION,
+        )?;
         signals.extend(analysis::signals_from_frames(&chunk, previous.as_deref()));
         previous = chunk.last().map(|(_, pixels)| pixels.clone());
         start = end;
@@ -481,7 +674,11 @@ async fn analyze_moments<M: FrameModel>(
     let version = format!("timeline-moment-sequence-v1/{frame_version}");
     for (index, window) in windows.iter().enumerate() {
         require_running(&database.lock(), id)?;
-        let coverage = format!("moment-window:{file_id}:{}:{version}:{}", source.revision, analysis::millis(window.start));
+        let coverage = format!(
+            "moment-window:{file_id}:{}:{version}:{}",
+            source.revision,
+            analysis::millis(window.start)
+        );
         let processed: bool = database.lock().query_row(
             "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=?1 AND status='sampled' AND source_revision=?2 AND model_version=?3)",
             params![coverage, source.revision, version],
@@ -491,7 +688,16 @@ async fn analyze_moments<M: FrameModel>(
             {
                 let conn = database.lock();
                 source.verify(&conn, file_id)?;
-                upsert_coverage(&conn, &coverage, file_id, window.start, window.end, "incomplete", &source.revision, &version)?;
+                upsert_coverage(
+                    &conn,
+                    &coverage,
+                    file_id,
+                    window.start,
+                    window.end,
+                    "incomplete",
+                    &source.revision,
+                    &version,
+                )?;
             }
             // Requests past the last decodable frame resolve to that frame; the
             // distinct-index pass collapses such repeats before inference.
@@ -510,7 +716,9 @@ async fn analyze_moments<M: FrameModel>(
             }
             let kept: Vec<f64> = distinct.iter().map(|&i| times[i]).collect();
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-            let raw = model.sequence(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone()).await;
+            let raw = model
+                .sequence(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone())
+                .await;
             remove_all(&paths);
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
             let moments = analysis::parse_moments(&raw, kept.len())?;
@@ -529,7 +737,16 @@ async fn analyze_moments<M: FrameModel>(
                     upsert_chapter(&tx, chapter)?;
                 }
             }
-            upsert_coverage(&tx, &coverage, file_id, window.start, window.end, "sampled", &source.revision, &version)?;
+            upsert_coverage(
+                &tx,
+                &coverage,
+                file_id,
+                window.start,
+                window.end,
+                "sampled",
+                &source.revision,
+                &version,
+            )?;
             tx.commit()?;
         }
         let progress = (file_index as f64 + 0.7 * (index + 1) as f64 / windows.len() as f64) / total_files as f64;
@@ -545,12 +762,23 @@ fn remove_all(paths: &[PathBuf]) {
     }
 }
 
-fn persist_chapter_suggestions(conn: &Connection, file_id: i64, source: &Source, frame_version: &str, duration: f64) -> Result<()> {
+fn persist_chapter_suggestions(
+    conn: &Connection,
+    file_id: i64,
+    source: &Source,
+    frame_version: &str,
+    duration: f64,
+) -> Result<()> {
     let mut statement = conn.prepare(
         "SELECT start_seconds,text FROM catalog_passages WHERE file_id=?1 AND source_revision=?2 AND model_version=?3 AND stale=0 AND start_seconds IS NOT NULL AND confidence=0 ORDER BY start_seconds,id",
     )?;
     let captions = statement
-        .query_map(params![file_id, source.revision, frame_version], |r| Ok(analysis::Caption { seconds: r.get(0)?, text: r.get(1)? }))?
+        .query_map(params![file_id, source.revision, frame_version], |r| {
+            Ok(analysis::Caption {
+                seconds: r.get(0)?,
+                text: r.get(1)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let suggestions = analysis::chapter_suggestions(file_id, &source.revision, frame_version, duration, &captions);
     if suggestions.is_empty() {

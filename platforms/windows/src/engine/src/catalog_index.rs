@@ -193,22 +193,20 @@ impl CatalogIndex {
         let mut query_vector = crate::commands::catalog_search::vector(&tx, request)?;
         normalize(&mut query_vector);
         let latest = revision(&tx)?;
-        let cached = self
-            .state
-            .lock()
-            .cache
-            .clone()
-            .filter(|cache| cache.revision == latest);
+        let cached = self.state.lock().cache.clone().filter(|cache| cache.revision == latest);
         let Some(cache) = cached else {
             drop(tx);
             drop(retrieval_lease);
             self.prepare()?;
             response.status = if mode == "semantic" { "error" } else { "ok" }.into();
-            response.message = Some(if mode == "semantic" {
-                "Preparing the local visual search index. Similarity results are not available yet."
-            } else {
-                "Keyword results only. Preparing the local visual search index."
-            }.into());
+            response.message = Some(
+                if mode == "semantic" {
+                    "Preparing the local visual search index. Similarity results are not available yet."
+                } else {
+                    "Keyword results only. Preparing the local visual search index."
+                }
+                .into(),
+            );
             response.jobs = crate::commands::catalog::jobs(&conn)?;
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);
             return Ok(response);
@@ -226,8 +224,7 @@ impl CatalogIndex {
         } else {
             None
         };
-        let mut candidates =
-            Searcher::default().top_k(&cache.graph, &query_vector, (limit * 4 + 1).min(1000));
+        let mut candidates = Searcher::default().top_k(&cache.graph, &query_vector, (limit * 4 + 1).min(1000));
         candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
         let mut visual = Vec::new();
         let mut stmt = tx.prepare("SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,''),e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.id=?1 AND f.failed=0 AND e.model=?2")?;
@@ -252,9 +249,7 @@ impl CatalogIndex {
                 })
                 .optional()?;
             if let Some((hit, blob)) = found {
-                if clip_space::digest(&blob) == entry.fingerprint
-                    && clip_space::decode(&blob).is_some()
-                {
+                if clip_space::digest(&blob) == entry.fingerprint && clip_space::decode(&blob).is_some() {
                     visual.push(hit);
                 }
             }
@@ -286,25 +281,26 @@ impl CatalogIndex {
             let recipe = serde_json::json!({"model":clip_space::model_id()}).to_string();
             conn.execute("INSERT OR IGNORE INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,priority,created_at,updated_at) VALUES(?1,'catalogIndex','[]',?2,'queued',1,?3,?3)",params![id,recipe,now()])?;
             let current: String =
-                conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [&id], |row| {
-                    row.get(0)
-                })?;
-            ensure!(["queued", "completed"].contains(&current.as_str()), "Visual index preparation is stopped or failed. Resume its job; keyword search remains available.");
-            conn.execute("UPDATE catalog_jobs SET state='running',progress=0,error=NULL,updated_at=?1 WHERE id=?2",params![now(),id])?;
+                conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [&id], |row| row.get(0))?;
+            ensure!(
+                ["queued", "completed"].contains(&current.as_str()),
+                "Visual index preparation is stopped or failed. Resume its job; keyword search remains available."
+            );
+            conn.execute(
+                "UPDATE catalog_jobs SET state='running',progress=0,error=NULL,updated_at=?1 WHERE id=?2",
+                params![now(), id],
+            )?;
         }
         let cancel = Arc::new(AtomicBool::new(false));
         state.worker = Some(cancel.clone());
         let previous = state.cache.clone();
         let owner = self.clone();
-        let started = std::thread::Builder::new()
-            .name("catalog-index".into())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    owner.synchronize(previous, &cancel)
-                }))
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("Visual index worker interrupted")));
-                owner.finish(result, &cancel);
-            });
+        let started = std::thread::Builder::new().name("catalog-index".into()).spawn(move || {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| owner.synchronize(previous, &cancel)))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Visual index worker interrupted")));
+            owner.finish(result, &cancel);
+        });
         if let Err(error) = started {
             state.worker = None;
             self.changed.notify_all();
@@ -323,10 +319,7 @@ impl CatalogIndex {
                 state.cache = Some(Arc::new(cache));
                 ("completed", None)
             }
-            Ok(_) => (
-                "paused",
-                Some("Visual index preparation interrupted".to_owned()),
-            ),
+            Ok(_) => ("paused", Some("Visual index preparation interrupted".to_owned())),
             Err(error) => {
                 let message = error.to_string();
                 (
@@ -346,16 +339,20 @@ impl CatalogIndex {
         state.worker = None;
         self.changed.notify_all();
     }
-    fn checkpoint(
-        &self,
-        revision: &Revision,
-        processed: usize,
-        total: usize,
-        cancel: &AtomicBool,
-    ) -> Result<()> {
+    fn checkpoint(&self, revision: &Revision, processed: usize, total: usize, cancel: &AtomicBool) -> Result<()> {
         check(cancel)?;
-        let checkpoint = serde_json::json!({"model":clip_space::model_id(),"revision":revision,"processed":processed,"total":total}).to_string();
-        let changed = self.writer.lock().execute("UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",params![checkpoint,(processed as f64 / total.max(1) as f64).min(0.99),now(),Self::job_id()])?;
+        let checkpoint =
+            serde_json::json!({"model":clip_space::model_id(),"revision":revision,"processed":processed,"total":total})
+                .to_string();
+        let changed = self.writer.lock().execute(
+            "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
+            params![
+                checkpoint,
+                (processed as f64 / total.max(1) as f64).min(0.99),
+                now(),
+                Self::job_id()
+            ],
+        )?;
         ensure!(changed == 1, "Visual index job stopped");
         Ok(())
     }
@@ -364,7 +361,11 @@ impl CatalogIndex {
         let conn = db::open_read(&self.database)?;
         let tx = conn.unchecked_transaction()?;
         let latest = revision(&tx)?;
-        let count: usize = tx.query_row("SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0", [clip_space::model_id()], |row| row.get(0))?;
+        let count: usize = tx.query_row(
+            "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0",
+            [clip_space::model_id()],
+            |row| row.get(0),
+        )?;
         ensure!(count <= MAX_FILES, "Visual index capacity exceeded");
         let mut candidate = if previous.is_none() {
             self.cache_candidate(&tx, &latest).ok()
@@ -454,7 +455,11 @@ impl CatalogIndex {
     }
     fn rebuild(&self, conn: &Connection, latest: Revision, cancel: &AtomicBool) -> Result<Cache> {
         let mut stmt = conn.prepare("SELECT e.file_id,e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0 ORDER BY e.file_id")?;
-        let total: usize = conn.query_row("SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0", [clip_space::model_id()], |row| row.get(0))?;
+        let total: usize = conn.query_row(
+            "SELECT COUNT(*) FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.model=?1 AND f.failed=0",
+            [clip_space::model_id()],
+            |row| row.get(0),
+        )?;
         let mut processed = 0;
         let mut rows = stmt.query([clip_space::model_id()])?;
         let mut points = Vec::new();
@@ -514,8 +519,8 @@ impl CatalogIndex {
             graph_hash: hash,
         };
         atomic_write(&self.manifest_path(), &serde_json::to_vec(&manifest)?)?;
-        if let Some(old) = old_manifest
-            .filter(|old| valid_digest(&old.graph_hash) && old.graph_hash != manifest.graph_hash)
+        if let Some(old) =
+            old_manifest.filter(|old| valid_digest(&old.graph_hash) && old.graph_hash != manifest.graph_hash)
         {
             let old_path = self.directory.join(format!("{}.graph", old.graph_hash));
             crate::util::read_only::require_writable(&old_path)?;
@@ -528,8 +533,7 @@ impl CatalogIndex {
         Ok(())
     }
     fn cache_candidate(&self, conn: &Connection, latest: &Revision) -> Result<(Manifest, u64)> {
-        let manifest: Manifest =
-            serde_json::from_slice(&bounded_read(&self.manifest_path(), 65536)?)?;
+        let manifest: Manifest = serde_json::from_slice(&bounded_read(&self.manifest_path(), 65536)?)?;
         ensure!(
             manifest.model == clip_space::model_id()
                 && manifest.dimension == clip_space::DIMENSION
@@ -537,10 +541,7 @@ impl CatalogIndex {
                 && valid_digest(&manifest.graph_hash),
             "Incompatible visual index snapshot"
         );
-        let metadata = std::fs::metadata(
-            self.directory
-                .join(format!("{}.graph", manifest.graph_hash)),
-        )?;
+        let metadata = std::fs::metadata(self.directory.join(format!("{}.graph", manifest.graph_hash)))?;
         ensure!(
             metadata.is_file() && metadata.len() > 0 && metadata.len() <= MAX_GRAPH_BYTES,
             "Invalid or oversized visual index cache"
@@ -553,9 +554,7 @@ impl CatalogIndex {
     }
     fn load_graph(&self, manifest: Manifest) -> Result<Cache> {
         let graph = bounded_read(
-            &self
-                .directory
-                .join(format!("{}.graph", manifest.graph_hash)),
+            &self.directory.join(format!("{}.graph", manifest.graph_hash)),
             MAX_GRAPH_BYTES,
         )?;
         ensure!(
@@ -575,10 +574,7 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 fn check(cancel: &AtomicBool) -> Result<()> {
-    ensure!(
-        !cancel.load(Ordering::Relaxed),
-        "Visual index preparation cancelled"
-    );
+    ensure!(!cancel.load(Ordering::Relaxed), "Visual index preparation cancelled");
     Ok(())
 }
 fn revision(conn: &Connection) -> Result<Revision> {
@@ -611,15 +607,15 @@ fn can_advance(conn: &Connection, old: &Revision, latest: &Revision) -> Result<b
         )
         .optional()?
     };
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1 AND generation<=?2",params![old.generation,latest.generation],|row|row.get(0))?;
-    Ok(checkpoint.as_deref() == Some(old.nonce.as_str())
-        && count == latest.generation - old.generation)
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1 AND generation<=?2",
+        params![old.generation, latest.generation],
+        |row| row.get(0),
+    )?;
+    Ok(checkpoint.as_deref() == Some(old.nonce.as_str()) && count == latest.generation - old.generation)
 }
 fn valid_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
@@ -632,10 +628,7 @@ fn bounded_read(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     std::io::Read::by_ref(&mut file)
         .take(maximum + 1)
         .read_to_end(&mut data)?;
-    ensure!(
-        data.len() as u64 <= maximum,
-        "Visual index cache exceeds safe size"
-    );
+    ensure!(data.len() as u64 <= maximum, "Visual index cache exceeds safe size");
     Ok(data)
 }
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -665,9 +658,7 @@ fn validate_graph(bytes: &[u8]) -> Result<()> {
     let entries = array(&value["values"])?;
     let count = points.len();
     ensure!(
-        count <= MAX_FILES
-            && entries.len() == count
-            && value["hnsw"]["ef_search"].as_u64() == Some(1000),
+        count <= MAX_FILES && entries.len() == count && value["hnsw"]["ef_search"].as_u64() == Some(1000),
         "Invalid visual graph capacity"
     );
     let mut ids = std::collections::HashSet::new();
@@ -684,10 +675,7 @@ fn validate_graph(bytes: &[u8]) -> Result<()> {
     ensure!(zero.len() == count, "Invalid graph node count");
     let layers = array(&value["hnsw"]["layers"])?;
     ensure!(layers.len() <= 32, "Invalid graph layer count");
-    ensure!(
-        layers.iter().all(serde_json::Value::is_array),
-        "Malformed graph layer"
-    );
+    ensure!(layers.iter().all(serde_json::Value::is_array), "Malformed graph layer");
     let mut capacity = count;
     for (nodes, width) in std::iter::once((zero, 64)).chain(
         layers
@@ -703,9 +691,7 @@ fn validate_graph(bytes: &[u8]) -> Result<()> {
             let edges = array(node)?;
             ensure!(edges.len() == width, "Invalid graph edge count");
             for edge in edges {
-                let id = edge
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid graph neighbor"))?;
+                let id = edge.as_u64().ok_or_else(|| anyhow::anyhow!("Invalid graph neighbor"))?;
                 ensure!(
                     id == u64::from(u32::MAX) || id < nodes.len() as u64,
                     "Graph neighbor out of bounds"
@@ -717,16 +703,10 @@ fn validate_graph(bytes: &[u8]) -> Result<()> {
 }
 
 fn array(value: &serde_json::Value) -> Result<&Vec<serde_json::Value>> {
-    value
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Malformed graph array"))
+    value.as_array().ok_or_else(|| anyhow::anyhow!("Malformed graph array"))
 }
 fn normalize(vector: &mut [f32]) {
-    let norm = vector
-        .iter()
-        .map(|v| f64::from(*v).powi(2))
-        .sum::<f64>()
-        .sqrt() as f32;
+    let norm = vector.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>().sqrt() as f32;
     for value in vector {
         *value /= norm;
     }

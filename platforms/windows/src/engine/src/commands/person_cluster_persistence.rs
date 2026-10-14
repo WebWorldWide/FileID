@@ -4,14 +4,10 @@ use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 fn different_pairs(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(i64, i64)>> {
-    let resolve = |legacy: Option<i64>,
-                   file: Option<i64>,
-                   bbox: Option<String>|
-     -> anyhow::Result<Option<i64>> {
+    let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> anyhow::Result<Option<i64>> {
         if let (Some(file), Some(bbox)) = (file, bbox) {
-            let mut query = conn.prepare(
-                "SELECT id FROM face_prints WHERE file_id=?1 AND bbox=?2 ORDER BY id LIMIT 2",
-            )?;
+            let mut query =
+                conn.prepare("SELECT id FROM face_prints WHERE file_id=?1 AND bbox=?2 ORDER BY id LIMIT 2")?;
             let ids = query
                 .query_map(rusqlite::params![file, bbox], |r| r.get::<_, i64>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -31,17 +27,15 @@ fn different_pairs(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(i64, i64)
             .optional()?)
     };
     let mut pairs = Vec::new();
-    let mut stmt = conn.prepare("SELECT face_a,face_b,file_a,bbox_a,file_b,bbox_b FROM face_verifications WHERE same_person=0")?;
+    let mut stmt =
+        conn.prepare("SELECT face_a,face_b,file_a,bbox_a,file_b,bbox_b FROM face_verifications WHERE same_person=0")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         if let (Some(a), Some(b)) = (
             resolve(row.get(0)?, row.get(2)?, row.get(3)?)?,
             resolve(row.get(1)?, row.get(4)?, row.get(5)?)?,
         ) {
-            anyhow::ensure!(
-                a != b,
-                "Contradictory face correction; existing People were preserved."
-            );
+            anyhow::ensure!(a != b, "Contradictory face correction; existing People were preserved.");
             pairs.push((a, b));
         }
     }
@@ -79,9 +73,7 @@ pub(super) fn persist(
     }
     let mut owner = HashMap::new();
     {
-        let mut stmt = tx.prepare(
-            "SELECT id,person_id FROM face_prints WHERE person_id IS NOT NULL ORDER BY id",
-        )?;
+        let mut stmt = tx.prepare("SELECT id,person_id FROM face_prints WHERE person_id IS NOT NULL ORDER BY id")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let (face, person) = (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?);
@@ -100,10 +92,7 @@ pub(super) fn persist(
             first_by_file.insert(face.file_id, face.face_id);
         }
     }
-    let cluster_of: HashMap<_, _> = assignments
-        .iter()
-        .map(|a| (a.face_id, a.cluster_id))
-        .collect();
+    let cluster_of: HashMap<_, _> = assignments.iter().map(|a| (a.face_id, a.cluster_id)).collect();
     let mut blocked = HashSet::new();
     for &(a, b) in &different {
         if let (Some(&a), Some(&b)) = (cluster_of.get(&a), cluster_of.get(&b)) {
@@ -191,12 +180,8 @@ pub(super) fn persist(
     for (person, (index, _)) in claims {
         fixed[index] = Some(person);
     }
-    let ids = stable_person_assignments::resolve(
-        &priors.into_values().collect::<Vec<_>>(),
-        &clusters,
-        &fixed,
-        &preserved,
-    )?;
+    let ids =
+        stable_person_assignments::resolve(&priors.into_values().collect::<Vec<_>>(), &clusters, &fixed, &preserved)?;
     let existing: usize = tx.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))?;
     anyhow::ensure!(
         existing + ids.iter().filter(|id| id.is_none()).count() <= 8000,
@@ -235,7 +220,10 @@ pub(super) fn persist(
             rusqlite::params![person, serde_json::to_string(&c.face_ids)?],
         )?;
     }
-    tx.execute("UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=persons.id)",[])?;
+    tx.execute(
+        "UPDATE persons SET file_count=(SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id=persons.id)",
+        [],
+    )?;
     tx.execute("UPDATE persons SET representative_face_id=(SELECT id FROM face_prints WHERE person_id=persons.id AND COALESCE(excluded,0)=0 ORDER BY COALESCE(face_quality,0) DESC,id LIMIT 1) WHERE representative_face_id IS NULL OR NOT EXISTS(SELECT 1 FROM face_prints WHERE id=persons.representative_face_id AND person_id=persons.id AND COALESCE(excluded,0)=0)",[])?;
     Ok(tx.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0))?)
 }
@@ -255,9 +243,7 @@ mod tests {
         }
     }
     fn fixture() -> anyhow::Result<(FixtureRoot, rusqlite::Connection, Vec<FaceRow>)> {
-        let root = FixtureRoot(
-            std::env::temp_dir().join(format!("fileid-stable-{}", uuid::Uuid::new_v4())),
-        );
+        let root = FixtureRoot(std::env::temp_dir().join(format!("fileid-stable-{}", uuid::Uuid::new_v4())));
         let conn = crate::db::open_writer(&root.path().join("catalog.sqlite"))?;
         conn.execute_batch("INSERT INTO persons(id,first_name,is_unknown,created_at) VALUES(7,'Alex',0,123),(8,NULL,1,123),(9,'Offline',0,123); CREATE TABLE fixture_refs(person_id INTEGER REFERENCES persons(id)); INSERT INTO fixture_refs VALUES(7),(8),(9);")?;
         let mut faces = Vec::new();
@@ -306,11 +292,10 @@ mod tests {
         assert_eq!(run(&conn, &faces)?, 4);
         assert_eq!(run(&conn, &faces)?, 4);
         assert_eq!(
-            conn.query_row(
-                "SELECT first_name,created_at FROM persons WHERE id=7",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
-            )?,
+            conn.query_row("SELECT first_name,created_at FROM persons WHERE id=7", [], |r| Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?
+            )))?,
             ("Alex".into(), 123.0)
         );
         assert_eq!(
@@ -318,10 +303,16 @@ mod tests {
                 .get::<_, i64>(0))?,
             8
         );
-        assert_eq!(conn.query_row("SELECT COUNT(*) FROM fixture_refs JOIN persons ON persons.id=fixture_refs.person_id",[],|r|r.get::<_,i64>(0))?,3);
         assert_eq!(
-            conn.query_row("SELECT file_count FROM persons WHERE id=7", [], |r| r
-                .get::<_, i64>(0))?,
+            conn.query_row(
+                "SELECT COUNT(*) FROM fixture_refs JOIN persons ON persons.id=fixture_refs.person_id",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            3
+        );
+        assert_eq!(
+            conn.query_row("SELECT file_count FROM persons WHERE id=7", [], |r| r.get::<_, i64>(0))?,
             2
         );
         Ok(())
@@ -329,22 +320,18 @@ mod tests {
     #[test]
     fn failure_rolls_back_assignments_and_analysis() -> anyhow::Result<()> {
         let (_root, conn, faces) = fixture()?;
-        conn.execute_batch("CREATE TRIGGER fixture_fail BEFORE INSERT ON persons BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")?;
+        conn.execute_batch(
+            "CREATE TRIGGER fixture_fail BEFORE INSERT ON persons BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
+        )?;
         assert!(run(&conn, &faces).is_err());
         assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM face_prints WHERE person_id=7",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?,
+            conn.query_row("SELECT COUNT(*) FROM face_prints WHERE person_id=7", [], |r| r
+                .get::<_, i64>(0))?,
             2
         );
         assert_eq!(
-            conn.query_row(
-                "SELECT COUNT(*) FROM persons WHERE centroid IS NOT NULL",
-                [],
-                |r| r.get::<_, i64>(0)
-            )?,
+            conn.query_row("SELECT COUNT(*) FROM persons WHERE centroid IS NOT NULL", [], |r| r
+                .get::<_, i64>(0))?,
             0
         );
         assert_eq!(

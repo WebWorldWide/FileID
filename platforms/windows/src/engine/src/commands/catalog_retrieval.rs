@@ -21,12 +21,11 @@ pub(super) fn search(
     events: &[String],
     time: Option<f64>,
 ) -> Result<Vec<CatalogHit>> {
-    if !kinds.iter().all(|kind| {
-        ["image", "video", "pdf", "doc", "audio", "other", "model"].contains(&kind.as_str())
-    }) || people.iter().any(|id| *id <= 0)
-        || events
-            .iter()
-            .any(|id| id.is_empty() || id.chars().count() > 200)
+    if !kinds
+        .iter()
+        .all(|kind| ["image", "video", "pdf", "doc", "audio", "other", "model"].contains(&kind.as_str()))
+        || people.iter().any(|id| *id <= 0)
+        || events.iter().any(|id| id.is_empty() || id.chars().count() > 200)
         || time.is_some_and(|value| !value.is_finite() || value < 0.0)
     {
         bail!("Invalid catalog filters")
@@ -52,12 +51,7 @@ pub(super) fn search(
         .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" ");
-    if quoted.is_empty()
-        && kinds.is_none()
-        && people.is_none()
-        && events.is_none()
-        && time.is_none()
-    {
+    if quoted.is_empty() && kinds.is_none() && people.is_none() && events.is_none() && time.is_none() {
         return Ok(vec![]);
     }
     let filters = "f.failed=0 AND (?2 IS NULL OR f.kind IN (SELECT value FROM json_each(?2))) AND (?3 IS NULL OR f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?3)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?3)) AND stale=0)) AND (?4 IS NULL OR f.id IN (SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?4))))";
@@ -150,7 +144,11 @@ mod tests {
         for id in 1..=150 {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,100,0,'video','mov','Birthday gifts')",params![id,format!("/fixture/{id}.mov")]).unwrap();
         }
-        conn.execute("INSERT INTO persons(id,name,created_at,is_unknown) VALUES(1,'Alice',0,0),(2,'Unknown',0,1)",[]).unwrap();
+        conn.execute(
+            "INSERT INTO persons(id,name,created_at,is_unknown) VALUES(1,'Alice',0,0),(2,'Unknown',0,1)",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO catalog_events(id,title,user_edited) VALUES('event','Family Birthday',1),('automatic','Guessed',0)",[]).unwrap();
         conn.execute(
             "INSERT INTO catalog_event_files(event_id,file_id) VALUES('event',1)",
@@ -189,22 +187,12 @@ mod tests {
         }
         conn.execute("UPDATE catalog_passages SET stale=1 WHERE file_id=1", [])
             .unwrap();
-        assert_eq!(
-            search(&conn, "Birthday", &[], &[1], &[], Some(123.0))
-                .unwrap()
-                .len(),
-            1
-        );
-        conn.execute("UPDATE files SET failed=1 WHERE id=1", [])
-            .unwrap();
-        assert!(search(&conn, "Birthday", &[], &[1], &[], None)
-            .unwrap()
-            .is_empty());
+        assert_eq!(search(&conn, "Birthday", &[], &[1], &[], Some(123.0)).unwrap().len(), 1);
+        conn.execute("UPDATE files SET failed=1 WHERE id=1", []).unwrap();
+        assert!(search(&conn, "Birthday", &[], &[1], &[], None).unwrap().is_empty());
         assert!(search(&conn, "", &["video".into()], &[1], &[], None)
             .unwrap()
             .is_empty());
-        assert!(search(&conn, "", &[], &[1], &[], Some(123.0))
-            .unwrap()
-            .is_empty());
+        assert!(search(&conn, "", &[], &[1], &[], Some(123.0)).unwrap().is_empty());
     }
 }
