@@ -33,7 +33,7 @@ pub mod registry;
 pub mod runtime;
 pub mod scene_vocab;
 pub mod face_align;
-pub mod scrfd;
+pub mod face_geometry;
 pub mod sface;
 pub mod variants;
 pub mod yunet;

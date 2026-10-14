@@ -1,58 +1,37 @@
 // Windows shell + system integrations. Each Win32 submodule is a thin
 // RAII wrapper over a Win32 / WinRT API:
 //
-//   reveal     → SHOpenFolderAndSelectItems
 //   trash      → IFileOperation::DeleteItem (8-parallel from Cleanup tab)
-//   thumbnail  → IThumbnailProvider
 //   ocr        → Windows.Media.Ocr (WinRT)
 //   tags       → IPropertyStore System.Keywords
 //   video      → Media Foundation IMFSourceReader
+//   heic       → WIC HEIF decode
 //
 // Sleep-prevention (SetThreadExecutionState) lives in `crate::platform`
 // because it's cross-cutting, not shell-specific.
 //
-// On non-Windows targets thumbnail rendering supports image-rs formats.
-// The remaining shell integrations return errors until native Linux
-// implementations are available.
+// On other platforms trash goes through the freedesktop trash spec and
+// thumbnails through image-rs; the remaining integrations return errors.
 
-#[cfg(windows)] pub mod reveal;
 #[cfg(windows)] pub mod tags;
-#[cfg(windows)] pub mod thumbnail;
 #[cfg(windows)] pub mod trash;
 #[cfg(windows)] pub mod ocr;
 #[cfg(windows)] pub mod video;
 #[cfg(windows)] pub mod heic;
 
 #[cfg(not(windows))]
-pub mod reveal {
-    use anyhow::Result;
-    use std::path::Path;
-    #[allow(dead_code)]
-    pub fn reveal(_path: &Path) -> Result<()> {
-        anyhow::bail!("shell::reveal::reveal not implemented on this platform")
-    }
-}
-
-#[cfg(not(windows))]
 pub mod tags {
     use anyhow::Result;
     use std::path::Path;
-    #[allow(dead_code)]
-    pub fn write_tags(_path: &Path, _tags: &[String]) -> Result<()> {
-        anyhow::bail!("shell::tags::write_tags not implemented on this platform")
-    }
     pub fn write_tags_full(_path: &Path, _tags: &[String]) -> Result<bool> {
         anyhow::bail!("shell::tags::write_tags_full not implemented on this platform")
-    }
-    #[allow(dead_code)]
-    pub fn read_tags(_path: &Path) -> Result<Vec<String>> {
-        Ok(Vec::new())
     }
     pub fn move_sidecar(_old: &Path, _new: &Path) {}
 }
 
+/// Image-rs thumbnails for the Linux app; the WinUI app renders its own.
 #[cfg(not(windows))]
-#[allow(dead_code)]
+#[allow(dead_code)] // GTK app consumer
 pub mod thumbnail {
     use anyhow::{Context, Result};
     use std::path::Path;
@@ -121,17 +100,7 @@ pub mod trash;
 #[cfg(not(windows))]
 pub mod ocr {
     use anyhow::Result;
-    #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    pub struct OcrLine { pub text: String }
-    #[allow(dead_code)]
-    pub struct OcrResult {
-        pub text: String,
-        pub lines: Vec<OcrLine>,
-        pub locale: Option<String>,
-    }
-    #[allow(dead_code)]
-    pub fn recognize(_rgba: &[u8], _width: u32, _height: u32) -> Result<OcrResult> {
+    pub fn recognize(_rgb: &[u8], _width: u32, _height: u32) -> Result<String> {
         anyhow::bail!("shell::ocr::recognize not implemented on this platform")
     }
 }
@@ -141,13 +110,12 @@ pub mod video {
     use anyhow::Result;
     use std::path::Path;
     #[derive(Debug, Clone)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // fields are read only on Windows
     pub struct VideoFrame {
         pub width: u32,
         pub height: u32,
         /// Tightly packed RGB8.
         pub rgb: Vec<u8>,
-        pub time_seconds: f64,
     }
     pub fn keyframe_25pct(_path: &Path) -> Result<VideoFrame> {
         anyhow::bail!("shell::video::keyframe_25pct not implemented on this platform")

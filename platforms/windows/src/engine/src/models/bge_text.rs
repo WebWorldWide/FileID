@@ -1,9 +1,9 @@
 // BGE-small-en-v1.5 text embedding wrapper. Maps a string to a 384-d
 // L2-normalized float32 embedding via the BERT-family WordPiece tokenizer
-// (`util::wordpiece_tokenizer`) + ONNX inference. Used for semantic search
-// over document text (Phase 4b) — different vector space from MobileCLIP
-// (which is image-only), so the dbwriter persists these into a parallel
-// `text_embeddings` table keyed by model.
+// (`models::wordpiece_tokenizer`) + ONNX inference. Used for semantic search
+// over document text. It is a different vector space from CLIP, so the
+// dbwriter persists these into a parallel `text_embeddings` table keyed by
+// model.
 //
 // Input names are read from the session so a re-export with different
 // names still binds; token_type_ids is passed only when the session

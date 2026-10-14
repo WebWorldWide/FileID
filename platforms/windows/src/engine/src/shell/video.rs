@@ -74,13 +74,11 @@ fn ensure_mf_started() {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     /// Tightly packed RGB8.
     pub rgb: Vec<u8>,
-    pub time_seconds: f64,
 }
 
 /// Extract a frame at 25% of duration. Returns the frame as RGB8.
@@ -156,7 +154,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         for _ in 0..32 {
             let mut stream_index = 0u32;
             let mut flags = 0u32;
-            let mut timestamp = 0i64;
             let mut sample = None;
             reader
                 .ReadSample(
@@ -164,7 +161,7 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                     0,
                     Some(&mut stream_index),
                     Some(&mut flags),
-                    Some(&mut timestamp),
+                    None,
                     Some(&mut sample),
                 )
                 .context("ReadSample")?;
@@ -246,7 +243,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                 width: w,
                 height: h,
                 rgb,
-                time_seconds: (timestamp as f64) / 10_000_000.0,
             });
         }
 

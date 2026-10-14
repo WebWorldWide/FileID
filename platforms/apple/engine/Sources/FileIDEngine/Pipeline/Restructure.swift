@@ -816,8 +816,6 @@ public enum Restructure {
     struct ClassifiedFolder: Sendable {
         let sourceFolder: String
         let classification: FolderClassification
-        let moveCount: Int
-        let dominantCategory: String
     }
 
     private static let genericFolderNames: Set<String> = [
@@ -844,11 +842,7 @@ public enum Restructure {
             var hist: [String: Int] = [:]
             for m in items { hist[m.bucket, default: 0] += 1 }
             let total = items.count
-            let dominant = hist.max { a, b in
-                a.value != b.value ? a.value < b.value : a.key > b.key
-            }
-            let dominantCategory = dominant?.key ?? ""
-            let top = dominant?.value ?? 0
+            let top = hist.values.max() ?? 0
             let homogeneity = total > 0 ? Float(top) / Float(total) : 0
 
             let name = (folder as NSString).lastPathComponent.lowercased()
@@ -861,9 +855,7 @@ public enum Restructure {
             } else {
                 classification = .mixed
             }
-            out.append(ClassifiedFolder(
-                sourceFolder: folder, classification: classification,
-                moveCount: total, dominantCategory: dominantCategory))
+            out.append(ClassifiedFolder(sourceFolder: folder, classification: classification))
         }
         return out
     }

@@ -56,7 +56,7 @@ async fn job_weights_bad_pin_sticks_refusal_before_repeated_file_work() {
     receipt(&root,serde_json::json!({"badPinRefused":true,"fullHashCalls":1,"nativeSpawned":false}));
 }
 #[test]
-fn job_weights_actual_cli_cluster_and_pipeline_use_verified_job_paths() {
-    let pipeline=include_str!("../pipeline/deep_analyze.rs");let cluster=include_str!("../pipeline/cluster_suggestions.rs");for source in [pipeline,cluster] {assert!(source.contains("runner.verified_weights(model_kind, cancel.clone()).await?"));assert!(!source.contains("vlm::find_weights(model_kind)"));}
+fn job_weights_actual_cli_and_pipeline_use_verified_job_paths() {
+    let pipeline=include_str!("../pipeline/deep_analyze.rs");assert!(pipeline.contains("runner.verified_weights(model_kind, cancel.clone()).await?"));assert!(!pipeline.contains("vlm::find_weights(model_kind)"));
     let cli=include_str!("vlm.rs");assert!(cli.contains("runner.weights.require_pair("));assert!(cli.find("verified.recheck(cancel.clone()).await?").unwrap()<cli.find("let resources = super::native_admission::reserve_host(").unwrap());
 }

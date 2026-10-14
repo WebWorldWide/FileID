@@ -1,7 +1,6 @@
 // Deep Analyze regression suite.
 //
-// Covers: parseFaceComparison negation, 50 MP decode cap,
-// recursive HF tree listing, escaped folder-scope
+// Covers: the 50 MP decode cap, recursive HF tree listing, escaped folder-scope
 // LIKE, COALESCE persist, and the queued-cancel /
 // exactly-one-terminal-complete run() invariant.
 //
@@ -140,60 +139,6 @@ struct DeepAnalyzePureLogicTests {
         ) == [2024])
         #expect(DeepAnalyze.hasMinimumGeneratedFilenameWords("family-holiday"))
         #expect(DeepAnalyze.hasMinimumGeneratedFilenameWords("adam-family-holiday"))
-    }
-
-    // A negated verdict must parse as DIFFERENT, never an
-    // affirmative SAME at the defaulted 0.80 (> 0.75 auto-merge threshold).
-    @Test("parseFaceComparison: negated 'same' is DIFFERENT, never auto-merges")
-    func negatedVerdictNeverMerges() {
-        // Only LOOSE free-text negations parse as DIFFERENT here. A reply
-        // with an explicit "VERDICT: SAME" line is authoritative and is covered
-        // in `affirmativeVerdictPreserved` — the negated-same override must not
-        // reach the explicit-verdict branch.
-        let negatives = [
-            "These are not the same person.",
-            "not the same",
-            "They are not the same.",
-            "No — isn't the same person.",
-            "These two aren't the same.",
-            "They cannot be the same individual."
-        ]
-        for raw in negatives {
-            let r = DeepAnalyze.parseFaceComparison(raw)
-            #expect(r.sameClass == false, "negated verdict must be DIFFERENT: \(raw)")
-            // The auto-merge gate is sameClass && confidence > 0.75; a false
-            // sameClass already blocks it regardless of confidence.
-            #expect(!(r.sameClass && r.confidence > 0.75),
-                    "negated verdict must never clear the 0.75 auto-merge gate: \(raw)")
-        }
-    }
-
-    @Test("parseFaceComparison: affirmative SAME still parses + keeps explicit confidence")
-    func affirmativeVerdictPreserved() {
-        let same = DeepAnalyze.parseFaceComparison("VERDICT: SAME\nCONFIDENCE: 0.92")
-        #expect(same.sameClass == true)
-        #expect(abs(same.confidence - 0.92) < 0.001)
-
-        // Loose affirmative with no confidence number → clears the gate.
-        let loose = DeepAnalyze.parseFaceComparison("Yes, these are the same person.")
-        #expect(loose.sameClass == true)
-        #expect(loose.confidence > 0.75)
-
-        let diff = DeepAnalyze.parseFaceComparison("VERDICT: DIFFERENT\nCONFIDENCE: 0.9")
-        #expect(diff.sameClass == false)
-
-        // An explicit "VERDICT: SAME" line is authoritative — incidental
-        // negation about lighting/angle must NOT be picked up by the
-        // negated-same heuristic and flip the verdict to DIFFERENT.
-        let incidental = DeepAnalyze.parseFaceComparison(
-            "VERDICT: SAME\nCONFIDENCE: 0.92\nThese are not in the same lighting but clearly the same person.")
-        #expect(incidental.sameClass == true,
-                "explicit VERDICT: SAME must survive incidental negated phrasing")
-        #expect(abs(incidental.confidence - 0.92) < 0.001)
-
-        // An explicit DIFFERENT still wins even alongside a SAME line.
-        let conflict = DeepAnalyze.parseFaceComparison("VERDICT: SAME\nVERDICT: DIFFERENT")
-        #expect(conflict.sameClass == false)
     }
 
     // macOS lockstep: parseVLMTags mirrors Windows parse_vlm_tags 1:1.

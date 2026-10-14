@@ -5,7 +5,7 @@
 // `PKEY_Keywords` (System.Keywords). Explorer's Details column reads
 // from there, the search index picks it up, etc.
 //
-// Two-tier strategy (both written on every `write_tags` call):
+// Two-tier strategy (both written on every `write_tags_full` call):
 //   1. Sidecar (`.fileid-tags.json` next to the file): always works,
 //      every file type, no Win32 interop, no schema risk on weird
 //      property handlers (Office / RAW / .HEIC etc.).
@@ -21,11 +21,6 @@
 // convention Windows Explorer / search index use when a user types
 // multiple keywords into the Details pane. Tools that read PKEY_Keywords
 // expect either shape; ours roundtrips cleanly.
-//
-// `read_tags` merges both tiers (deduped case-insensitively, sidecar
-// wins on case) so the user sees a consistent tag set regardless of
-// which writer landed first or whether Explorer / Photos has added
-// keywords out-of-band.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -45,28 +40,10 @@ fn sidecar_path(file: &Path) -> PathBuf {
     parent.join(format!(".{stem}.fileid-tags.json"))
 }
 
-/// Replace the file's tag list. Writes both tiers: the sidecar (always)
-/// and IPropertyStore PKEY_Keywords (best-effort — silently skipped if
-/// the file type has no registered property handler). Empty `tags`
-/// clears both: VT_EMPTY into PKEY_Keywords + sidecar removal.
-#[allow(dead_code)]
-pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
-    write_sidecar(path, tags)?;
-    // IPropertyStore write is best-effort. Many extensions (.swift,
-    // .md, source files, archives) don't have a property handler at
-    // all; SHGetPropertyStoreFromParsingName errors with E_FAIL /
-    // REGDB_E_CLASSNOTREG / similar. We log nothing and fall through
-    // so the sidecar carries the tags alone.
-    #[cfg(target_os = "windows")]
-    {
-        let _ = windows_ipropertystore::write_keywords(path, tags);
-    }
-    Ok(())
-}
-
-/// Like `write_tags` but also reports whether the IPropertyStore tier landed.
-/// The sidecar write is still mandatory (returns Err on failure). The bool
-/// indicates `true` when PKEY_Keywords was written to Explorer's property
+/// Replace the file's tag list in both tiers. Empty `tags` clears both. The
+/// sidecar write is mandatory (returns Err on failure); the IPropertyStore
+/// write is best-effort, since many file types have no property handler. The
+/// bool is `true` when PKEY_Keywords was written to Explorer's property
 /// store (i.e. the file type has a registered handler), `false` when it
 /// silently fell back to sidecar-only.
 pub fn write_tags_full(path: &Path, tags: &[String]) -> Result<bool> {
@@ -116,15 +93,10 @@ pub fn move_sidecar(old: &Path, new: &Path) {
     let _ = std::fs::rename(&from, sidecar_path(new));
 }
 
-/// Read the file's tag list. Merges the IPropertyStore PKEY_Keywords
-/// (on Windows) with the sidecar JSON, deduped case-insensitively. The
-/// sidecar's casing wins when both tiers carry the same tag spelled
-/// differently — sidecar is the FileID-authored canonical source.
-///
-/// Currently exposed for IPC handlers that need to surface the merged
-/// view (search / Library card chip); no in-tree caller wires it yet.
-#[allow(dead_code)]
-pub fn read_tags(path: &Path) -> Result<Vec<String>> {
+/// Read back both tiers, deduped case-insensitively with the sidecar's casing
+/// winning. Verifies the write path in tests.
+#[cfg(test)]
+fn read_tags(path: &Path) -> Result<Vec<String>> {
     let sidecar_tags = read_sidecar(path)?;
     #[cfg(target_os = "windows")]
     let store_tags: Vec<String> = windows_ipropertystore::read_keywords(path).unwrap_or_default();
@@ -142,7 +114,7 @@ pub fn read_tags(path: &Path) -> Result<Vec<String>> {
     Ok(out)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn read_sidecar(path: &Path) -> Result<Vec<String>> {
     let sidecar = sidecar_path(path);
     if !sidecar.exists() {
@@ -170,9 +142,11 @@ mod windows_ipropertystore {
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::PropertiesSystem::{
-        IPropertyStore, SHGetPropertyStoreFromParsingName, GETPROPERTYSTOREFLAGS, GPS_DEFAULT,
-        GPS_READWRITE, PROPERTYKEY,
+        IPropertyStore, SHGetPropertyStoreFromParsingName, GETPROPERTYSTOREFLAGS, GPS_READWRITE,
+        PROPERTYKEY,
     };
+    #[cfg(test)]
+    use windows::Win32::UI::Shell::PropertiesSystem::GPS_DEFAULT;
 
     /// PKEY_Keywords (System.Keywords): {F29F85E0-4FF9-1068-AB91-08002B27B3D9} pid 5.
     const PKEY_KEYWORDS: PROPERTYKEY = PROPERTYKEY {
@@ -234,7 +208,7 @@ mod windows_ipropertystore {
         })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn read_keywords(path: &Path) -> Result<Vec<String>> {
         with_com(|| unsafe {
             let store = open_store(path, GPS_DEFAULT)?;
@@ -277,7 +251,7 @@ mod tests {
     #[test]
     fn write_then_read_round_trip() {
         let f = temp_file_with_name("rt.txt");
-        write_tags(&f, &["holiday".into(), "2024".into()]).unwrap();
+        write_tags_full(&f, &["holiday".into(), "2024".into()]).unwrap();
         let read = read_tags(&f).unwrap();
         // .txt may or may not roundtrip through IPropertyStore depending
         // on the system property handler, but sidecar must always
@@ -286,15 +260,15 @@ mod tests {
         assert!(read.contains(&"2024".to_string()));
         // Cleanup.
         let _ = std::fs::remove_file(sidecar_path(&f));
-        let _ = write_tags(&f, &[]);
+        let _ = write_tags_full(&f, &[]);
     }
 
     #[test]
     fn write_empty_clears_existing_sidecar() {
         let f = temp_file_with_name("clear.txt");
-        write_tags(&f, &["x".into()]).unwrap();
+        write_tags_full(&f, &["x".into()]).unwrap();
         assert!(sidecar_path(&f).exists());
-        write_tags(&f, &[]).unwrap();
+        write_tags_full(&f, &[]).unwrap();
         assert!(!sidecar_path(&f).exists());
     }
 
@@ -302,20 +276,20 @@ mod tests {
     fn read_missing_sidecar_returns_empty() {
         let f = temp_file_with_name("nofile.txt");
         let _ = std::fs::remove_file(sidecar_path(&f));
-        let _ = write_tags(&f, &[]);
+        let _ = write_tags_full(&f, &[]);
         assert!(read_tags(&f).unwrap().is_empty());
     }
 
     #[test]
     fn read_dedups_case_insensitive() {
         let f = temp_file_with_name("dedup.txt");
-        write_tags(&f, &["Holiday".into()]).unwrap();
+        write_tags_full(&f, &["Holiday".into()]).unwrap();
         let read = read_tags(&f).unwrap();
         let occurrences = read
             .iter()
             .filter(|t| t.eq_ignore_ascii_case("holiday"))
             .count();
         assert_eq!(occurrences, 1);
-        let _ = write_tags(&f, &[]);
+        let _ = write_tags_full(&f, &[]);
     }
 }

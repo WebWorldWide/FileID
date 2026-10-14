@@ -145,7 +145,7 @@ The strategy is a regex-like generator. See `util/path_safety.rs` for working ex
 
 ## Working on Restructure
 
-Restructure is being overhauled to "butler-grade" — see `RESTRUCTURE.md` for the full design. The architecture is cluster-then-name: geometry finds groups from fused signals (CLIP + tags + time), a local VLM only names/justifies them, and a cheap classifier routes the long tail to the nearest existing folder. Phase 1 (semantic classify + learn-your-style routing) has landed in the engine (`pipeline/restructure_semantic.rs`, `cluster_suggestions.rs`); P2 VLM naming, P3 confidence tiers + reversible move journal, and P4 the Win2D Sankey upgrade follow. The Sankey is the chosen primary reorg visualization — match the macOS reference.
+Restructure follows the "butler-grade" design in `RESTRUCTURE.md`, which also tracks phase status. The architecture is cluster-then-name: geometry finds groups from fused signals (CLIP + tags + time), a local VLM only names/justifies them, and a cheap classifier routes the long tail to the nearest existing folder. The engine side lives in `pipeline/restructure*.rs` (Swift mirror under `Pipeline/Restructure*.swift`). The Sankey is the primary reorg visualization — match the macOS reference.
 
 ## Code style
 

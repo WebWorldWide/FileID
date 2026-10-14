@@ -1,17 +1,15 @@
-// YuNet face detector (OpenCV Zoo `face_detection_yunet_2023mar`, MIT). Replaces
-// the non-commercial SCRFD (InsightFace) for a commercial-clean detection path.
-// Produces the SAME `scrfd::Detection` (corner bbox + 5 landmarks in FileID
-// order [left_eye, right_eye, nose, mouth_left, mouth_right] + score) so the
-// downstream face pipeline (estimate_pose, validate_face_geometry, alignment)
-// is unchanged.
+// YuNet face detector (OpenCV Zoo `face_detection_yunet_2023mar`, MIT), the
+// commercial-clean detection path. Produces `face_geometry::Detection` (corner
+// bbox + 5 landmarks in FileID order [left_eye, right_eye, nose, mouth_left,
+// mouth_right] + score) for the downstream face pipeline (estimate_pose,
+// validate_face_geometry, alignment).
 //
 // The HF ONNX emits RAW per-stride anchor tensors (cls/obj/bbox/kps at strides
 // 8/16/32, one anchor per cell, fixed 640x640 input). Decode + NMS are done on
 // the CPU after the GPU forward pass, mirroring OpenCV's FaceDetectorYN:
 //   score = sqrt(cls * obj); center/exp box; landmark = (cell + delta)*stride.
 // Input is BGR, raw [0,255] float, no normalization (matches OpenCV's blob).
-// A wrong-variant ONNX → scores under threshold → empty Vec (no panic), the
-// same fail-soft posture as scrfd.rs.
+// A wrong-variant ONNX → scores under threshold → empty Vec (no panic).
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +22,7 @@ use super::runtime::{
     classify_inference_error, configure_session_builder, execution_providers_for_chain,
     priority_chain, RuntimeProbe,
 };
-use super::scrfd::{nms, resize_nearest, Detection};
+use super::face_geometry::{nms, resize_nearest, Detection};
 
 const INPUT: u32 = 640;
 const STRIDES: [u32; 3] = [8, 16, 32];

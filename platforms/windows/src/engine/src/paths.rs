@@ -55,20 +55,15 @@ pub fn models_dir() -> Result<PathBuf> {
     }
     Ok(root()?.join("Models"))
 }
-#[allow(dead_code)]
+#[allow(dead_code)] // CLI/TUI consumer
 pub fn engine_models_dir() -> Result<PathBuf> { models_dir() }
 pub fn hf_cache_dir() -> Result<PathBuf> { Ok(root()?.join("Models").join("HuggingFace")) }
 pub fn thumbs_dir()   -> Result<PathBuf> { Ok(root()?.join("thumbs.cache")) }
 pub fn faces_dir()    -> Result<PathBuf> { Ok(root()?.join("face_crops")) }
 pub fn runtime_dir()  -> Result<PathBuf> { Ok(root()?.join("runtime")) }
-#[allow(dead_code)]
-pub fn settings_path() -> Result<PathBuf> { Ok(root()?.join("settings.json")) }
-/// The C# app's settings file (separate from the engine's probe-cache
-/// `settings.json`). Read-only from the engine; the app owns writes.
+/// The app's settings file. Read-only from the engine; the app owns writes.
 pub fn app_settings_path() -> Result<PathBuf> { Ok(root()?.join("app-settings.json")) }
 pub fn trash_log_path() -> Result<PathBuf> { Ok(root()?.join("trash_log.json")) }
-#[allow(dead_code)]
-pub fn merge_log_path() -> Result<PathBuf> { Ok(root()?.join("merge_log.json")) }
 
 /// Create the full state-directory layout. Idempotent; safe on every launch.
 pub fn ensure_state_dirs() -> Result<PathBuf> {

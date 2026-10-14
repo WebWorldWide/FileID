@@ -20,26 +20,12 @@
 
 use std::collections::HashMap;
 
-/// Cosine threshold for "definitely same person". Tuned for SFace's 128-d
-/// embeddings — OpenCV's published same-identity cosine for SFace is 0.363, so
-/// genuine pairs sit lower than ArcFace's old 512-d distribution. PROVISIONAL:
-/// anchored on the OpenCV reference; calibrate against a labeled library.
-pub const COS_HIGH: f32 = 0.50;
-
-/// Cosine threshold for "definitely different person". The 0.32..=0.50 band is
-/// the uncertain range that routes through VLM verification. SFace default
-/// (provisional — calibrate with labeled faces).
-pub const COS_LOW: f32 = 0.32;
-
-/// Lower bound for surfacing MERGE suggestions in the People tab. The old code
-/// reused COS_LOW (0.32) as the floor, which flooded the sheet with anchor pairs
-/// deep in impostor territory — empirically (identity_clustering.rs) genuine
-/// same-person SFace cosine sits at 0.88–0.95 and the hardest different-person
-/// (lookalike) pairs top out near ~0.55, so a 0.32 floor is mostly noise. 0.55
-/// keeps the genuinely-uncertain band (plausible cross-pose same person, plus
+/// Lower bound for surfacing MERGE suggestions in the People tab. Empirically
+/// (identity_clustering.rs) genuine same-person SFace cosine sits at 0.88–0.95
+/// and the hardest different-person (lookalike) pairs top out near ~0.55, so a
+/// lower floor floods the sheet with impostor pairs. 0.55 keeps the genuinely-uncertain band (plausible cross-pose same person, plus
 /// the hardest impostors worth a human glance) and drops the rest — fewer, more
-/// actionable suggestions. Distinct from COS_LOW so the VLM-verifier band is
-/// unaffected.
+/// actionable suggestions.
 pub const MERGE_SUGGEST_COS_LOW: f32 = 0.55;
 
 /// Upper bound for surfacing MERGE suggestions in the People tab. Previously
@@ -150,6 +136,16 @@ pub fn cluster(faces: &[FaceRow]) -> (Vec<ClusterAssignment>, Vec<ClusterAnchor>
             hits
         },
         super::identity_clustering::Hyperparameters::default(),
+    );
+    tracing::info!(
+        faces = faces.len(),
+        clusters = result.cluster_count,
+        cores = result.core_count,
+        outliers_assigned = result.outliers_assigned,
+        outliers_as_singletons = result.outliers_as_singletons,
+        splits = result.splits_applied,
+        duration_seconds = result.duration_seconds,
+        "[FACES] identity clustering pass"
     );
 
     // Remap dense 0-based IDs to 1-based stable IDs in first-seen order
@@ -556,22 +552,6 @@ pub fn unknown_blocked_pairs<S: std::hash::BuildHasher>(
     blocked
 }
 
-/// Pairs in the uncertain similarity band 0.45..=0.70. The VLM verifier
-/// is invoked on these — outputs go back into the union-find.
-#[allow(dead_code)]
-pub fn uncertain_pairs(faces: &[FaceRow]) -> Vec<(i64, i64, f32)> {
-    let mut pairs = Vec::new();
-    for i in 0..faces.len() {
-        for j in (i + 1)..faces.len() {
-            let sim = cosine(&faces[i].embedding, &faces[j].embedding);
-            if (COS_LOW..COS_HIGH).contains(&sim) {
-                pairs.push((faces[i].face_id, faces[j].face_id, sim));
-            }
-        }
-    }
-    pairs
-}
-
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = 0.0f32;
@@ -632,17 +612,6 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_band_pairs_collected() {
-        // ~0.40 cosine — inside the SFace uncertain band (COS_LOW..COS_HIGH).
-        let a = unit(&[1.0, 0.0]);
-        let b = unit(&[0.40, 0.9165]); // dot ≈ 0.40
-        let faces = vec![row(1, 1, a, 0.9), row(2, 2, b, 0.9)];
-        let pairs = uncertain_pairs(&faces);
-        assert_eq!(pairs.len(), 1);
-        assert!(pairs[0].2 > COS_LOW && pairs[0].2 < COS_HIGH);
-    }
-
-    #[test]
     fn cluster_ids_are_one_based_and_stable() {
         let v = unit(&[1.0, 0.0, 0.0]);
         let faces = vec![row(1, 1, v.clone(), 0.5), row(2, 2, v, 0.9)];
@@ -670,7 +639,7 @@ mod tests {
 
     // Property tests proving bookkeeping invariants on randomized embeddings.
     // The two-pass density algorithm doesn't guarantee every cluster member
-    // is COS_HIGH-close to its anchor (clusters can chain transitively).
+    // is close to its anchor (clusters can chain transitively).
     proptest::proptest! {
         // Invariant: every face_id appears in exactly one cluster
         // assignment, and the assignment count equals the input count.

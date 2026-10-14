@@ -521,16 +521,9 @@ pub fn dbwriter_batch_size_for(tier: MemoryTier) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub enum StorageType {
+    /// Any non-rotational fixed drive; the seek-penalty descriptor can't tell
+    /// NVMe from SATA SSD.
     Nvme,
-    /// Reserved for a future BusType-discriminator pass (would use
-    /// `STORAGE_ADAPTER_DESCRIPTOR.BusType` to distinguish NVMe from
-    /// SATA SSD; the seek-penalty descriptor alone can't tell them
-    /// apart). `walk_concurrency_for` returns a smaller budget here
-    /// than NVMe (8 vs 16 threads). Kept in the enum so call sites
-    /// don't need a non-exhaustive update when bus-type detection
-    /// lands.
-    #[allow(dead_code)]
-    SsdSata,
     Hdd,
     Removable,
     Network,
@@ -541,7 +534,6 @@ impl StorageType {
     pub fn as_str(self) -> &'static str {
         match self {
             StorageType::Nvme => "nvme",
-            StorageType::SsdSata => "ssd_sata",
             StorageType::Hdd => "hdd",
             StorageType::Removable => "removable",
             StorageType::Network => "network",
@@ -557,7 +549,6 @@ pub fn walk_concurrency_for(path: &Path) -> usize {
     let logical = num_cpus::get().max(1);
     match storage {
         StorageType::Nvme => logical.clamp(4, 16),
-        StorageType::SsdSata => logical.clamp(2, 8),
         StorageType::Hdd => 2,
         StorageType::Removable => 2,
         StorageType::Network => 2,
@@ -1399,7 +1390,7 @@ mod adaptive_tests {
     #[test]
     fn storage_type_string_round_trip() {
         for s in [
-            StorageType::Nvme, StorageType::SsdSata, StorageType::Hdd,
+            StorageType::Nvme, StorageType::Hdd,
             StorageType::Removable, StorageType::Network, StorageType::Unknown,
         ] {
             assert!(!s.as_str().is_empty());

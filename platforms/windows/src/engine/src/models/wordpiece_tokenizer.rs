@@ -1,13 +1,12 @@
 //! Minimal BERT-family WordPiece tokenizer (pure Rust, no `tokenizers` dep).
 //!
-//! Shared by the upcoming BGE-small text-embedding and GLiNER NER wrappers,
-//! which are BERT-architecture models needing `[CLS]`/`[SEP]`, a `vocab.txt`
+//! Used by the BGE-small text-embedding wrapper, a BERT-architecture model
+//! needing `[CLS]`/`[SEP]`, a `vocab.txt`
 //! map, an attention mask, and token-type ids — unlike the BPE
 //! `clip_tokenizer`. Greedy longest-match-first WordPiece over a `vocab.txt`,
 //! mirroring HuggingFace `BertTokenizer(do_lower_case=True)` for the common
 //! English case. Avoids pulling the heavy `tokenizers` crate (onig + a big
-//! build) for what these models actually need.
-#![allow(dead_code)] // wired into the Phase 4 document/text models (GLiNER, BGE).
+//! build) for what the model actually needs.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,7 +16,6 @@ use anyhow::{Context, Result};
 const CLS: &str = "[CLS]";
 const SEP: &str = "[SEP]";
 const UNK: &str = "[UNK]";
-const PAD: &str = "[PAD]";
 /// HF caps a single whitespace token at 100 chars before emitting `[UNK]`.
 const MAX_INPUT_CHARS_PER_WORD: usize = 100;
 
@@ -26,7 +24,6 @@ pub struct WordPieceTokenizer {
     cls_id: i64,
     sep_id: i64,
     unk_id: i64,
-    pad_id: i64,
     lower_case: bool,
 }
 
@@ -57,12 +54,7 @@ impl WordPieceTokenizer {
         let cls_id = *vocab.get(CLS).context("vocab.txt missing [CLS]")?;
         let sep_id = *vocab.get(SEP).context("vocab.txt missing [SEP]")?;
         let unk_id = *vocab.get(UNK).context("vocab.txt missing [UNK]")?;
-        let pad_id = vocab.get(PAD).copied().unwrap_or(0);
-        Ok(Self { vocab, cls_id, sep_id, unk_id, pad_id, lower_case })
-    }
-
-    pub fn pad_id(&self) -> i64 {
-        self.pad_id
+        Ok(Self { vocab, cls_id, sep_id, unk_id, lower_case })
     }
 
     /// Encode one string into `[CLS] … [SEP]`, truncated to `max_len`

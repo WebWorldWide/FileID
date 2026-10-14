@@ -28,9 +28,7 @@ use crate::pipeline::tagging::{ModelStack, Tagger, TaggedFile};
 use crate::platform::{PriorityBoost, SleepGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum SessionPhase {
-    Idle,
     Discovering,
     Tagging,
     PostScan,
@@ -42,7 +40,6 @@ pub enum SessionPhase {
 impl SessionPhase {
     fn as_ipc_phase(self) -> ScanPhase {
         match self {
-            SessionPhase::Idle => ScanPhase::Idle,
             SessionPhase::Discovering => ScanPhase::Discovering,
             SessionPhase::Tagging => ScanPhase::Tagging,
             SessionPhase::PostScan => ScanPhase::PostScan,
@@ -54,7 +51,6 @@ impl SessionPhase {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub struct SessionResult {
     pub processed: u64,
     pub failed: u64,
@@ -74,18 +70,7 @@ pub struct ScanSession {
 }
 
 impl ScanSession {
-    #[allow(dead_code)]
     pub fn new(
-        coordinator: ScanCoordinator,
-        db_conn: Arc<Mutex<Connection>>,
-        worker_count: usize,
-        sink: Sink,
-        models: Arc<ModelStack>,
-    ) -> Self {
-        Self::new_with_options(coordinator, db_conn, worker_count, sink, models, false)
-    }
-
-    pub fn new_with_options(
         coordinator: ScanCoordinator,
         db_conn: Arc<Mutex<Connection>>,
         worker_count: usize,

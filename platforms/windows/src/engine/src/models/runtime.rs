@@ -287,8 +287,7 @@ pub fn execution_providers_for_chain(
             // the GPU (or NPU once detected) and only fall back to the OpenVINO
             // CPU plugin when no accelerator binds — instead of OpenVINO's
             // default possibly landing on CPU silently. AUTO keeps a safe
-            // fallback if the GPU plugin is unavailable. (Explicit NPU hint +
-            // INT8 variants land in Phase 6 alongside NPU detection.)
+            // fallback if the GPU plugin is unavailable.
             ExecutionProvider::OpenVino => out.push(
                 OpenVINOExecutionProvider::default()
                     .with_device_type("AUTO:GPU,CPU")

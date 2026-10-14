@@ -67,14 +67,11 @@ pub enum FolderClassification {
     Junk,
 }
 
-/// Per-source-folder classification + the dominant destination category.
+/// Per-source-folder classification.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClassifiedFolder {
     pub source_folder: PathBuf,
     pub classification: FolderClassification,
-    pub move_count: u32,
-    pub dominant_category: String,
 }
 
 /// Classify every source folder appearing in `moves`. Returns one
@@ -99,11 +96,7 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
             *hist.entry(m.category.clone()).or_insert(0) += 1;
         }
         let total = items.len() as u32;
-        let (dominant, top) = hist
-            .iter()
-            .max_by_key(|(_, c)| **c)
-            .map(|(k, v)| (k.clone(), *v))
-            .unwrap_or_default();
+        let top = hist.values().copied().max().unwrap_or_default();
         let homogeneity = if total > 0 { top as f32 / total as f32 } else { 0.0 };
 
         // Folder name heuristic — generic names like "Downloads",
@@ -129,8 +122,6 @@ pub fn classify_folders(moves: &[ProposedMove]) -> Vec<ClassifiedFolder> {
         out.push(ClassifiedFolder {
             source_folder: folder,
             classification,
-            move_count: total,
-            dominant_category: dominant,
         });
     }
     out

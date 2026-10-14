@@ -410,7 +410,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 "#;
 
 // v10: document text extracted by `pipeline::doc_extract` for txt/md/docx/
-// pptx/xlsx (and a future Phase 4b pdf step). Mirrors the `ocr_text` /
+// pptx/xlsx. Mirrors the `ocr_text` /
 // `ocr_fts` shape so the dbwriter inserts are near copy-paste and the
 // existing search ranker can search `doc_fts` with the same query syntax.
 const V10_DOC_TEXT: &str = r#"
@@ -427,12 +427,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
 );
 "#;
 
-// v9: per-volume USN journal cursor. Provisioned by the Phase 3 foundation;
-// the (Windows-only) scan-driver integration that reads
-// `FSCTL_READ_USN_JOURNAL` since `next_usn` and prunes the skip-set
-// accordingly is a follow-up — until then this table stays unwritten and the
-// scan uses the (always-allowed) `jwalk` + timestamp-skip path. `journal_id`
-// detects deletion/recreation so a stale cursor never reads garbage.
+// v9: per-volume USN journal cursor. Never written: scans use the `jwalk` +
+// timestamp-skip path. Kept because applied migrations are immutable.
 const V9_USN_STATE: &str = r#"
 CREATE TABLE IF NOT EXISTS usn_state (
     volume_id       TEXT    PRIMARY KEY,

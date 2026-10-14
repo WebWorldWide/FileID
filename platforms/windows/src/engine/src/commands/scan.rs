@@ -281,7 +281,7 @@ pub(crate) async fn handle_start_scan(
         platform::MemoryTier::Low => platform::default_worker_cap().min(6) as usize,
         _ => platform::default_worker_cap() as usize,
     };
-    let session = ScanSession::new_with_options(
+    let session = ScanSession::new(
         coord,
         db,
         worker_count,
@@ -291,24 +291,30 @@ pub(crate) async fn handle_start_scan(
     );
     let root = PathBuf::from(payload.root_path.clone());
 
-    let outcome = session.run(&root, |_| {}).await;
+    let result = match session.run(&root, |_| {}).await {
+        Ok(result) => result,
+        Err(err) => {
+            tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");
+            sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
+                ScanPhase::Failed,
+            ))))
+            .await;
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "scan_failed".into(),
+                message: format!("Scan failed: {err}"),
+                path: Some(payload.root_path),
+                model_kind: None,
+            }))))
+            .await;
+            tracing::warn!("[SCAN] handle_start_scan exiting: scan_failed");
+            return;
+        }
+    };
 
-    if let Err(err) = outcome {
-        tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");
-        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-            ScanPhase::Failed,
-        ))))
-        .await;
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "scan_failed".into(),
-            message: format!("Scan failed: {err}"),
-            path: Some(payload.root_path),
-            model_kind: None,
-        }))))
-        .await;
-        tracing::warn!("[SCAN] handle_start_scan exiting: scan_failed");
-        return;
-    }
-
-    tracing::info!("[SCAN] handle_start_scan exiting normally");
+    tracing::info!(
+        processed = result.processed,
+        failed = result.failed,
+        elapsed_seconds = result.elapsed_seconds,
+        "[SCAN] handle_start_scan exiting normally"
+    );
 }

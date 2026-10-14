@@ -276,16 +276,12 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/pipeline/deep_analyze.rs",
             "platforms/windows/src/engine/src/pipeline/doc_extract.rs",
             "platforms/windows/src/engine/src/pipeline/restructure_apply.rs",
-            "platforms/windows/src/engine/src/pipeline/usn.rs",
             "platforms/windows/src/engine/src/shell/heic.rs",
             "platforms/windows/src/engine/src/shell/ocr.rs",
-            "platforms/windows/src/engine/src/shell/reveal.rs",
             "platforms/windows/src/engine/src/shell/tags.rs",
-            "platforms/windows/src/engine/src/shell/thumbnail.rs",
             "platforms/windows/src/engine/src/shell/trash.rs",
             "platforms/windows/src/engine/src/shell/video.rs",
             "platforms/windows/src/engine/src/util/content_hash.rs",
-            "platforms/windows/src/engine/src/util/elevation.rs",
             "platforms/windows/src/engine/src/util/path_safety.rs",
         })
         self.assertEqual(set(REVIEWED_NETWORK_SOURCE_SHA256), RAW_NETWORK_FILES)

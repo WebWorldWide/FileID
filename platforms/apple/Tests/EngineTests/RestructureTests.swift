@@ -101,10 +101,9 @@ struct RestructureCascadeTests {
 
     @Test("Mixed-tier homogeneity is measured against the dominant person")
     func mixedHomogeneityDominantPerson() {
-        // A folder dominated by Alice (5) with one Bob outlier (6 files). The bug
-        // measured homogeneity against a non-dominant person, flagging most of
-        // the folder as outliers. The dominant category must be the dominant
-        // PERSON (Alice), not Bob.
+        // A folder dominated by Alice (5) with one Bob outlier (6 files).
+        // Homogeneity must be measured against the dominant person (Alice);
+        // measuring against Bob would flag most of the folder as outliers.
         var files: [Restructure.FileForClassify] = []
         for i in 0..<5 {
             files.append(f(Int64(i), "image", source: "/Library/Family/\(i).jpg", person: "Alice"))
@@ -113,7 +112,6 @@ struct RestructureCascadeTests {
         let moves = Restructure.ruleClassify(files, libraryRoot: root)
         let classified = Restructure.classifyFolders(moves)
         let family = classified.first { $0.sourceFolder == "/Library/Family" }
-        #expect(family?.dominantCategory == "People/Alice")
         // 5/6 ≈ 0.83 ≥ 0.80 → Anchor (homogeneity measured against Alice, not Bob).
         #expect(family?.classification == .anchor)
     }

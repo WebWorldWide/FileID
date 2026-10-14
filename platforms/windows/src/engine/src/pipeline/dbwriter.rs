@@ -441,7 +441,7 @@ impl DbWriter {
                         .with_context(|| format!("clip insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                 }
 
-                // BGE-small text embeddings (Phase 4b) — parallel to clip
+                // BGE-small text embeddings — parallel to clip
                 // above but in a different vector space; persisted into
                 // `text_embeddings` keyed by model so future embeddings
                 // (BGE-m3, Nomic, ...) can coexist without table churn.
@@ -544,7 +544,7 @@ impl DbWriter {
                     }
                 }
 
-                // Phase 4: document text — same stage-ran-gated
+                // Document text — same stage-ran-gated
                 // delete-then-conditional-insert as ocr_text above (#11).
                 if f.doc_stage_ran {
                     doc_text_delete
@@ -684,7 +684,7 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
 /// `path_search` (?20) is bound the NFC-normalized path (`nfc_path_search`),
 /// NOT the verbatim `path_text` (?1) — the v16 contract, so NFD filenames are
 /// found by the app's NFC query.
-#[allow(dead_code)]  // used by test fixtures only; bin path uses the RETURNING variant.
+#[cfg(test)] // the bin path uses the RETURNING variant
 const INSERT_FILE_SQL: &str = r#"
     INSERT INTO files (
         path_text, path_hash, size_bytes,
@@ -1830,7 +1830,6 @@ mod tests {
         embedding[0] = 1.0;
         file.faces.push(crate::pipeline::tagging::DetectedFace {
             bbox: [1.0, 2.0, 10.0, 10.0],
-            landmarks: [[0.0; 2]; 5],
             embedding,
             embedding_model: Some("fixture-weight-hash".to_owned()),
             roll: 0.0, yaw: 0.0, pitch: 0.0, quality: 0.9,
