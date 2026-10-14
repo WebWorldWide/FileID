@@ -419,6 +419,21 @@ public class FileTileKindChipTests
     }
 
     [Fact]
+    public void AccessibleName_AnnouncesFaceAndTextIndicators()
+    {
+        var tile = Tile("image");
+        Assert.Equal("x.jpg, Image", tile.AccessibleName);
+
+        var changed = new List<string>();
+        tile.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+        tile.HasFaces = true;
+        tile.HasText = true;
+
+        Assert.Equal("x.jpg, Image, contains faces, contains text", tile.AccessibleName);
+        Assert.Equal(2, changed.Count(name => name == nameof(FileTile.AccessibleName)));
+    }
+
+    [Fact]
     public void HasChips_TrueWhenOnlyKindChipPresent()
     {
         Assert.True(Tile("image").HasChips);

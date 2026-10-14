@@ -656,14 +656,26 @@ internal sealed class FileTile : INotifyPropertyChanged
     public bool HasFaces
     {
         get => _hasFaces;
-        set { if (_hasFaces == value) return; _hasFaces = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasFaces))); }
+        set
+        {
+            if (_hasFaces == value) return;
+            _hasFaces = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasFaces)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(AccessibleName)));
+        }
     }
 
     private bool _hasText;
     public bool HasText
     {
         get => _hasText;
-        set { if (_hasText == value) return; _hasText = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasText))); }
+        set
+        {
+            if (_hasText == value) return;
+            _hasText = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HasText)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(AccessibleName)));
+        }
     }
 
     /// <summary>Top auto-tags from CLIP zero-shot scene tagging + enriched extras.
@@ -750,6 +762,20 @@ internal sealed class FileTile : INotifyPropertyChanged
                 }
             }
             return string.Empty;
+        }
+    }
+
+    /// <summary>Screen-reader name for the tile: filename, kind, date, and the
+    /// face/OCR indicators. Mirrors macOS LibraryView's VoiceOver description.</summary>
+    public string AccessibleName
+    {
+        get
+        {
+            var parts = new List<string> { FileName, KindDisplay };
+            if (DateDisplay.Length > 0) parts.Add(DateDisplay);
+            if (HasFaces) parts.Add("contains faces");
+            if (HasText) parts.Add("contains text");
+            return string.Join(", ", parts);
         }
     }
 

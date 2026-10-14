@@ -1374,7 +1374,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         dialog.Resources["ContentDialogMaxWidth"] = 1600.0;
         dialog.Resources["ContentDialogMaxHeight"] = 1100.0;
         dialog.Opened += (_, _) => sheet.SetFile(
-            tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasFaces, tile.HasText);
+            tile.Path, tile.Kind, tile.SizeBytes, tile.ModifiedAt, tile.Id, tile.HasText);
         sheet.RequestClose += (_, _) => { try { dialog.Hide(); } catch { /* swallow */ } };
 
         // The ContentDialog — not the sheet — owns keyboard focus once shown, so

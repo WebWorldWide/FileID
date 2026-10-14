@@ -171,12 +171,12 @@ public sealed partial class FilePreviewSheet : UserControl
         if (next < 0 || next >= _siblings.Count) return;
         _siblingIndex = next;
         var t = _siblings[next];
-        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id, t.HasFaces, t.HasText);
+        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id, t.HasText);
         UpdateNavButtons();
     }
 
     public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0,
-                               bool hasFaces = false, bool hasText = false)
+                               bool hasText = false)
     {
         // Stamp this navigation so async loads from a prior file bail.
         int navGen = System.Threading.Interlocked.Increment(ref _navGen);
@@ -224,7 +224,7 @@ public sealed partial class FilePreviewSheet : UserControl
             // post-continuation ShowPlaceholder would touch a torn-down tree.
             if (_isClosed) return;
             Services.DebugLog.Warn("FilePreviewSheet.SetFile threw: " + ex);
-            ShowPlaceholder(kind, "Preview failed: " + ex.Message);
+            ShowPlaceholder("Preview failed: " + ex.Message);
         }
         finally
         {
@@ -307,7 +307,7 @@ public sealed partial class FilePreviewSheet : UserControl
                 await LoadVideoOrAudioAsync(path, kind, _mediaGen);
                 break;
             default:
-                ShowPlaceholder(kind, "No inline preview for this file type — use Open.");
+                ShowPlaceholder("No inline preview for this file type — use Open.");
                 break;
         }
     }
@@ -412,7 +412,7 @@ public sealed partial class FilePreviewSheet : UserControl
         // file's load clobbers the CURRENT sibling's preview with a placeholder.
         // A genuine decode failure on the still-current file falls through.
         if (_isClosed || _navGen != navGen) return;
-        ShowPlaceholder(kind, kind switch
+        ShowPlaceholder(kind switch
         {
             "image" => "Image couldn't be decoded by any installed provider.",
             "pdf" => "PDF preview unavailable — open it in your default reader.",
@@ -586,7 +586,7 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             if (gen != _mediaGen) return;
             Services.DebugLog.Warn($"FilePreviewSheet media load failed for {kind}: {ex.Message}");
-            ShowPlaceholder(kind, "Media couldn't load — try Open in default app.");
+            ShowPlaceholder("Media couldn't load — try Open in default app.");
         }
     }
 
@@ -604,7 +604,7 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             if (_isClosed || gen != _mediaGen) return; // superseded media failure
             Services.DebugLog.Warn($"FilePreviewSheet media failed ({kind}): {err}");
-            ShowPlaceholder(kind, kind switch
+            ShowPlaceholder(kind switch
             {
                 "video" => "Video couldn't decode — missing codec? Try Open in default app.",
                 "audio" => "Audio couldn't decode — try Open in default app.",
@@ -613,7 +613,7 @@ public sealed partial class FilePreviewSheet : UserControl
         });
     }
 
-    private void ShowPlaceholder(string kind, string caption)
+    private void ShowPlaceholder(string caption)
     {
         PreviewImage.Visibility = Visibility.Collapsed;
         PreviewMedia.Visibility = Visibility.Collapsed;

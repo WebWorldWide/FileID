@@ -309,7 +309,7 @@
                               PointerEntered="OnTilePointerEntered"
                               PointerExited="OnTilePointerExited"
                               ToolTipService.ToolTip="{x:Bind Path}"
-                              AutomationProperties.Name="{x:Bind FileName}"
+                              AutomationProperties.Name="{x:Bind AccessibleName, Mode=OneWay}"
                               AutomationProperties.HelpText="Double-tap to preview, or right-tap for more actions">
                             <!-- Inline so each tile gets a unique animatable instance.
                                  macOS LibraryView.swift:676-677 ramps stroke opacity
