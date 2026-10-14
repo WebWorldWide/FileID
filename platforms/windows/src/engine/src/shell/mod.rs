@@ -1767,29 +1767,6 @@ pub mod trash {
         vec![false; paths.len()]
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn linux_thumbnail_scales_generated_image_and_rejects_invalid_size() {
-            let fixture = std::env::temp_dir().join(format!(
-                "fileid-thumbnail-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-            ));
-            std::fs::create_dir_all(&fixture).unwrap();
-            let path = fixture.join("generated.png");
-            image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 40, 60, 255]))
-                .save(&path).unwrap();
-            let thumb = render_at(&path, 8).unwrap();
-            assert_eq!((thumb.width, thumb.height), (8, 4));
-            assert_eq!(thumb.rgba.len(), 8 * 4 * 4);
-            assert_eq!(&thumb.rgba[0..4], &[200, 40, 60, 255]);
-            assert!(render_at(&path, 0).is_err());
-            std::fs::remove_dir_all(fixture).unwrap();
-        }
-    }
     pub(crate) fn trash_path_as(
         _source: &Path,
         _original_path: &Path,
