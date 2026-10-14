@@ -590,7 +590,7 @@ private final class RedirectCapture: NSObject, URLSessionTaskDelegate, @unchecke
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
-        // https-only + host-allowlist + hop cap (Windows download.rs E11).
+        // https-only + host-allowlist + hop cap (mirrors the Windows downloader).
         // Passing nil stops the chain so the caller surfaces redirectBlocked.
         redirectCount += 1
         guard redirectCount <= TLSPinning.maxRedirects,
@@ -695,8 +695,8 @@ private final class StreamingDownloadDelegate: NSObject, URLSessionDownloadDeleg
     /// rejection apart from a user cancel.
     private(set) var pinningRejected = false
     /// Set when a redirect was refused for downgrading https→http, leaving
-    /// the host allowlist, or exceeding the hop cap (Windows download.rs
-    /// E11). Reported as `redirectBlocked` so the chain can't silently
+    /// the host allowlist, or exceeding the hop cap (mirrors the Windows
+    /// downloader). Reported as `redirectBlocked` so the chain can't silently
     /// connect to an unpinned/plaintext host.
     private(set) var redirectRejected = false
     private var redirectCount = 0

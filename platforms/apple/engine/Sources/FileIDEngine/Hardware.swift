@@ -100,7 +100,7 @@ public enum Hardware {
     /// conservative. Mirrors the Windows engine's `memory_tier`. M1 Pro 16 GB →
     /// `.balanced`. Thresholds are coarse; per-machine tuning is an on-hardware
     /// UAT knob (see NEXT.md). Static at startup (matches the worker-cap model);
-    /// runtime pressure adaptation is the separate F-3 item.
+    /// runtime memory-pressure adaptation is not implemented.
     public enum MemoryTier: Sendable { case low, balanced, high }
 
     public static let memoryTier: MemoryTier = {

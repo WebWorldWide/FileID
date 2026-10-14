@@ -345,7 +345,7 @@ struct RestructureApplyTests {
 
         let db = try makeDB(tmp)
         try await insertRow(db, id: 1, path: src.path)
-        // Force the post-move UPDATE to throw (the B4 SELECT still succeeds).
+        // Force the post-move UPDATE to throw (the stale-plan SELECT still succeeds).
         try await db.pool.write { d in
             try d.execute(sql: """
                 CREATE TRIGGER reject_files_update BEFORE UPDATE ON files

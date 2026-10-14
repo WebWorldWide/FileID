@@ -762,7 +762,7 @@ public actor DeepAnalyze {
                                    proposedName: nil)
         }
         let parsed = Self.parse(rawOutput: raw)
-        // F-A6 (extended): a NON-empty raw whose DESCRIPTION section parses
+        // A NON-empty raw whose DESCRIPTION section parses
         // to "" (e.g. "DESCRIPTION:\nFILENAME: x", or a bare "DESCRIPTION:") must
         // ALSO be a failure. The runner's isFailure check keys off the "Inference
         // failed" prefix, and persist's COALESCE(?, vlm_description) only guards

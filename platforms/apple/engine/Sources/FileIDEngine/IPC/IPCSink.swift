@@ -38,7 +38,7 @@ public actor IPCSink {
     private var drainerContinuation: CheckedContinuation<Void, Never>?
     private var drainerBackstop: Task<Void, Never>?
 
-    /// The wire the events go to. Captured at init: the U4 bootstrap dups the
+    /// The wire the events go to. Captured at init: the stdio bootstrap dups the
     /// wire fd aside before the singleton exists; tests inject a pipe to capture
     /// the byte stream. Retained for the process lifetime so its file descriptor
     /// (`wireFD`) stays open — all actual writes go through the fd off-actor.

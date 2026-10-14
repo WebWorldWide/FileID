@@ -765,7 +765,7 @@ internal sealed partial class EngineClient
         // ModelInstallerService.PrewarmAsync passes false: its installAction
         // cleared the mark at click time, and clearing again at dispatch would
         // erase a Cancel that arrived while the dispatch was parked waiting
-        // for engine Ready — the lost-cancel half of C7.
+        // for engine Ready.
         if (clearCancelMark)
         {
             Interlocked.Exchange(ref _prewarmCancelAllRequested, 0);

@@ -23,7 +23,7 @@ struct IPCSinkCoalescingTests {
         )
         // Flood well past maxBuffer (1024) so the buffer is saturated and
         // the coalescing path runs, then land the critical event, then
-        // keep flooding — the H3 bug overwrote it right here.
+        // keep flooding — an unpinned critical event would be overwritten here.
         for _ in 0..<2000 { await sink.emit(.progress(progress)) }
         await sink.emit(.scanComplete(ScanComplete(
             sessionID: "h3", totalFiles: 100, processedFiles: 100,

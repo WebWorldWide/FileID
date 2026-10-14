@@ -1,4 +1,4 @@
-// Regression tests for FTSQuery.quoted — the M3 fix. FTS5 MATCH
+// Regression tests for FTSQuery.quoted. FTS5 MATCH
 // parses its argument as a query expression, so unquoted user input
 // containing " * : ( ) - AND OR NEAR … threw a syntax error that the
 // caller's catch turned into zero results. SharedTests has no GRDB

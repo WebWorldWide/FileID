@@ -1307,7 +1307,7 @@ mod tests {
         assert!(bytes.iter().all(|&b| b == 0));
     }
 
-    // ---- B1 rename-heal data-loss regression --------------------------------
+    // ---- rename-heal data-loss regression -----------------------------------
 
     fn unique_tmp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1325,7 +1325,7 @@ mod tests {
 
     /// Mirror of the heal+insert per-file body in `flush`, exercising the
     /// real HEAL_LOOKUP_SQL / `heal_candidate_moved` / HEAL_UPDATE_SQL /
-    /// INSERT_FILE_RETURNING_ID_SQL so the B1 guard is under test end-to-end.
+    /// INSERT_FILE_RETURNING_ID_SQL so the old-path-gone heal guard is under test end-to-end.
     fn ingest_with_heal(conn: &Connection, f: &TaggedFile) -> i64 {
         let path_text = f.path.to_string_lossy();
         let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
@@ -1457,7 +1457,7 @@ mod tests {
         assert!(!by_ref, "legacy-hash match is a content match, not a ref match");
     }
 
-    /// B1 core: two byte-identical files that COEXIST (a copy, not a move)
+    /// Two byte-identical files that COEXIST (a copy, not a move)
     /// must each get their own row. Before the fix the second file's
     /// content_hash heal stole the first's row and dropped it from the
     /// library.

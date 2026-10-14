@@ -1,4 +1,4 @@
-// Pins the C4 fix: parts orphaned in .fileid-staging by a dead process
+// Parts orphaned in .fileid-staging by a dead process
 // are reclaimed on the next download, without ever touching entries an
 // in-flight download (this process, or a live sibling process) owns.
 import Testing

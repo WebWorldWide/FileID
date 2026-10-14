@@ -89,7 +89,7 @@ public enum TLSPinning {
         return (.cancelAuthenticationChallenge, nil)
     }
 
-    // MARK: - Redirect policy (Windows download.rs E11 parity)
+    // MARK: - Redirect policy (Windows downloader parity)
 
     /// Maximum redirect hops to follow before treating the chain as
     /// hostile. Mirrors the Windows downloader's 10-hop cap — an on-path

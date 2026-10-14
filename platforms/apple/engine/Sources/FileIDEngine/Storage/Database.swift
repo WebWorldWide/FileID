@@ -186,9 +186,8 @@ public final class Database: @unchecked Sendable {
         }
 
         // v2 — CLIP image embeddings. Raw float32 BLOB (length = 512 * 4 = 2048 B).
-        // No vector index in M3 (v2's vectorlite extension lands later); brute-force
-        // k-NN at scan-time scale (≤500K files) is fine, and the M4 read path
-        // doesn't query similarity yet (Library is filename + tags + FTS5).
+        // No vector index: brute-force k-NN at scan-time scale (≤500K files) is
+        // fast enough.
         m.registerMigration("v2_clip_embeddings") { db in
             try db.create(table: "clip_embeddings") { t in
                 t.column("file_id",   .integer).primaryKey()

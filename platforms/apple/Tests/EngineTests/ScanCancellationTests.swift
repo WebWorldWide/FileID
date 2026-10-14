@@ -1,8 +1,8 @@
-// C1 regression, end-to-end: cancelling a scan mid-flight must still
+// End-to-end: cancelling a scan mid-flight must still
 // produce the terminal scanComplete event and leave the engine
 // responsive (the original deadlock left an unbuffered channel producer
 // uncancelled, wedging shutdown). Spawns the real engine binary, so
-// this also exercises the U4 fd-2 transport split: every wire line must
+// this also exercises the fd-2 transport split: every wire line must
 // be a parseable JSON event.
 import Testing
 import Foundation

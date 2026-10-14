@@ -1,7 +1,7 @@
 //! Schema-conformance suite: serializes an exemplar of every CommandPayload /
 //! EventPayload variant and structurally checks the wire JSON against
-//! `shared/ipc-schema/ipc.schema.json`. Guards the L1 finding class (key-casing
-//! drift like `fileID` vs `fileId`) that a pure Rust↔Rust round-trip can't see.
+//! `shared/ipc-schema/ipc.schema.json`. Guards against key-casing drift
+//! (`fileID` vs `fileId`) that a pure Rust↔Rust round-trip cannot see.
 
 use std::collections::BTreeSet;
 use std::path::Path;

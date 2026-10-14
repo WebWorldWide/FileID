@@ -920,7 +920,7 @@ public enum Restructure {
 
     /// Apply the user-selected proposals on disk + update the DB. For each move:
     /// re-reads the live `files.path_text` and requires it to still name the
-    /// proposal's `oldPath` (B4 stale-plan guard); uniquifies a
+    /// proposal's `oldPath` (stale-plan guard); uniquifies a
     /// colliding destination to `name (n).ext` instead of skipping;
     /// and on a move whose DB update fails, records a recovery sidecar and
     /// counts the move once — never double-counts moved+failed.
@@ -1372,7 +1372,7 @@ public enum Restructure {
                 continue
             }
 
-            // B4 stale-plan / identity guard: the payload `oldPath` is not
+            // Stale-plan / identity guard: the payload `oldPath` is not
             // authoritative on its own. Re-read the live row for this fileID and
             // require it still names `oldPath`, so a plan that went stale (the
             // file was renamed/moved/replaced since planning) can't move the

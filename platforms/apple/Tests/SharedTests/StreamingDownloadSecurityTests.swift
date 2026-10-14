@@ -1,8 +1,7 @@
-// Pins the C3-DOWNLOAD fixes:
-//   free-disk-space preflight before a multi-GB VLM download.
-//   Redirect hardening (https-only + host allowlist + hop cap,
-//              ported from Windows download.rs E11) and the no-hash size
-//              gate (port of check_size_plausible) for VLM non-LFS files.
+// Pins the VLM download policies: the free-disk-space preflight before a
+// multi-GB download, redirect hardening (https-only + host allowlist + hop
+// cap, mirroring the Windows downloader), and the no-hash size gate (port of
+// check_size_plausible) for non-LFS files.
 // The redirect/pinning wiring lives in URLSession delegates that need a
 // live server to exercise end-to-end; these tests lock the pure policy
 // functions those delegates call, which are the actual invariants.
@@ -10,7 +9,7 @@ import Testing
 @testable import FileIDShared
 import Foundation
 
-@Suite("TLSPinning.allowsRedirect — https-only + host allowlist (E11)")
+@Suite("TLSPinning.allowsRedirect — https-only + host allowlist")
 struct RedirectPolicyTests {
 
     // Test URLs are assembled from a bare host via interpolation rather than

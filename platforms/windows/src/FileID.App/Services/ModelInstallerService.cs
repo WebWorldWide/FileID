@@ -365,8 +365,7 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
     /// cancel mark is erased. EngineClient.PrewarmModelAsync used to clear it
     /// at dispatch — but during engine cold start the dispatch is parked in
     /// WaitForReadyAsync, so a Cancel clicked in that window was erased by the
-    /// very prewarm it should have cancelled (C9, the surviving branch (a) of
-    /// the C7 finding).</summary>
+    /// very prewarm it should have cancelled.</summary>
     private static void ClearCancelMarks(params string[] kinds)
     {
         foreach (var k in kinds)
