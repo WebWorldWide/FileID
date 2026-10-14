@@ -754,6 +754,15 @@ CATALOG_FILE_ENTRY_URL = _normalized("url: file.url.clone()")
 CATALOG_URL_RE = re.compile(r"^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/resolve/([0-9a-f]{40})/([^?#]+)$")
 
 
+def catalog_for(registry: Path) -> Path:
+    """The catalog beside the registry's repository, else this script's."""
+    relative = Path("shared") / "models" / "catalog.json"
+    for parent in registry.resolve().parents:
+        if (parent / relative).is_file():
+            return parent / relative
+    return Path(__file__).resolve().parents[2] / relative
+
+
 def catalog_urls_checked(catalog: Path) -> tuple[list[str], set[str]]:
     """Every catalog download must be an immutable Hugging Face file URL in
     the entry's own repository and revision, with a SHA256 pin."""
@@ -804,7 +813,7 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
     if catalog_constructions > 1:
         failures.append(f"{registry}: only one catalog-backed FileEntry construction is reviewed")
     if catalog_constructions:
-        catalog_failures, catalog_urls = catalog_urls_checked(registry.parents[6] / "shared" / "models" / "catalog.json")
+        catalog_failures, catalog_urls = catalog_urls_checked(catalog_for(registry))
         failures.extend(catalog_failures)
         urls |= catalog_urls
 
