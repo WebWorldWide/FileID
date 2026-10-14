@@ -138,13 +138,6 @@ async fn async_main() -> Result<()> {
 
     tracing::info!(version = ENGINE_VERSION, "FileIDEngine starting");
 
-    // Create the process-lifetime Job Object now, so every llama.cpp child
-    // (server/CLI/probe) assigned to it is force-killed by the OS if the engine
-    // dies ungracefully (fast-fail / taskkill) and leaves a multi-GB-VRAM
-    // llama-server orphaned. Belt-and-suspenders alongside the parent-PID
-    // watchdog + kill_on_drop, which only cover graceful shutdown. (L4)
-    platform::init_engine_job();
-
     // macOS: the engine's `load-dynamic` ORT build `dlopen`s
     // `libonnxruntime.dylib`, but `download-binaries` ships only a STATIC
     // `libonnxruntime.a` for arm64 — so the dylib must be provisioned
