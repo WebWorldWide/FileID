@@ -138,7 +138,7 @@ jobs:
             platforms/tui/target/release/fileid-tui.exe
 
       - name: Upload tool bundle
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # Windows archives remain CI-only until their PE payloads use the
           # protected release signer. The publication download pattern excludes them.
@@ -237,7 +237,7 @@ jobs:
 
       - name: Upload unsigned dry-run artifacts
         if: steps.mode.outputs.publish != 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: FileID-Windows-unsigned-${{ github.run_number }}
           path: |
@@ -317,7 +317,7 @@ jobs:
 
       - name: Upload release-ready assets
         if: steps.mode.outputs.publish == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: FileID-release-ready-${{ github.run_id }}
           path: platforms/windows/dist/release-ready/*
