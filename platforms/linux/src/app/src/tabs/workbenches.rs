@@ -221,7 +221,7 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let timeline_mode = gtk::DropDown::from_strings(&["Quick samples", "Significant moments"]);
     timeline.append(&timeline_mode);
     body.append(&timeline);
-    body.append(&label("Timeline analysis needs a local visual model from Deep Analyze; nothing is downloaded automatically. Quick samples caption one moment per ten seconds; significant moments also examine overlapping four-second frame sequences. Speech transcription is not yet available on Linux. Every draft chapter needs review."));
+    body.append(&label("Timeline analysis needs a local visual model from Deep Analyze; nothing is downloaded automatically. Quick samples caption one moment per ten seconds; significant moments also examine overlapping four-second frame sequences. With a speech model installed from the model catalog (such as Qwen3-ASR), speech is transcribed on this device in 30-second searchable passages. Every draft chapter needs review."));
     let hits = column();
     body.append(&hits);
     let chapters = column();

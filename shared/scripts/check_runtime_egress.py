@@ -132,7 +132,7 @@ RAW_NETWORK_FILES = {
 REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/native_process.rs": "ab6b887dc2f1500bb80b510f333ddb0fc110a5e6234b6f57502330e67fd21ad3",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "4dca8812ea40edb2a39925693db2d8496d264b59557d42ecbf216aaff221e59a",
-  "platforms/windows/src/engine/src/commands/video_export.rs": "986212eb141859df8a63c3a34c7b6efcb0ea6da67c69b49d07cf9457c7eab0a1",
+  "platforms/windows/src/engine/src/commands/video_export.rs": "2bd14ef0d1f5afdf966572ebf4e0d2cea17f2dbb5b31be6cf3e518d89d989b18",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "b681e22dd5a9276b64371add52bc62917c68e60071cbb9cb0e720c14d86f9ba0",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "e3fb83d34956f74e87efdcc05bb38b3f2ecf109712832287fdde6bae1c80a729",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "820c7428acee9b0aba5d4a60812e70e117c34bd5ea340c875c215e32d23752e7",
@@ -171,7 +171,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/main.rs": "531e324aacae69756a5b69acb97d314d322a578e62c3e6ce461f77ccf98f41d5",
   "platforms/windows/src/engine/src/models/runtime.rs": "554fb40628ffd8653c8466ebae2a7e648e68ee3dfae99fa2a59b70b528c971b5",
   "platforms/windows/src/engine/src/models/vlm.rs": "feab915808a35c9bebfab4cb77399b5a7a086fe1e0d4f3506a2c102c2e736e73",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "5a41a76951a7f805a7ab975a55133f9ffe2ef6f588c8f8ff8d7a85c452991690",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "1d51b825e8be9514e4a6dd52cc003cdcf8fb1ab78643b53c4b3ebe9f904e90b7",
   "platforms/windows/src/engine/src/models/whisper.rs": "c6c6c4b288e0a6327fde8944cda3fbcfcc1cf5b30f2dd21bfbe5f388713fc0c9",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "5c133b3492b75aeb950d0905348c9d2b5fb87fe85d1bb228b707c1e5db0f7a6c",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "a3b83d9dbf74ee31353bbafc35cf8578d35544436ecd68fa64c240597f73a4ca",

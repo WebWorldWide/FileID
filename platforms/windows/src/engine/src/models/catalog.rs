@@ -97,22 +97,31 @@ pub fn find(id: &str) -> Option<&'static CatalogEntry> {
     catalog().entries.iter().find(|entry| entry.id == id)
 }
 
-/// A catalog model the shared engine can run today: a llama.cpp vision
-/// model (weights plus projector) offered on this platform.
-pub fn runnable_vision(id: &str) -> Option<&'static CatalogEntry> {
+/// A catalog model the shared engine can run today through llama-server: a
+/// GGUF vision or speech model (weights plus image or audio projector)
+/// offered on this platform.
+pub fn runnable(id: &str) -> Option<&'static CatalogEntry> {
     let platform = if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" };
     find(id).filter(|entry| {
         entry.format == "gguf"
-            && entry.role == "vision"
+            && matches!(entry.role.as_str(), "vision" | "speech")
             && entry.platforms.iter().any(|p| p == platform)
             && entry.files.iter().any(|f| f.role == "model")
             && entry.files.iter().any(|f| f.role == "projector")
     })
 }
 
-/// Directory under `Models/vlm/` for a runnable catalog vision model.
+pub fn runnable_vision(id: &str) -> Option<&'static CatalogEntry> {
+    runnable(id).filter(|entry| entry.role == "vision")
+}
+
+pub fn runnable_speech(id: &str) -> Option<&'static CatalogEntry> {
+    runnable(id).filter(|entry| entry.role == "speech")
+}
+
+/// Directory under `Models/vlm/` for a runnable catalog model.
 pub(crate) fn directory(id: &str) -> Option<&'static str> {
-    runnable_vision(id).and_then(|entry| catalog().directories.get(&entry.id).copied())
+    runnable(id).and_then(|entry| catalog().directories.get(&entry.id).copied())
 }
 
 #[cfg(test)]

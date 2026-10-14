@@ -322,6 +322,7 @@ pub(crate) struct AnalysisProbe {
     pub(crate) duration: f64,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) has_audio: bool,
 }
 
 fn demuxer(source: &Path) -> Result<&'static str> {
@@ -355,7 +356,8 @@ fn parse_analysis_probe(data: &[u8]) -> Result<AnalysisProbe> {
     let rotated = video["side_data_list"].as_array().is_some_and(|items| items.iter().filter_map(|item| number(&item["rotation"]))
         .any(|rotation| (rotation.abs() - 90.0).abs() <= 1.0 || (rotation.abs() - 270.0).abs() <= 1.0));
     let (width, height) = if rotated { (height as u32, width as u32) } else { (width as u32, height as u32) };
-    Ok(AnalysisProbe { duration, width, height })
+    let has_audio = streams.iter().any(|stream| stream["codec_type"] == "audio");
+    Ok(AnalysisProbe { duration, width, height, has_audio })
 }
 
 pub(crate) fn analysis_probe(source: &Path, cancelled: &AtomicBool) -> Result<AnalysisProbe> {
@@ -398,6 +400,50 @@ pub(crate) fn signal_frames(source: &Path, start: f64, end: f64, cancelled: &Ato
     let data = capture_cancellable(&runtime.ffmpeg, &args, SIGNAL_TIMEOUT, maximum, Some(cancelled))?;
     ensure!(data.len() % frame == 0, "The video worker returned a partial signal frame");
     Ok(data.chunks_exact(frame).enumerate().map(|(index, pixels)| (start + index as f64, pixels.to_vec())).collect())
+}
+
+const AUDIO_TIMEOUT: Duration = Duration::from_secs(120);
+/// 16 kHz mono 16-bit PCM: what on-device speech models expect.
+pub(crate) const SPEECH_SAMPLE_RATE: u32 = 16_000;
+
+/// The first audio stream of `[start, start + length)` as a 16 kHz mono WAV.
+pub(crate) fn audio_wav(source: &Path, start: f64, length: f64, cancelled: &AtomicBool) -> Result<Vec<u8>> {
+    ensure!(start.is_finite() && start >= 0.0 && length.is_finite() && length > 0.0 && length <= 600.0, "Invalid audio interval");
+    let runtime = runtime()?;
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin"].map(str::to_owned).into();
+    args.extend(["-ss".to_owned(), format!("{start:.3}"), "-t".to_owned(), format!("{length:.3}")]);
+    args.extend(input_args(source)?);
+    args.push("-i".to_owned());
+    args.push(source.to_str().context("Invalid video path")?.to_owned());
+    args.extend(["-map", "0:a:0", "-vn", "-sn", "-dn", "-ac", "1", "-ar"].map(str::to_owned));
+    args.push(SPEECH_SAMPLE_RATE.to_string());
+    args.extend(["-c:a", "pcm_s16le", "-f", "wav", "pipe:1"].map(str::to_owned));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let maximum = 64 + (length.ceil() as usize + 1) * SPEECH_SAMPLE_RATE as usize * 2;
+    let data = capture_cancellable(&runtime.ffmpeg, &args, AUDIO_TIMEOUT, maximum, Some(cancelled))?;
+    ensure!(data.len() > 44 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE", "The video worker returned no audio");
+    let mut data = data;
+    fix_wav_sizes(&mut data)?;
+    Ok(data)
+}
+
+/// A WAV streamed to a pipe carries placeholder sizes because FFmpeg cannot
+/// seek back; write the real RIFF and data-chunk sizes.
+pub(crate) fn fix_wav_sizes(data: &mut [u8]) -> Result<()> {
+    let riff = u32::try_from(data.len() - 8).context("Audio chunk too large")?;
+    data[4..8].copy_from_slice(&riff.to_le_bytes());
+    let mut offset = 12;
+    while offset + 8 <= data.len() {
+        let id = &data[offset..offset + 4];
+        let size = u32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        if id == b"data" {
+            let actual = u32::try_from(data.len() - offset - 8).context("Audio chunk too large")?;
+            data[offset + 4..offset + 8].copy_from_slice(&actual.to_le_bytes());
+            return Ok(());
+        }
+        offset = offset.checked_add(8 + size + (size & 1)).context("Invalid WAV chunk")?;
+    }
+    bail!("The audio has no data chunk")
 }
 
 /// Even dimensions whose long side is at most `max_side`, preserving aspect.
