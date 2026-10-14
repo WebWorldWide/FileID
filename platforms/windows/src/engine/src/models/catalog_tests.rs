@@ -44,7 +44,9 @@ fn validation_rejects_unsafe_or_unlicensed_entries() {
     let mut unpinned = sample();
     unpinned.files[0].sha256 = None;
     let mut foreign = sample();
-    foreign.files[1].url = "https://example.com/mmproj.gguf".into();
+    foreign.files[1].url = foreign.files[1].url.replace("org/model-GGUF", "other/model-GGUF");
+    let mut off_host = sample();
+    off_host.files[1].url = format!("https://{}/org/model-GGUF/resolve/{}/mmproj.gguf", "mirror.invalid", off_host.revision);
     let mut moved = sample();
     moved.files[0].url = moved.files[0].url.replace(&moved.revision, "main");
     let mut traversal = sample();
@@ -52,6 +54,7 @@ fn validation_rejects_unsafe_or_unlicensed_entries() {
     let cases = [
         unpinned,
         foreign,
+        off_host,
         moved,
         traversal,
         CatalogEntry { license: "cc-by-nc-4.0".into(), ..sample() },

@@ -41,7 +41,9 @@ internal sealed class ModelsWorkbench : WorkbenchPanel
         DebugLog.SafeRun("ModelsWorkbench.OnEngineChanged", () =>
         {
             if (e.PropertyName == nameof(EngineClient.BenchmarkProgress) && Engine.BenchmarkProgress is { } p)
+            {
                 DispatcherQueue.TryEnqueue(() => Status.Text = $"Benchmarking {p.ModelKind} · {p.Phase} {p.Completed}/{p.Total}");
+            }
         });
     }
 
@@ -71,11 +73,13 @@ internal sealed class ModelsWorkbench : WorkbenchPanel
             if (model.Benchmark is { } benchmark) card.Children.Add(new TextBlock { Text = ModelCatalogPresentation.BenchmarkSummary(benchmark), TextWrapping = TextWrapping.Wrap });
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             if (ModelCatalogPresentation.CanInstall(model))
+            {
                 actions.Children.Add(ActionButton("Install", async ct =>
                 {
                     await Engine.PrewarmModelAsync(model.Id);
                     await UI(() => Status.Text = $"Downloading {model.Id} from its pinned Hugging Face revision. Refresh when it completes.", ct);
                 }));
+            }
             if (ModelCatalogPresentation.CanBenchmark(model))
             {
                 actions.Children.Add(ActionButton("Benchmark", ct => BenchmarkAsync(model.Id, false, ct)));
