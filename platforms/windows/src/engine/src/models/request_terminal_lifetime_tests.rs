@@ -56,7 +56,7 @@ async fn fixture(root: &Path, url: String) -> (Arc<VlmServer>, Arc<ProcessTracke
     let process = OwnedProcess::spawn(&mut command, Some(lease.clone()), &tracker).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async { while !marker.exists() { tokio::task::yield_now().await; } }).await.unwrap();
     lease.retain_memory();
-    let server = Arc::new(VlmServer { process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler: s.clone(), cancel: Arc::new(AtomicBool::new(false)), request_gate: tokio::sync::Mutex::new(()) });
+    let server = Arc::new(VlmServer { last_timings: parking_lot::Mutex::new(None), process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler: s.clone(), cancel: Arc::new(AtomicBool::new(false)), request_gate: tokio::sync::Mutex::new(()) });
     (server, tracker, s)
 }
 async fn finish(server: Arc<VlmServer>, tracker: Arc<ProcessTracker>, s: &ResourceScheduler) {

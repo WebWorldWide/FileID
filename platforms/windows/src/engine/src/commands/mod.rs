@@ -26,6 +26,8 @@ mod catalog_take_suggestions;
 pub mod chat;
 mod chat_search;
 pub mod tools;
+pub mod models;
+pub mod benchmark;
 pub mod timeline;
 pub(crate) mod video_export;
 

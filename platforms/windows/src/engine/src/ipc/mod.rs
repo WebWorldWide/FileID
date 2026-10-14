@@ -77,6 +77,12 @@ pub enum CommandPayload {
     RequestStatus(Empty),
     #[serde(rename = "healthCheck")]
     HealthCheck(HealthCheckPayload),
+    #[serde(rename = "listModels")]
+    ListModels(ListModelsPayload),
+    #[serde(rename = "benchmarkModel")]
+    BenchmarkModel(BenchmarkModelPayload),
+    #[serde(rename = "cancelBenchmark")]
+    CancelBenchmark(Empty),
     #[serde(rename = "shutdown")]
     Shutdown(Empty),
     #[serde(rename = "runFaceClustering")]
@@ -231,6 +237,120 @@ mod health_tests {
             assert!(!HealthCheckPayload { request_id }.is_valid());
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListModelsPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+impl ListModelsPayload {
+    pub fn is_valid(&self) -> bool {
+        HealthCheckPayload { request_id: self.request_id.clone() }.is_valid()
+            && self.role.as_deref().is_none_or(|role| ["vision", "text", "embedding", "reranker", "speech"].contains(&role))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkModelPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub model_kind: String,
+    pub tune: bool,
+}
+
+impl BenchmarkModelPayload {
+    pub fn is_valid(&self) -> bool {
+        HealthCheckPayload { request_id: self.request_id.clone() }.is_valid() && (1..=128).contains(&self.model_kind.len())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkProgress {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub model_kind: String,
+    pub phase: String,
+    pub completed: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkResult {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub model_kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<ModelBenchmark>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalog {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    #[serde(rename = "physicalMemoryGB")]
+    pub physical_memory_gb: f64,
+    #[serde(rename = "vramMB")]
+    pub vram_mb: u64,
+    pub models: Vec<ModelCatalogItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogItem {
+    pub id: String,
+    pub name: String,
+    pub family: String,
+    pub upstream: String,
+    pub role: String,
+    pub format: String,
+    pub quantization: String,
+    pub license: String,
+    pub terms_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters_billion: Option<f64>,
+    pub download_bytes: u64,
+    #[serde(rename = "estimatedResidentGB")]
+    pub estimated_resident_gb: f64,
+    pub tier: String,
+    pub status: String,
+    pub runnable: bool,
+    pub installed: bool,
+    pub fits: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<ModelBenchmark>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelBenchmark {
+    pub measured_at: String,
+    pub hardware: String,
+    pub load_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_per_second: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_tokens_per_second: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds_per_image: Option<f64>,
+    #[serde(rename = "peakResidentGB", default, skip_serializing_if = "Option::is_none")]
+    pub peak_resident_gb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_valid_rate: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_accuracy: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuned_arguments: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,6 +708,12 @@ pub enum EventPayload {
     Ready(Wrap<EngineInfo>),
     #[serde(rename = "healthCheckResult")]
     HealthCheckResult(Wrap<HealthCheckResult>),
+    #[serde(rename = "modelCatalog")]
+    ModelCatalog(Wrap<ModelCatalog>),
+    #[serde(rename = "benchmarkProgress")]
+    BenchmarkProgress(Wrap<BenchmarkProgress>),
+    #[serde(rename = "benchmarkResult")]
+    BenchmarkResult(Wrap<BenchmarkResult>),
 
     #[serde(rename = "progress")]
     Progress(Wrap<ScanProgress>),

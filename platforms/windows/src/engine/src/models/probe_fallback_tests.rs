@@ -20,7 +20,7 @@ async fn fixture(root: &Path) -> (VlmServer, ProcessTracker, Arc<ResourceSchedul
     tokio::time::timeout(Duration::from_secs(5), async { while !marker.exists() { tokio::task::yield_now().await; } }).await.unwrap();
     lease.retain_memory(); let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    (VlmServer { process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler: s.clone(), cancel: Arc::new(AtomicBool::new(false)), request_gate: tokio::sync::Mutex::new(()) }, tracker, s, available, listener)
+    (VlmServer { last_timings: parking_lot::Mutex::new(None), process, base_url: url, api_key: "generated-auth".into(), client: build_loopback_client().unwrap(), scheduler: s.clone(), cancel: Arc::new(AtomicBool::new(false)), request_gate: tokio::sync::Mutex::new(()) }, tracker, s, available, listener)
 }
 async fn finish(server: VlmServer, tracker: &ProcessTracker, s: &ResourceScheduler) {
     server.shutdown().await.unwrap(); assert!(tracker.allows_fallback());

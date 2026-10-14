@@ -361,6 +361,37 @@ struct FileIDEngineMain {
                 requestID: requestID,
                 pid: ProcessInfo.processInfo.processIdentifier
             )))
+        case .listModels(let requestID, let role):
+            let roles: Set<String> = ["vision", "text", "embedding", "reranker", "speech"]
+            guard HealthCheckResult.isValidRequestID(requestID), role.map(roles.contains) ?? true else {
+                await sink.emit(.error(EngineError(
+                    kind: "invalid_list_models_request",
+                    message: "listModels needs a 1–128 character ASCII request ID and a known role."
+                )))
+                return
+            }
+            let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+            // The curated MLX models; the extended catalog's MLX entries need
+            // per-architecture loader support before macOS can offer them.
+            let includeVision = role.map { $0 == "vision" } ?? true
+            let models: [ModelCatalogItem] = !includeVision ? [] : AIModelKind.allCases.map { kind in
+                ModelCatalogItem(
+                    id: kind.rawValue, name: kind.displayName, family: kind.sourceRepo.components(separatedBy: "/").last ?? kind.rawValue,
+                    upstream: kind.sourceRepo, role: "vision", format: "mlx", quantization: kind.displayName.contains("8-bit") ? "8bit" : "4bit",
+                    license: kind.licensePolicyKey, termsRequired: kind.licensePolicyKey == "Gemma", parametersBillion: nil,
+                    downloadBytes: kind.approxBytes, estimatedResidentGB: kind.ramBudgetGB,
+                    tier: ModelCatalogItem.tier(forResidentGB: kind.ramBudgetGB), status: "curated", runnable: true,
+                    installed: kind.isInstalledOnDisk(), fits: kind.ramBudgetGB <= memoryGB * 0.6
+                )
+            }
+            await sink.emit(.modelCatalog(ModelCatalog(requestID: requestID, physicalMemoryGB: memoryGB, vramMB: 0, models: models)))
+        case .benchmarkModel(let requestID, let modelKind, _):
+            await sink.emit(.benchmarkResult(BenchmarkResult(
+                requestID: requestID, modelKind: String(modelKind.prefix(128)), status: "error",
+                message: "On-device benchmarking is available in the shared engine on Windows and Linux; MLX benchmarking on macOS is not yet implemented."
+            )))
+        case .cancelBenchmark:
+            break
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))

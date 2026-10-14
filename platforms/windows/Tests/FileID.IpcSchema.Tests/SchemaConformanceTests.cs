@@ -36,6 +36,7 @@ public class SchemaConformanceTests
     // Hoisted constant arrays (CA1861) shared by the exemplars.
     private static readonly long[] _exampleFileIds = { 1, 2, 3 };
     private static readonly string[] _exampleTags = { "hawaii", "sunset" };
+    private static readonly string[] _exampleTunedArguments = { "-ngl", "99" };
     private static readonly long[] _examplePersonIds = { 1, 2 };
     private static readonly long[] _exampleFaceIds = { 10, 11, 12 };
     private static readonly string[] _exampleSkippedStages = { "ocr" };
@@ -177,6 +178,9 @@ public class SchemaConformanceTests
         new CancelScanCommand(),
         new RequestStatusCommand(),
         new HealthCheckCommand("probe-1"),
+        new ListModelsCommand("models-1", "vision"),
+        new BenchmarkModelCommand("bench-1", "qwen3_vl_4b", true),
+        new CancelBenchmarkCommand(),
         new ShutdownCommand(),
         new RunFaceClusteringCommand(),
         new VerifyCudaPackCommand(),
@@ -215,6 +219,14 @@ public class SchemaConformanceTests
         new CatalogResponseEvent(new CatalogResponse("r1", "ok", "Found a moment", new[] { new CatalogHit(42, @"C:\Photos\Birthday.mov", "chapter", "Gift Opening", "chapter-1", 12.5, 1) }, new[] { ExampleChapter() }, new[] { new CatalogJob("job-1", "timelineSample", new long[] { 42 }, "failed", 0.5, "Interrupted", 100, 101) })),
         new ReadyEvent(new EngineInfo("1.0.0", 1234, 14, 16.0, ExampleHardware())),
         new HealthCheckResultEvent(new HealthCheckResult("probe-1", 1234)),
+        new BenchmarkProgressEvent(new BenchmarkProgress("bench-1", "qwen3_vl_4b", "measuring", 3, 12)),
+        new BenchmarkResultEvent(new BenchmarkResult("bench-1", "qwen3_vl_4b", "error", "The model is not installed or failed verification")),
+        new ModelCatalogEvent(new ModelCatalog("models-1", 16, 6144, new[]
+        {
+            new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",
+                "Q4_K_M", "Apache-2.0", false, 2, 1_500_000_000, 2.3, "tiny", "verified", true, true, true,
+                new ModelBenchmark("2026-10-13T22:00:00Z", "x86_64 · 16 GB · RTX 2060 6 GB", 3.2, 900, 55, 1.4, 2.6, 0.95, 0.8, _exampleTunedArguments)),
+        })),
         new ProgressEvent(new ScanProgress("sess-1", ScanPhase.Tagging, 100, 100, 50, 1, 87.4, 12.5, 612, 4200)),
         new PhaseChangedEvent(ScanPhase.PostScan),
         new DiscoveryCompleteEvent(50_000),

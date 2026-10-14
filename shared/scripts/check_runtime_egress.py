@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -129,11 +130,11 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
-  "platforms/windows/src/engine/src/models/native_process.rs": "8988beadf86a88ac4d1ebfb6568191b10860094f1bd908f284df6ba7741c4a0c",
+  "platforms/windows/src/engine/src/models/native_process.rs": "ab6b887dc2f1500bb80b510f333ddb0fc110a5e6234b6f57502330e67fd21ad3",
   "platforms/windows/src/engine/src/commands/deep_scope.rs": "4dca8812ea40edb2a39925693db2d8496d264b59557d42ecbf216aaff221e59a",
   "platforms/windows/src/engine/src/commands/video_export.rs": "986212eb141859df8a63c3a34c7b6efcb0ea6da67c69b49d07cf9457c7eab0a1",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "b681e22dd5a9276b64371add52bc62917c68e60071cbb9cb0e720c14d86f9ba0",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "2b718da30cc9385b8938f5421beb98f45d49b0dffc1176a4f742034d8ecf3a9f",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "e3fb83d34956f74e87efdcc05bb38b3f2ecf109712832287fdde6bae1c80a729",
   "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "820c7428acee9b0aba5d4a60812e70e117c34bd5ea340c875c215e32d23752e7",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
@@ -148,8 +149,8 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
   "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
   "platforms/cli/src/scan_models.rs": "4964efabe46667a3a4019020d8ca1a85b04d9a07975d19c975d656eb6c7cd8c6",
-  "platforms/linux/src/app/src/engine_client.rs": "016a50073547891da43e83481eea4d24d9476b6b6f08f36aa422f8cbe577e51c",
-  "platforms/linux/src/app/src/tabs/settings.rs": "53e1862376b8dc6f7ef0a9204efb2265ec32ffb0c05c69df932d10a09186536f",
+  "platforms/linux/src/app/src/engine_client.rs": "b0aaa5342fa79fc0c7537818e0f75e355f78e9af5d1ca358182dcfc024cf95a8",
+  "platforms/linux/src/app/src/tabs/settings.rs": "54c08bc34af9007b250659b55374697af927659c000551d7b617f59f564f897c",
   "platforms/tui/src/models.rs": "bc27e7237659b63e42d2f4f8ca9d5d2a83015d849be771395654e250b0754c23",
   "platforms/tui/src/scan.rs": "d125e647269633def7438245657d0e4e447ba9e2d477aac72afda918b2330cf0",
   "platforms/windows/src/FileID.App/App.xaml.cs": "165dfcd81bd6fcdae0dbdc0ab9a1a55a9a181408a425310f1e072686a06c41ef",
@@ -167,10 +168,10 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/restructure.rs": "9db9d9bff7250b001cc269dfa435bbc53986ad165b66e84bc20f3e2e3a232e89",
   "platforms/windows/src/engine/src/commands/trash.rs": "196629996b04c3d6c8db3cc76936a5e3af73905cecdd7ee95bf33eaf368091fa",
   "platforms/windows/src/engine/src/downloader.rs": "3ec3a3da33b8b42eff58676e378b6268809dceb24b29385c305604f7e060263a",
-  "platforms/windows/src/engine/src/main.rs": "f112c644ee4816094aa35cd6505bd8448bd9af494a5d3c77d9ea2c4c3dcbcde4",
+  "platforms/windows/src/engine/src/main.rs": "531e324aacae69756a5b69acb97d314d322a578e62c3e6ce461f77ccf98f41d5",
   "platforms/windows/src/engine/src/models/runtime.rs": "554fb40628ffd8653c8466ebae2a7e648e68ee3dfae99fa2a59b70b528c971b5",
   "platforms/windows/src/engine/src/models/vlm.rs": "feab915808a35c9bebfab4cb77399b5a7a086fe1e0d4f3506a2c102c2e736e73",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "076dc47e332edab60d64bd0de13dfc13c607e610691848dc00bf7ed620bf1595",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "5a41a76951a7f805a7ab975a55133f9ffe2ef6f588c8f8ff8d7a85c452991690",
   "platforms/windows/src/engine/src/models/whisper.rs": "c6c6c4b288e0a6327fde8944cda3fbcfcc1cf5b30f2dd21bfbe5f388713fc0c9",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "5c133b3492b75aeb950d0905348c9d2b5fb87fe85d1bb228b707c1e5db0f7a6c",
   "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "a3b83d9dbf74ee31353bbafc35cf8578d35544436ecd68fa64c240597f73a4ca",
@@ -749,6 +750,42 @@ def _file_entry_blocks(text: str) -> tuple[list[str], list[str]]:
     return blocks, failures
 
 
+CATALOG_FILE_ENTRY_URL = _normalized("url: file.url.clone()")
+CATALOG_URL_RE = re.compile(r"^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/resolve/([0-9a-f]{40})/([^?#]+)$")
+
+
+def catalog_for(registry: Path) -> Path:
+    """The catalog beside the registry's repository, else this script's."""
+    relative = Path("shared") / "models" / "catalog.json"
+    for parent in registry.resolve().parents:
+        if (parent / relative).is_file():
+            return parent / relative
+    return Path(__file__).resolve().parents[2] / relative
+
+
+def catalog_urls_checked(catalog: Path) -> tuple[list[str], set[str]]:
+    """Every catalog download must be an immutable Hugging Face file URL in
+    the entry's own repository and revision, with a SHA256 pin."""
+    failures: list[str] = []
+    urls: set[str] = set()
+    try:
+        document = json.loads(catalog.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f"{catalog}: unreadable model catalog ({error})"], urls
+    for entry in document.get("entries", []):
+        for item in entry.get("files", []):
+            url = item.get("url", "")
+            match = CATALOG_URL_RE.match(url)
+            if not match or match.group(1) != entry.get("repo") or match.group(2) != entry.get("revision") or ".." in match.group(3):
+                failures.append(f"{catalog}: {entry.get('id')}: catalog URL is not an immutable file in its own repository: {url}")
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256") or "")):
+                failures.append(f"{catalog}: {entry.get('id')}: catalog file is not SHA256-pinned: {url}")
+                continue
+            urls.add(url)
+    return failures, urls
+
+
 def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[str]]:
     failures: list[str] = []
     registry_text = _without_comments(
@@ -757,8 +794,14 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
     urls: set[str] = set()
     blocks, block_failures = _file_entry_blocks(registry_text)
     failures.extend(f"{registry}: {failure}" for failure in block_failures)
+    catalog_constructions = 0
     for index, block in enumerate(blocks, 1):
         matches = re.findall(r'\burl:\s*"(https?://[^"\\]+)"', block)
+        # The one reviewed catalog construction takes its URL from
+        # shared/models/catalog.json, whose URLs are verified below.
+        if not matches and CATALOG_FILE_ENTRY_URL in _normalized(block):
+            catalog_constructions += 1
+            continue
         if len(matches) != 1:
             failures.append(
                 f"{registry}: FileEntry construction {index} must contain exactly one literal http(s) url field"
@@ -767,6 +810,12 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
         urls.add(matches[0])
     if not blocks or not urls:
         failures.append(f"{registry}: no production FileEntry URL constructions found")
+    if catalog_constructions > 1:
+        failures.append(f"{registry}: only one catalog-backed FileEntry construction is reviewed")
+    if catalog_constructions:
+        catalog_failures, catalog_urls = catalog_urls_checked(catalog_for(registry))
+        failures.extend(catalog_failures)
+        urls |= catalog_urls
 
     downloader_text = _without_comments(downloader.read_text(encoding="utf-8"))
     downloader_structure = _mask_comments_and_strings(downloader_text)

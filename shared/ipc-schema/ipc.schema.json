@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.13.0",
+  "version": "1.14.0",
 
   "$defs": {
     "IPCCommand": {
@@ -93,6 +93,24 @@
             "description": "Lightweight command-channel probe. Echoes the opaque nonce and actual engine PID without starting work, touching the catalog or re-emitting ready. Clients correlate replies with their captured process generation; this does not establish model or storage health.",
             "required": ["requestID"], "properties": { "requestID": { "$ref": "#/$defs/HealthRequestID" } }
           } } },
+        { "type": "object", "required": ["listModels"], "additionalProperties": false,
+          "properties": { "listModels": { "type": "object", "additionalProperties": false,
+            "description": "List the curated and extended local model catalog for this platform with install state, hardware fit and any local benchmark. Read-only: never downloads, loads or benchmarks a model. Replies with `modelCatalog`.",
+            "required": ["requestID"], "properties": {
+              "requestID": { "$ref": "#/$defs/HealthRequestID" },
+              "role": { "type": "string", "enum": ["vision", "text", "embedding", "reranker", "speech"] }
+            }
+          } } },
+        { "type": "object", "required": ["benchmarkModel"], "additionalProperties": false,
+          "properties": { "benchmarkModel": { "type": "object", "additionalProperties": false,
+            "description": "Benchmark one installed model on this machine with locally rendered probes (no download, no personal files). tune additionally tries llama-server launch flags and keeps the fastest configuration whose greedy output is unchanged. Emits benchmarkProgress, then one benchmarkResult. One benchmark runs at a time.",
+            "required": ["requestID", "modelKind", "tune"], "properties": {
+              "requestID": { "$ref": "#/$defs/HealthRequestID" },
+              "modelKind": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "tune": { "type": "boolean" }
+            }
+          } } },
+        { "type": "object", "required": ["cancelBenchmark"], "additionalProperties": false, "properties": { "cancelBenchmark": { "type": "object", "additionalProperties": false, "description": "Stop the running benchmark; it replies with benchmarkResult status cancelled." } } },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false, "description": "Recluster compatible face evidence while retaining identity IDs and user corrections. Failed validation must not publish partial assignments." } } },
@@ -396,6 +414,18 @@
             }
           }
         },
+        { "type": "object", "required": ["benchmarkProgress"], "additionalProperties": false,
+          "properties": { "benchmarkProgress": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/BenchmarkProgress" } }
+          } } },
+        { "type": "object", "required": ["benchmarkResult"], "additionalProperties": false,
+          "properties": { "benchmarkResult": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/BenchmarkResult" } }
+          } } },
+        { "type": "object", "required": ["modelCatalog"], "additionalProperties": false,
+          "properties": { "modelCatalog": { "type": "object", "additionalProperties": false,
+            "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/ModelCatalog" } }
+          } } },
         { "type": "object", "required": ["healthCheckResult"], "additionalProperties": false,
           "properties": { "healthCheckResult": { "type": "object", "additionalProperties": false,
             "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/HealthCheckResult" } }
@@ -506,6 +536,80 @@
     "HealthRequestID": {
       "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$",
       "description": "Client-generated correlation nonce, never a file path, document text or secret. Invalid nonces receive invalid_health_request and no success reply. Use a fresh nonce for each probe."
+    },
+    "ModelCatalog": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestID", "physicalMemoryGB", "vramMB", "models"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "physicalMemoryGB": { "type": "number", "minimum": 0 },
+        "vramMB": { "type": "integer", "minimum": 0 },
+        "models": { "type": "array", "maxItems": 4000, "items": { "$ref": "#/$defs/ModelCatalogItem" } }
+      }
+    },
+    "ModelCatalogItem": {
+      "type": "object", "additionalProperties": false,
+      "description": "status is `curated` for the shipped defaults, `candidate` for catalog entries not yet benchmarked on real hardware, `verified` once fileid-bench has run them. runnable means this engine can load it on this platform today; fits compares the resident estimate with this machine's memory.",
+      "required": ["id", "name", "family", "upstream", "role", "format", "quantization", "license", "termsRequired", "downloadBytes", "estimatedResidentGB", "tier", "status", "runnable", "installed", "fits"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 200 },
+        "family": { "type": "string", "maxLength": 120 },
+        "upstream": { "type": "string", "maxLength": 200 },
+        "role": { "type": "string", "enum": ["vision", "text", "embedding", "reranker", "speech"] },
+        "format": { "type": "string", "enum": ["gguf", "mlx", "onnx"] },
+        "quantization": { "type": "string", "maxLength": 40 },
+        "license": { "type": "string", "enum": ["Apache-2.0", "MIT", "Gemma"] },
+        "termsRequired": { "type": "boolean" },
+        "parametersBillion": { "type": ["number", "null"], "minimum": 0 },
+        "downloadBytes": { "type": "integer", "minimum": 0 },
+        "estimatedResidentGB": { "type": "number", "minimum": 0 },
+        "tier": { "type": "string", "enum": ["tiny", "small", "medium", "large", "xlarge", "workstation"] },
+        "status": { "type": "string", "enum": ["curated", "candidate", "verified"] },
+        "runnable": { "type": "boolean" },
+        "installed": { "type": "boolean" },
+        "fits": { "type": "boolean" },
+        "benchmark": { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/ModelBenchmark" } ] }
+      }
+    },
+    "BenchmarkProgress": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestID", "modelKind", "phase", "completed", "total"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "modelKind": { "type": "string", "maxLength": 128 },
+        "phase": { "type": "string", "enum": ["loading", "measuring", "tuning"] },
+        "completed": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "BenchmarkResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requestID", "modelKind", "status"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "modelKind": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["ok", "error", "cancelled"] },
+        "message": { "type": ["string", "null"], "maxLength": 2000 },
+        "benchmark": { "anyOf": [ { "type": "null" }, { "$ref": "#/$defs/ModelBenchmark" } ] }
+      }
+    },
+    "ModelBenchmark": {
+      "type": "object", "additionalProperties": false,
+      "description": "Local measurement by fileid-bench on this machine. Rates are medians over the fixture run; jsonValidRate is the share of structured (moment/rename) prompts that parsed; probeAccuracy is the exact-answer rate on synthetic colour, count and OCR probes — a functional check, not photo-quality evaluation. tunedArguments are the llama-server flags auto-tuning kept because they were fastest without changing greedy output.",
+      "required": ["measuredAt", "hardware", "loadSeconds"],
+      "properties": {
+        "measuredAt": { "type": "string", "maxLength": 40 },
+        "hardware": { "type": "string", "maxLength": 200 },
+        "loadSeconds": { "type": "number", "minimum": 0 },
+        "promptTokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
+        "generatedTokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
+        "secondsPerImage": { "type": ["number", "null"], "minimum": 0 },
+        "peakResidentGB": { "type": ["number", "null"], "minimum": 0 },
+        "jsonValidRate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "probeAccuracy": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "tunedArguments": { "type": ["array", "null"], "maxItems": 32, "items": { "type": "string", "maxLength": 64 } }
+      }
     },
     "HealthCheckResult": {
       "type": "object", "additionalProperties": false, "required": ["requestID", "pid"],

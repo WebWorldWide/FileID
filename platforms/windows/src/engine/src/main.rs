@@ -767,6 +767,13 @@ async fn handle_line(
             let index = catalog_index.cloned();
             tokio::spawn(async move { commands::catalog::handle(sink, database, index, payload.request).await; });
         }
+        CommandPayload::ListModels(payload) => {
+            tokio::spawn(commands::models::handle(sink.clone(), payload));
+        }
+        CommandPayload::BenchmarkModel(payload) => {
+            tokio::spawn(commands::benchmark::handle(sink.clone(), payload));
+        }
+        CommandPayload::CancelBenchmark(_) => commands::benchmark::cancel(),
         CommandPayload::HealthCheck(payload) => {
             let response = if payload.is_valid() {
                 EventPayload::HealthCheckResult(Wrap::new(ipc::HealthCheckResult {
