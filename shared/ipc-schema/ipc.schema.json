@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.14.0",
+  "version": "1.15.0",
 
   "$defs": {
     "IPCCommand": {
@@ -382,6 +382,77 @@
               "properties": {
                 "request": {
                   "$ref": "#/$defs/ChatRequest"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cancelRestructure"
+          ],
+          "properties": {
+            "cancelRestructure": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Cooperatively cancel only the active restructure plan, apply, or undo operation. Must not cancel a library scan."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reassignFace"
+          ],
+          "properties": {
+            "reassignFace": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "faceID"
+              ],
+              "description": "Move one face to another person, or to a new person when createNewPerson is true. Replies with a bulkActionResult.",
+              "properties": {
+                "faceID": {
+                  "type": "integer"
+                },
+                "destinationPersonID": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "createNewPerson": {
+                  "type": "boolean",
+                  "default": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "purgeExcluded"
+          ],
+          "properties": {
+            "purgeExcluded": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Remove cataloged rows under the given excluded folders immediately (files on disk untouched; cascades tags/faces/captions/embeddings). Sent when the user adds an exclusion so the Library reflects it without waiting for a rescan. Replies with a bulkActionResult (action 'purgeExcluded', succeeded = purged row count).",
+              "required": [
+                "excludedPaths"
+              ],
+              "properties": {
+                "excludedPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               }
             }

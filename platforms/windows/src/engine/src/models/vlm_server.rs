@@ -47,7 +47,7 @@ pub struct VlmServer {
 }
 
 /// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
-/// bare elsewhere (parity with `whisper::BIN_EXT` / `vlm::BIN_EXT`).
+/// bare elsewhere.
 #[cfg(windows)]
 const BIN_EXT: &str = ".exe";
 #[cfg(not(windows))]
@@ -244,6 +244,15 @@ impl VlmServer {
     }
     pub async fn complete_sequence_with_cancel(&self, image_paths: &[&Path], prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
         validate_sequence(image_paths, prompt, max_tokens)?;
+        self.dispatch(image_paths, prompt, max_tokens, cancel).await
+    }
+    /// Text-only completion (document analysis): same admission, cancellation
+    /// and cleanup as image requests.
+    pub async fn complete_text_with_cancel(&self, prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
+        validate_prompt(prompt, max_tokens)?;
+        self.dispatch(&[], prompt, max_tokens, cancel).await
+    }
+    async fn dispatch(&self, image_paths: &[&Path], prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
         let _turn = tokio::select! { biased;
             _ = wait_request_cancelled(&cancel, &self.cancel) => return Err(HostAdmissionError(anyhow!("Native request cancelled before admission")).into()),
             turn = self.request_gate.lock() => turn,
@@ -367,9 +376,13 @@ fn read_image_bounded_sync(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn validate_sequence(image_paths: &[&Path], prompt: &str, max_tokens: u32) -> Result<()> {
-    anyhow::ensure!((1..=8).contains(&image_paths.len()) && prompt.len() <= 32768 && (1..=4096).contains(&max_tokens), "Native request prompt/token bounds exceeded");
+fn validate_prompt(prompt: &str, max_tokens: u32) -> Result<()> {
+    anyhow::ensure!(prompt.len() <= 32768 && (1..=4096).contains(&max_tokens), "Native request prompt/token bounds exceeded");
     Ok(())
+}
+fn validate_sequence(image_paths: &[&Path], prompt: &str, max_tokens: u32) -> Result<()> {
+    anyhow::ensure!((1..=8).contains(&image_paths.len()), "Native request prompt/token bounds exceeded");
+    validate_prompt(prompt, max_tokens)
 }
 
 fn is_wav(bytes: &[u8]) -> bool {
@@ -377,7 +390,8 @@ fn is_wav(bytes: &[u8]) -> bool {
 }
 
 async fn multimodal_body_admitted(image_paths: &[&Path], prompt: &str, max_tokens: u32, host: Arc<crate::resource_scheduler::Lease>) -> Result<serde_json::Value> {
-    validate_sequence(image_paths, prompt, max_tokens)?;
+    anyhow::ensure!(image_paths.len() <= 8, "Native request prompt/token bounds exceeded");
+    validate_prompt(prompt, max_tokens)?;
     let mut total = 0u64;
     for path in image_paths {
         let metadata = tokio::fs::metadata(path).await.context("Read visual-frame size")?;

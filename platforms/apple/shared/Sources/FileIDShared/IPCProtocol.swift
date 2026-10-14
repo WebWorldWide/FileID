@@ -36,7 +36,7 @@ public struct IPCCommand: Codable, Sendable {
         case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
         /// Read-only model catalog with install state, hardware fit and any
-        /// local benchmark. Replies with `modelCatalog` (schema 1.14.0).
+        /// local benchmark. Replies with `modelCatalog` (schema 1.14.0+).
         case listModels(requestID: String, role: String?)
         /// On-device benchmark of one installed model; replies with
         /// `benchmarkProgress` events and one `benchmarkResult`.
@@ -99,6 +99,8 @@ public struct IPCCommand: Codable, Sendable {
         case purgeExcluded(excludedPaths: [String])
         case trashFiles(fileIDs: [Int64], exactIdentities: [ExactTrashIdentity]?)
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
+        /// Move one face to another person (or a new one when `createNewPerson`).
+        case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
         case markPersonsAsUnknown(personIDs: [Int64])

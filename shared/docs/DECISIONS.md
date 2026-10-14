@@ -3848,3 +3848,19 @@ A DirectML device-removed error invalidates every ORT session in the process. `S
 
 The engine compiles each module twice: as the `FileIDEngine` binary and as the `fileid_engine` library used by the CLI, TUI, GTK app, examples and tests. The library keeps a crate-wide `allow(dead_code)` because items only `main.rs` calls look unused there. Dead code is judged against the binary on both Windows and Linux: an item the binary never uses must either have a named external consumer (stated on its `allow`), be `#[cfg(test)]`, or be deleted. Unwired "foundation" code with no roadmap entry is deleted rather than kept for a future integration. Formatting stays opted out via `rustfmt.toml`, except files with no hand layout to preserve, which may be formatted individually.
 
+## 2026-10-14 — Restore the pre-rollback engine selectively, not wholesale
+
+The August rollback removed mature engine work, but `main` has since gained features the old tip lacks. Restore per file with three-way merges (base = rollback, ours = `main`, theirs = pre-rollback tip), preferring the pre-rollback engine where they conflict and keeping every post-August feature and policy. Not restored: runtime downloads from GitHub/NVIDIA (Hugging Face-only egress) and the whisper.cpp backend (speech runs through the catalog ASR models on llama.cpp).
+
+## 2026-10-14 — Linux path hashes are case-sensitive; rehash once on upgrade
+
+Linux filesystems are case-sensitive, so lowercasing before hashing made `Photo.JPG` and `photo.jpg` collide. Existing catalogs hold the old hashes and the missing-file sweep compares hashes, so `open_writer` rehashes every row once and records it in `PRAGMA user_version` bit 0. The marker cannot go in `grdb_migrations`, which refuses unknown identifiers as a newer-database guard.
+
+## 2026-10-14 — Restructure identity: inode binding plus the planned snapshot
+
+The pre-rollback engine binds each move to the stored `file_ref`; `main` compared the move's recorded hash, size, mtime and ref with the live row. Both are kept. A row with no `file_ref` (cataloged before v8) is adopted only when the move's hash and size match the live row and the bytes on disk. Stored plans keep strict destinations (an occupied approved name fails and asks for a re-plan); inline moves get a ` (2)` sibling like macOS.
+
+## 2026-10-14 — Single-file Deep Analyze falls back to llama-server
+
+The per-file CLI is optional. When `llama-mtmd-cli` is missing, a single-file request uses the resident llama-server lease like the batch path, so a server-only runtime (the Linux source build) analyzes individual files.
+

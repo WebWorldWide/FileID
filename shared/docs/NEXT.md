@@ -10,6 +10,7 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## In flight
 
+0. **Finish the August-rollback restore** (engine landed first): restore the GTK app (paged restructure plans, engine client, settings), the WinUI app (47 conflicted files) and the macOS app/engine (57) area by area, each as its own PR verified on its host. Implement `reassignFace` in the macOS engine (currently `not_implemented_yet`).
 1. **Redesign** (FileID Prototype v3): blocked until the design files are exported into the repo or the Design connector is authorized from an interactive session; then port to SwiftUI, WinUI and GTK keeping the palette, springs and `LavaLampBackground`.
 2. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; add MLX benchmarking and catalog MLX loading on macOS.
 

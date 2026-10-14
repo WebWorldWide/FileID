@@ -5,7 +5,7 @@
 // `PKEY_Keywords` (System.Keywords). Explorer's Details column reads
 // from there, the search index picks it up, etc.
 //
-// Two-tier strategy (both written on every `write_tags_full` call):
+// Two-tier strategy (both written on every `write_tags` call):
 //   1. Sidecar (`.fileid-tags.json` next to the file): always works,
 //      every file type, no Win32 interop, no schema risk on weird
 //      property handlers (Office / RAW / .HEIC etc.).
@@ -42,19 +42,14 @@ fn sidecar_path(file: &Path) -> PathBuf {
 
 /// Replace the file's tag list in both tiers. Empty `tags` clears both. The
 /// sidecar write is mandatory (returns Err on failure); the IPropertyStore
-/// write is best-effort, since many file types have no property handler. The
-/// bool is `true` when PKEY_Keywords was written to Explorer's property
-/// store (i.e. the file type has a registered handler), `false` when it
-/// silently fell back to sidecar-only.
-pub fn write_tags_full(path: &Path, tags: &[String]) -> Result<bool> {
+/// write is best-effort, since many file types have no property handler.
+pub fn write_tags(path: &Path, tags: &[String]) -> Result<()> {
     write_sidecar(path, tags)?;
     #[cfg(target_os = "windows")]
     {
-        let iprops_ok = windows_ipropertystore::write_keywords(path, tags).is_ok();
-        return Ok(iprops_ok);
+        let _ = windows_ipropertystore::write_keywords(path, tags);
     }
-    #[cfg(not(target_os = "windows"))]
-    Ok(false)
+    Ok(())
 }
 
 fn write_sidecar(path: &Path, tags: &[String]) -> Result<()> {
@@ -241,55 +236,68 @@ mod tests {
     use super::*;
 
     fn temp_file_with_name(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("fileid-tags-test");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-tags-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, b"hello").unwrap();
         path
     }
 
+    fn cleanup_temp_file(path: &Path) {
+        let _ = write_tags(path, &[]);
+        let _ = std::fs::remove_file(sidecar_path(path));
+        let _ = std::fs::remove_file(path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
     #[test]
     fn write_then_read_round_trip() {
         let f = temp_file_with_name("rt.txt");
-        write_tags_full(&f, &["holiday".into(), "2024".into()]).unwrap();
+        write_tags(&f, &["holiday".into(), "2024".into()]).unwrap();
         let read = read_tags(&f).unwrap();
         // .txt may or may not roundtrip through IPropertyStore depending
         // on the system property handler, but sidecar must always
         // produce the original two tags.
         assert!(read.contains(&"holiday".to_string()));
         assert!(read.contains(&"2024".to_string()));
-        // Cleanup.
-        let _ = std::fs::remove_file(sidecar_path(&f));
-        let _ = write_tags_full(&f, &[]);
+        cleanup_temp_file(&f);
     }
 
     #[test]
     fn write_empty_clears_existing_sidecar() {
         let f = temp_file_with_name("clear.txt");
-        write_tags_full(&f, &["x".into()]).unwrap();
+        write_tags(&f, &["x".into()]).unwrap();
         assert!(sidecar_path(&f).exists());
-        write_tags_full(&f, &[]).unwrap();
+        write_tags(&f, &[]).unwrap();
         assert!(!sidecar_path(&f).exists());
+        cleanup_temp_file(&f);
     }
 
     #[test]
     fn read_missing_sidecar_returns_empty() {
         let f = temp_file_with_name("nofile.txt");
         let _ = std::fs::remove_file(sidecar_path(&f));
-        let _ = write_tags_full(&f, &[]);
+        let _ = write_tags(&f, &[]);
         assert!(read_tags(&f).unwrap().is_empty());
+        cleanup_temp_file(&f);
     }
 
     #[test]
     fn read_dedups_case_insensitive() {
         let f = temp_file_with_name("dedup.txt");
-        write_tags_full(&f, &["Holiday".into()]).unwrap();
+        write_tags(&f, &["Holiday".into()]).unwrap();
         let read = read_tags(&f).unwrap();
         let occurrences = read
             .iter()
             .filter(|t| t.eq_ignore_ascii_case("holiday"))
             .count();
         assert_eq!(occurrences, 1);
-        let _ = write_tags_full(&f, &[]);
+        cleanup_temp_file(&f);
     }
 }

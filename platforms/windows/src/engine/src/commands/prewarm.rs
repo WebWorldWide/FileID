@@ -8,13 +8,15 @@
 //! second call still streams bytes into the same .part).
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 
-use crate::downloader::{download_parallel, DownloadProgress, DownloadRequest};
+use crate::downloader::{
+    download_parallel, required_install_free_bytes, DownloadProgress, DownloadRequest,
+};
 use crate::ipc::{
     sink::Sink, EngineError, EventPayload, IpcEvent, ModelDownloadProgress, Wrap,
 };
@@ -132,7 +134,8 @@ fn download_failure_kind_and_hint(pin_failure: bool, disk_full: bool) -> (&'stat
     }
 }
 
-async fn write_install_sentinel(model: &registry::Model, tmp: &Path) -> std::io::Result<()> {
+#[cfg(test)]
+async fn write_install_sentinel(model: &registry::Model, tmp: &std::path::Path) -> std::io::Result<()> {
     let body = registry::installation_attestation(model)
         .ok_or_else(|| std::io::Error::other("installed model files are missing or unreadable"))?;
     tokio::fs::write(tmp, body).await
@@ -193,15 +196,26 @@ pub(crate) async fn handle_prewarm_model(
         kind: model_kind.clone(),
         set: in_flight,
     };
+    // Model downloads and warm-up can outlive the user's active session.
+    // Keep the machine awake, while still allowing the display to dim.
+    let _sleep = platform::SleepGuard::acquire();
 
     // Per-model cancel flag (reset to un-cancelled for this fresh prewarm).
     // download_parallel below polls it after every chunk.
     let cancel = prewarm_cancel_flag(&model_kind);
 
     // (Re)installing a GPU EP pack is an explicit "try this EP again" — clear
-    // any prior crash-disable (ep_guard) so the next launch re-attempts the bind.
+    // any prior crash-disable (ep_guard) so the next launch re-attempts the bind,
+    // and drop the cached CUDA-stack loadability verdict so a completed install
+    // is visible to verify/probe flows in THIS session.
     match model_kind.as_str() {
-        "ort_cuda_x64" => crate::models::ep_guard::reenable_ep("cuda"),
+        "ort_cuda_x64" => {
+            crate::models::ep_guard::reenable_ep("cuda");
+            crate::models::runtime::invalidate_cuda_stack_probe();
+        }
+        "cudnn_runtime_x64" | "llama_runtime_cuda_x64" => {
+            crate::models::runtime::invalidate_cuda_stack_probe();
+        }
         "ort_openvino_x64" => crate::models::ep_guard::reenable_ep("openvino"),
         _ => {}
     }
@@ -263,6 +277,27 @@ pub(crate) async fn handle_prewarm_model(
     }
 
     let total_bytes_estimate: u64 = model.files.iter().map(|f| f.approx_bytes).sum();
+    let required_free = required_install_free_bytes(total_bytes_estimate);
+    if let Ok(models_dir) = crate::paths::models_dir() {
+        if let Some(available) = platform::available_disk_bytes(&models_dir) {
+            if available < required_free {
+                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                    kind: "model_download_disk_full".into(),
+                    message: format!(
+                        "{} needs about {:.1} GB free while verified download parts are staged, but only {:.1} GB is available on the models drive. Free space and try again; no download was started.",
+                        model.display_name,
+                        required_free as f64 / 1_073_741_824.0,
+                        available as f64 / 1_073_741_824.0,
+                    ),
+                    path: None,
+                    model_kind: Some(model_kind.clone()),
+                }))))
+                .await;
+                tracing::warn!(model_kind = %model_kind, required_free, available, outcome = "insufficient_disk", "[PREWARM] exiting");
+                return;
+            }
+        }
+    }
     let total_estimate = total_bytes_estimate.max(1);
     let file_count = model.files.len();
 
@@ -397,16 +432,9 @@ pub(crate) async fn handle_prewarm_model(
             tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
             return;
         }
-        for (label, _dest, err) in &errs {
-            tracing::warn!(?err, file = %label, "model download failed");
+        for (label, _, _) in &errs {
+            tracing::warn!(file = %label, "model download failed; path-bearing details suppressed");
         }
-        // {err:#} prints the whole context chain — plain {err} shows only the
-        // outermost layer ("writing range chunk"), hiding the OS cause.
-        let detail = errs
-            .iter()
-            .map(|(label, _dest, err)| format!("{label}: {err:#}"))
-            .collect::<Vec<_>>()
-            .join("\n");
         let (first_label, first_dest, _) = &errs[0];
         let summary = if errs.len() == 1 {
             format!("Couldn't download {first_label}")
@@ -422,7 +450,7 @@ pub(crate) async fn handle_prewarm_model(
         let (kind, hint) = download_failure_kind_and_hint(pin_failure, disk_full);
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: kind.into(),
-            message: format!("{summary}:\n{detail}\n\n{hint}"),
+            message: format!("{summary}.\n\n{hint}"),
             path: Some(first_dest.display().to_string()),
             model_kind: Some(model_kind.clone()),
         }))))
@@ -475,14 +503,14 @@ pub(crate) async fn handle_prewarm_model(
                 tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
                 return;
             }
-            tracing::warn!(?err, file = %label, "model download failed");
+            tracing::warn!(file = %label, "model download failed; path-bearing details suppressed");
             let (kind, hint) = download_failure_kind_and_hint(
                 crate::downloader::chain_has_pin_failure(&err),
                 crate::downloader::chain_has_disk_full(&err),
             );
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: kind.into(),
-                message: format!("Couldn't download {label}: {err:#}\n\n{hint}"),
+                message: format!("Couldn't download {label}.\n\n{hint}"),
                 path: Some(file.dest.display().to_string()),
                 model_kind: Some(model_kind.clone()),
             }))))
@@ -493,11 +521,13 @@ pub(crate) async fn handle_prewarm_model(
         let dest = file.dest.clone();
         let extract =
             tokio::task::spawn_blocking(move || util::zip::extract_into_parent(&dest)).await;
-        if let Err(err) = extract.unwrap_or(Err(anyhow::anyhow!("zip extract panicked"))) {
-            tracing::warn!(?err, "zip extract failed");
+        if extract.unwrap_or(Err(anyhow::anyhow!("zip extract panicked"))).is_err() {
+            tracing::warn!(file = %label, "zip extract failed; path-bearing details suppressed");
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "zip_extract_failed".into(),
-                message: format!("Couldn't extract {label}: {err}"),
+                message: format!(
+                    "Couldn't extract {label}. The archive was rejected or couldn't be promoted safely; retry the download."
+                ),
                 path: Some(file.dest.display().to_string()),
                 model_kind: Some(model_kind.clone()),
             }))))
@@ -526,7 +556,7 @@ pub(crate) async fn handle_prewarm_model(
     if let Some(sentinel) = registry::sentinel_path(&model) {
         if let Some(parent) = sentinel.parent() {
             if let Err(err) = tokio::fs::create_dir_all(parent).await {
-                tracing::error!(?err, dir = %parent.display(), "could not create .sentinels dir");
+                tracing::error!(?err, dir = %crate::platform::redact_path_for_log(parent), "could not create .sentinels dir");
                 sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                     kind: "sentinel_dir_create_failed".into(),
                     message: format!(
@@ -541,9 +571,22 @@ pub(crate) async fn handle_prewarm_model(
                 return;
             }
         }
+        let Some(attestation) = registry::installation_attestation(&model) else {
+            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+                kind: "sentinel_attestation_failed".into(),
+                message: format!(
+                    "Couldn't attest the installed files for {}. The model was not marked installed; try again.",
+                    model.display_name
+                ),
+                path: None,
+                model_kind: Some(model_kind.clone()),
+            }))))
+            .await;
+            return;
+        };
         let tmp = sentinel.with_extension("installed.tmp");
-        if let Err(err) = write_install_sentinel(&model, &tmp).await {
-            tracing::error!(?err, tmp = %tmp.display(), "sentinel tmp write failed");
+        if let Err(err) = tokio::fs::write(&tmp, attestation.as_bytes()).await {
+            tracing::error!(?err, tmp = %crate::platform::redact_path_for_log(&tmp), "sentinel tmp write failed");
             // A failed write can leave a partial .tmp behind; remove it (mirroring
             // the rename path below) so a half-written marker isn't left on disk.
             let _ = tokio::fs::remove_file(&tmp).await;
@@ -561,7 +604,12 @@ pub(crate) async fn handle_prewarm_model(
             return;
         }
         if let Err(err) = tokio::fs::rename(&tmp, &sentinel).await {
-            tracing::error!(?err, from = %tmp.display(), to = %sentinel.display(), "sentinel rename failed");
+            tracing::error!(
+                ?err,
+                from = %crate::platform::redact_path_for_log(&tmp),
+                to = %crate::platform::redact_path_for_log(&sentinel),
+                "sentinel rename failed"
+            );
             let _ = tokio::fs::remove_file(&tmp).await;
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "sentinel_rename_failed".into(),
@@ -594,6 +642,13 @@ pub(crate) async fn handle_prewarm_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_preflight_reserves_parts_final_file_and_staging_headroom() {
+        let gib = 1024_u64 * 1024 * 1024;
+        assert_eq!(required_install_free_bytes(3 * gib), 6 * gib + 512 * 1024 * 1024);
+        assert_eq!(required_install_free_bytes(u64::MAX), u64::MAX);
+    }
 
     // Per-model cancel registry: cancelling one kind must not touch another, and
     // a fresh prewarm of a kind resets only its own flag. Unique kind names keep

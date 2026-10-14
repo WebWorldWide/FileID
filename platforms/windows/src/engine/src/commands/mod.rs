@@ -31,4 +31,3 @@ pub mod benchmark;
 pub mod timeline;
 pub(crate) mod video_export;
 
-mod person_cluster_persistence;
