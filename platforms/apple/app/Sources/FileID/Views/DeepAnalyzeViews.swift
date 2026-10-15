@@ -376,6 +376,7 @@ struct DeepAnalyzeView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Hide this explanation")
+                .accessibilityLabel("Hide this explanation")
             }
         }
     }

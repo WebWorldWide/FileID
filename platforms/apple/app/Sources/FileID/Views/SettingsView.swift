@@ -299,6 +299,7 @@ struct DeepAnalyzeExclusionsCard: View {
                             .buttonStyle(.borderless)
                             .foregroundStyle(.secondary)
                             .help("Stop excluding \(folder) from Deep Analyze")
+                            .accessibilityLabel("Stop excluding \(folder) from Deep Analyze")
                         }
                     }
                 }

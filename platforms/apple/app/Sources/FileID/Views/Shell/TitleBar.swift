@@ -62,6 +62,7 @@ struct TitleBar: View {
             }
             .buttonStyle(.plain)
             .help(sidebarVisible ? "Hide sidebar (⌃⌘S)" : "Show sidebar (⌃⌘S)")
+            .accessibilityLabel(sidebarVisible ? "Hide sidebar" : "Show sidebar")
             .keyboardShortcut("s", modifiers: [.control, .command])
 
             Button { folderOpen.toggle() } label: {
@@ -174,6 +175,7 @@ struct TitleBar: View {
             }
             .buttonStyle(.plain)
             .help(chatPresented ? "Close chat (⌘⇧K)" : "Open chat beside this page (⌘⇧K)")
+            .accessibilityLabel(chatPresented ? "Close chat" : "Open chat beside this page")
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(activeTab == .chat)
             Button { activeTab = .settings } label: {
@@ -185,6 +187,7 @@ struct TitleBar: View {
             }
             .buttonStyle(.plain)
             .help("Settings (⌘,)")
+            .accessibilityLabel("Settings")
             .keyboardShortcut(",", modifiers: .command)
         }
     }

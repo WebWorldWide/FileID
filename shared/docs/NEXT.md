@@ -46,7 +46,8 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Rounded geometry, Archivo text, simplified sidebar, compact scan card.
 - [x] Library Selected pane (single click), full preview on double-click, accessibility actions on tiles.
 - [x] Finder-style file sizes everywhere.
-- [ ] HIG pass: hit targets ≥ 28 pt on Mac controls, focus rings, keyboard navigation for every page, VoiceOver labels, Reduce Motion/Transparency, Increase Contrast, Dynamic Type-like scaling.
+- [x] HIG: icon-only buttons have spoken names (VoiceOver read "Gear Shape", "Split View Horizontally Left", "Conversation"); text and hairlines strengthen under Increase Contrast; the animated background becomes solid under Reduce Transparency; Reduce Motion already honored.
+- [ ] HIG: keyboard focus order and visible focus rings on every page with Full Keyboard Access; text-size setting for the content area.
 - [ ] Moments tracks, Takes/Tools/Chat panels, Restructure step cells in v3 layout.
 - [ ] Model browser "Speed on this Mac" panel checked on screen (results now exist for two models).
 - [ ] Title bar: rounded controls, consistent heights, toolbar spacing per HIG.

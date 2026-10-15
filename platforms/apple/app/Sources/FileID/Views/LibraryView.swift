@@ -471,6 +471,7 @@ struct LibraryView: View {
                         Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
                             .buttonStyle(.plain)
                             .help("Clear search")
+                            .accessibilityLabel("Clear search")
                     }
                 }
                 .padding(.horizontal, 10)
@@ -1150,12 +1151,14 @@ private struct FilePreviewSheet: View {
                         .buttonStyle(.dsSecondary)
                         .disabled(idx <= 0)
                         .help("Previous file")
+                        .accessibilityLabel("Previous file")
                         Button { step(1) } label: {
                             Image(systemName: "chevron.right")
                         }
                         .buttonStyle(.dsSecondary)
                         .disabled(idx >= siblings.count - 1)
                         .help("Next file")
+                        .accessibilityLabel("Next file")
                     }
                 }
                 if file.kind == "image" {
@@ -1188,6 +1191,7 @@ private struct FilePreviewSheet: View {
                 .buttonStyle(.plain)
                 .keyboardShortcut(.escape)
                 .help("Close preview")
+                .accessibilityLabel("Close preview")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
@@ -1541,6 +1545,7 @@ private struct FinderTagsEditor: View {
             }
             .buttonStyle(.plain)
             .help("Remove this tag")
+            .accessibilityLabel("Remove this tag")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)

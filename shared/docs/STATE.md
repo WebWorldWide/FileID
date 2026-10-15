@@ -23,6 +23,8 @@ CLIP image embeddings now run on the GPU. The pinned ONNX export is built from d
 
 End-to-end scan of 105 Sony ARW files on Adlon (warm cache, isolated database): previous engine 4.1 files/s and 1,090 MB peak → now 40–42 files/s and ~660 MB. The first scan after installing a new engine binary is slower while Metal compiles shaders.
 
+Accessibility (Apple HIG): icon-only buttons now carry spoken names instead of SF Symbol names, text-secondary and hairline tokens resolve per appearance and strengthen under Increase Contrast, and the LavaLamp is replaced by a solid background under Reduce Transparency.
+
 Test fix: the incremental-walk test seeded a placeholder CLIP model ID, so it failed on any Mac with CLIP installed; it now seeds the real ID. The media-worker tests need `FILEID_TEST_ENGINE_PATH`, as CI sets it. Verified: full Swift suite **597 tests** pass (174 shared, 46 app, 377 engine, including eight new benchmark tests).
 
 ## 2026-10-15 — Prototype v3 redesign on macOS, website refresh, Adlon run

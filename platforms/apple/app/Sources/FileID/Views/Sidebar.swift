@@ -156,7 +156,7 @@ struct Sidebar: View {
             }
             Spacer(minLength: 4)
             Button { engine.clearLastError() } label: { Image(systemName: "xmark").foregroundStyle(Theme.text3) }
-                .buttonStyle(.plain).help("Dismiss")
+                .buttonStyle(.plain).help("Dismiss").accessibilityLabel("Dismiss")
         }
         .padding(8)
         .background(Theme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
