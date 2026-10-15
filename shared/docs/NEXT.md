@@ -56,7 +56,11 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Preview sheet: sharp ImageIO decode (Quick Look queued it behind grid thumbnails and showed 640 px), neutral backdrop, toolbar with arrows/Finder/Open/info toggle (⌘I)/close, info panel with details, people, description + smart name, tags, Finder tags, technical.
 - [x] Scrolling (Library): main-thread load while scrolling 75% → 28% — thumbnails decode to bitmaps off the main thread (NSImage(data:) decoded on first draw), no per-tile shimmer timeline, gradient layer or appear transitions; native view churn 53% → ~1% of main-thread work.
 - [ ] Scrolling: remaining cost is SwiftUI layout and per-tile hover tracking (~11%); consider an NSCollectionView-backed grid for 10k+ files, and apply the same fixes to People, Cleanup and Moments lists.
-- [ ] Database: faster file catalog for large libraries (owner request) — measure query plans, indexes, FTS and paging on the 3,447-file Adlon library and a synthetic 100k library.
+- [x] Library shows every file: the grid paged at a hard 200; it now loads 300 at a time as you scroll (stable `scanned_at, id` order), verified to reach 3,447 of 3,447.
+- [x] App reads use a pool of 6 read-only connections (was one serial queue shared by grid, search, tags, people and counters), each with a 32 MB cache and memory-mapped I/O.
+- [x] Scroll memory: off-screen tiles drop their bitmap, thumbnails decode at 448 px (was 528), cache 256 MB: 1,542 → 843 MB after flinging through 3,447 files.
+- [ ] Grid rendering: SwiftUI LazyVGrid still spends ~90% of the main thread when flinging through thousands of tiles; move the Library grid to an NSCollectionView with cell reuse.
+- [ ] Database at 100k files: measure keyword search (LIKE scans on path/description/tags), counters and FTS on a synthetic 100k-row catalog; add trigram FTS for paths if LIKE dominates.
 - [x] Restructure (macOS): respect-your-organization stage (see RESTRUCTURE.md); Adlon/Camera 2,966 shuffling moves → 0, 28 folders kept; planning >10 min → ~19 s; "Staying put" shows real file count; models banner offers Rescan when CLIP is installed but files were scanned before it.
 - [ ] Restructure (shared Rust engine): port RestructureRespect to `platforms/windows/src/engine` (restructure.rs / restructure_semantic.rs) so Windows and Linux behave the same.
 - [ ] Restructure: test on a genuinely messy folder (Downloads-style dump) with CLIP embeddings present, and review the loose-file folder names it proposes.

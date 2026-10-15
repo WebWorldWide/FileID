@@ -31,7 +31,7 @@ public final class ThumbnailService {
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 4000          // cover a full ~3–4k-file library
-        c.totalCostLimit = 512 * 1024 * 1024  // 512 MB ceiling
+        c.totalCostLimit = 256 * 1024 * 1024
         return c
     }()
 

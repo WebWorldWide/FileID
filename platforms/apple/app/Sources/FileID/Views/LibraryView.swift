@@ -53,6 +53,14 @@ struct LibraryView: View {
     /// place — the sheet keeps identity instead of dismissing+re-presenting.
     @State private var previewSelectedID: Int64? = nil
     @State private var paneSelectedID: Int64? = nil
+    /// Keyword and plain listings page in from the database as the grid
+    /// nears its end; similarity and semantic results are one ranked list.
+    @State private var canLoadMore = false
+    @State private var loadingMore = false
+    private static let pageSize = 300
+    /// The tile about two screens before the end; the grid creates it lazily,
+    /// so its appearance means the user is approaching the last loaded row.
+    private var loadTriggerID: Int64? { rows.isEmpty ? nil : rows[max(0, rows.count - 24)].id }
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
@@ -646,6 +654,7 @@ struct LibraryView: View {
                              isChecked: checkedFiles[row.id] != nil,
                              topTags: tagsByFile[row.id] ?? [],
                              refreshToken: tileRefreshToken)
+                        .onAppear { if canLoadMore, row.id == loadTriggerID { loadMore() } }
                         .onTapGesture {
                             if selectMode {
                                 if checkedFiles[row.id] != nil {
@@ -691,6 +700,10 @@ struct LibraryView: View {
                 }
             }
             .padding(20)
+            if loadingMore {
+                ProgressView().controlSize(.small)
+                    .frame(maxWidth: .infinity).padding(.bottom, 24)
+            }
         }
         // One stable sheet. `isPresented` stays true across navigation so the
         // sheet keeps identity; the displayed file is driven by selectedID.
@@ -777,13 +790,15 @@ struct LibraryView: View {
         reloadTask = Task { @MainActor in
             defer { if !Task.isCancelled { visualSearchPending = false } }
             var newRows: [FileRow]
+            var pageable = false
             if let seed {
                 visualSearchPending = true
                 if let response = await engine.searchCatalog(seedID: seed.id), response.status == "ok" {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                 } else { newRows = [] }
             } else {
-                newRows = await store.filesAsync(search: query, kindFilter: kind)
+                newRows = await store.filesAsync(limit: Self.pageSize, search: query, kindFilter: kind)
+                pageable = newRows.count == Self.pageSize
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count >= 3, encoderReady, let vector = await store.semanticVectorAsync(query: trimmed) {
                     guard !Task.isCancelled else { return }
@@ -791,6 +806,7 @@ struct LibraryView: View {
                     visualSearchPending = true
                     if let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
                         newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                        pageable = false
                     }
                 }
             }
@@ -804,6 +820,26 @@ struct LibraryView: View {
             guard !Task.isCancelled else { return }
             rows = newRows
             tagsByFile = tags
+            canLoadMore = pageable
+        }
+    }
+
+    private func loadMore() {
+        guard canLoadMore, !loadingMore, similarSeed == nil else { return }
+        loadingMore = true
+        let offset = rows.count, query = searchText, kind = kindFilter
+        Task { @MainActor in
+            defer { loadingMore = false }
+            let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind)
+            guard query == searchText, kind == kindFilter, offset == rows.count else { return }
+            let ids = page.map(\.id)
+            let tags = await Task.detached(priority: .userInitiated) { [store] in
+                store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
+            }.value
+            let known = Set(rows.map(\.id))
+            rows.append(contentsOf: page.filter { !known.contains($0.id) })
+            tagsByFile.merge(tags) { _, new in new }
+            canLoadMore = page.count == Self.pageSize
         }
     }
 }
@@ -945,7 +981,7 @@ struct FileTile: View {
         // doesn't re-task every visible tile, re-reading thumbnails + Finder
         // xattrs for files that didn't change. Thumbnail re-fetches are NSCache hits.
         .task(id: "\(row.id)·\(refreshToken)") {
-            thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
+            thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 224)
             // Off-main like FinderTagsEditor — xattr reads can stall on
             // slow / network volumes.
             let url = row.url
@@ -957,6 +993,10 @@ struct FileTile: View {
             guard !Task.isCancelled else { return }
             finderTags = tags
         }
+        // The lazy grid keeps state for tiles it has scrolled past; dropping
+        // the bitmap lets memory follow what is on screen. Re-showing is an
+        // NSCache hit.
+        .onDisappear { thumb = nil }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits(.isButton)

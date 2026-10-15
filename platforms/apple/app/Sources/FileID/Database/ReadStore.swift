@@ -15,8 +15,8 @@ public final class ReadStore: @unchecked Sendable {
     // captures a strong `q` under the lock, so ARC keeps the connection
     // alive until the last in-flight read drains, even across `close()`.
     @ObservationIgnored private let connLock = NSLock()
-    @ObservationIgnored private var _queue: DatabaseQueue?
-    private var queue: DatabaseQueue? {
+    @ObservationIgnored private var _queue: DatabasePool?
+    private var queue: DatabasePool? {
         get { connLock.lock(); defer { connLock.unlock() }; return _queue }
         set { connLock.lock(); defer { connLock.unlock() }; _queue = newValue }
     }
@@ -79,10 +79,8 @@ public final class ReadStore: @unchecked Sendable {
         }
         if queue == nil {
             do {
-                var config = Configuration()
-                config.readonly = true
                 try ReadOnlyLocations.requireWritable(dbURL)
-            self.queue = try DatabaseQueue(path: dbURL.path, configuration: config)
+                self.queue = try DatabasePool(path: dbURL.path, configuration: Self.readConfiguration())
             } catch {
                 reportError("Could not open DB: \(error)")
                 return
@@ -340,7 +338,7 @@ public final class ReadStore: @unchecked Sendable {
                     sql += " AND kind = ?"
                     args += [k]
                 }
-                sql += " ORDER BY scanned_at DESC LIMIT ? OFFSET ?"
+                sql += " ORDER BY scanned_at DESC, id DESC LIMIT ? OFFSET ?"
                 args += [limit, offset]
                 let rows = try Row.fetchAll(db, sql: sql, arguments: args)
                 return rows.map { Self.toFileRow($0) }
@@ -1758,6 +1756,22 @@ public final class ReadStore: @unchecked Sendable {
     // during a brief engine WAL write would otherwise hit SQLITE_BUSY and
     // throw — silently no-opping the edit, or stranding a trashed file as
     // a ghost DB row. The timeout makes the contended write retry instead.
+    /// Concurrent read-only connections over the engine's WAL database: the
+    /// grid, search, tags, people and counters no longer queue behind one
+    /// another. Each reader gets a 32 MB page cache and memory-mapped I/O.
+    nonisolated static func readConfiguration() -> Configuration {
+        var config = Configuration()
+        config.readonly = true
+        config.maximumReaderCount = 6
+        config.busyMode = .timeout(2)
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA cache_size = -32768")
+            try db.execute(sql: "PRAGMA mmap_size = 268435456")
+            try db.execute(sql: "PRAGMA temp_store = MEMORY")
+        }
+        return config
+    }
+
     private func writeQueue() throws -> DatabaseQueue {
         try ReadOnlyLocations.requireWritable(dbURL)
         var config = Configuration()
