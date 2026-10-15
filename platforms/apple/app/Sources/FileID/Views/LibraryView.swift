@@ -687,19 +687,10 @@ struct LibraryView: View {
                                         lineWidth: 2)
                                 .padding(-5)
                         )
-                        // Tiles fade + scale in so the grid "fills
-                        // the room" during a live scan instead of
-                        // popping items.
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.96)),
-                            removal: .opacity
-                        ))
+
                 }
             }
             .padding(20)
-            // Animate on rows.count, not rows.map(\.id) — the map
-            // allocates a new array per render and adds up at 1000+ tiles.
-            .animation(.easeOut(duration: 0.30), value: rows.count)
         }
         // One stable sheet. `isPresented` stays true across navigation so the
         // sheet keeps identity; the displayed file is driven by selectedID.
@@ -888,14 +879,8 @@ struct FileTile: View {
             Color.white.opacity(0.04)
                 .aspectRatio(4 / 3, contentMode: .fit)
                 .overlay(thumbContent)
-                .overlay(
-                    LinearGradient(stops: [.init(color: .white.opacity(0.07), location: 0), .init(color: .clear, location: 0.4), .init(color: .black.opacity(0.38), location: 1)],
-                                   startPoint: .top, endPoint: .bottom)
-                )
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Color.white.opacity(hovering ? 0.28 : 0.08), lineWidth: 1))
-                .animation(.easeOut(duration: 0.18), value: hovering)
-                .animation(.easeOut(duration: 0.40), value: thumb != nil)
                 .onHover { hovering = $0 }
                 .overlay(badgeOverlay)
                 .overlay(selectionOverlay)
@@ -1013,12 +998,12 @@ struct FileTile: View {
             Image(nsImage: thumb)
                 .resizable()
                 .scaledToFill()
-                .transition(.opacity)
+                
         } else if row.kind == "image" {
             // Show a shimmer while the thumbnail loads — feels more
             // alive than a static placeholder, signals "something is
             // arriving".
-            ShimmerView(cornerRadius: 0)
+            Color.white.opacity(0.05)
         } else {
             // Non-image kinds get the icon placeholder (no thumb pending).
             VStack(spacing: 4) {

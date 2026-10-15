@@ -54,7 +54,8 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Model browser "Speed on this Mac" checked on screen with a real in-app run (Qwen3-VL 4B: 4.3 s load, 165/26 tok/s, 5.1 s per image, 3.8 GB); metrics use the full width, the selected row stays in view, measured memory replaces the estimate.
 - [x] Title bar: window buttons vertically centred in the 48 pt bar (re-applied on resize/full screen), search centred, folder left, activity/chat/settings right; Browse/Analyze/Act moved to the top of the sidebar and filters its pages.
 - [x] Preview sheet: sharp ImageIO decode (Quick Look queued it behind grid thumbnails and showed 640 px), neutral backdrop, toolbar with arrows/Finder/Open/info toggle (⌘I)/close, info panel with details, people, description + smart name, tags, Finder tags, technical.
-- [ ] Scrolling: Library grid and long lists must scroll at display refresh rate with thousands of files (owner reports it is very slow); profile tile rendering, thumbnail decode and per-tile tasks.
+- [x] Scrolling (Library): main-thread load while scrolling 75% → 28% — thumbnails decode to bitmaps off the main thread (NSImage(data:) decoded on first draw), no per-tile shimmer timeline, gradient layer or appear transitions; native view churn 53% → ~1% of main-thread work.
+- [ ] Scrolling: remaining cost is SwiftUI layout and per-tile hover tracking (~11%); consider an NSCollectionView-backed grid for 10k+ files, and apply the same fixes to People, Cleanup and Moments lists.
 - [ ] Database: faster file catalog for large libraries (owner request) — measure query plans, indexes, FTS and paging on the 3,447-file Adlon library and a synthetic 100k library.
 - [ ] Restructure: owner dislikes the proposed folder organisation; review the plan it generates for Adlon/Camera and redesign the rules.
 

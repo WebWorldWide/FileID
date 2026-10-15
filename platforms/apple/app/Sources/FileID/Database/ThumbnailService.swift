@@ -44,7 +44,7 @@ public final class ThumbnailService {
         if let hit = cache.object(forKey: key) { return hit }
         if let task = inflight[key as String] {
             if let data = await task.value {
-                return NSImage(data: data)
+                return await Self.decoded(data)
             }
             return nil
         }
@@ -58,7 +58,7 @@ public final class ThumbnailService {
         inflight[key as String] = task
         let data = await task.value
         inflight.removeValue(forKey: key as String)
-        if let data, let image = NSImage(data: data) {
+        if let data, let image = await Self.decoded(data) {
             // Cost in PIXELS, not points — a Retina request yields a
             // scale× representation, and point-based costs undercount
             // 4× so the totalCostLimit never engages.
@@ -88,6 +88,18 @@ public final class ThumbnailService {
                 image = CGImageSourceCreateThumbnailAtIndex(source, 0, full as CFDictionary) ?? small
             }
             guard let image else { return nil }
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }.value
+    }
+
+    /// Decodes the cached JPEG into a bitmap off the main thread. NSImage(data:)
+    /// defers decoding to the first draw, which put a JPEG decode on the main
+    /// thread for every tile scrolled into view.
+    nonisolated static func decoded(_ data: Data) async -> NSImage? {
+        await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+            else { return nil }
             return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
         }.value
     }
