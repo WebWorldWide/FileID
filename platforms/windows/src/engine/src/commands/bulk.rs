@@ -1425,27 +1425,11 @@ pub(crate) async fn handle_merge_clusters(
             "UPDATE face_prints SET person_id = ?1 WHERE person_id = ?2",
             rusqlite::params![dst, src],
         )? as u32;
-        // R4-07: carry the source's user-assigned identity onto the destination
-        // when the destination has NONE, BEFORE deleting src (the subqueries must
-        // still see src). Merge direction is arbitrary (suggestions order by id;
-        // drag/bulk by user choice), so a named cluster can be the source —
-        // without this its name/title/first/middle/last/suffix is silently lost.
-        // The WHERE gate fires only when EVERY name-bearing column on the
-        // destination is NULL, so merging two differently-named people never
-        // grafts the source's sub-fields onto an already-named destination
-        // (R4-07 delta). is_unknown clears once the carried name lands.
+        // A named source can merge into an unnamed destination (merge direction is
+        // arbitrary), so carry one complete identity across only when every
+        // destination name field is blank; two named people keep the destination's.
         tx.execute(
-            "UPDATE persons SET
-                 name        = COALESCE(name,        (SELECT name        FROM persons WHERE id = ?2)),
-                 title       = COALESCE(title,       (SELECT title       FROM persons WHERE id = ?2)),
-                 first_name  = COALESCE(first_name,  (SELECT first_name  FROM persons WHERE id = ?2)),
-                 middle_name = COALESCE(middle_name, (SELECT middle_name FROM persons WHERE id = ?2)),
-                 last_name   = COALESCE(last_name,   (SELECT last_name   FROM persons WHERE id = ?2)),
-                 suffix      = COALESCE(suffix,      (SELECT suffix      FROM persons WHERE id = ?2)),
-                 is_unknown  = CASE WHEN COALESCE(name, (SELECT name FROM persons WHERE id = ?2)) IS NOT NULL THEN 0 ELSE is_unknown END
-             WHERE id = ?1
-               AND name IS NULL AND title IS NULL AND first_name IS NULL
-               AND middle_name IS NULL AND last_name IS NULL AND suffix IS NULL",
+            "UPDATE persons SET name=(SELECT name FROM persons WHERE id=?2), title=(SELECT title FROM persons WHERE id=?2), first_name=(SELECT first_name FROM persons WHERE id=?2), middle_name=(SELECT middle_name FROM persons WHERE id=?2), last_name=(SELECT last_name FROM persons WHERE id=?2), suffix=(SELECT suffix FROM persons WHERE id=?2), is_unknown=0 WHERE id=?1 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))=0 AND EXISTS(SELECT 1 FROM persons WHERE id=?2 AND length(trim(COALESCE(name,'') || COALESCE(title,'') || COALESCE(first_name,'') || COALESCE(middle_name,'') || COALESCE(last_name,'') || COALESCE(suffix,'')))>0)",
             rusqlite::params![dst, src],
         )?;
         anyhow::ensure!(
@@ -1469,9 +1453,8 @@ pub(crate) async fn handle_merge_clusters(
             rusqlite::params![src],
         )?;
         // Recompute the destination's file_count AND representative_face_id
-        // (highest-quality embedded face now in the cluster) so the People
-        // card + suggestion anchor reflect the combined membership rather than
-        // a stale rep. COALESCE keeps the old rep if no embedded face survives.
+        // (highest-quality embedded face now in the cluster, else any face) so
+        // the People card + suggestion anchor reflect the combined membership.
         anyhow::ensure!(
             tx.execute(
                 "UPDATE persons SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1) WHERE id = ?1",
@@ -1484,7 +1467,10 @@ pub(crate) async fn handle_merge_clusters(
                 "UPDATE persons SET representative_face_id = COALESCE(
                  (SELECT fp.id FROM face_prints fp
                   WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
-                  ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
+                  ORDER BY COALESCE(fp.face_quality, 0) DESC, fp.id LIMIT 1),
+                 (SELECT fp.id FROM face_prints fp
+                  WHERE fp.person_id = ?1
+                  ORDER BY COALESCE(fp.face_quality, 0) DESC, fp.id LIMIT 1),
                  representative_face_id)
              WHERE id = ?1",
                 rusqlite::params![dst],
