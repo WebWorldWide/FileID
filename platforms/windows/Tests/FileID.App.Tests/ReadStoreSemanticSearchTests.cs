@@ -64,7 +64,8 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
                     has_faces INTEGER NOT NULL DEFAULT 0,
                     has_text INTEGER NOT NULL DEFAULT 0,
                     failed INTEGER NOT NULL DEFAULT 0,
-                    vlm_proposed_name TEXT
+                    vlm_proposed_name TEXT,
+                    scanned_at REAL NOT NULL DEFAULT 0
                 );
                 CREATE TABLE clip_embeddings (
                     file_id INTEGER NOT NULL,
@@ -154,6 +155,24 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         {
             Assert.True(actual[i - 1].Score >= actual[i].Score);
         }
+    }
+
+    [Fact]
+    public async Task Recent_PagesWithOffsetInStableOrder()
+    {
+        var rows = Enumerable.Range(1, 5).Select(i => new Row(i, "image", false, Emb(0.1f * i, 0f, 0f))).ToList();
+        BuildDb(rows);
+
+        using var store = new ReadStore(_dbPath);
+        await store.OpenAsync(CancellationToken.None);
+
+        var first = await store.RecentAsync(2, CancellationToken.None);
+        var second = await store.RecentAsync(2, CancellationToken.None, offset: 2);
+        var last = await store.RecentAsync(2, CancellationToken.None, offset: 4);
+
+        Assert.Equal(new long[] { 5, 4 }, first.Select(r => r.Id).ToArray());
+        Assert.Equal(new long[] { 3, 2 }, second.Select(r => r.Id).ToArray());
+        Assert.Equal(new long[] { 1 }, last.Select(r => r.Id).ToArray());
     }
 
     [Fact]

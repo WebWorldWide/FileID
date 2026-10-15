@@ -65,7 +65,7 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Library grid on NSCollectionView with cell reuse, Core Animation text layers and one grid-wide hover tracker: flinging through 3,447 files (warm) main thread 86% → 53%, app memory 1,622 → 318 MB.
 - [ ] People, Cleanup and Moments lists: apply the same treatment where they hold hundreds of items.
 - [x] Linux Library: pages in 600 at a time as the grid nears its end (was a hard 1,000 cap), reloads in one splice instead of one signal per row, thumbnails decode on a 2–6 thread pool and skip tiles already rebound (was one OS thread per tile).
-- [ ] Windows Library: same paging, batched collection updates and bounded thumbnail decode in WinUI (verify on the Windows host).
+- [x] Windows Library: pages in 300 at a time from the ScrollViewer position (was a hard 200), appends in one collection Reset, and live-scan refreshes keep every loaded page; ReadStore paging test added. Compiled and tested by CI only (no .NET SDK on the Mac); interactive check on the Windows host still needed.
 - [ ] Database at 100k files: measure keyword search (LIKE scans on path/description/tags), counters and FTS on a synthetic 100k-row catalog; add trigram FTS for paths if LIKE dominates.
 - [x] Restructure (macOS): respect-your-organization stage (see RESTRUCTURE.md); Adlon/Camera 2,966 shuffling moves → 0, 28 folders kept; planning >10 min → ~19 s; "Staying put" shows real file count; models banner offers Rescan when CLIP is installed but files were scanned before it.
 - [x] Restructure (shared Rust engine): `pipeline/restructure_respect.rs` ports the same rules and Keep accounting for Windows, Linux, CLI and TUI; 6 Rust tests mirror the Swift ones; strict Clippy clean.

@@ -115,6 +115,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         // eat arrows as scroll before our bubbling handler sees them.
         _gridKeyHandler = new Microsoft.UI.Xaml.Input.KeyEventHandler(OnGridPreviewKeyDown);
         GridScroller.AddHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler, handledEventsToo: true);
+        GridScroller.ViewChanged += OnGridScrolled;
 
         Loaded += async (_, _) =>
         {
@@ -352,6 +353,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             try { GridScroller.RemoveHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler); } catch { /* swallow */ }
             _gridKeyHandler = null;
         }
+        try { GridScroller.ViewChanged -= OnGridScrolled; } catch { /* swallow */ }
         // Step 2: dispose ViewModel FIRST. See the method-level remark
         // above for why the order is load-bearing.
         try { ViewModel.Dispose(); } catch { /* swallow */ }
@@ -887,6 +889,16 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             _ => $"{count} files selected",
         };
         SelectionBar.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    // Loads the next page of the library when the viewport is within three
+    // screens of the end (macOS/Linux parity; the grid used to stop at 200).
+    private void OnGridScrolled(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        if (GridScroller.VerticalOffset + GridScroller.ViewportHeight * 3 >= GridScroller.ExtentHeight)
+        {
+            _ = ViewModel.LoadMoreAsync();
+        }
     }
 
     // Arrow-key navigation over the ItemsRepeater grid. Wired on GridScroller's
