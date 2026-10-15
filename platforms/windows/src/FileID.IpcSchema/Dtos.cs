@@ -15,6 +15,60 @@ public sealed record HealthCheckResult(
     [property: JsonPropertyName("requestID")] string RequestId,
     int Pid);
 
+/// <summary>Reply to <c>listModels</c>: curated and catalog models for this
+/// platform with install state, hardware fit and any local benchmark.</summary>
+public sealed record ModelCatalog(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    double PhysicalMemoryGB,
+    long VramMB,
+    IReadOnlyList<ModelCatalogItem> Models);
+
+public sealed record ModelCatalogItem(
+    string Id,
+    string Name,
+    string Family,
+    string Upstream,
+    string Role,
+    string Format,
+    string Quantization,
+    string License,
+    bool TermsRequired,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? ParametersBillion,
+    long DownloadBytes,
+    double EstimatedResidentGB,
+    string Tier,
+    string Status,
+    bool Runnable,
+    bool Installed,
+    bool Fits,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
+
+public sealed record BenchmarkProgress(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string ModelKind,
+    string Phase,
+    int Completed,
+    int Total);
+
+public sealed record BenchmarkResult(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string ModelKind,
+    string Status,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Message = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ModelBenchmark? Benchmark = null);
+
+public sealed record ModelBenchmark(
+    string MeasuredAt,
+    string Hardware,
+    double LoadSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? PromptTokensPerSecond = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? GeneratedTokensPerSecond = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? SecondsPerImage = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? PeakResidentGB = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? JsonValidRate = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? ProbeAccuracy = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? TunedArguments = null);
+
 public sealed record EngineInfo(
     string Version,
     int Pid,
@@ -94,7 +148,7 @@ public sealed record HardwareInfo(
     bool OpenvinoPackPresent,
     bool QnnPackPresent,
     string Recommendation,
-    // V15.9 adaptive-utilization diagnostics. All optional with sensible
+    // adaptive-utilization diagnostics. All optional with sensible
     // defaults so an old engine talking to a new app still deserializes.
     uint PCores = 0,
     uint ECores = 0,

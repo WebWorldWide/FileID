@@ -15,24 +15,39 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use crate::resource_scheduler::{Demand, Lease, ResourceScheduler};
+use super::native_admission::{reserve_host, HostAdmissionError, RequestWork};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
 use futures_util::StreamExt;
-use tokio::io::AsyncReadExt;
-use tokio::process::{Child, Command};
+use tokio::process::Command;
+use super::native_process::{OwnedProcess, ProcessTracker};
+
+/// llama-server's own per-request measurements (`timings` in its reply).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Timings {
+    pub prompt_tokens: u64,
+    pub prompt_per_second: f64,
+    pub predicted_tokens: u64,
+    pub predicted_per_second: f64,
+}
 
 pub struct VlmServer {
-    // Held so the child is killed on drop (kill_on_drop). Never read directly.
-    _child: Child,
+    last_timings: parking_lot::Mutex<Option<Timings>>,
+    process: OwnedProcess,
     base_url: String,
     api_key: String,
     client: reqwest::Client,
+    scheduler: Arc<ResourceScheduler>,
+    cancel: Arc<AtomicBool>,
+    request_gate: tokio::sync::Mutex<()>,
 }
 
 /// Executable suffix for the bundled llama.cpp binaries — `.exe` on Windows,
-/// bare elsewhere (parity with `whisper::BIN_EXT` / `vlm::BIN_EXT`).
+/// bare elsewhere.
 #[cfg(windows)]
 const BIN_EXT: &str = ".exe";
 #[cfg(not(windows))]
@@ -45,38 +60,36 @@ impl VlmServer {
     /// first (faster on NVIDIA), then the universal Vulkan runtime. `start`
     /// tries each until one becomes healthy, so a present-but-broken CUDA
     /// runtime (e.g. missing cudart DLLs) transparently falls back to Vulkan.
-    fn server_binaries() -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        if let Ok(root) = crate::paths::models_dir() {
-        let mut dirs = vec![root.join("llama.cpp-cuda"), root.join("llama.cpp")];
-        if let Ok(executable) = std::env::current_exe() {
-            if let Some(application_dir) = executable.parent() {
-                dirs.push(application_dir.join("RuntimeBundles/llama.cpp"));
-            }
-        }
-        for dir in dirs {
-                for cand in [
-                    dir.join(format!("llama-server{BIN_EXT}")),
-                    dir.join("bin").join(format!("llama-server{BIN_EXT}")),
-                ] {
-                    if cand.exists() {
-                        out.push(cand);
-                    }
-                }
-            }
-        }
-        out
+    #[cfg(test)]
+    pub(crate) async fn start_verified(model_kind: &str, cancel: &Arc<AtomicBool>) -> Result<Self> {
+        let verified = super::model_provenance::verify_installed(model_kind, cancel.clone()).await?;
+        verified.trace_verified_bytes();
+        let (gguf, mmproj) = verified.paths();
+        Self::start(gguf, mmproj, cancel).await
+    }
+
+    async fn server_binaries(cancel: &Arc<AtomicBool>) -> Result<Vec<PathBuf>> {
+        super::native_runtime::candidates("llama-server", "FILEID_LLAMA_SERVER", cancel.clone()).await
     }
 
     /// Start the server with the given model + mmproj and wait for `/health`.
     /// The model load happens here (once); `complete()` calls are then cheap.
     /// Tries each candidate binary (CUDA → Vulkan) so a broken CUDA runtime
     /// never blocks the working Vulkan one.
-    pub async fn start(gguf: &Path, mmproj: &Path, cancel: &AtomicBool) -> Result<Self> {
+    pub async fn start(gguf: &Path, mmproj: &Path, cancel: &Arc<AtomicBool>) -> Result<Self> {
+        Self::start_with_arguments(gguf, mmproj, cancel, None).await
+    }
+
+    /// Start with explicit tuning flags instead of the stored profile. Used by
+    /// the benchmark to try candidates; flags outside the allowlist are refused.
+    pub async fn start_with_arguments(gguf: &Path, mmproj: &Path, cancel: &Arc<AtomicBool>, arguments: Option<&[String]>) -> Result<Self> {
+        if arguments.is_some_and(|args| !super::launch_tuning::valid(args)) { bail!("Launch flags outside the tuning allowlist"); }
         if cancel.load(Ordering::Relaxed) { bail!("VLM server startup cancelled"); }
-        crate::util::model_memory::require_model_headroom(gguf,mmproj).await?;
+        let memory_mb = crate::util::model_memory::require_model_headroom(gguf,mmproj)
+            .await.map_err(super::native_admission::HostAdmissionError)?;
+        let scheduler = ResourceScheduler::shared();
         crate::models::runtime::ensure_gpu_inference_alive()?;
-        let bins = Self::server_binaries();
+        let bins = Self::server_binaries(cancel).await?;
         if bins.is_empty() {
             bail!(
                 "llama-server{BIN_EXT} not found — update the llama.cpp runtime from \
@@ -89,10 +102,13 @@ impl VlmServer {
             if cancel.load(Ordering::Relaxed) {
                 bail!("VLM server startup cancelled");
             }
-            match Self::start_with_binary(&bin, gguf, mmproj, cancel).await {
+            let device = if crate::models::runtime::user_forced_cpu() { None }
+                else { crate::models::vlm::discrete_gpu_device(&bin, cancel).await? };
+            let resources = reserve_host(scheduler.clone(), Demand { memory_mb, cpu: 1, io: 1 }, cancel.clone()).await?;
+            match Self::start_with_binary(&bin, gguf, mmproj, cancel, resources, device.as_deref(), arguments).await {
                 Ok(server) => return Ok(server),
                 Err(err) => {
-                    if crate::coordinator::process_gpu_device_removed() {
+                    if crate::coordinator::process_gpu_device_removed() || !ProcessTracker::shared().allows_fallback() {
                         return Err(err);
                     }
                     tracing::warn!(binary = %crate::platform::redact_path_for_log(&bin), ?err, "[VLM-SERVER] candidate failed; trying next backend");
@@ -107,14 +123,21 @@ impl VlmServer {
         bin: &Path,
         gguf: &Path,
         mmproj: &Path,
-        cancel: &AtomicBool,
+        cancel: &Arc<AtomicBool>,
+        resources: Arc<Lease>,
+        device: Option<&str>,
+        arguments: Option<&[String]>,
     ) -> Result<Self> {
         crate::models::runtime::ensure_gpu_inference_alive()?;
         let port = pick_free_port()?;
         let api_key = new_api_key();
         // GPU-TDR recovery parity: when the user pinned the EP to CPU, evacuate
-        // the GPU for Deep Analyze too (not just the ORT scan path). (F-C1-006)
+        // the GPU for Deep Analyze too (not just the ORT scan path).
         let forced_cpu = crate::models::runtime::user_forced_cpu();
+        // Flags kept by `fileid-bench --tune` for this model on this machine.
+        // Forced CPU always wins over a tuned GPU offload.
+        let tuned = if forced_cpu { None } else { arguments.map(<[String]>::to_vec).or_else(|| super::launch_tuning::lookup(gguf)) };
+        let gpu_layers = tuned.as_ref().and_then(|args| args.chunks(2).find(|pair| pair[0] == "-ngl").map(|pair| pair[1].clone()));
         let mut cmd = Command::new(bin);
         cmd.arg("-m")
             .arg(gguf)
@@ -129,15 +152,16 @@ impl VlmServer {
             // Offload all layers to the GPU (0 when the user forced CPU). Falls
             // back to CPU layers if VRAM is short — llama.cpp handles the spill.
             .arg("-ngl")
-            .arg(if forced_cpu { "0" } else { "99" })
+            .arg(if forced_cpu { "0".to_owned() } else { gpu_layers.unwrap_or_else(|| "99".to_owned()) })
             .arg("-c")
             .arg("4096");
+        for pair in tuned.iter().flat_map(|args| args.chunks(2)).filter(|pair| pair[0] != "-ngl") {
+            cmd.arg(&pair[0]).arg(&pair[1]);
+        }
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
         // skipped under forced-CPU so we don't re-engage the evacuated GPU.
         if !forced_cpu {
-            if let Some(dev) = crate::models::vlm::discrete_gpu_device(bin).await {
-                cmd.arg("--device").arg(dev);
-            }
+            if let Some(device) = device { cmd.arg("--device").arg(device); }
         }
         if cancel.load(Ordering::Relaxed) {
             bail!("VLM server startup cancelled");
@@ -145,13 +169,9 @@ impl VlmServer {
         cmd.stdout(Stdio::null())
             .stderr(Stdio::null())
             .stdin(Stdio::null());
-        // Kill the server if this handle is dropped (job done / cancelled /
-        // engine exit) so we never orphan a multi-GB process.
-        cmd.kill_on_drop(true);
-
-        let mut child = cmd.spawn().context("spawn bundled llama-server")?;
-        let base_url = format!("http://127.0.0.1:{port}");
         let client = build_loopback_client()?;
+        let child = OwnedProcess::spawn(&mut cmd, Some(resources.clone()), ProcessTracker::shared()).context("spawn owned llama-server")?;
+        let base_url = format!("http://127.0.0.1:{port}");
 
         // Health-poll until ready, but bail FAST if the child exits early — a
         // CUDA build missing its runtime DLLs dies on launch, and we don't want
@@ -160,19 +180,19 @@ impl VlmServer {
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
             if let Err(err) = crate::models::runtime::ensure_gpu_inference_alive() {
-                stop_child(&mut child).await;
+                child.shutdown().await?;
                 return Err(err);
             }
             if cancel.load(Ordering::Relaxed) {
-                stop_child(&mut child).await;
+                child.shutdown().await?;
                 bail!("VLM server startup cancelled");
             }
-            if let Ok(Some(status)) = child.try_wait() {
+            if let Some(status) = child.poll_exit()? {
                 bail!("llama-server exited early ({status}) — likely missing GPU runtime DLLs");
             }
             // Short per-request timeout so a server that accepts the connection
             // but stalls the /health response can't defeat the 120s deadline by
-            // hanging on the client's 300s default. (audit E13)
+            // hanging on the client's 300s default.
             if let Ok(resp) = client
                 .get(&health_url)
                 .bearer_auth(&api_key)
@@ -182,14 +202,14 @@ impl VlmServer {
             {
                 if resp.status().is_success() {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    if let Some(status) = child.try_wait().context("poll VLM server after health")? {
+                    if let Some(status) = child.poll_exit().context("poll VLM server after health")? {
                         bail!("llama-server exited after health check ({status})");
                     }
                     break;
                 }
             }
             if Instant::now() >= deadline {
-                stop_child(&mut child).await;
+                child.shutdown().await?;
                 bail!("llama-server did not become healthy within 120s");
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -199,30 +219,84 @@ impl VlmServer {
             model = %crate::platform::redact_path_for_log(gguf),
             "[VLM-SERVER] ready"
         );
+        resources.retain_memory();
         Ok(Self {
-            _child: child,
+            last_timings: parking_lot::Mutex::new(None),
+            process: child,
             base_url,
             api_key,
             client,
+            scheduler: ResourceScheduler::shared(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            request_gate: tokio::sync::Mutex::new(()),
         })
     }
 
     /// Run one multimodal completion: image + text prompt → text. The image is
     /// read from disk and inlined as a base64 data URI (the format
     /// `/v1/chat/completions` accepts for `image_url`).
+    #[cfg(test)]
     pub async fn complete(&self, image_path: &Path, prompt: &str, max_tokens: u32) -> Result<String> {
-        self.complete_sequence(&[image_path], prompt, max_tokens).await
+        self.complete_with_cancel(image_path, prompt, max_tokens, self.cancel.clone()).await
+    }
+    pub async fn complete_with_cancel(&self, image_path: &Path, prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
+        self.complete_sequence_with_cancel(&[image_path], prompt, max_tokens, cancel).await
+    }
+    pub async fn complete_sequence_with_cancel(&self, image_paths: &[&Path], prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
+        validate_sequence(image_paths, prompt, max_tokens)?;
+        self.dispatch(image_paths, prompt, max_tokens, cancel).await
+    }
+    /// Text-only completion (document analysis): same admission, cancellation
+    /// and cleanup as image requests.
+    pub async fn complete_text_with_cancel(&self, prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
+        validate_prompt(prompt, max_tokens)?;
+        self.dispatch(&[], prompt, max_tokens, cancel).await
+    }
+    async fn dispatch(&self, image_paths: &[&Path], prompt: &str, max_tokens: u32, cancel: Arc<AtomicBool>) -> Result<String> {
+        let _turn = tokio::select! { biased;
+            _ = wait_request_cancelled(&cancel, &self.cancel) => return Err(HostAdmissionError(anyhow!("Native request cancelled before admission")).into()),
+            turn = self.request_gate.lock() => turn,
+        };
+        if let Some(status) = self.process.poll_exit()? { bail!("VLM server already exited ({status})"); }
+        let stop = self.cancel.clone(); let request = cancel.clone();
+        let resources = super::native_admission::reserve_host_when(self.scheduler.clone(), Demand { memory_mb: 512, cpu: 1, io: 1 },
+            move || stop.load(Ordering::Relaxed) || request.load(Ordering::Relaxed)).await?;
+        if cancel.load(Ordering::Relaxed) || self.cancel.load(Ordering::Relaxed) { return Err(HostAdmissionError(anyhow!("Native request cancelled before dispatch")).into()); }
+        let mut work = RequestWork::new(&self.process, resources)?;
+        let (result, cancelled) = tokio::select! { biased;
+            _ = wait_request_cancelled(&cancel, &self.cancel) => (Err(HostAdmissionError(anyhow!("Native request cancelled")).into()), true),
+            result = self.complete_owned(image_paths, prompt, max_tokens, &mut work) => (result, false),
+        };
+        let native_incomplete = work.native_incomplete();
+        drop(work);
+        if cancelled && native_incomplete {
+            if let Err(cleanup) = self.process.stop_and_wait().await { return Err(HostAdmissionError(cleanup.context("Cancelled request cleanup failed")).into()); }
+        }
+        result
     }
 
-    pub async fn complete_sequence(
-        &self,
-        image_paths: &[&Path],
-        prompt: &str,
-        max_tokens: u32,
-    ) -> Result<String> {
-        let body = multimodal_body(image_paths, prompt, max_tokens).await?;
+    /// Timings from the most recent completed request, when the server sent them.
+    pub fn last_timings(&self) -> Option<Timings> {
+        *self.last_timings.lock()
+    }
+
+    pub(crate) fn pid(&self) -> Option<u32> {
+        self.process.pid()
+    }
+
+    pub(crate) fn reusable_idle(&self) -> bool {
+        !self.cancel.load(Ordering::Relaxed) && self.process.reusable_idle()
+    }
+    pub(crate) async fn shutdown(self) -> Result<()> {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.process.shutdown().await
+    }
+
+    async fn complete_owned(&self, image_paths: &[&Path], prompt: &str, max_tokens: u32, work: &mut RequestWork<'_>) -> Result<String> {
+        let body = multimodal_body_admitted(image_paths, prompt, max_tokens, work.host_lease()).await?;
         let body_bytes = serde_json::to_vec(&body).context("encode VLM request body")?;
         let url = format!("{}/v1/chat/completions", self.base_url);
+        work.begin_dispatch();
         let resp = self
             .client
             .post(&url)
@@ -232,19 +306,33 @@ impl VlmServer {
             .send()
             .await
             .context("VLM chat/completions request")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = read_response_bounded(resp).await.unwrap_or_default();
-            bail!("llama-server returned {status}: {text}");
-        }
-        let text = read_response_bounded(resp).await?;
+        let status = resp.status();
+        let bytes = read_response_bounded(resp).await?;
+        work.complete();
+        let text = String::from_utf8(bytes).context("VLM response wasn't UTF-8")?;
+        if !status.is_success() { bail!("llama-server returned {status}: {text}"); }
         let json: serde_json::Value =
             serde_json::from_str(&text).context("parse VLM response JSON")?;
+        *self.last_timings.lock() = parse_timings(&json["timings"]);
         let content = json["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| anyhow!("VLM response missing choices[0].message.content: {text}"))?;
         Ok(content.trim().to_string())
     }
+}
+
+async fn wait_request_cancelled(request: &AtomicBool, stop: &AtomicBool) {
+    while !request.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) { tokio::time::sleep(Duration::from_millis(25)).await; }
+}
+
+fn parse_timings(value: &serde_json::Value) -> Option<Timings> {
+    let number = |key: &str| value[key].as_f64().filter(|v| v.is_finite() && *v >= 0.0);
+    Some(Timings {
+        prompt_tokens: value["prompt_n"].as_u64()?,
+        prompt_per_second: number("prompt_per_second")?,
+        predicted_tokens: value["predicted_n"].as_u64()?,
+        predicted_per_second: number("predicted_per_second")?,
+    })
 }
 
 fn build_loopback_client() -> Result<reqwest::Client> {
@@ -260,94 +348,96 @@ fn build_loopback_client_with(builder: reqwest::ClientBuilder) -> Result<reqwest
         .context("build VLM HTTP client")
 }
 
-async fn stop_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_some() {
-        return;
-    }
-    let _ = child.start_kill();
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+async fn read_image_admitted(path: &Path, limit: u64, host: Arc<crate::resource_scheduler::Lease>) -> Result<Vec<u8>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _host = host;
+        read_image_bounded_sync(&path, limit)
+    }).await.context("join admitted image read")?
 }
 
 #[cfg(test)]
 async fn read_image_bounded(path: &Path) -> Result<Vec<u8>> {
-    read_image_with_limit(path, MAX_VLM_ENCODED_BYTES).await
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || read_image_bounded_sync(&path, MAX_VLM_ENCODED_BYTES)).await.context("join fixture image read")?
 }
 
-async fn read_image_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>> {
+fn read_image_bounded_sync(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
     let safe_path = crate::platform::redact_path_for_log(path);
-    let len = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("stat image {safe_path}"))?
-        .len();
+    let len = std::fs::metadata(path).with_context(|| format!("stat image {safe_path}"))?.len();
     if len > limit {
-        bail!(
-            "image {} is {} bytes, exceeding the VLM encoded-input cap of {} bytes",
-            safe_path,
-            len,
-            MAX_VLM_ENCODED_BYTES
-        );
+        bail!("image {} is {} bytes, exceeding the VLM encoded-input cap of {} bytes", safe_path, len, limit);
     }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("open image {safe_path}"))?;
+    let file = std::fs::File::open(path).with_context(|| format!("open image {safe_path}"))?;
     let mut bytes = Vec::with_capacity(len as usize);
-    tokio::io::AsyncReadExt::take(&mut file, limit + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .with_context(|| format!("read image {safe_path}"))?;
-    if bytes.len() as u64 > limit {
-        bail!(
-            "image {} grew beyond the VLM encoded-input cap while reading",
-            safe_path
-        );
-    }
+    file.take(limit + 1).read_to_end(&mut bytes).with_context(|| format!("read image {safe_path}"))?;
+    if bytes.len() as u64 > limit { bail!("image {} grew beyond the VLM encoded-input cap while reading", safe_path); }
     Ok(bytes)
 }
 
-async fn multimodal_body(
-    image_paths: &[&Path],
-    prompt: &str,
-    max_tokens: u32,
-) -> Result<serde_json::Value> {
-    if !(1..=8).contains(&image_paths.len())
-        || prompt.len() > 32_768
-        || !(1..=4096).contains(&max_tokens)
-    {
-        bail!("Invalid bounded visual-model request");
-    }
+fn validate_prompt(prompt: &str, max_tokens: u32) -> Result<()> {
+    anyhow::ensure!(prompt.len() <= 32768 && (1..=4096).contains(&max_tokens), "Native request prompt/token bounds exceeded");
+    Ok(())
+}
+fn validate_sequence(image_paths: &[&Path], prompt: &str, max_tokens: u32) -> Result<()> {
+    anyhow::ensure!((1..=8).contains(&image_paths.len()), "Native request prompt/token bounds exceeded");
+    validate_prompt(prompt, max_tokens)
+}
+
+fn is_wav(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE"
+}
+
+async fn multimodal_body_admitted(image_paths: &[&Path], prompt: &str, max_tokens: u32, host: Arc<crate::resource_scheduler::Lease>) -> Result<serde_json::Value> {
+    anyhow::ensure!(image_paths.len() <= 8, "Native request prompt/token bounds exceeded");
+    validate_prompt(prompt, max_tokens)?;
     let mut total = 0u64;
     for path in image_paths {
         let metadata = tokio::fs::metadata(path).await.context("Read visual-frame size")?;
-        total = total.checked_add(metadata.len()).context("Visual-frame size overflow")?;
-        if metadata.len() == 0 || total > MAX_VLM_ENCODED_BYTES {
-            bail!("Visual frames are empty or exceed the aggregate encoded-input limit");
-        }
+        let len = metadata.len();
+        total = total.checked_add(len).context("Visual-frame size overflow")?;
+        if (len == 0 && metadata.is_file()) || total > MAX_VLM_ENCODED_BYTES { bail!("Visual frames are empty or exceed the aggregate encoded-input limit"); }
     }
     let mut remaining = MAX_VLM_ENCODED_BYTES;
     let mut content = vec![serde_json::json!({"type": "text", "text": prompt})];
     for path in image_paths {
-        let bytes = read_image_with_limit(path, remaining).await?;
-        if bytes.is_empty() {
-            bail!("A visual-model frame is empty");
-        }
+        let bytes = read_image_admitted(path, remaining, host.clone()).await?;
+        if bytes.is_empty() { bail!("A visual-model frame is empty"); }
         remaining -= bytes.len() as u64;
-        let uri = format!(
-            "data:{};base64,{}",
-            image_mime(&bytes),
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        );
-        content.push(serde_json::json!({"type": "image_url", "image_url": {"url": uri}}));
+        // Speech models take audio through the same multimodal channel.
+        if is_wav(&bytes) {
+            content.push(serde_json::json!({"type": "input_audio", "input_audio": {"data": base64::engine::general_purpose::STANDARD.encode(&bytes), "format": "wav"}}));
+        } else {
+            content.push(serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", image_mime(&bytes), base64::engine::general_purpose::STANDARD.encode(&bytes))}}));
+        }
     }
-    Ok(serde_json::json!({
-        "messages": [{"role": "user", "content": content}],
-        "max_tokens": max_tokens,
-        "n_predict": max_tokens,
-        "temperature": 0.0,
-        "stream": false
-    }))
+    Ok(serde_json::json!({"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "n_predict": max_tokens, "temperature": 0.0, "stream": false}))
 }
 
-async fn read_response_bounded(resp: reqwest::Response) -> Result<String> {
+#[cfg(test)]
+async fn multimodal_body(image_paths: &[&Path], prompt: &str, max_tokens: u32) -> Result<serde_json::Value> {
+    validate_sequence(image_paths, prompt, max_tokens)?;
+    let mut total = 0u64;
+    for path in image_paths {
+        let metadata = tokio::fs::metadata(path).await.context("Read visual-frame size")?;
+        let len = metadata.len();
+        total = total.checked_add(len).context("Visual-frame size overflow")?;
+        if (len == 0 && metadata.is_file()) || total > MAX_VLM_ENCODED_BYTES { bail!("Visual frames are empty or exceed the aggregate encoded-input limit"); }
+    }
+    let mut remaining = MAX_VLM_ENCODED_BYTES;
+    let mut content = vec![serde_json::json!({"type": "text", "text": prompt})];
+    for path in image_paths {
+        let path = path.to_path_buf();
+        let bytes = tokio::task::spawn_blocking(move || read_image_bounded_sync(&path, remaining)).await.context("join fixture image read")??;
+        if bytes.is_empty() { bail!("A visual-model frame is empty"); }
+        remaining -= bytes.len() as u64;
+        content.push(serde_json::json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", image_mime(&bytes), base64::engine::general_purpose::STANDARD.encode(&bytes))}}));
+    }
+    Ok(serde_json::json!({"messages": [{"role": "user", "content": content}], "max_tokens": max_tokens, "n_predict": max_tokens, "temperature": 0.0, "stream": false}))
+}
+
+async fn read_response_bounded(resp: reqwest::Response) -> Result<Vec<u8>> {
     let mut stream = resp.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
@@ -357,7 +447,7 @@ async fn read_response_bounded(resp: reqwest::Response) -> Result<String> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    String::from_utf8(bytes).context("VLM response wasn't UTF-8")
+    Ok(bytes)
 }
 
 fn new_api_key() -> String {
@@ -396,6 +486,33 @@ fn image_mime(bytes: &[u8]) -> &'static str {
         "image/jpeg"
     }
 }
+
+#[cfg(test)]
+#[path = "server_host_admission_tests.rs"]
+mod admission_tests;
+
+#[cfg(test)]
+#[path = "server_preflight_typing_tests.rs"]
+mod preflight_tests;
+
+#[cfg(test)]
+#[path = "request_terminal_lifetime_tests.rs"]
+mod terminal_lifetime_tests;
+
+#[cfg(test)]
+#[path = "request_cancel_tests.rs"]
+mod request_cancel_tests;
+
+#[cfg(test)]
+#[path = "resident_owner_tests.rs"]
+mod resident_owner_tests;
+
+#[cfg(test)]
+#[path = "probe_fallback_tests.rs"]
+mod probe_fallback_tests;
+#[cfg(test)]
+#[path = "benchmark_server_tests.rs"]
+mod benchmark_server_tests;
 
 #[cfg(test)]
 mod tests {
@@ -445,6 +562,7 @@ mod tests {
         assert!(multimodal_body(&[&first, &second], "frames", 512).await.unwrap_err().to_string().contains("aggregate"));
         std::fs::remove_dir_all(directory).unwrap();
     }
+
 
     #[tokio::test]
     async fn bounded_image_reader_rejects_oversized_sparse_file() {

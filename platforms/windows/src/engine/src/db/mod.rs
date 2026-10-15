@@ -31,7 +31,7 @@ pub const SETUP_PRAGMAS: &[&str] = &[
 ];
 
 /// Open the engine's writer connection. Creates the file + schema if absent.
-/// Applies every migration up to v7 in registered order.
+/// Applies every migration up to v20 in registered order.
 pub fn open_writer(db_path: &Path) -> Result<Connection> {
     crate::util::read_only::require_writable(db_path)?;
     if let Some(parent) = db_path.parent() {
@@ -49,21 +49,80 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     // statements every batch. 32 keeps them all resident across flushes.
     conn.set_prepared_statement_cache_capacity(32);
     migrations::apply(&conn).context("applying migrations")?;
+    #[cfg(target_os = "linux")]
+    rehash_case_sensitive_paths(&conn).context("rehashing Linux path hashes")?;
 
     // Sweep orphaned "running" scan_sessions left over from a previous
     // crash. The engine writes status='running' at scan start; if it
     // exits abnormally the row stays stale forever, polluting Settings →
     // Recent scans. Mark them all as 'failed' on startup; new scans
     // overwrite this when they finish cleanly.
-    let _ = conn.execute(
+    match conn.execute(
         "UPDATE scan_sessions SET status = 'failed', completed_at = COALESCE(completed_at, started_at) \
          WHERE status = 'running'",
         [],
-    );
+    ) {
+        // A swept 'running' row means the previous engine died mid-scan, so
+        // the last committed batch may have durable face_prints rows whose
+        // crop JPEGs (written post-commit, outside the tx) never landed. Flag
+        // it so the next incremental scan reconciles missing crops instead of
+        // skipping those now-unchanged files forever. Clean shutdowns sweep 0
+        // rows and pay nothing.
+        Ok(swept) if swept > 0 => {
+            UNCLEAN_PRIOR_SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(swept, "open_writer: swept orphaned 'running' scan_sessions (unclean prior shutdown)");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "open_writer: sweeping orphaned 'running' scan_sessions failed");
+        }
+    }
 
     crate::commands::tools::recover(&conn)?;
+    crate::catalog_index::CatalogIndex::recover(&conn)?;
     Ok(conn)
 }
+
+/// Linux catalogs written before path hashes became case-sensitive hold
+/// lowercased hashes; the missing-file sweep compares hashes, so unchanged
+/// files would be hidden after the first rescan. Runs once and records itself
+/// in `user_version` because `grdb_migrations` rejects unknown identifiers.
+#[cfg(target_os = "linux")]
+fn rehash_case_sensitive_paths(conn: &Connection) -> Result<()> {
+    const DONE: i64 = 1;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version & DONE != 0 {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(i64, String, i64)> = tx
+        .prepare("SELECT id, path_text, path_hash FROM files")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut update = tx.prepare("UPDATE files SET path_hash = ?2 WHERE id = ?1")?;
+    let mut changed = 0usize;
+    for (id, path_text, old) in rows {
+        let new = crate::util::path_safety::stable_path_hash(&path_text);
+        if new != old {
+            update.execute(rusqlite::params![id, new])?;
+            changed += 1;
+        }
+    }
+    drop(update);
+    tx.execute_batch(&format!("PRAGMA user_version = {}", version | DONE))?;
+    tx.commit()?;
+    if changed > 0 {
+        tracing::info!(changed, "open_writer: rehashed Linux path hashes");
+    }
+    Ok(())
+}
+
+/// Set true when `open_writer` sweeps a stale `running` scan_sessions row —
+/// i.e. the previous engine process died mid-scan. Read once by the next
+/// incremental scan to decide whether to reconcile face crops that a
+/// post-commit write may have missed (see scan_session skip-set preload).
+pub static UNCLEAN_PRIOR_SHUTDOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Open an ephemeral READ-ONLY connection. Query handlers use these so they
 /// never contend on the single writer mutex — WAL lets readers run concurrent
@@ -117,8 +176,13 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
     const MAX_ATTEMPTS: u32 = 5;
     const RETRY_DELAY_MS: u64 = 50;
     for attempt in 1..=MAX_ATTEMPTS {
-        match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)") {
-            Ok(()) => return Ok(()),
+        // wal_checkpoint(TRUNCATE) returns a row `(busy, log, checkpointed)`. A
+        // blocked truncate surfaces as `busy != 0` in that row, NOT as a
+        // SQLITE_BUSY error — `execute_batch` discards the row, so it would
+        // report Ok() even when nothing was truncated (and the SQLITE_BUSY retry
+        // arm was dead). Read the busy flag and retry on it.
+        let busy = match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0)) {
+            Ok(busy) => busy,
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::DatabaseBusy
                     && attempt < MAX_ATTEMPTS =>
@@ -127,7 +191,14 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
                 continue;
             }
             Err(e) => return Err(e).context("WAL checkpoint(TRUNCATE) failed"),
+        };
+        if busy == 0 {
+            return Ok(());
         }
+        if attempt >= MAX_ATTEMPTS {
+            anyhow::bail!("WAL checkpoint(TRUNCATE) still busy after {MAX_ATTEMPTS} attempts");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
     }
     Ok(())
 }
@@ -144,16 +215,16 @@ pub fn checkpoint_truncate(conn: &Connection) -> Result<()> {
 /// is preserved so the schema version survives the wipe.
 pub fn wipe_all(conn: &Connection) -> Result<()> {
     // FTS5 virtual tables (emptied via the special command, never row-by-row).
-    let virtual_tables: Vec<String> = {
+    let virtual_tables: Vec<(String, bool)> = {
         let mut stmt = conn.prepare(
-            "SELECT name FROM sqlite_master \
+            "SELECT name, instr(lower(replace(sql, ' ', '')), 'content=') > 0 FROM sqlite_master \
              WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'",
         )?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
     // A plain table is an FTS5 shadow table when its name is `<vtab>_<suffix>`.
-    let is_shadow = |name: &str| virtual_tables.iter().any(|v| name.starts_with(&format!("{v}_")));
+    let is_shadow = |name: &str| virtual_tables.iter().any(|(v, _)| name.starts_with(&format!("{v}_")));
     // Real data tables: CREATE TABLE, not sqlite internal, not the migration
     // ledger, not an FTS shadow table.
     let data_tables: Vec<String> = {
@@ -180,9 +251,15 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
             tx.execute_batch(&format!("DELETE FROM \"{t}\""))
                 .with_context(|| format!("wiping table {t}"))?;
         }
-        for v in &virtual_tables {
-            tx.execute_batch(&format!("INSERT INTO \"{v}\"(\"{v}\") VALUES('delete-all')"))
-                .with_context(|| format!("resetting FTS table {v}"))?;
+        // 'delete-all' only exists for contentless/external-content FTS5; a
+        // table that stores its own content is emptied with a plain DELETE.
+        for (v, external_content) in &virtual_tables {
+            let sql = if *external_content {
+                format!("INSERT INTO \"{v}\"(\"{v}\") VALUES('delete-all')")
+            } else {
+                format!("DELETE FROM \"{v}\"")
+            };
+            tx.execute_batch(&sql).with_context(|| format!("resetting FTS table {v}"))?;
         }
         // Reset AUTOINCREMENT so the next scan starts at id 1 again. Only present
         // when an AUTOINCREMENT table exists (it does); guard anyway.
@@ -190,7 +267,23 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         tx.commit().context("committing wipe")?;
         Ok(())
     })();
-    let _ = conn.execute_batch("PRAGMA foreign_keys = ON");
+    let restore_foreign_keys = (|| -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = ON")
+            .context("re-enabling foreign_keys after wipe")?;
+        let enabled: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+        if enabled != 1 {
+            anyhow::bail!("foreign_keys remained disabled after wipe");
+        }
+        Ok(())
+    })();
+    if let Err(restore_error) = restore_foreign_keys {
+        return match wipe {
+            Ok(()) => Err(restore_error),
+            Err(wipe_error) => Err(anyhow::anyhow!(
+                "wipe failed: {wipe_error:#}; foreign-key recovery also failed: {restore_error:#}"
+            )),
+        };
+    }
     wipe?;
 
     // Shrink the on-disk file: collapse the WAL, then reclaim freed pages.
@@ -249,5 +342,51 @@ mod tests {
             r.execute_batch("CREATE TABLE t2 (id INTEGER)").is_err(),
             "CREATE TABLE through a read-only conn must fail"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_rehash_replaces_lowercased_path_hashes_once() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-rehash-{}-{:?}.sqlite",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _guard = TempDb(path.clone());
+        {
+            let w = open_writer(&path).expect("open_writer");
+            w.execute(
+                "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+                 VALUES ('/lib/Photo.JPG', ?1, 1, 0, 'image', 'jpg')",
+                [crate::util::path_safety::stable_path_hash("/lib/photo.jpg")],
+            )
+            .expect("insert legacy row");
+            w.execute_batch("PRAGMA user_version = 0").expect("reset marker");
+        }
+        let w = open_writer(&path).expect("reopen");
+        let hash: i64 = w
+            .query_row("SELECT path_hash FROM files", [], |row| row.get(0))
+            .expect("hash");
+        assert_eq!(hash, crate::util::path_safety::stable_path_hash("/lib/Photo.JPG"));
+        let version: i64 = w.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version & 1, 1);
+    }
+
+    #[test]
+    fn wipe_all_empties_every_fts_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::apply(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES ('/lib/a.txt', 1, 1, 0, 'document', 'txt'); \
+             INSERT INTO catalog_evidence_fts(evidence_id, file_id, kind, text) VALUES (1, 1, 'passage', 'mulch');",
+        )
+        .unwrap();
+        wipe_all(&conn).expect("wipe");
+        let files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        let evidence: i64 = conn
+            .query_row("SELECT COUNT(*) FROM catalog_evidence_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((files, evidence), (0, 0));
     }
 }

@@ -1,17 +1,15 @@
-// YuNet face detector (OpenCV Zoo `face_detection_yunet_2023mar`, MIT). Replaces
-// the non-commercial SCRFD (InsightFace) for a commercial-clean detection path.
-// Produces the SAME `scrfd::Detection` (corner bbox + 5 landmarks in FileID
-// order [left_eye, right_eye, nose, mouth_left, mouth_right] + score) so the
-// downstream face pipeline (estimate_pose, validate_face_geometry, alignment)
-// is unchanged.
+// YuNet face detector (OpenCV Zoo `face_detection_yunet_2023mar`, MIT), the
+// commercial-clean detection path. Produces `face_geometry::Detection` (corner
+// bbox + 5 landmarks in FileID order [left_eye, right_eye, nose, mouth_left,
+// mouth_right] + score) for the downstream face pipeline (estimate_pose,
+// validate_face_geometry, alignment).
 //
 // The HF ONNX emits RAW per-stride anchor tensors (cls/obj/bbox/kps at strides
 // 8/16/32, one anchor per cell, fixed 640x640 input). Decode + NMS are done on
 // the CPU after the GPU forward pass, mirroring OpenCV's FaceDetectorYN:
 //   score = sqrt(cls * obj); center/exp box; landmark = (cell + delta)*stride.
 // Input is BGR, raw [0,255] float, no normalization (matches OpenCV's blob).
-// A wrong-variant ONNX → scores under threshold → empty Vec (no panic), the
-// same fail-soft posture as scrfd.rs.
+// A wrong-variant ONNX → scores under threshold → empty Vec (no panic).
 
 use std::path::{Path, PathBuf};
 
@@ -21,10 +19,9 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::runtime::{
-    classify_inference_error, configure_session_builder, execution_providers_for_chain,
-    priority_chain, RuntimeProbe,
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
 };
-use super::scrfd::{nms, resize_nearest, Detection};
+use super::face_geometry::{nms, resize_nearest, Detection};
 
 const INPUT: u32 = 640;
 const STRIDES: [u32; 3] = [8, 16, 32];
@@ -44,28 +41,7 @@ impl YuNet {
         if !path.exists() {
             anyhow::bail!("YuNet weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder =
-            configure_session_builder(builder).context("configure session (YuNet)")?;
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (YuNet)")?;
-        }
-        tracing::info!(model = "YuNet", chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(path)
-            .context("ORT session commit (YuNet)")?;
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("YuNet ONNX has no inputs"))?
-            .name
-            .clone();
+        let (session, input_name) = commit_chain_session("YuNet", path)?;
 
         // Validate the output-name contract at LOAD. detect() matches outputs by
         // literal name (cls_/obj_/bbox_/kps_ × strides 8/16/32); a mismatch makes
@@ -137,6 +113,7 @@ impl YuNet {
 
         let input = Tensor::from_array(chw).context("YuNet input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])

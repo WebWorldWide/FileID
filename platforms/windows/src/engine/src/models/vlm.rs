@@ -1,30 +1,29 @@
 // Subprocess wrapper around llama.cpp's `llama-mtmd-cli.exe` for VLM
 // inference (Deep Analyze).
 //
-// We deliberately go through a subprocess instead of linking the
-// `llama-cpp-2` Rust bindings by default. The native binding adds ~150
-// MB of build artifacts and requires cmake at build time. The subprocess
-// path keeps CI builds fast and the runtime DLL surface small. Toggle
-// `--features vlm-native` at build time if zero-subprocess inference
-// matters for your deployment.
+// A subprocess keeps the engine free of a linked llama.cpp build (cmake,
+// ~150 MB of artifacts) and lets it ship the upstream release binaries.
 //
-// Hardening: `find()` only probes `%LOCALAPPDATA%\FileID\Models\
-// llama.cpp\` (no PATH lookup — supply-chain hardening). Binary is
-// sanity-checked (PE header + size bounds) before spawning.
+// Hardening: explicit canonical runtime or app-owned bundles, never PATH.
+// Binary is host/header/size-checked before an admitted owned version probe.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use anyhow::{anyhow, bail, Result};
 use tokio::process::Command;
+
+#[path = "vlm_cli_output.rs"]
+mod cli_output;
 
 /// Default caption prompt.
 pub const CAPTION_PROMPT: &str = "Describe this image in one specific, factual sentence: name the main subjects (people by count, notable objects, the place, the activity) and transcribe any visible text verbatim. Be concrete and definite — no hedging like \"appears to be\" or \"likely\", no generic filler, no preamble.";
 
 /// Default rename prompt — produces a short, kebab-cased filename
 /// suitable for `sanitize_proposed_name`.
-pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), hyphen-separated, no quotes, no extension.";
+pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), using separate words joined by hyphens. Never concatenate words. No quotes or extension. For a form, receipt, or repeated document type, include a visible name or reference that distinguishes this file from similar copies. Only include a date when it is visibly legible in the image or document; never infer or invent a year.";
+
+pub const RENAME_RETRY_PROMPT: &str = "Return only a filename stem made of exactly 3 to 5 separate lowercase words joined by hyphens. Use only visible subjects, text, setting, or actions. Do not concatenate words, add quotes, an extension, a date unless visibly legible, or any explanation. Example: boy-getting-face-paint";
 
 /// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
 /// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
@@ -67,6 +66,7 @@ pub fn rename_prompt_with_faces(face_names: &[String]) -> String {
 #[derive(Debug)]
 pub struct VlmRunner {
     pub binary: PathBuf,
+    weights: super::model_job::ModelJob,
 }
 
 #[derive(Debug, Clone)]
@@ -85,69 +85,51 @@ pub struct CaptionResult {
 }
 
 impl VlmRunner {
-    /// Locate `llama-mtmd-cli.exe` under `%LOCALAPPDATA%\FileID\Models\
-    /// llama.cpp\` and verify it's a sane PE binary in the expected
-    /// size range. Returns Err with a friendly message if missing —
-    /// callers surface that to the user as "VLM runtime not installed".
-    pub fn find() -> Result<Self> {
-        let root = crate::paths::models_dir().context("resolving Models dir")?;
-        let vulkan_dir = root.join("llama.cpp");
-        let cuda_dir = root.join("llama.cpp-cuda");
-        // Prefer the CUDA runtime (faster on NVIDIA) when it has the multimodal
-        // binary AND it actually launches; otherwise the universal Vulkan
-        // runtime. `sanity_check_binary` runs `--version`, so a CUDA build
-        // missing its runtime DLLs fails the probe and we fall through to Vulkan
-        // instead of erroring.
-        for dir in [&cuda_dir, &vulkan_dir] {
-            for cand in [
-                dir.join("llama-mtmd-cli.exe"),
-                dir.join("bin").join("llama-mtmd-cli.exe"),
-            ] {
-                if cand.exists() && sanity_check_binary(&cand).is_ok() {
-                    return Ok(VlmRunner { binary: cand });
-                }
-            }
+    pub fn new(binary: PathBuf) -> Self { Self { binary, weights: super::model_job::ModelJob::default() } }
+    pub(crate) async fn verified_weights(&self, kind: &str, cancel: Arc<std::sync::atomic::AtomicBool>) -> Result<Arc<super::model_provenance::VerifiedModel>> {
+        self.weights.resolve(kind, cancel).await
+    }
+    pub async fn find(cancel: &Arc<std::sync::atomic::AtomicBool>) -> Result<Self> {
+        let binaries = super::native_runtime::candidates("llama-mtmd-cli", "FILEID_LLAMA_CLI", cancel.clone()).await?;
+        let mut last_error = None;
+        for binary in binaries {
+            let mut command = Command::new(&binary); command.arg("--version");
+            let output = super::native_probe::run_probe(command, crate::resource_scheduler::ResourceScheduler::shared(),
+                cancel.clone(), super::native_process::ProcessTracker::shared(), std::time::Duration::from_secs(5)).await?;
+            if output.status.success() { return Ok(Self::new(binary)); }
+            last_error = Some(anyhow!("Installed llama.cpp CLI --version failed: {}", output.status));
         }
-        if let Some(dir) = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.join("RuntimeBundles/llama.cpp")))
-        {
-            for cand in [
-                dir.join("llama-mtmd-cli.exe"),
-                dir.join("bin").join("llama-mtmd-cli.exe"),
-            ] {
-                if cand.exists() && sanity_check_binary(&cand).is_ok() {
-                    return Ok(VlmRunner { binary: cand });
-                }
-            }
-        }
-        // Distinguish "not installed at all" from "installed but too old".
-        // Pre-mtmd-unification llama.cpp builds (≈b4400 and earlier) ship
-        // llama-server.exe / llama-llava-cli.exe / llama-qwen2vl-cli.exe but
-        // NOT the unified llama-mtmd-cli.exe this code drives — and they also
-        // predate Qwen2.5-VL. Emit an accurate, actionable message rather than
-        // the misleading "runtime not found" when a stale runtime is present.
-        if vulkan_dir.join("llama-server.exe").exists()
-            || vulkan_dir.join("llama-cli.exe").exists()
-            || cuda_dir.join("llama-server.exe").exists()
-        {
-            bail!(
-                "The installed llama.cpp runtime is too old for image analysis \
-                 (missing llama-mtmd-cli.exe, and pre-Qwen2.5-VL). Update it from \
-                 Settings -> Performance -> 'Install llama.cpp runtime'."
-            )
-        }
-        bail!(
-            "llama.cpp runtime not found under {}. Install it from Settings -> Performance -> 'Install llama.cpp runtime'.",
-            vulkan_dir.display()
-        )
+        Err(last_error.unwrap_or_else(|| anyhow!("llama-mtmd-cli runtime not installed; configure FILEID_LLAMA_CLI or install the runtime from Settings")))
     }
 }
 
 /// Resolve the (gguf, mmproj) pair for a given model_kind. Returns None
 /// if either file is missing — the caller surfaces "model not installed"
 /// without crashing.
+///
+/// Resolution goes through the registry: the wire kind is snake_case
+/// ("mistral_small_3_2") but the installer writes the registry's dotted
+/// dir ("vlm/mistral-small-3.2"), so a naive join(model_kind) never found
+/// installed weights and Deep Analyze reported every model missing.
 pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
+    if let crate::models::registry::LookupResult::Found(model) =
+        crate::models::registry::lookup_full(model_kind)
+    {
+        let dest = |name: &str| {
+            model
+                .files
+                .iter()
+                .map(|f| f.dest.clone())
+                .find(|d| d.file_name().is_some_and(|n| n == name))
+        };
+        if let (Some(gguf), Some(mmproj)) = (dest("model.gguf"), dest("mmproj.gguf")) {
+            if gguf.exists() && mmproj.exists() {
+                return Some((gguf, mmproj));
+            }
+        }
+    }
+    // Unregistered kinds (or callers passing a literal dir name) keep the
+    // direct-layout fallback.
     let root = crate::paths::models_dir().ok()?;
     find_weights_at(&root, model_kind)
 }
@@ -163,56 +145,6 @@ fn find_weights_at(root: &std::path::Path, model_kind: &str) -> Option<(PathBuf,
     }
 }
 
-fn sanity_check_binary(p: &PathBuf) -> Result<()> {
-    let meta = std::fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
-    let len = meta.len();
-    // Floor is 20 KB, not 3 MB: modern llama.cpp ships a thin launcher
-    // (llama-mtmd-cli.exe ~89 KB, the heavy code lives in mtmd.dll / ggml DLLs),
-    // so a 3 MB floor rejected a perfectly valid binary and surfaced a bogus
-    // "runtime too old, re-install" toast. 20 KB still catches a truncated or
-    // empty download; the --version probe below catches missing DLLs.
-    if !(20_000..=200_000_000).contains(&len) {
-        bail!(
-            "{}: unexpected size {} bytes (expected 20 KB..200 MB)",
-            p.display(),
-            len
-        );
-    }
-    let mut buf = [0u8; 2];
-    use std::io::Read;
-    let mut f = std::fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
-    f.read_exact(&mut buf).context("reading PE header")?;
-    if buf != *b"MZ" {
-        bail!("{}: not a PE binary (missing MZ header)", p.display());
-    }
-    // PE-header + size pass even if dependent DLLs are missing.
-    // Spawning --version trips on dyld errors so we can emit an
-    // actionable "reinstall the runtime" message instead of letting
-    // caption() fail later with STATUS_DLL_NOT_FOUND.
-    let out = std::process::Command::new(p)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => bail!(
-            "{}: --version exited with status {:?}. The binary is present but \
-             likely missing dependent DLLs (a Performance Pack install probably \
-             didn't finish). Re-install from Settings -> Performance.",
-            p.display(),
-            o.status.code()
-        ),
-        Err(err) => bail!(
-            "{}: could not spawn for --version probe ({err}). Likely \
-             missing dependent DLLs — re-install the runtime from \
-             Settings -> Performance.",
-            p.display()
-        ),
-    }
-}
-
 /// Caption an image. Streams stdout line-by-line, calling `on_token`
 /// per chunk and accumulating the final text. Honors cancellation via
 /// the shared `AtomicBool` — flips kill the child process within
@@ -221,136 +153,52 @@ pub async fn caption(
     runner: &VlmRunner,
     req: &CaptionRequest,
     cancel: Arc<std::sync::atomic::AtomicBool>,
-    mut on_token: impl FnMut(&str),
+    on_token: impl FnMut(&str),
 ) -> Result<CaptionResult> {
-    #[cfg(feature = "vlm-native")]
-    {
-        return native::caption(runner, req, cancel, on_token).await;
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
+    if req.prompt.len() > 32 * 1024 || !(1..=4096).contains(&req.max_tokens) { bail!("VLM generation exceeds prompt/token bounds"); }
+    let model_mb = crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path)
+        .await.map_err(super::native_admission::HostAdmissionError)?;
+    let verified = runner.weights.require_pair(&req.gguf_path, &req.mmproj_path, cancel.clone()).await?;
+    let mut cmd = Command::new(&runner.binary);
+    cmd.arg("-m").arg(&req.gguf_path);
+    cmd.arg("--mmproj").arg(&req.mmproj_path);
+    cmd.arg("--image").arg(&req.image_path);
+    cmd.arg("-p").arg(&req.prompt);
+    cmd.arg("--n-predict").arg(req.max_tokens.to_string());
+    if req.greedy {
+        cmd.arg("--temp").arg("0");
     }
-
-    #[cfg(not(feature = "vlm-native"))]
-    {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) { bail!("VLM startup cancelled"); }
-        crate::util::model_memory::require_model_headroom(&req.gguf_path,&req.mmproj_path).await?;
-        let mut cmd = Command::new(&runner.binary);
-        cmd.arg("-m").arg(&req.gguf_path);
-        cmd.arg("--mmproj").arg(&req.mmproj_path);
-        cmd.arg("--image").arg(&req.image_path);
-        cmd.arg("-p").arg(&req.prompt);
-        cmd.arg("--n-predict").arg(req.max_tokens.to_string());
-        if req.greedy {
-            cmd.arg("--temp").arg("0");
+    // Never pass `--no-display-prompt`: llama-mtmd-cli rejects that llama-cli
+    // flag with `invalid argument`, and mtmd-cli never echoes the prompt.
+    // Offload all layers to the GPU, mirroring the persistent server
+    // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
+    // this the per-file CLI path ran the entire VLM decode + vision
+    // projector on the CPU — many-fold slower. Quality-neutral (same
+    // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
+    // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
+    // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
+    // recovery), evacuating the GPU for the per-file CLI path too.
+    let forced_cpu = crate::models::runtime::user_forced_cpu();
+    cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
+    // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
+    // skipped under forced-CPU so we don't re-engage the evacuated GPU.
+    if !forced_cpu {
+        if let Some(dev) = discrete_gpu_device(&runner.binary, &cancel).await? {
+            cmd.arg("--device").arg(dev);
         }
-        // Don't print the prompt back at us; we only want the completion.
-        cmd.arg("--no-display-prompt");
-        // P2: offload all layers to the GPU, mirroring the persistent server
-        // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
-        // this the per-file CLI path ran the entire VLM decode + vision
-        // projector on the CPU — many-fold slower. Quality-neutral (same
-        // weights/prompt/sampling); a no-op on a CPU-only llama.cpp build, and
-        // on a small-VRAM card llama.cpp spills the overflow layers back to CPU.
-        // 0 offloaded layers when the user pinned the EP to CPU (GPU-TDR
-        // recovery), evacuating the GPU for the per-file CLI path too. (F-C1-006)
-        let forced_cpu = crate::models::runtime::user_forced_cpu();
-        cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
-        // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
-        // skipped under forced-CPU so we don't re-engage the evacuated GPU.
-        if !forced_cpu {
-            if let Some(dev) = discrete_gpu_device(&runner.binary).await {
-                cmd.arg("--device").arg(dev);
-            }
-        }
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.stdin(std::process::Stdio::null());
-        // Kill the child if the parent task is dropped mid-caption so we
-        // don't orphan llama-mtmd-cli for the OS session.
-        cmd.kill_on_drop(true);
-
-        let mut child = cmd.spawn().with_context(|| format!("spawn {}", runner.binary.display()))?;
-        // Drain stderr concurrently. llama.cpp is extremely verbose on stderr
-        // (backend init, full model/mmproj metadata, sampling params, timings —
-        // tens of KB, emitted during load BEFORE any stdout token). With the
-        // pipe captured but never read, the child blocks on its next stderr
-        // write once the OS pipe buffer fills while we block reading stdout —
-        // a deadlock that hangs Deep Analyze. Read it to EOF on its own task.
-        if let Some(stderr) = child.stderr.take() {
-            // llama.cpp echoes the --image arg (a user path) into its
-            // diagnostics; the model/binary paths are app-structural and
-            // pass redaction unchanged.
-            let image_raw = req.image_path.to_string_lossy().into_owned();
-            let image_redacted = crate::platform::redact_path_for_log(&req.image_path);
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
-                    tracing::debug!(target: "vlm", "{}", l.replace(&image_raw, &image_redacted));
-                }
-            });
-        }
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow!("missing stdout pipe"))?;
-        let mut reader = BufReader::new(stdout).lines();
-
-        let mut text = String::new();
-        loop {
-            tokio::select! {
-                line = reader.next_line() => {
-                    match line {
-                        Ok(Some(l)) => {
-                            on_token(&l);
-                            if !text.is_empty() {
-                                text.push('\n');
-                            }
-                            text.push_str(&l);
-                        }
-                        Ok(None) => break,
-                        Err(err) => {
-                            tracing::warn!(?err, "VLM stdout read error");
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        let _ = child.kill().await;
-                        bail!("cancelled");
-                    }
-                }
-            }
-        }
-
-        let status = child.wait().await.context("waiting on VLM child")?;
-        if !status.success() {
-            bail!("VLM exited with status {:?}", status);
-        }
-        Ok(CaptionResult { text: text.trim().to_string() })
     }
-}
-
-#[cfg(feature = "vlm-native")]
-mod native {
-    // Native (in-process) llama.cpp path. Off by default; the user opts
-    // in via `cargo build --features vlm-native --release`. Adds ~150 MB
-    // build artifacts + requires cmake.
-    //
-    // For now this is a placeholder that delegates to the subprocess
-    // path so the feature builds cleanly. A real implementation lands
-    // in a follow-up; the contract is the same.
-    use super::*;
-    pub async fn caption(
-        runner: &VlmRunner,
-        req: &CaptionRequest,
-        cancel: Arc<std::sync::atomic::AtomicBool>,
-        on_token: impl FnMut(&str),
-    ) -> Result<CaptionResult> {
-        // Falls through to the subprocess code path so the feature is
-        // additive rather than an alternate code path. Replace with a
-        // real llama-cpp-2 invocation once the native build wires up.
-        let _ = (runner, req, cancel, on_token);
-        bail!("vlm-native is a build-time placeholder; rebuild without the feature")
-    }
+    verified.recheck(cancel.clone()).await?;
+    let memory_mb = model_mb.checked_add(512)
+        .ok_or_else(|| super::native_admission::HostAdmissionError(anyhow!("VLM CLI host estimate overflow")))?;
+    let resources = super::native_admission::reserve_host(crate::resource_scheduler::ResourceScheduler::shared(),
+        crate::resource_scheduler::Demand { memory_mb, cpu: 1, io: 1 }, cancel.clone()).await?;
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+    let text = cli_output::run_caption_command(cmd, resources, cancel, &req.image_path,
+        on_token, super::native_process::ProcessTracker::shared()).await?;
+    Ok(CaptionResult { text })
 }
 
 // ── Discrete-GPU selection for the llama.cpp runner ────────────────────
@@ -361,49 +209,38 @@ mod native {
 // so Deep Analyze runs on the dGPU. Mirrors the DirectML `device_id` pinning
 // the ORT scan path does (see runtime.rs::execution_providers_for_chain).
 //
-// Safety: every failure path returns None → the caller passes no flag and
-// llama.cpp keeps its default. CUDA builds list "CUDAn" (not "Vulkann") device
+// Unsupported clean probes select no flag; admission, cap, timeout and cleanup
+// failures terminate startup. CUDA builds list "CUDAn" (not "Vulkann") device
 // lines, so this is a no-op there — and on a single-GPU box there's nothing to
 // pin. Because the probe uses the SAME binary that runs inference, a parseable
 // device list also proves the build supports `--device`.
 
 /// Best-effort discrete-GPU device name (e.g. `"Vulkan0"`) for `--device`,
 /// cached per binary. Returns None when it can't confidently pick one.
-pub(crate) async fn discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
+pub(crate) async fn discrete_gpu_device(binary: &std::path::Path, cancel: &Arc<std::sync::atomic::AtomicBool>) -> Result<Option<String>> {
     use std::collections::HashMap;
     use std::sync::OnceLock;
     use tokio::sync::Mutex;
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(hit) = cache.lock().await.get(binary) {
-        return hit.clone();
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(super::native_admission::HostAdmissionError(anyhow!("Native device probe cancelled")).into()); }
+    if let Some(hit) = cache.lock().await.get(binary) { return Ok(hit.clone()); }
+    let resolved = probe_discrete_gpu_device(binary, cancel).await?;
+    cache.lock().await.insert(binary.to_path_buf(), resolved.clone());
+    if let Some(device) = &resolved {
+        tracing::info!(%device, binary = %crate::platform::redact_path_for_log(binary), "[VLM] pinning llama.cpp to discrete GPU");
     }
-    let resolved = probe_discrete_gpu_device(binary).await;
-    cache
-        .lock()
-        .await
-        .insert(binary.to_path_buf(), resolved.clone());
-    if let Some(dev) = &resolved {
-        tracing::info!(%dev, binary = %binary.display(), "[VLM] pinning llama.cpp to discrete GPU");
-    }
-    resolved
+    Ok(resolved)
 }
 
-async fn probe_discrete_gpu_device(binary: &std::path::Path) -> Option<String> {
-    let mut cmd = Command::new(binary);
-    cmd.arg("--list-devices");
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.stdin(std::process::Stdio::null());
-    cmd.kill_on_drop(true);
-    let child = cmd.spawn().ok()?;
-    let out = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
-        .await
-        .ok()? // probe timed out
-        .ok()?; // spawn / wait failed
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    parse_best_vulkan_device(&text)
+async fn probe_discrete_gpu_device(binary: &std::path::Path, cancel: &Arc<std::sync::atomic::AtomicBool>) -> Result<Option<String>> {
+    let mut command = Command::new(binary); command.arg("--list-devices");
+    let output = super::native_probe::run_probe(command, crate::resource_scheduler::ResourceScheduler::shared(),
+        cancel.clone(), super::native_process::ProcessTracker::shared(), std::time::Duration::from_secs(5)).await?;
+    if !output.status.success() { return Ok(None); }
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Ok(parse_best_vulkan_device(&text))
 }
 
 /// Parse `--list-devices` output for `"VulkanN: <name> (<vram> MiB, …)"` lines
@@ -452,35 +289,15 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_weights_at, parse_best_vulkan_device};
+    use super::{find_weights_at, parse_best_vulkan_device, RENAME_PROMPT, RENAME_RETRY_PROMPT};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
-    fn installed_weights_resolve_from_wire_model_kind() {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "fileid-vlm-weights-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        for (kind, dir) in [
-            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
-            ("gemma_3_4b", "gemma-3-4b"),
-            ("mistral_small_3_2", "mistral-small-3.2"),
-            ("qwen3_vl_4b", "qwen3-vl-4b"),
-            ("qwen3_vl_8b", "qwen3-vl-8b"),
-        ] {
-            let installed = root.join("vlm").join(dir);
-            std::fs::create_dir_all(&installed).unwrap();
-            let gguf = installed.join("model.gguf");
-            let mmproj = installed.join("mmproj.gguf");
-            std::fs::write(&gguf, b"gguf").unwrap();
-            assert_eq!(find_weights_at(&root, kind), None, "incomplete {kind}");
-            std::fs::write(&mmproj, b"mmproj").unwrap();
-            assert_eq!(find_weights_at(&root, kind), Some((gguf, mmproj)));
-        }
-        assert_eq!(find_weights_at(&root, "unknown"), None);
-        std::fs::remove_dir_all(root).unwrap();
+    fn rename_prompt_forbids_invented_dates() {
+        assert!(RENAME_PROMPT.contains("visibly legible"));
+        assert!(RENAME_PROMPT.contains("never infer or invent a year"));
+        assert!(RENAME_PROMPT.contains("Never concatenate words"));
+        assert!(RENAME_RETRY_PROMPT.contains("exactly 3 to 5 separate lowercase words"));
     }
 
     #[test]
@@ -511,4 +328,36 @@ mod tests {
         let out = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4070 (8188 MiB, free)\n";
         assert_eq!(parse_best_vulkan_device(out), None);
     }
+
+    /// The wire kind is snake_case but the installer writes the registry's
+    /// dotted dir — a naive join(model_kind) reported every installed VLM as
+    /// missing (Deep Analyze "model isn't installed" on a complete install).
+    #[test]
+    fn installed_weights_resolve_from_wire_model_kind() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fileid-vlm-weights-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (kind, dir) in [
+            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
+            ("gemma_3_4b", "gemma-3-4b"),
+            ("mistral_small_3_2", "mistral-small-3.2"),
+            ("qwen3_vl_4b", "qwen3-vl-4b"),
+            ("qwen3_vl_8b", "qwen3-vl-8b"),
+        ] {
+            let installed = root.join("vlm").join(dir);
+            std::fs::create_dir_all(&installed).unwrap();
+            let gguf = installed.join("model.gguf");
+            let mmproj = installed.join("mmproj.gguf");
+            std::fs::write(&gguf, b"gguf").unwrap();
+            assert_eq!(find_weights_at(&root, kind), None, "incomplete {kind}");
+            std::fs::write(&mmproj, b"mmproj").unwrap();
+            assert_eq!(find_weights_at(&root, kind), Some((gguf, mmproj)));
+        }
+        assert_eq!(find_weights_at(&root, "unknown"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

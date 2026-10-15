@@ -1138,9 +1138,8 @@ fn no_subcommand_prints_friendly_intro() {
 }
 
 /// A scan that hits an unreadable file must still commit everything readable
-/// and exit with the dedicated partial code (3) — not success (the pre-audit
-/// silent-success bug) and not hard failure (which wrappers read as "results
-/// unusable").
+/// and exit with the dedicated partial code (3) — not silent success, and not
+/// hard failure (which wrappers read as "results unusable").
 #[test]
 fn partial_scan_commits_results_and_exits_with_code_3() {
     // Root can read 0o000 files, which would turn the partial scan clean.

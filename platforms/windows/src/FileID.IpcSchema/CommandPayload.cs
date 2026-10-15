@@ -33,9 +33,29 @@ public sealed record StartScanCommand(
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
 public sealed record CancelScanCommand : CommandPayload;
+public sealed record CancelRestructureCommand : CommandPayload;
+
+/// <summary>Immediately remove cataloged rows under the given excluded
+/// folders (files on disk untouched). Sent when the user adds an exclusion
+/// so the Library reflects it without waiting for a rescan. Replies with a
+/// <c>bulkActionResult</c> (action "purgeExcluded").</summary>
+public sealed record PurgeExcludedCommand(
+    System.Collections.Generic.IReadOnlyList<string> ExcludedPaths) : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
 public sealed record HealthCheckCommand(
     [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
+/// <summary>Read-only local model catalog (schema 1.14.0). Replies with
+/// <c>modelCatalog</c>; never downloads, loads or benchmarks a model.</summary>
+public sealed record ListModelsCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Role = null) : CommandPayload;
+/// <summary>Benchmark one installed model on this machine (schema 1.14.0).
+/// Replies with <c>benchmarkProgress</c> events and one <c>benchmarkResult</c>.</summary>
+public sealed record BenchmarkModelCommand(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    string ModelKind,
+    bool Tune) : CommandPayload;
+public sealed record CancelBenchmarkCommand : CommandPayload;
 public sealed record ShutdownCommand : CommandPayload;
 public sealed record RunFaceClusteringCommand : CommandPayload;
 
@@ -57,7 +77,9 @@ public sealed record DeepAnalyzeAllCommand(
     string ModelKind,
     bool SkipExisting,
     bool TagsOnly = false,
-    bool ProposeRenames = true) : CommandPayload;
+    bool ProposeRenames = true,
+    [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long>? FileIDs = null,
+    System.Collections.Generic.IReadOnlyList<string>? ExcludedFolders = null) : CommandPayload;
 
 public sealed record DeepAnalyzeCancelCommand : CommandPayload;
 
@@ -90,7 +112,14 @@ public sealed record RestructureMove(
     /// (RESTRUCTURE.md §6). Empty on older engines.</summary>
     string Confidence = "",
     /// <summary>Plain-language "why filed here", shown in the drill-down.</summary>
-    string? Reason = null);
+    string? Reason = null,
+    /// <summary>Plan-time source identity (schema 1.13.0). The engine re-checks
+    /// these against the live file before moving, so the app must echo them
+    /// back untouched in applyRestructure.</summary>
+    string? ContentHash = null,
+    ulong? SizeBytes = null,
+    ulong? FileRef = null,
+    double? ModifiedAt = null);
 
 public sealed record ApplyTagsCommand(
     [property: JsonPropertyName("fileIDs")] System.Collections.Generic.IReadOnlyList<long> FileIds,
@@ -123,6 +152,14 @@ public sealed record MergeClustersCommand(
 public sealed record EmbedTextQueryCommand(
     string Query,
     [property: JsonPropertyName("queryID")] string QueryId) : CommandPayload;
+
+/// <summary>Move a face through the engine writer. A null destination removes
+/// the face from its current person; createNewPerson creates a fresh unnamed
+/// person before assigning it.</summary>
+public sealed record ReassignFaceCommand(
+    [property: JsonPropertyName("faceID")] long FaceId,
+    [property: JsonPropertyName("destinationPersonID")] long? DestinationPersonId = null,
+    bool CreateNewPerson = false) : CommandPayload;
 
 public sealed record RenamePersonCommand(
     [property: JsonPropertyName("personID")] long PersonId,
@@ -226,8 +263,14 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
+            "cancelRestructure" => Empty<CancelRestructureCommand>(ref reader),
+            "purgeExcluded" => JsonSerializer.Deserialize<PurgeExcludedCommand>(ref reader, options) ?? throw new JsonException("purgeExcluded: null body"),
+            "reassignFace" => JsonSerializer.Deserialize<ReassignFaceCommand>(ref reader, options) ?? throw new JsonException("reassignFace: null body"),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
+            "listModels" => JsonSerializer.Deserialize<ListModelsCommand>(ref reader, options) ?? throw new JsonException("listModels: null body"),
+            "benchmarkModel" => JsonSerializer.Deserialize<BenchmarkModelCommand>(ref reader, options) ?? throw new JsonException("benchmarkModel: null body"),
+            "cancelBenchmark" => Empty<CancelBenchmarkCommand>(ref reader),
             "shutdown" => Empty<ShutdownCommand>(ref reader),
             "runFaceClustering" => Empty<RunFaceClusteringCommand>(ref reader),
             "verifyCudaPack" => Empty<VerifyCudaPackCommand>(ref reader),
@@ -259,8 +302,14 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
+            case CancelRestructureCommand: WriteEmpty(writer, "cancelRestructure"); break;
+            case PurgeExcludedCommand c: WriteVariant(writer, "purgeExcluded", c, options); break;
+            case ReassignFaceCommand c: WriteVariant(writer, "reassignFace", c, options); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
+            case ListModelsCommand c: WriteVariant(writer, "listModels", c, options); break;
+            case BenchmarkModelCommand c: WriteVariant(writer, "benchmarkModel", c, options); break;
+            case CancelBenchmarkCommand: WriteEmpty(writer, "cancelBenchmark"); break;
             case ShutdownCommand: WriteEmpty(writer, "shutdown"); break;
             case RunFaceClusteringCommand: WriteEmpty(writer, "runFaceClustering"); break;
             case VerifyCudaPackCommand: WriteEmpty(writer, "verifyCudaPack"); break;

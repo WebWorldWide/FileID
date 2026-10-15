@@ -18,7 +18,7 @@ public enum Hardware {
 
     /// True when the kernel exposes Apple Silicon's P/E split (hw.perflevelN.*).
     /// False on Intel Macs, where we derive a physical core count and lean on
-    /// the logical-core clamp instead. (F-C3-045)
+    /// the logical-core clamp instead.
     static let hasPerformanceLevels: Bool = {
         var size: size_t = MemoryLayout<Int32>.size
         var value: Int32 = 0
@@ -35,7 +35,7 @@ public enum Hardware {
         // Intel Macs / pre-M1: no perf levels. Use the PHYSICAL core count
         // (hw.physicalcpu) — NOT activeProcessorCount, which counts each
         // Hyper-Threading sibling as a core and doubled the P-count, sizing the
-        // worker pool ~1.5x too large on every Intel Mac (F-C3-045).
+        // worker pool ~1.5x too large on every Intel Mac.
         var phys: Int32 = 0
         var psize: size_t = MemoryLayout<Int32>.size
         if sysctlbyname("hw.physicalcpu", &phys, &psize, nil, 0) == 0, phys > 0 {
@@ -85,7 +85,7 @@ public enum Hardware {
     /// and is deliberately left above the 10 physical cores. On Intel (no perf
     /// levels) the counts are generic, so the pool is clamped to logical
     /// threads, mirroring the Windows `CpuTopology::worker_cap` clamp so a
-    /// fallback mis-count can never oversubscribe SMT. (F-C3-045)
+    /// fallback mis-count can never oversubscribe SMT.
     static func computeWorkerCap(performanceCores: Int, efficiencyCores: Int,
                                  logicalCores: Int, hasPerformanceLevels: Bool) -> Int {
         let p = max(1, performanceCores)
@@ -100,7 +100,7 @@ public enum Hardware {
     /// conservative. Mirrors the Windows engine's `memory_tier`. M1 Pro 16 GB →
     /// `.balanced`. Thresholds are coarse; per-machine tuning is an on-hardware
     /// UAT knob (see NEXT.md). Static at startup (matches the worker-cap model);
-    /// runtime pressure adaptation is the separate F-3 item.
+    /// runtime memory-pressure adaptation is not implemented.
     public enum MemoryTier: Sendable { case low, balanced, high }
 
     public static let memoryTier: MemoryTier = {

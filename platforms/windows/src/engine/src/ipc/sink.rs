@@ -18,14 +18,14 @@ use super::{EngineError, EventPayload, IpcEvent, Wrap};
 // senders blocking on the channel during fast scans + caption streams.
 const CHANNEL_CAPACITY: usize = 16384;
 
-// C1-009: per-frame size cap, symmetric with the app's inbound cap
-// (EngineClient.MaxFrameChars) and the engine's command-read cap
+// per-frame size cap, symmetric with the app's inbound cap
+// (EngineClient.MaxFrameBytes) and the engine's command-read cap
 // (main.rs MAX_FRAME_BYTES). A frame above this is silently dropped by the
 // app's bounded reader (it resyncs to the next newline), which hangs the UI
 // that was awaiting the reply (e.g. a huge restructurePlan). Rather than emit
 // the oversize frame, the sink substitutes a small structured
-// `ipc_frame_too_large` error the app can surface. Bumped 32→64 MiB
-// (R3-07B/R5-12), symmetric with the inbound caps, to carry a whole-library plan.
+// `ipc_frame_too_large` error the app can surface. Bumped 32→64 MiB,
+// symmetric with the inbound caps, to carry a whole-library plan.
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -43,10 +43,11 @@ impl Sink {
         let writer = tokio::task::spawn_blocking(move || {
             let stdout = std::io::stdout();
             let mut handle = stdout.lock();
+            let mut scratch: Vec<u8> = Vec::new();
             // The runtime can't await on the blocking thread, so we use a
             // sync-style consumer over the channel via blocking_recv.
             //
-            // C6-015: coalesce flushes. blocking_recv blocks for the first
+            // Coalesce flushes. blocking_recv blocks for the first
             // event of a burst; we then drain every already-queued event with
             // try_recv, writing each as a line WITHOUT flushing, and flush ONCE
             // when the channel momentarily empties. During the bursts the 16384
@@ -60,14 +61,14 @@ impl Sink {
                     Some(event) => event,
                     None => break, // channel closed and drained
                 };
-                if !write_line(&mut handle, &first) {
+                if !write_line(&mut handle, &mut scratch, &first) {
                     break;
                 }
                 // Drain the rest of the current burst without flushing.
                 loop {
                     match rx.try_recv() {
                         Ok(event) => {
-                            if !write_line(&mut handle, &event) {
+                            if !write_line(&mut handle, &mut scratch, &event) {
                                 closed = true;
                                 break;
                             }
@@ -116,46 +117,35 @@ impl Sink {
         let (tx, rx) = mpsc::channel::<IpcEvent>(capacity);
         (Self { tx }, rx)
     }
-
-    /// Close the sink. After this, `send` returns immediately (silently).
-    /// The writer task will exit once the channel drains.
-    #[allow(dead_code)]
-    pub fn close(&self) {
-        // Drop the only known sender from this handle isn't enough since
-        // clones may exist. We expose this only as a documented hook; in
-        // practice the engine relies on dropping all Sink handles.
-        drop(self.tx.clone());
-    }
 }
 
 /// Serialize `event` and write it as one newline-terminated frame. Does NOT
-/// flush — the caller coalesces flushes per drained burst (C6-015). Returns
+/// flush — the caller coalesces flushes per drained burst. Returns
 /// `false` only on a fatal stdout write error (the writer loop then exits).
 ///
-/// C1-009: serialize to a buffer first so we can enforce `MAX_FRAME_BYTES`.
+/// Serialize to a buffer first so we can enforce `MAX_FRAME_BYTES`.
 /// An over-cap frame is dropped app-side with no error, hanging whatever UI
 /// awaited the reply; we substitute a small structured `ipc_frame_too_large`
 /// event so the app can surface the failure instead of hanging.
-fn write_line<W: Write>(w: &mut W, event: &IpcEvent) -> bool {
+fn write_line<W: Write>(w: &mut W, buf: &mut Vec<u8>, event: &IpcEvent) -> bool {
     // Insertion-order keys are fine — consumers don't care about JSON key
     // order. Byte-for-byte parity with sorted output would require a
     // custom sorted-key writer.
-    let bytes = match serde_json::to_vec(event) {
-        Ok(b) => b,
-        Err(err) => {
-            tracing::error!(?err, "ipc sink encode failed");
-            return true; // skip this frame; the channel is still healthy
-        }
-    };
-    if bytes.len() > MAX_FRAME_BYTES {
+    // `buf` is reused across frames so the hot drain loop allocates no Vec per event.
+    buf.clear();
+    if let Err(err) = serde_json::to_writer(&mut *buf, event) {
+        tracing::error!(?err, "ipc sink encode failed");
+        return true; // skip this frame; the channel is still healthy
+    }
+    if buf.len() > MAX_FRAME_BYTES {
         tracing::warn!(
-            frame_bytes = bytes.len(),
+            frame_bytes = buf.len(),
             cap = MAX_FRAME_BYTES,
             "ipc frame exceeds outbound cap; substituting ipc_frame_too_large"
         );
-        return write_frame_too_large(w, bytes.len());
+        return write_frame_too_large(w, buf.len());
     }
-    write_raw_line(w, &bytes)
+    write_raw_line(w, buf)
 }
 
 /// Emit the structured replacement for an over-cap frame. Tiny and fixed-size,
@@ -216,7 +206,7 @@ mod tests {
     }
 
     /// A `Write` that tallies writes vs. flushes so a test can prove the sink
-    /// no longer flushes per frame (C6-015).
+    /// no longer flushes per frame.
     #[derive(Default)]
     struct CountingWriter {
         bytes: Vec<u8>,
@@ -242,14 +232,15 @@ mod tests {
         })))
     }
 
-    /// C1-009: an outbound frame above the cap must be replaced by a small,
+    /// An outbound frame above the cap must be replaced by a small,
     /// structured `ipc_frame_too_large` error — never emitted oversize (the app
     /// would silently drop it and hang the awaiting UI).
     #[test]
     fn oversize_frame_becomes_structured_error_event() {
         let huge = log_event("X".repeat(MAX_FRAME_BYTES + 1024));
         let mut out = CountingWriter::default();
-        assert!(write_line(&mut out, &huge), "write_line must not report a fatal error");
+        let mut buf = Vec::new();
+        assert!(write_line(&mut out, &mut buf, &huge), "write_line must not report a fatal error");
 
         // The bytes on the wire are the substitute event, well under the cap.
         assert!(
@@ -273,7 +264,8 @@ mod tests {
     fn normal_frame_is_written_verbatim() {
         let evt = log_event("hello".into());
         let mut out = CountingWriter::default();
-        assert!(write_line(&mut out, &evt));
+        let mut buf = Vec::new();
+        assert!(write_line(&mut out, &mut buf, &evt));
         let line = out.bytes.strip_suffix(b"\n").unwrap();
         let decoded: IpcEvent = serde_json::from_slice(line).unwrap();
         match decoded.payload {
@@ -282,15 +274,16 @@ mod tests {
         }
     }
 
-    /// C6-015: writing a burst of frames must NOT flush per frame. `write_line`
+    /// Writing a burst of frames must NOT flush per frame. `write_line`
     /// is the per-event primitive; flushing is the writer loop's job, coalesced
     /// once per drained burst. Proven here by asserting write_line performs zero
     /// flushes across many events (the old `write_frame` flushed every call).
     #[test]
     fn burst_writes_do_not_flush_per_frame() {
         let mut out = CountingWriter::default();
+        let mut buf = Vec::new();
         for i in 0..100 {
-            assert!(write_line(&mut out, &log_event(format!("event-{i}"))));
+            assert!(write_line(&mut out, &mut buf, &log_event(format!("event-{i}"))));
         }
         assert_eq!(
             out.flushes, 0,
@@ -299,7 +292,7 @@ mod tests {
         assert!(out.writes >= 100, "each frame still produces output");
     }
 
-    /// C1-002: a terminal PhaseChanged must use the guaranteed (blocking/
+    /// A terminal PhaseChanged must use the guaranteed (blocking/
     /// awaiting) `send` path, which delivers even when the channel is full —
     /// unlike `try_send`, which drops. A dropped terminal frame makes the app
     /// render a cancelled/failed scan as Completed. This pins the difference:

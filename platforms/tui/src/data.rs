@@ -658,7 +658,7 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
 
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path_text, f.extension, f.modified_at, f.created_at, \
-            f.location_lat, f.location_lon, f.has_text, \
+            f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name, \
             (SELECT p.name FROM face_prints fp JOIN persons p ON p.id = fp.person_id \
              WHERE fp.file_id = f.id LIMIT 1) AS person_name \
          FROM files f WHERE f.failed = 0 ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?1",
@@ -673,10 +673,12 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
                 kind: FileKind::from_extension(ext.as_deref().unwrap_or("")),
                 modified_unix: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
                 created_unix: r.get(4)?,
-                person_name: r.get(8)?,
+                person_name: r.get(9)?,
                 location_lat: r.get(5)?,
                 location_lon: r.get(6)?,
                 has_text: r.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
+                vlm_proposed: r.get(8)?,
+                identity: None,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

@@ -29,7 +29,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
 
     // Drag-over highlight brush. SolidColorBrush is a DispatcherObject;
     // constructing one per drag-over event (fired continuously while a
-    // cluster card hovers) is the V15.2-class native fast-fail shape —
+    // cluster card hovers) is the native fast-fail shape —
     // cache once on the dispatcher this view owns and reuse. Mirrors
     // SidebarEngineStatus's ctor-cached brushes.
     private readonly SolidColorBrush _goldBrush = new(Microsoft.UI.Colors.Gold);
@@ -122,7 +122,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 {
                     if (!System.IO.File.Exists(AppPaths.DbPath)) return 0;
                     // `using` so the connection is deterministically returned to the
-                    // pool when the lambda exits (was leaked per footer refresh). (audit A14)
+                    // pool when the lambda exits (was leaked per footer refresh).
                     using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
@@ -236,7 +236,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 // Shared singleton, not a fresh Load() — avoids the static-debounce
                 // lost-update (a fresh instance's Save() cancels the singleton's
-                // pending write). (audit A8)
+                // pending write).
                 var s = AppViewModel.Instance.Settings;
                 s.PeopleHideUnknown = false;
                 s.Save();
@@ -475,7 +475,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         if (cluster is null) return;
         el.DataContext = cluster;
 
-        // M19: ItemsRepeater virtualizes + recycles cards, so the one-shot
+        // ItemsRepeater virtualizes + recycles cards, so the one-shot
         // UpdateCheckboxVisibility() walk (run only at toggle time) misses any
         // card realized later via scroll/refresh — its select checkbox then
         // never appears (or a recycled card keeps a stale Visible). Apply the

@@ -5,15 +5,11 @@ name = "fileid-engine"
 # script (no new deps) and exposes its own version via CARGO_PKG_VERSION
 # (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
 # cross-checks this literal against VERSION and fails the build on drift.
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.90"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
-# License choice is pending the public-release decision; the engine is
-# `publish = false` so cargo doesn't enforce a SPDX expression. Update
-# this to "MIT" / "Apache-2.0" / proprietary text before any external
-# distribution. Tracked in shared/docs/SHIP.md.
-license = "TBD"
+license = "Apache-2.0"
 publish = false
 
 [lib]
@@ -27,7 +23,6 @@ path = "src/main.rs"
 [dependencies]
 # Async runtime + bounded channels.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time", "signal", "fs", "process"] }
-tokio-util = { version = "0.7", features = ["io"] }
 async-channel = "2"
 parking_lot = "0.12"
 
@@ -50,7 +45,6 @@ tracing-appender   = "0.2"
 
 # Errors.
 anyhow    = "1"
-thiserror = "1"
 
 # Filesystem walk + path utilities. Faster than std::fs::read_dir at scale.
 walkdir   = "2"
@@ -87,8 +81,15 @@ image            = { version = "0.25", default-features = false, features = ["jp
 kamadak-exif     = "0.5"
 # turbojpeg considered + dropped: requires a system libjpeg-turbo install
 # (no `vendored` feature upstream). The system-dep cost beats the JPEG-decode
-# speedup for the "user just downloads and runs" promise. Revisit when a
-# pure-Rust SIMD JPEG decoder lands.
+# speedup for the "user just downloads and runs" promise.
+# jpeg-decoder supplies the piece image-rs's zune-jpeg backend lacks: DCT-
+# scaled decode (1/2, 1/4, 1/8) for oversized JPEGs. Full-resolution decode of
+# 24-48 MP photos was the measured pipeline ceiling (~533 ms/file, memory-
+# bandwidth-bound) while every vision consumer is capped at ≤640 px input;
+# see decode_jpeg_scaled in pipeline/tagging.rs and DECISIONS 2026-07-21.
+# Pure Rust, no system deps; rayon feature off — the decoder pool owns
+# parallelism.
+jpeg-decoder     = { version = "0.3", default-features = false }
 
 # Memory mapping for large image reads.
 memmap2 = "0.9"
@@ -105,7 +106,14 @@ crossbeam-channel = "0.5"
 # CLIP/BGE semantic search above ~10 k vectors, where brute-force cosine
 # becomes the bottleneck. No C/C++ build dep (rejected `usearch` for that
 # reason — see shared/docs/DECISIONS.md). MIT/Apache-2.0.
-instant-distance = "0.6"
+instant-distance = { version = "0.6", features = ["with-serde"] }
+
+# Already linked in transitively by instant-distance; declared directly only so
+# the HNSW build can be pinned to a single-threaded pool. instant-distance
+# builds its graph with rayon, so thread scheduling — not just the RNG seed —
+# decides the graph topology and therefore the approximate-kNN neighbour sets
+# face clustering derives identities from. See shared/docs/DECISIONS.md
+# (2026-07-29). Apache-2.0/MIT.
 rayon = "1.12"
 
 # Zip extraction for the llama.cpp runtime + Performance Pack downloads,
@@ -122,12 +130,7 @@ quick-xml = "0.41"
 # audio files in the library get real content-style tag chips. MPL-2.0 (file-
 # level copyleft; fine for separate use). YAMNet sound-event tagging + Whisper
 # transcription are documented follow-ups (need offline ONNX conversion).
-symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "aac", "isomp4", "pcm"] }
-
-# Native llama.cpp bindings (in-process VLM inference, no subprocess).
-# Off by default to keep CI build fast — adds ~150 MB build artifacts +
-# requires cmake at build time. Toggle via `cargo build --features vlm-native`.
-llama-cpp-2 = { version = "0.1", optional = true }
+symphonia = { version = "0.5", default-features = false, features = ["all-codecs", "all-formats"] }
 
 # ONNX Runtime bindings + ndarray for tensor wrangling. Both pinned to
 # EXACT versions (no caret) because the 2.0 RC line had ABI churn between
@@ -152,6 +155,10 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "cuda",
     "openvino",
     "qnn",
+    # Bridge ORT's native C++ logger into `tracing` — without this, an EP that
+    # fails to register (missing provider DLL dependency, unsupported GPU arch)
+    # falls back silently and the engine log shows nothing.
+    "tracing",
 ] }
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
@@ -160,10 +167,13 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
+    "Win32_System_JobObjects",
     "Win32_System_Power",
     "Win32_System_SystemInformation",
     "Win32_System_Ioctl",
@@ -189,11 +199,43 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Foundation_Collections",
 ] }
-windows-core = "0.58"
 
-# Non-Windows deps. ort with CPU + CUDA + OpenVINO (no DirectML).
-# libc for getppid() / parent-death detection in platform.rs.
-[target.'cfg(not(windows))'.dependencies]
+# Linux: STATIC-link the CPU ONNX Runtime.
+#
+# pyke's `download-binaries` ships ONLY a static `libonnxruntime.a` for Linux
+# x64 — verified empirically: neither the CPU set nor the `cu12` set contains a
+# dynamic `libonnxruntime.so`. So a `load-dynamic` build (which dlopens
+# `libonnxruntime.so` by name at runtime) has NOTHING to load on Linux and every
+# ML session fails — full-ML was silently broken here. Dropping `load-dynamic`
+# makes ort static-link the `.a` into the engine binary: self-contained,
+# "download-and-run", and ORT is guaranteed present.
+#
+# `cuda`/`openvino` are intentionally omitted on Linux: (1) enabling `cuda` makes
+# download-binaries select the `cu12` set whose `libonnxruntime_providers_cuda.so`
+# needs CUDA 12 + cuDNN 9 (mismatched on CUDA-13 hosts and absent on most), and
+# (2) there is no DirectML GPU fallback on Linux, so a GPU EP that fails to bind
+# would silently drop to single-threaded CPU. Linux therefore runs the CPU EP
+# (multi-threaded). Linux GPU acceleration needs a CUDA-version-matched dynamic
+# ORT build and is tracked as future work — see shared/docs/DECISIONS.md.
+#
+# libc is for getppid() / parent-death + inode file_ref in platform.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+# `std` is required for ort's `impl std::error::Error for ort::Error` (so the
+# engine's `.context()` on `ort::Result` works). The old config got it
+# transitively from `load-dynamic` (= ["std", ...]); now that we drop
+# load-dynamic for static linking, request `std` explicitly.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "download-binaries",
+    "ndarray",
+] }
+libc = "0.2"
+
+# macOS / other Unix: UNCHANGED. `load-dynamic` + the macOS runtime-install flow
+# (`src/ort_runtime.rs`, `fileid runtime install`) provisions the `.dylib` at
+# runtime, since pyke ships only a static `.a` for arm64 macOS too. cuda/openvino
+# are inert on macOS but kept so this arm is byte-identical to the prior config.
+[target.'cfg(all(not(windows), not(target_os = "linux")))'.dependencies]
 ort = { version = "=2.0.0-rc.10", default-features = false, features = [
     "load-dynamic",
     "download-binaries",
@@ -211,10 +253,6 @@ libc = "0.2"
 # (e.g. for size-conscious CI smoke builds) — opt out with
 # `cargo build --no-default-features`.
 default = ["pdf-analyze"]
-# Native (in-process) llama.cpp VLM inference. Off by default to keep CI
-# build time low — adds ~150 MB build artifacts + needs cmake. Toggle via
-# `cargo build --features vlm-native --release`.
-vlm-native = ["dep:llama-cpp-2"]
 # Engine-side PDF rasterization via pdfium-render. Bundles a pre-built
 # pdfium DLL (~15 MB binary cost). Enabled in `default` above.
 pdf-analyze = ["dep:pdfium-render"]

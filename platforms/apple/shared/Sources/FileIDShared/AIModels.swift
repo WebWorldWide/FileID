@@ -7,7 +7,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public let rawValue: String
     private init(registeredValue: String) { rawValue = registeredValue }
     public init?(rawValue: String) {
-        guard Self.favorites.contains(where: { $0.rawValue == rawValue }) || ModelCatalog.entry(forID: rawValue) != nil else { return nil }
+        guard Self.favorites.contains(where: { $0.rawValue == rawValue }) || MLXModelCatalog.entry(forID: rawValue) != nil else { return nil }
         self.rawValue = rawValue
     }
     public init(from decoder: Decoder) throws {
@@ -38,9 +38,9 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
 
     public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .paligemma3B]
-    public static var allCases: [Self] { favorites + ModelCatalog.entries.filter { entry in !favorites.contains { $0.sourceRepo == entry.repo } }.map { Self(registeredValue: $0.id) } }
-    public var catalogEntry: CatalogModel? { ModelCatalog.entry(forRepo: sourceRepo) }
-    public var supportsVision: Bool { ModelCatalog.entry(forID: rawValue)?.role != .text }
+    public static var allCases: [Self] { favorites + MLXModelCatalog.entries.filter { entry in !favorites.contains { $0.sourceRepo == entry.repo } }.map { Self(registeredValue: $0.id) } }
+    public var catalogEntry: CatalogModel? { MLXModelCatalog.entry(forRepo: sourceRepo) }
+    public var supportsVision: Bool { MLXModelCatalog.entry(forID: rawValue)?.role != .text }
     public static var visionModels: [Self] { allCases.filter(\.supportsVision) }
     public var displayName: String {
         switch self {
@@ -52,7 +52,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_12B:    return "Gemma 3 12B (QAT 4-bit)"
         case .mistralSmall32: return "Mistral Small 3.2 24B (4-bit)"
         case .paligemma3B:   return "PaliGemma 3B (8-bit)"
-        default: return ModelCatalog.entry(forID: rawValue)?.displayName ?? rawValue
+        default: return MLXModelCatalog.entry(forID: rawValue)?.displayName ?? rawValue
         }
     }
 
@@ -66,7 +66,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_12B:    return "High quality. Heavy: ~9 GB resident, ~3× slower."
         case .mistralSmall32: return "Max quality. Apache-2.0; ~14 GB, slowest. 32 GB Macs."
         case .paligemma3B:   return "Strong on grounding, OCR, and visual question answering."
-        default: return ModelCatalog.entry(forID: rawValue)?.summary ?? "Registered model"
+        default: return MLXModelCatalog.entry(forID: rawValue)?.summary ?? "Registered model"
         }
     }
 
@@ -80,7 +80,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_12B:    return "mlx-community/gemma-3-12b-it-qat-4bit"
         case .mistralSmall32: return "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit"
         case .paligemma3B:   return "mlx-community/paligemma-3b-mix-448-8bit"
-        default: return ModelCatalog.entry(forID: rawValue)!.repo
+        default: return MLXModelCatalog.entry(forID: rawValue)!.repo
         }
     }
 
@@ -94,7 +94,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         case .gemma3_12B:    return 7_500_000_000
         case .mistralSmall32: return 13_500_000_000
         case .paligemma3B:   return 3_300_000_000
-        default: return ModelCatalog.entry(forID: rawValue)!.weightBytes
+        default: return MLXModelCatalog.entry(forID: rawValue)!.weightBytes
         }
     }
 
@@ -131,7 +131,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
         switch self {
         case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache-2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma"
-        default: return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][ModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
+        default: return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][MLXModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
         }
     }
 

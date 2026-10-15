@@ -19,7 +19,6 @@ public sealed partial class SidebarQueueList : UserControl
     private static readonly SolidColorBrush RunningBackground =
         new(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
     private static readonly SolidColorBrush TransparentBackground = new(Colors.Transparent);
-    private static readonly FontFamily FluentIconsFont = new("Segoe Fluent Icons");
 
     public SidebarQueueList()
     {

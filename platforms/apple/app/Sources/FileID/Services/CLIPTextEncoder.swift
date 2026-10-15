@@ -107,7 +107,7 @@ public final class CLIPTextEncoder: @unchecked Sendable {
     /// file until the next app launch. After this, `isReady` is false and
     /// `embedText` returns nil; a later `load()` re-builds if the model is
     /// reinstalled. Takes `loadLock` so it can't race a build in progress and
-    /// drop a session another thread is mid-way through creating. (F-C4-017)
+    /// drop a session another thread is mid-way through creating.
     public func unload() {
         loadLock.lock(); defer { loadLock.unlock() }
         lock.lock()

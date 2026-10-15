@@ -1,5 +1,5 @@
 ﻿#pragma warning disable CA1861 // Fresh fixture arrays keep each test isolated.
-// Tests for the bulk-tag "Replace existing" undo grouping (F-C5-004). A replace
+// Tests for the bulk-tag "Replace existing" undo grouping. A replace
 // wipes user tags, so BulkTagSheet snapshots each file's prior user tags and
 // journals an undo that restores them via one applyTags(replace) per distinct
 // tag-set. GroupByTagSet is the pure batching behind that undo — exercised here

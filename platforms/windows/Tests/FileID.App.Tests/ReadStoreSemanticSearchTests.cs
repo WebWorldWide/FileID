@@ -1,4 +1,4 @@
-// Equivalence test for ReadStore.SemanticSearchAsync's bounded top-K scan.
+﻿// Equivalence test for ReadStore.SemanticSearchAsync's bounded top-K scan.
 //
 // The perf change made the loop materialize a FileRow only for rows the heap
 // retains (instead of for every embedding row). This guards that the change is
@@ -199,7 +199,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         Assert.DoesNotContain(2L, actualIds);
     }
 
-    // F-C5-001: Dispose / DisposeAsync must close the connection exactly once
+    // Dispose / DisposeAsync must close the connection exactly once
     // and tolerate being called repeatedly across both teardown paths.
     [Fact]
     public async Task Dispose_ClosesConnection_AndIsIdempotent()
@@ -218,7 +218,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         await store.DisposeAsync();
     }
 
-    // F-C5-001: reads issued after disposal bail at the pre-gate null check and
+    // Reads issued after disposal bail at the pre-gate null check and
     // return empty without throwing (they never touch the disposed gate).
     [Fact]
     public async Task ReadsAfterDispose_ReturnEmpty_DoNotThrow()
@@ -236,7 +236,7 @@ public sealed class ReadStoreSemanticSearchTests : IDisposable
         Assert.Empty(await store.SimilarFilesAsync(1, 10, CancellationToken.None));
     }
 
-    // F-C5-001 regression: Dispose must drain an in-flight thread-pool read via
+    // Dispose must drain an in-flight thread-pool read via
     // the gate before freeing the native connection. With the pre-fix teardown
     // (free without acquiring the gate) the concurrent reader uses the connection
     // after sqlite3_close — an access violation that crashes the test host. The

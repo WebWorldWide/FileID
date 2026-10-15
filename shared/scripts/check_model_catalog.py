@@ -8,15 +8,13 @@ def require(condition, message):
         raise ValueError(message)
 
 def check(root):
-    canonical = root / 'shared/models/catalog.json'
-    mirror = root / 'platforms/apple/shared/Sources/FileIDShared/Resources/model-catalog.json'
-    require(canonical.read_bytes() == mirror.read_bytes(), 'Mac catalog mirror drifted')
-    document = json.loads(canonical.read_text())
+    catalog = root / 'platforms/apple/shared/Sources/FileIDShared/Resources/model-catalog.json'
+    document = json.loads(catalog.read_text())
     require(document['formatVersion'] == 1 and document['runtime'] == 'mlx-swift-lm 3.32.3', 'Invalid model catalog')
     entries = document['entries']
     require(len(entries) >= 200 and len({e['repo'] for e in entries}) == len(entries), 'Invalid model catalog')
     policy = {'apache-2.0', 'mit', 'bsd-2-clause', 'bsd-3-clause', 'isc'}
-    swift = (root / 'platforms/apple/shared/Sources/FileIDShared/ModelCatalog.swift').read_text()
+    swift = (root / 'platforms/apple/shared/Sources/FileIDShared/MLXModelCatalog.swift').read_text()
     architectures = {}
     for role in ('text', 'vision'):
         table = re.search(role + 'Architectures: Set<String> = \\[([^\\]]+)\\]', swift)

@@ -7,10 +7,7 @@ struct LavaLampBackground: View {
         ZStack {
             Color(white: 0.08)
 
-            // System-paced TimelineView (no minimumInterval cap) so
-            // ProMotion displays drive the canvas at 120Hz.
-            TimelineView(.animation(paused: paused)) { context in
-                let time = context.date.timeIntervalSinceReferenceDate
+            AtmosphereTimeline(paused: paused) { time in
                 Canvas { ctx, size in
                     let w = size.width, h = size.height
                     let cx1 = w * 0.5 + sin(time * 0.2)  * w * 0.3
@@ -43,5 +40,7 @@ struct LavaLampBackground: View {
                 .environment(\.colorScheme, .dark)
         }
         .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }

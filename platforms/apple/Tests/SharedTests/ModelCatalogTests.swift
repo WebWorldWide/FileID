@@ -6,12 +6,12 @@ import Testing
 struct ModelCatalogTests {
     private var canonical: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("shared/models/catalog.json")
+            .deletingLastPathComponent()
+            .appendingPathComponent("shared/Sources/FileIDShared/Resources/model-catalog.json")
     }
-    @Test func mirrorPinsLicensesAndWireIDs() throws {
-        let entries = try ModelCatalog.load(data: Data(contentsOf: canonical))
-        #expect(entries == ModelCatalog.entries)
+    @Test func bundledCatalogPinsLicensesAndWireIDs() throws {
+        let entries = try MLXModelCatalog.load(data: Data(contentsOf: canonical))
+        #expect(entries == MLXModelCatalog.entries)
         #expect(entries.count >= 200)
         #expect(entries.contains { $0.role == .text })
         #expect(entries.contains { $0.role == .vision })
@@ -46,7 +46,7 @@ struct ModelCatalogTests {
         }
         document["entries"] = entries
         let invalid = try JSONSerialization.data(withJSONObject: document)
-        #expect(throws: (any Error).self) { try ModelCatalog.load(data: invalid) }
+        #expect(throws: (any Error).self) { try MLXModelCatalog.load(data: invalid) }
     }
     @Test func chatModelSelectionRemainsOptionalOnTheWire() throws {
         let old = Data(#"{"requestID":"r","conversationID":"c","action":"send","text":"gift"}"#.utf8)

@@ -36,6 +36,9 @@ use fileid_engine::models::registry::{self, LookupResult};
 use super::util::glass_card;
 use crate::engine_client::{EngineClient, EngineEvent};
 
+#[path = "deep_scope.rs"]
+mod deep_scope;
+
 const PROPOSED_LIMIT: i64 = 200;
 
 // ─── VLM registry (Linux mirror of macOS `AIModelKind`) ──────────────────────
@@ -457,6 +460,15 @@ struct DeepUi {
 // ─── Command routing ─────────────────────────────────────────────────────────
 
 fn send_cmd(ui: &Rc<DeepUi>, payload: CommandPayload) -> bool {
+    let payload = match deep_scope::prepare(payload) {
+        Ok(payload) => payload,
+        Err(error) => {
+            ui.completion_icon.set_text("!");
+            ui.completion_label.set_text(&error);
+            reveal(&ui.completion_card);
+            return false;
+        }
+    };
     match ui.engine.borrow_mut().send(payload) {
         Ok(()) => true,
         Err(error) => {
@@ -492,6 +504,8 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
             skip_existing: ui.skip_check.is_active(),
             tags_only: false,
             propose_renames: true,
+            file_ids: None,
+            excluded_folders: None,
         });
             if send_cmd(&ui, payload) {
                 begin_run(&ui);
@@ -718,7 +732,7 @@ fn begin_run(ui: &Rc<DeepUi>) {
 }
 
 /// Tear down the live cards (crash / cancel / clean exit). Mirrors macOS
-/// F-C4-016 — a crash mid-run removes the live cards at once.
+/// A crash mid-run removes the live cards at once.
 fn end_run(ui: &Rc<DeepUi>) {
     ui.in_flight.set(false);
     ui.starting_card.set_visible(false);

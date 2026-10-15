@@ -29,7 +29,7 @@ struct ModelCatalogBrowser: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Find a local model").font(.title2.bold())
-                    Text("\(ModelCatalog.entries.count) audited catalog entries · \(Int(ramGB)) GB Mac")
+                    Text("\(MLXModelCatalog.entries.count) audited catalog entries · \(Int(ramGB)) GB Mac")
                         .font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()

@@ -1,10 +1,14 @@
-// MobileCLIP-S2 image encoder. Maps a 256×256 RGB image to a 512-d
-// L2-normalized float32 embedding for scan-time clustering and
-// query-time semantic search.
+// CLIP ViT-B/32 image encoder (OpenAI/OpenCLIP, MIT). The module, type and
+// `mobileclip/` install slot keep their pre-swap names as stable keys. Maps a
+// 224×224 RGB image to a 512-d L2-normalized float32 embedding for scan-time
+// clustering and query-time semantic search.
 //
-// Inference order: resize-and-letterbox → ImageNet mean/std normalize
-// → CHW float32 → ORT session.run → L2 normalize. Persisted as raw
-// little-endian bytes in `clip_embeddings.embedding`.
+// Inference order: resize → CLIP mean/std normalize → CHW float32
+// → ORT session.run → L2 normalize. Persisted as raw little-endian bytes
+// in `clip_embeddings.embedding`.
+//
+// File was originally MobileCLIP-S2 (256×256, research-only license); now
+// loads the Apache-2.0 / commercial-clean ViT-B/32 export at 224×224.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +17,17 @@ use ndarray::Array4;
 use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
-use super::runtime::{classify_inference_error, configure_session_builder, execution_providers_for_chain, priority_chain, RuntimeProbe};
+use super::runtime::{
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
+};
+
+/// Expected image-embedding width. ViT-B/32 emits 512-d. A model whose output
+/// width differs is wrong/substituted (corrupt, re-quantized, or a future swap
+/// with a mismatched registry SHA) and must be rejected, not L2-normalized and
+/// persisted as an off-dimension `clip_embeddings` blob — that silently poisons
+/// scene-tag dot products (`scene_vocab::dot` folds over `min(len)`) and
+/// semantic search. Mirrors the SFace (`sface.rs` ENG-69), RAM++, and BGE guards.
+pub(crate) const CLIP_EMBED_DIM: usize = 512;
 
 // OpenAI CLIP normalization (ViT-B/32) — differs from ImageNet; using ImageNet
 // stats on a CLIP model measurably degrades the embeddings.
@@ -21,6 +35,7 @@ use super::runtime::{classify_inference_error, configure_session_builder, execut
 const CLIP_MEAN: [f32; 3] = [0.48145466, 0.4578275, 0.40821073];
 #[allow(clippy::excessive_precision)]
 const CLIP_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
+const INV_255: f32 = 1.0 / 255.0;
 
 pub struct MobileClipImage {
     session: Session,
@@ -36,29 +51,9 @@ impl MobileClipImage {
         if !path.exists() {
             anyhow::bail!("MobileCLIP weights missing at {}", path.display());
         }
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder = configure_session_builder(builder)
-            .context("configure session (MobileCLIP image)")?;
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (MobileCLIP image)")?;
-        }
-        tracing::info!(model = "MobileCLIP image", chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(path)
-            .context("ORT session commit (MobileCLIP image)")?;
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("MobileCLIP ONNX has no inputs"))?
-            .name
-            .clone();
-        // Warmup with a zero 256×256 frame so first-call kernel compile
+        super::clip_space::verify(path, "mobileclip_s2", 0)?;
+        let (session, input_name) = commit_chain_session("MobileCLIP image", path)?;
+        // Warmup with a zero 224×224 frame so first-call kernel compile
         // happens during load.
         let mut model = Self { session, input_name, input_size: 224 };
         let warmup_started = std::time::Instant::now();
@@ -71,36 +66,24 @@ impl MobileClipImage {
         Ok(model)
     }
 
-    /// Embed a 256×256 RGB8 image. Caller pre-resizes to 256×256 via
-    /// `tagging::resize_rgb_nearest` (or bilinear when we wire that).
-    /// Single-image embed. Kept for non-batched callers (e.g. interactive
-    /// semantic-search query embedding) — main scan pipeline goes through
-    /// `embed_batch` via `pipeline::batch_clip::ClipBatchCoordinator`.
-    #[allow(dead_code)]
-    pub fn embed(&mut self, rgb_256: &[u8]) -> Result<Vec<f32>> {
+    /// Embed one 224×224 RGB8 image (the caller pre-resizes). Used by the
+    /// pooled scan path and single-image queries; the batched scan path goes
+    /// through `embed_batch` via `pipeline::batch_clip::ClipBatchCoordinator`.
+    pub fn embed(&mut self, rgb: &[u8]) -> Result<Vec<f32>> {
         let n = self.input_size as usize;
-        if rgb_256.len() != 3 * n * n {
+        if rgb.len() != 3 * n * n {
             anyhow::bail!(
                 "MobileCLIP embed expects {} RGB8 bytes, got {}",
                 3 * n * n,
-                rgb_256.len()
+                rgb.len()
             );
         }
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
-        for y in 0..n {
-            for x in 0..n {
-                let i = (y * n + x) * 3;
-                let r = rgb_256[i] as f32 / 255.0;
-                let g = rgb_256[i + 1] as f32 / 255.0;
-                let b = rgb_256[i + 2] as f32 / 255.0;
-                chw[[0, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
-                chw[[0, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
-                chw[[0, 2, y, x]] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
-            }
-        }
+        fill_clip_chw(&mut chw, 0, rgb, n);
 
         let input = Tensor::from_array(chw).context("MobileCLIP input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
@@ -113,13 +96,20 @@ impl MobileClipImage {
         let (_shape, data) = value
             .try_extract_tensor::<f32>()
             .context("extract MobileCLIP output as f32")?;
+        if data.len() != CLIP_EMBED_DIM {
+            anyhow::bail!(
+                "MobileCLIP produced a {}-d embedding, expected {CLIP_EMBED_DIM} (wrong or corrupt model?)",
+                data.len()
+            );
+        }
         let mut emb: Vec<f32> = data.to_vec();
         l2_normalize(&mut emb);
+        if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
         Ok(emb)
     }
 
-    /// Batched inference. Takes N pre-resized 256×256 RGB8 buffers, packs
-    /// them into a single (N, 3, 256, 256) tensor, calls `session.run` ONCE,
+    /// Batched inference. Takes N pre-resized 224×224 RGB8 buffers, packs
+    /// them into a single (N, 3, 224, 224) tensor, calls `session.run` ONCE,
     /// and returns N L2-normalized embeddings.
     ///
     /// Per-call dispatch overhead through DirectML is sizable (kernel queue
@@ -128,14 +118,14 @@ impl MobileClipImage {
     /// without growing VRAM.
     pub fn embed_batch(
         &mut self,
-        rgb_256_images: &[Vec<u8>],
+        rgb_images: &[Vec<u8>],
     ) -> Result<Vec<Vec<f32>>> {
         let n = self.input_size as usize;
-        let batch = rgb_256_images.len();
+        let batch = rgb_images.len();
         if batch == 0 {
             return Ok(Vec::new());
         }
-        for (i, buf) in rgb_256_images.iter().enumerate() {
+        for (i, buf) in rgb_images.iter().enumerate() {
             if buf.len() != 3 * n * n {
                 anyhow::bail!(
                     "MobileCLIP embed_batch[{}] expects {} RGB8 bytes, got {}",
@@ -146,21 +136,12 @@ impl MobileClipImage {
             }
         }
         let mut chw = Array4::<f32>::zeros((batch, 3, n, n));
-        for (b, rgb) in rgb_256_images.iter().enumerate() {
-            for y in 0..n {
-                for x in 0..n {
-                    let i = (y * n + x) * 3;
-                    let r = rgb[i] as f32 / 255.0;
-                    let g = rgb[i + 1] as f32 / 255.0;
-                    let bch = rgb[i + 2] as f32 / 255.0;
-                    chw[[b, 0, y, x]] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
-                    chw[[b, 1, y, x]] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
-                    chw[[b, 2, y, x]] = (bch - CLIP_MEAN[2]) / CLIP_STD[2];
-                }
-            }
+        for (b, rgb) in rgb_images.iter().enumerate() {
+            fill_clip_chw(&mut chw, b, rgb, n);
         }
         let input = Tensor::from_array(chw).context("MobileCLIP batch input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
@@ -181,15 +162,46 @@ impl MobileClipImage {
                 data.len()
             );
         }
+        if batch == 0 || total % batch != 0 {
+            anyhow::bail!(
+                "MobileCLIP output total {} not divisible by batch size {}; shape {:?}",
+                total, batch, shape
+            );
+        }
+        if total != batch * super::clip_space::DIMENSION { anyhow::bail!("Invalid CLIP image output dimension") }
         let embed_dim = total / batch;
+        if embed_dim != CLIP_EMBED_DIM {
+            anyhow::bail!(
+                "MobileCLIP produced {embed_dim}-d embeddings, expected {CLIP_EMBED_DIM} (wrong or corrupt model?)"
+            );
+        }
         let mut out = Vec::with_capacity(batch);
         for b in 0..batch {
             let start = b * embed_dim;
             let mut emb: Vec<f32> = data[start..start + embed_dim].to_vec();
             l2_normalize(&mut emb);
+            if !super::clip_space::valid(&emb) { anyhow::bail!("Invalid CLIP image embedding") }
             out.push(emb);
         }
         Ok(out)
+    }
+}
+
+fn fill_clip_chw(chw: &mut Array4<f32>, image_index: usize, rgb: &[u8], n: usize) {
+    let plane = n * n;
+    let base = image_index * 3 * plane;
+    let out = chw
+        .as_slice_mut()
+        .expect("fresh Array4 input tensor is contiguous");
+    let mut src = 0usize;
+    for p in 0..plane {
+        let r = rgb[src] as f32 * INV_255;
+        let g = rgb[src + 1] as f32 * INV_255;
+        let b = rgb[src + 2] as f32 * INV_255;
+        out[base + p] = (r - CLIP_MEAN[0]) / CLIP_STD[0];
+        out[base + plane + p] = (g - CLIP_MEAN[1]) / CLIP_STD[1];
+        out[base + (2 * plane) + p] = (b - CLIP_MEAN[2]) / CLIP_STD[2];
+        src += 3;
     }
 }
 
@@ -204,4 +216,40 @@ pub fn default_weights_path() -> Result<PathBuf> {
     Ok(crate::paths::models_dir()?
         .join("mobileclip")
         .join("mobileclip_s2_image.onnx"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn norm(v: u8, channel: usize) -> f32 {
+        ((v as f32 * INV_255) - CLIP_MEAN[channel]) / CLIP_STD[channel]
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn fill_clip_chw_writes_contiguous_channel_planes() {
+        let rgb = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120];
+        let mut chw = Array4::<f32>::zeros((1, 3, 2, 2));
+
+        fill_clip_chw(&mut chw, 0, &rgb, 2);
+
+        let out = chw.as_slice().expect("test tensor is contiguous");
+        assert_eq!(out.len(), 12);
+        assert_close(out[0], norm(10, 0));
+        assert_close(out[1], norm(40, 0));
+        assert_close(out[2], norm(70, 0));
+        assert_close(out[3], norm(100, 0));
+        assert_close(out[4], norm(20, 1));
+        assert_close(out[5], norm(50, 1));
+        assert_close(out[6], norm(80, 1));
+        assert_close(out[7], norm(110, 1));
+        assert_close(out[8], norm(30, 2));
+        assert_close(out[9], norm(60, 2));
+        assert_close(out[10], norm(90, 2));
+        assert_close(out[11], norm(120, 2));
+    }
 }

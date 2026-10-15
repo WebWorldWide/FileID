@@ -35,6 +35,13 @@ public struct IPCCommand: Codable, Sendable {
         case chatRequest(request: ChatRequest)
         case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
+        /// Read-only model catalog with install state, hardware fit and any
+        /// local benchmark. Replies with `modelCatalog` (schema 1.14.0+).
+        case listModels(requestID: String, role: String?)
+        /// On-device benchmark of one installed model; replies with
+        /// `benchmarkProgress` events and one `benchmarkResult`.
+        case benchmarkModel(requestID: String, modelKind: String, tune: Bool)
+        case cancelBenchmark
         case requestStatus
         case shutdown
         case runFaceClustering
@@ -57,7 +64,7 @@ public struct IPCCommand: Codable, Sendable {
         /// `fileIDs` is present — an explicit selection is a deliberate
         /// per-file action and is never silently filtered. Optional; nil/empty
         /// means no folder exclusions.
-        /// (audit F-C2-001 — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
+        /// ( — mirrors Rust DeepAnalyzeAllPayload + C# DeepAnalyzeAllCommand.
         /// excludedFolders mirrors schema 1.3.0 / Rust `exclusion_where_clause`.)
         case deepAnalyzeAll(modelKind: String, skipExisting: Bool, tagsOnly: Bool?, proposeRenames: Bool?, fileIDs: [Int64]?, excludedFolders: [String]?)
         case deepAnalyzeCancel
@@ -71,7 +78,7 @@ public struct IPCCommand: Codable, Sendable {
         /// fetch loop — usually within ~1 s. Safe no-op if no prewarm
         /// is active. `modelKind` is OPTIONAL (schema): a value cancels that
         /// one model's download; `nil`/absent cancels ALL in-flight prewarms.
-        /// (audit F-C2-002 — mirrors Rust CancelPrewarmPayload + C# CancelPrewarmCommand.)
+        /// (mirrors Rust CancelPrewarmPayload + C# CancelPrewarmCommand.)
         case cancelPrewarm(modelKind: String?)
 
         // ── Windows-originated commands ───────────────────────────
@@ -92,6 +99,8 @@ public struct IPCCommand: Codable, Sendable {
         case purgeExcluded(excludedPaths: [String])
         case trashFiles(fileIDs: [Int64], exactIdentities: [ExactTrashIdentity]?)
         case mergeClusters(sourcePersonID: Int64, destinationPersonID: Int64)
+        /// Move one face to another person (or a new one when `createNewPerson`).
+        case reassignFace(faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool)
         case embedTextQuery(query: String, queryID: String)
         case renamePerson(personID: Int64, title: String?, firstName: String?, middleName: String?, lastName: String?, suffix: String?)
         case markPersonsAsUnknown(personIDs: [Int64])
@@ -132,10 +141,19 @@ public struct RestructureMove: Codable, Sendable {
     public let confidence: String
     /// Plain-language "why filed here", shown in the drill-down.
     public let reason: String?
+    /// Plan-time source identity (schema 1.13.0). A plan is applied after an
+    /// arbitrary delay, so the engine re-checks these against the live file
+    /// before moving; the app must echo them back untouched.
+    public let contentHash: String?
+    public let sizeBytes: UInt64?
+    public let fileRef: UInt64?
+    public let modifiedAt: Double?
 
     public init(fileID: Int64, source: String, destination: String,
                 category: String, tier: String? = nil,
-                confidence: String = "", reason: String? = nil) {
+                confidence: String = "", reason: String? = nil,
+                contentHash: String? = nil, sizeBytes: UInt64? = nil,
+                fileRef: UInt64? = nil, modifiedAt: Double? = nil) {
         self.fileID = fileID
         self.source = source
         self.destination = destination
@@ -143,6 +161,10 @@ public struct RestructureMove: Codable, Sendable {
         self.tier = tier
         self.confidence = confidence
         self.reason = reason
+        self.contentHash = contentHash
+        self.sizeBytes = sizeBytes
+        self.fileRef = fileRef
+        self.modifiedAt = modifiedAt
     }
 
     /// Custom decode so a move emitted by a Windows engine that omits
@@ -159,6 +181,10 @@ public struct RestructureMove: Codable, Sendable {
         tier = try c.decodeIfPresent(String.self, forKey: .tier)
         confidence = try c.decodeIfPresent(String.self, forKey: .confidence) ?? ""
         reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        sizeBytes = try c.decodeIfPresent(UInt64.self, forKey: .sizeBytes)
+        fileRef = try c.decodeIfPresent(UInt64.self, forKey: .fileRef)
+        modifiedAt = try c.decodeIfPresent(Double.self, forKey: .modifiedAt)
     }
 }
 
@@ -208,6 +234,9 @@ public struct IPCEvent: Codable, Sendable {
         case toolResponse(ToolResponse)
         case ready(EngineInfo)
         case healthCheckResult(HealthCheckResult)
+        case modelCatalog(ModelCatalog)
+        case benchmarkProgress(BenchmarkProgress)
+        case benchmarkResult(BenchmarkResult)
         case progress(ScanProgress)
         case phaseChanged(ScanPhase)
         case discoveryComplete(totalFiles: Int)
@@ -239,6 +268,137 @@ public struct IPCEvent: Codable, Sendable {
 }
 
 // MARK: - DTOs
+
+public struct ModelCatalog: Codable, Sendable {
+    public let requestID: String
+    public let physicalMemoryGB: Double
+    public let vramMB: Int64
+    public let models: [ModelCatalogItem]
+
+    public init(requestID: String, physicalMemoryGB: Double, vramMB: Int64, models: [ModelCatalogItem]) {
+        self.requestID = requestID
+        self.physicalMemoryGB = physicalMemoryGB
+        self.vramMB = vramMB
+        self.models = models
+    }
+}
+
+public struct ModelCatalogItem: Codable, Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let family: String
+    public let upstream: String
+    public let role: String
+    public let format: String
+    public let quantization: String
+    public let license: String
+    public let termsRequired: Bool
+    public let parametersBillion: Double?
+    public let downloadBytes: Int64
+    public let estimatedResidentGB: Double
+    public let tier: String
+    public let status: String
+    public let runnable: Bool
+    public let installed: Bool
+    public let fits: Bool
+    public let benchmark: ModelBenchmark?
+
+    public init(id: String, name: String, family: String, upstream: String, role: String, format: String,
+                quantization: String, license: String, termsRequired: Bool, parametersBillion: Double?,
+                downloadBytes: Int64, estimatedResidentGB: Double, tier: String, status: String,
+                runnable: Bool, installed: Bool, fits: Bool, benchmark: ModelBenchmark? = nil) {
+        self.id = id
+        self.name = name
+        self.family = family
+        self.upstream = upstream
+        self.role = role
+        self.format = format
+        self.quantization = quantization
+        self.license = license
+        self.termsRequired = termsRequired
+        self.parametersBillion = parametersBillion
+        self.downloadBytes = downloadBytes
+        self.estimatedResidentGB = estimatedResidentGB
+        self.tier = tier
+        self.status = status
+        self.runnable = runnable
+        self.installed = installed
+        self.fits = fits
+        self.benchmark = benchmark
+    }
+
+    /// Mirrors the Rust engine's tier bands so both engines label alike.
+    public static func tier(forResidentGB gigabytes: Double) -> String {
+        switch gigabytes {
+        case ...3: return "tiny"
+        case ...6: return "small"
+        case ...12: return "medium"
+        case ...24: return "large"
+        case ...48: return "xlarge"
+        default: return "workstation"
+        }
+    }
+}
+
+public struct BenchmarkProgress: Codable, Sendable, Equatable {
+    public let requestID: String
+    public let modelKind: String
+    public let phase: String
+    public let completed: Int
+    public let total: Int
+
+    public init(requestID: String, modelKind: String, phase: String, completed: Int, total: Int) {
+        self.requestID = requestID
+        self.modelKind = modelKind
+        self.phase = phase
+        self.completed = completed
+        self.total = total
+    }
+}
+
+public struct BenchmarkResult: Codable, Sendable, Equatable {
+    public let requestID: String
+    public let modelKind: String
+    public let status: String
+    public let message: String?
+    public let benchmark: ModelBenchmark?
+
+    public init(requestID: String, modelKind: String, status: String, message: String? = nil, benchmark: ModelBenchmark? = nil) {
+        self.requestID = requestID
+        self.modelKind = modelKind
+        self.status = status
+        self.message = message
+        self.benchmark = benchmark
+    }
+}
+
+public struct ModelBenchmark: Codable, Sendable, Equatable {
+    public let measuredAt: String
+    public let hardware: String
+    public let loadSeconds: Double
+    public let promptTokensPerSecond: Double?
+    public let generatedTokensPerSecond: Double?
+    public let secondsPerImage: Double?
+    public let peakResidentGB: Double?
+    public let jsonValidRate: Double?
+    public let probeAccuracy: Double?
+    public let tunedArguments: [String]?
+
+    public init(measuredAt: String, hardware: String, loadSeconds: Double, promptTokensPerSecond: Double? = nil,
+                generatedTokensPerSecond: Double? = nil, secondsPerImage: Double? = nil, peakResidentGB: Double? = nil,
+                jsonValidRate: Double? = nil, probeAccuracy: Double? = nil, tunedArguments: [String]? = nil) {
+        self.measuredAt = measuredAt
+        self.hardware = hardware
+        self.loadSeconds = loadSeconds
+        self.promptTokensPerSecond = promptTokensPerSecond
+        self.generatedTokensPerSecond = generatedTokensPerSecond
+        self.secondsPerImage = secondsPerImage
+        self.peakResidentGB = peakResidentGB
+        self.jsonValidRate = jsonValidRate
+        self.probeAccuracy = probeAccuracy
+        self.tunedArguments = tunedArguments
+    }
+}
 
 public struct HealthCheckResult: Codable, Sendable {
     public let requestID: String
@@ -279,7 +439,7 @@ public struct EngineInfo: Codable, Sendable {
 
 /// CPU/GPU/NPU detection snapshot. Mirrors the schema's HardwareInfo +
 /// the Windows engine's `HardwareInfo`. Every field is optional/defaulted so
-/// an older engine that omits the V15.9 adaptive-utilization fields (or omits
+/// an older engine that omits the adaptive-utilization fields (or omits
 /// `hardware` entirely) still decodes cleanly.
 public struct HardwareInfo: Codable, Sendable {
     /// "nvidia" / "amd" / "intel" / "qualcomm" / "other" / "none".
@@ -295,7 +455,7 @@ public struct HardwareInfo: Codable, Sendable {
     public let qnnPackPresent: Bool
     /// Contextual recommendation; empty when already on the optimal path.
     public let recommendation: String
-    // ── V15.9 adaptive-utilization diagnostics (all optional/defaulted). ──
+    // ── Adaptive-utilization diagnostics (all optional/defaulted). ──
     public let pCores: Int
     public let eCores: Int
     public let logicalCpuCores: Int
@@ -451,7 +611,7 @@ public struct FileDoneEvent: Codable, Sendable {
     /// `Decodable` (which requires the key) would throw `keyNotFound` on such a frame.
     /// Defaults to `[]` when absent, matching the schema + the C# DTO. Mirrors the
     /// `RestructureMove.confidence` pattern; `encode(to:)` stays auto-synthesized.
-    /// (audit — cross-platform IPC drift)
+    /// (cross-platform IPC drift)
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         path = try c.decode(String.self, forKey: .path)
@@ -586,7 +746,7 @@ public struct DeepAnalyzeProgress: Codable, Sendable {
     public let etaSeconds: Double?
     public let currentPath: String?
     public let modelKind: String
-    /// V14.9-L1: partial caption text accumulated from per-token streaming.
+    /// Partial caption text accumulated from per-token streaming.
     /// Engine throttles emission to 4 Hz so a fast VLM doesn't flood the
     /// sink. nil on pre-inference progress events ("starting file N").
     public let currentCaption: String?

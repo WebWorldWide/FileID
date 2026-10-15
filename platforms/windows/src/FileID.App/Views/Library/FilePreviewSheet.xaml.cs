@@ -171,14 +171,14 @@ public sealed partial class FilePreviewSheet : UserControl
         if (next < 0 || next >= _siblings.Count) return;
         _siblingIndex = next;
         var t = _siblings[next];
-        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id, t.HasFaces, t.HasText);
+        SetFile(t.Path, t.Kind, t.SizeBytes, t.ModifiedAt, t.Id, t.HasText);
         UpdateNavButtons();
     }
 
     public async void SetFile(string path, string kind, long sizeBytes, double? modifiedAt, long fileId = 0,
-                               bool hasFaces = false, bool hasText = false)
+                               bool hasText = false)
     {
-        // Stamp this navigation so async loads from a prior file bail. (audit A9)
+        // Stamp this navigation so async loads from a prior file bail.
         int navGen = System.Threading.Interlocked.Increment(ref _navGen);
         FileId = fileId;
         // Publish the active file so the Deep Analyze tab's "Analyze
@@ -224,7 +224,7 @@ public sealed partial class FilePreviewSheet : UserControl
             // post-continuation ShowPlaceholder would touch a torn-down tree.
             if (_isClosed) return;
             Services.DebugLog.Warn("FilePreviewSheet.SetFile threw: " + ex);
-            ShowPlaceholder(kind, "Preview failed: " + ex.Message);
+            ShowPlaceholder("Preview failed: " + ex.Message);
         }
         finally
         {
@@ -307,7 +307,7 @@ public sealed partial class FilePreviewSheet : UserControl
                 await LoadVideoOrAudioAsync(path, kind, _mediaGen);
                 break;
             default:
-                ShowPlaceholder(kind, "No inline preview for this file type — use Open.");
+                ShowPlaceholder("No inline preview for this file type — use Open.");
                 break;
         }
     }
@@ -358,12 +358,12 @@ public sealed partial class FilePreviewSheet : UserControl
                 {
                     try
                     {
-                        // Stale navigation — don't overwrite a newer file's preview. (audit A9)
+                        // Stale navigation — don't overwrite a newer file's preview.
                         if (_isClosed || _navGen != navGen) { tcs.TrySetResult(false); return; }
                         // Cap the decoded surface at the displayed 1024 px edge
                         // regardless of what the shell hands back, so the 4-entry
                         // preview cache stays within its ~16 MB budget instead of
-                        // holding native-resolution (e.g. 48 MP) decodes. (audit P6)
+                        // holding native-resolution (e.g. 48 MP) decodes.
                         var bmp = new BitmapImage { DecodePixelWidth = 1024 };
                         await bmp.SetSourceAsync(captured);
                         PreviewImage.Source = bmp;
@@ -410,9 +410,9 @@ public sealed partial class FilePreviewSheet : UserControl
         // Don't show the failure placeholder if we navigated away (or the stale
         // guard above set tcs=false for a superseded nav) — otherwise the prior
         // file's load clobbers the CURRENT sibling's preview with a placeholder.
-        // A genuine decode failure on the still-current file falls through. (audit A9 re-audit)
+        // A genuine decode failure on the still-current file falls through.
         if (_isClosed || _navGen != navGen) return;
-        ShowPlaceholder(kind, kind switch
+        ShowPlaceholder(kind switch
         {
             "image" => "Image couldn't be decoded by any installed provider.",
             "pdf" => "PDF preview unavailable — open it in your default reader.",
@@ -508,7 +508,7 @@ public sealed partial class FilePreviewSheet : UserControl
             _previewCache.AddFirst(node);
             dispatcher.TryEnqueue(() =>
             {
-                if (_isClosed || _navGen != navGen) return; // stale navigation (audit A9)
+                if (_isClosed || _navGen != navGen) return; // stale navigation
                 PreviewImage.Source = bmp;
                 PreviewImage.Visibility = Visibility.Visible;
             });
@@ -552,7 +552,6 @@ public sealed partial class FilePreviewSheet : UserControl
     // Bumped at the top of every SetFile. The image preview + metadata-card
     // loaders capture it and skip their UI write if it changed, so a slow async
     // result from a prior file can't overwrite the sibling the user navigated to.
-    // (audit A9)
     private int _navGen;
 
     /// <summary>Load a video/audio file into the MediaPlayerElement via
@@ -587,7 +586,7 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             if (gen != _mediaGen) return;
             Services.DebugLog.Warn($"FilePreviewSheet media load failed for {kind}: {ex.Message}");
-            ShowPlaceholder(kind, "Media couldn't load — try Open in default app.");
+            ShowPlaceholder("Media couldn't load — try Open in default app.");
         }
     }
 
@@ -595,7 +594,7 @@ public sealed partial class FilePreviewSheet : UserControl
                                      Windows.Media.Playback.MediaPlayerFailedEventArgs args)
     {
         // Fires on a Media Foundation worker thread. Marshal to UI thread before
-        // touching XAML state. R6-05: capture the kind + media generation up front
+        // touching XAML state. Capture the kind + media generation up front
         // so a navigation/close that races our failure can't stamp a stale
         // placeholder over the current sibling or touch a torn-down content tree.
         var kind = _currentMediaKind;
@@ -605,7 +604,7 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             if (_isClosed || gen != _mediaGen) return; // superseded media failure
             Services.DebugLog.Warn($"FilePreviewSheet media failed ({kind}): {err}");
-            ShowPlaceholder(kind, kind switch
+            ShowPlaceholder(kind switch
             {
                 "video" => "Video couldn't decode — missing codec? Try Open in default app.",
                 "audio" => "Audio couldn't decode — try Open in default app.",
@@ -614,7 +613,7 @@ public sealed partial class FilePreviewSheet : UserControl
         });
     }
 
-    private void ShowPlaceholder(string kind, string caption)
+    private void ShowPlaceholder(string caption)
     {
         PreviewImage.Visibility = Visibility.Collapsed;
         PreviewMedia.Visibility = Visibility.Collapsed;
@@ -775,7 +774,7 @@ public sealed partial class FilePreviewSheet : UserControl
         // Defensive: sheet may have closed during the async query. Bail before
         // touching XAML, then wrap the UI mutation so a torn-down dialog
         // content tree doesn't fast-fail the dispatcher.
-        if (_isClosed || _navGen != navGen) return; // navigated away during the await (audit A9)
+        if (_isClosed || _navGen != navGen) return; // navigated away during the await
         try
         {
             ProposedRenameText.Text = name;
@@ -885,7 +884,7 @@ public sealed partial class FilePreviewSheet : UserControl
         if (tags.Count == 0) return;
         // UI mutation in a try/catch — sheet may have closed during the
         // async DB read; the XAML element references could be disposed.
-        if (_isClosed || _navGen != navGen) return; // navigated away during the await (audit A9)
+        if (_isClosed || _navGen != navGen) return; // navigated away during the await
         try
         {
             // Build a wrapping chip layout via runtime row construction:

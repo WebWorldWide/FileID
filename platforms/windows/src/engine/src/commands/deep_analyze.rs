@@ -2,18 +2,19 @@
 //! prefix, or whole library. Streams per-token caption chunks to the UI at
 //! 4 Hz so a 50-tok/sec VLM doesn't flood the sink.
 
-use crate::pipeline::naming_context::{NamingContext, selected_face_model};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use rusqlite::OptionalExtension;
+use super::deep_scope::{DeepScope, ScopeError};
 
 use crate::ipc::{
     self, sink::Sink, DeepAnalyzeComplete, DeepAnalyzeFileDone, DeepAnalyzeProgress,
     DeepAnalyzeStarting, DeepAnalyzeStartingPhase, EngineError, EventPayload, IpcEvent, Wrap,
 };
-use crate::pipeline::deep_analyze::{analyze_file, analyze_file_via_server, AnalyzeMode};
+use crate::pipeline::deep_analyze::{analyze_file, analyze_file_scoped, analyze_file_via_server, AnalyzeMode};
 
 /// Append a per-token caption chunk from `llama-mtmd-cli` with normalized
 /// single-space separators. The CLI emits one stdout line per `on_token`
@@ -35,7 +36,7 @@ pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
 /// EMA approach (scan_session.rs `maybe_emit_progress`): seconds-remaining =
 /// (total - completed) / rolling_fps, or None until there's a positive rate or
 /// when nothing remains. Keeps the Deep Analyze progress UI's ETA consistent
-/// with the scan sidebar (F-C2-008).
+/// with the scan sidebar.
 fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64> {
     let remaining = total.saturating_sub(completed);
     if rolling_fps > 0.01 && remaining > 0 {
@@ -43,6 +44,110 @@ fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64
     } else {
         None
     }
+}
+
+/// Distinct named people in a file, formatted for display. Skips clusters flagged
+/// `is_unknown` (explicitly opted out). Feeds the Deep Analyze prompt + the
+/// deterministic filename prefix so renames carry the people you've named.
+/// Byte-faithful with the macOS engine's `fetchFaceNames`. (item 3)
+fn fetch_face_names(conn: &rusqlite::Connection, file_id: i64) -> Vec<String> {
+    let mut stmt = match conn.prepare(
+        "SELECT DISTINCT persons.title, persons.first_name, persons.name \
+         FROM persons \
+         INNER JOIN face_prints ON face_prints.person_id = persons.id \
+         WHERE face_prints.file_id = ?1 \
+           AND IFNULL(persons.is_unknown, 0) = 0",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map([file_id], |row| {
+        let title: Option<String> = row.get(0)?;
+        let first: Option<String> = row.get(1)?;
+        let legacy: Option<String> = row.get(2)?;
+        Ok(format_person_ref(
+            title.as_deref(),
+            first.as_deref(),
+            legacy.as_deref(),
+        ))
+    });
+    let mut names = Vec::new();
+    if let Ok(rows) = rows {
+        for formatted in rows.flatten() {
+            if !formatted.is_empty() {
+                names.push(formatted);
+            }
+        }
+    }
+    names
+}
+
+/// `title + first_name`, else `first_name`, else `title`, else legacy `name`
+/// (each trimmed). Matches the macOS `formatPersonRef`. (item 3)
+fn format_person_ref(title: Option<&str>, first: Option<&str>, legacy: Option<&str>) -> String {
+    let t = title.unwrap_or("").trim();
+    let f = first.unwrap_or("").trim();
+    if !t.is_empty() && !f.is_empty() {
+        return format!("{t} {f}");
+    }
+    if !f.is_empty() {
+        return f.to_string();
+    }
+    if !t.is_empty() {
+        return t.to_string();
+    }
+    legacy.unwrap_or("").trim().to_string()
+}
+
+/// Reject Deep Analyze after the GPU device was removed in this process: one
+/// diagnostic plus a terminal complete, so the app never waits on a run that
+/// cannot start.
+pub(crate) async fn send_gpu_failure_complete(
+    sink: &Sink,
+    model_kind: &str,
+    processed: u64,
+    failed: u64,
+    total_seconds: f64,
+) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "gpu_device_removed".into(),
+        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
+        path: None,
+        model_kind: Some(model_kind.to_string()),
+    }))))
+    .await;
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+        DeepAnalyzeComplete {
+            processed,
+            failed,
+            total_seconds,
+            model_kind: model_kind.to_string(),
+            cancelled: false,
+        },
+    ))))
+    .await;
+}
+
+enum SingleFileBackend {
+    Cli(crate::models::vlm::VlmRunner),
+    Server(crate::models::resident_service::ResidentLease),
+}
+
+/// The per-file CLI is optional: a runtime that only ships llama-server must
+/// still analyze a single file, the same way the batch path falls back.
+async fn single_file_backend(model_kind: &str, cancel: &Arc<AtomicBool>) -> anyhow::Result<SingleFileBackend> {
+    let cli_error = match crate::models::vlm::VlmRunner::find(cancel).await {
+        Ok(runner) => return Ok(SingleFileBackend::Cli(runner)),
+        Err(error) => error,
+    };
+    if crate::models::vlm::find_weights(model_kind).is_none() {
+        return Err(cli_error);
+    }
+    let server = crate::models::resident_service::ResidentService::shared()
+        .acquire(model_kind, cancel.clone())
+        .await
+        .map_err(|server_error| anyhow::anyhow!("{cli_error:#}; llama-server: {server_error:#}"))?;
+    Ok(SingleFileBackend::Server(server))
 }
 
 pub(crate) async fn handle_deep_analyze_file(
@@ -60,12 +165,12 @@ pub(crate) async fn handle_deep_analyze_file(
     ))))
     .await;
 
-    let runner = match crate::models::vlm::VlmRunner::find() {
-        Ok(r) => r,
+    let backend = match single_file_backend(&payload.model_kind, &cancel).await {
+        Ok(backend) => backend,
         Err(err) => {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "llama_cpp_missing".into(),
-                message: format!("{err}"),
+                message: format!("{err:#}"),
                 path: None,
                 model_kind: None,
             }))))
@@ -79,7 +184,7 @@ pub(crate) async fn handle_deep_analyze_file(
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
                     // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    // (a load/query failure isn't a user cancel).
                     cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
@@ -100,20 +205,11 @@ pub(crate) async fn handle_deep_analyze_file(
     let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
     let caption_buf_cb = caption_buf.clone();
     let last_emit_cb = last_emit.clone();
-    let selected_face_fingerprint = selected_face_model();
-    let naming_context = {
+    let face_names = {
         let conn = db.lock();
-        NamingContext::load(&conn, file_id, selected_face_fingerprint.as_deref()).ok()
+        fetch_face_names(&conn, file_id)
     };
-    let outcome = analyze_file(
-        db,
-        &runner,
-        file_id,
-        &model_kind,
-        AnalyzeMode::Both,
-        cancel.clone(),
-        naming_context.as_ref(),
-        move |chunk| {
+    let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
             // send.await }) pattern would pile up unbounded tasks if the
@@ -145,9 +241,20 @@ pub(crate) async fn handle_deep_analyze_file(
                     current_caption: Some(snapshot),
                 },
             ))));
-        },
-    )
-    .await;
+    };
+    let outcome = match &backend {
+        SingleFileBackend::Cli(runner) => {
+            analyze_file(db, runner, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token).await
+        }
+        SingleFileBackend::Server(server) => {
+            analyze_file_via_server(db, server, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token, None).await
+        }
+    };
+    if let SingleFileBackend::Server(server) = backend {
+        if let Err(error) = server.finish(outcome.is_ok() && !cancel.load(Ordering::Relaxed)).await {
+            tracing::warn!(?error, "[VLM-SERVER] single-file lease cleanup failed");
+        }
+    }
 
     match outcome {
         Ok(out) => {
@@ -207,7 +314,7 @@ pub(crate) async fn handle_deep_analyze_folder(
     payload: ipc::DeepAnalyzeFolderPayload,
     cancel: Arc<AtomicBool>,
 ) {
-    // P16: sargable range seek on the path_text index instead of a
+    // Sargable range seek on the path_text index instead of a
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
     let filter = deep_analyze_target_filter();
@@ -232,7 +339,7 @@ pub(crate) async fn handle_deep_analyze_folder(
                     total_seconds: 0.0,
                     model_kind: payload.model_kind.clone(),
                     // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
+                    // (a load/query failure isn't a user cancel).
                     cancelled: cancel.load(Ordering::Relaxed),
                 },
             ))))
@@ -241,37 +348,42 @@ pub(crate) async fn handle_deep_analyze_folder(
         }
     };
     // Folder-scoped Deep Analyze is a manual action → full enrichment (Both).
-    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false, true).await;
+    run_deep_analyze_batch(sink, db, &payload.model_kind, ids, cancel, true, false, true, None).await;
 }
 
 pub(crate) async fn handle_deep_analyze_all(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
-    payload: ipc::DeepAnalyzeAllPayload,
+    mut payload: ipc::DeepAnalyzeAllPayload,
     cancel: Arc<AtomicBool>,
 ) {
-    let ids = match collect_file_ids(
-        &db,
-        &format!("WHERE {}", deep_analyze_target_filter()),
-        &[],
-    ) {
-        Ok(v) => v,
-        Err(err) => {
-            tracing::warn!(?err, "deep_analyze_all query");
-            // Terminal Complete on the query failure so the UI clears the
-            // "Preparing…" card instead of stranding forever (#6).
-            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                DeepAnalyzeComplete {
-                    processed: 0,
-                    failed: 1,
-                    total_seconds: 0.0,
-                    model_kind: payload.model_kind.clone(),
-                    // Non-cancellation error path: report the ACTUAL cancel state
-                    // (a load/query failure isn't a user cancel). (audit F-A2)
-                    cancelled: cancel.load(Ordering::Relaxed),
-                },
-            ))))
-            .await;
+    let file_ids = payload.file_ids.take();
+    let excluded_folders = payload.excluded_folders.take();
+    let planning_db = db.clone();
+    let selection = if file_ids.as_ref().is_some_and(Vec::is_empty) {
+        DeepScope::from_fields_cancelable(file_ids.as_deref(), excluded_folders.as_deref(), &|| cancel.load(Ordering::Relaxed))
+            .map(|scope| (scope, Vec::new())).map_err(anyhow::Error::from)
+    } else {
+        admitted_scope_plan(crate::resource_scheduler::ResourceScheduler::shared(), cancel.clone(), move |cancelled| {
+            let scope = DeepScope::from_fields_cancelable(file_ids.as_deref(), excluded_folders.as_deref(), cancelled)?;
+            let ids = collect_scoped_file_ids_cancelable(&planning_db, &scope, cancelled)?;
+            Ok((scope, ids))
+        }).await
+    };
+    let (scope, ids) = match selection {
+        Ok(value) => value,
+        Err(error) if error.downcast_ref::<ScopeError>() == Some(&ScopeError::Cancelled) => {
+            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(DeepAnalyzeComplete {
+                processed: 0, failed: 0, total_seconds: 0.0,
+                model_kind: payload.model_kind.clone(), cancelled: true,
+            })))).await;
+            return;
+        }
+        Err(error) => {
+            emit_scope_failure(&sink, DeepAnalyzeComplete {
+                processed: 0, failed: 1, total_seconds: 0.0,
+                model_kind: payload.model_kind.clone(), cancelled: cancel.load(Ordering::Relaxed),
+            }, error.to_string()).await;
             return;
         }
     };
@@ -284,6 +396,7 @@ pub(crate) async fn handle_deep_analyze_all(
         payload.skip_existing,
         payload.tags_only,
         payload.propose_renames,
+        Some(scope),
     )
     .await;
 }
@@ -292,8 +405,8 @@ pub(crate) async fn handle_deep_analyze_all(
 /// shares. `'pdf'` is included only when the `pdf-analyze` render path is
 /// compiled in (default-on) — without it `rasterize_for_vlm` returns a
 /// feature-gate error for every PDF, so queuing them would only manufacture
-/// failures (F-C1-005). `failed = 0` excludes rows a prior GPU death marked
-/// failed, parity with the macOS reference (F-C1-022).
+/// failures. `failed = 0` excludes rows a prior GPU death marked
+/// failed, parity with the macOS reference.
 pub(crate) fn deep_analyze_target_filter() -> &'static str {
     #[cfg(feature = "pdf-analyze")]
     {
@@ -317,6 +430,148 @@ fn collect_file_ids(
     rows.collect()
 }
 
+struct ScopePlanCancellation(Arc<AtomicBool>);
+impl Drop for ScopePlanCancellation {
+    fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
+}
+
+async fn admitted_scope_plan<T: Send + 'static>(
+    scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
+    cancel: Arc<AtomicBool>,
+    plan: impl FnOnce(&dyn Fn() -> bool) -> anyhow::Result<T> + Send + 'static,
+) -> anyhow::Result<T> {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let _guard = ScopePlanCancellation(abandoned.clone());
+    tokio::task::spawn_blocking(move || {
+        let cancelled = || cancel.load(Ordering::Relaxed) || abandoned.load(Ordering::Relaxed);
+        let _lease = scheduler.reserve_queued(
+            crate::resource_scheduler::Demand { memory_mb: 128, cpu: 1, io: 1 },
+            crate::resource_scheduler::AcceleratorDemand::default(),
+            crate::resource_scheduler::Priority::Interactive, cancelled,
+        ).map_err(|error| if cancelled() { ScopeError::Cancelled.into() } else { error })?;
+        if cancelled() { return Err(ScopeError::Cancelled.into()); }
+        let output = plan(&cancelled)?;
+        if cancelled() { return Err(ScopeError::Cancelled.into()); }
+        Ok(output)
+    }).await?
+}
+
+#[cfg(test)]
+fn collect_scoped_file_ids(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    scope: &DeepScope,
+) -> anyhow::Result<Vec<i64>> {
+    collect_scoped_file_ids_cancelable(db, scope, &|| false)
+}
+
+fn collect_scoped_file_ids_cancelable(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    scope: &DeepScope,
+    cancelled: &dyn Fn() -> bool,
+) -> anyhow::Result<Vec<i64>> {
+    if cancelled() { return Err(ScopeError::Cancelled.into()); }
+    scope.validate_current_roots()?;
+    let filter = deep_analyze_target_filter();
+    let mut ids = Vec::new();
+    let mut append = |id, path: String| -> anyhow::Result<()> {
+        if cancelled() { return Err(ScopeError::Cancelled.into()); }
+        if scope.allows_file(id, std::path::Path::new(&path))? {
+            anyhow::ensure!(ids.len() < 4_194_304, "Deep scope target list exceeds its 128 MiB admission; select a smaller scope.");
+            ids.push(id);
+        }
+        Ok(())
+    };
+    if let Some(selected) = scope.selected_ids() {
+        for id in selected {
+            if cancelled() { return Err(ScopeError::Cancelled.into()); }
+            let target = db.lock().query_row(&format!("SELECT id, path_text, length(CAST(path_text AS BLOB)) FROM files WHERE id = ?1 AND {filter}"), [id], |r| {
+                if r.get::<_, i64>(2)? > 131_072 {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(ScopeError::InvalidFilePath)));
+                }
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            }).optional()?;
+            if let Some((id, path)) = target { append(id, path)?; }
+        }
+    } else {
+        let upper: Option<i64> = db.lock().query_row(&format!("SELECT MAX(id) FROM files WHERE {filter}"), [], |r| r.get(0))?;
+        let Some(upper) = upper else { return Ok(ids); };
+        let mut after = i64::MIN;
+        loop {
+            if cancelled() { return Err(ScopeError::Cancelled.into()); }
+            let targets = {
+                let conn = db.lock();
+                let mut stmt = conn.prepare(&format!("SELECT id, path_text, length(CAST(path_text AS BLOB)) FROM files WHERE id > ?1 AND id <= ?2 AND {filter} ORDER BY id LIMIT 256"))?;
+                let mut rows = stmt.query([after, upper])?;
+                let mut targets = Vec::new();
+                while let Some(row) = rows.next()? {
+                    if cancelled() { return Err(ScopeError::Cancelled.into()); }
+                    anyhow::ensure!(row.get::<_, i64>(2)? <= 131_072, "Catalog target path exceeds safe scope planning bounds.");
+                    targets.push((row.get::<_, i64>(0)?, row.get::<_, String>(1)?));
+                }
+                targets
+            };
+            if targets.is_empty() { break; }
+            for (id, path) in targets { after = id; append(id, path)?; }
+        }
+    }
+    Ok(ids)
+}
+
+fn scoped_catalog_path(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    scope: &DeepScope,
+    id: i64,
+) -> anyhow::Result<std::path::PathBuf> {
+    let path: String = db.lock().query_row(
+        &format!("SELECT path_text FROM files WHERE id = ?1 AND {}", deep_analyze_target_filter()),
+        [id], |r| r.get(0),
+    )?;
+    Ok(scope.source_path(id, std::path::Path::new(&path))?.ok_or(ScopeError::ExcludedTarget)?)
+}
+
+async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, message: String) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "deep_analyze_failed".into(), message, path: None,
+        model_kind: Some(complete.model_kind.clone()),
+    })))).await;
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(complete)))).await;
+}
+
+pub(crate) async fn emit_batch_terminal_after_cleanup(
+    sink: &Sink,
+    mut complete: DeepAnalyzeComplete,
+    message: Option<String>,
+    cleanup: impl std::future::Future<Output = anyhow::Result<()>>,
+) {
+    let cleanup_started = Instant::now();
+    let message = match cleanup.await {
+        Ok(()) => message,
+        Err(error) => Some(match message {
+            Some(reason) => format!("{reason}; native cleanup failed: {error:#}"),
+            None => format!("Native cleanup failed: {error:#}"),
+        }),
+    };
+    complete.total_seconds += cleanup_started.elapsed().as_secs_f64();
+    if let Some(message) = message {
+        emit_scope_failure(sink, complete, message).await;
+    } else {
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(complete)))).await;
+    }
+}
+
+async fn finalize_batch(
+    sink: &Sink,
+    server: &mut Option<crate::models::resident_service::ResidentLease>,
+    complete: DeepAnalyzeComplete,
+    message: Option<String>,
+) {
+    let server = server.take();
+    let keep = message.is_none() && !complete.cancelled;
+    emit_batch_terminal_after_cleanup(sink, complete, message, async move {
+        match server { Some(server) => server.finish(keep).await, None => Ok(()) }
+    }).await;
+}
+
 async fn run_deep_analyze_batch(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -326,7 +581,24 @@ async fn run_deep_analyze_batch(
     skip_existing: bool,
     tags_only: bool,
     propose_renames: bool,
+    scope: Option<DeepScope>,
 ) {
+    if file_ids.is_empty() {
+        sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(DeepAnalyzeComplete {
+            processed: 0, failed: 0, total_seconds: 0.0,
+            model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+        })))).await;
+        return;
+    }
+    if let Some(scope) = &scope {
+        if let Err(error) = scope.validate_current_roots() {
+            emit_scope_failure(&sink, DeepAnalyzeComplete {
+                processed: 0, failed: 1, total_seconds: 0.0,
+                model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+            }, error.to_string()).await;
+            return;
+        }
+    }
     // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
     // caption + tags + rename (the manual Deep Analyze pass).
     let mode = if tags_only {
@@ -340,7 +612,7 @@ async fn run_deep_analyze_batch(
     // Resolve both VLM backends up front so we can gate correctly BEFORE
     // sending DeepAnalyzeStarting. The persistent llama-server only needs
     // llama-server.exe; the per-file CLI needs llama-mtmd-cli.exe. find() is a
-    // cheap (~one --version probe) check and find_weights is just file
+    // bounded admitted --version check and find_weights is just file
     // existence — doing them first lets a server-capable runtime proceed even
     // when the CLI-binary check fails (the ordering trap), while still
     // surfacing a clean "runtime missing" error when NOTHING is available.
@@ -365,7 +637,19 @@ async fn run_deep_analyze_batch(
     // The CLI binary (llama-mtmd-cli.exe) is OPTIONAL: the persistent server only
     // needs llama-server.exe. None just means "server-only"; the no-backend gate
     // below surfaces a runtime error if the server also can't start.
-    let runner = crate::models::vlm::VlmRunner::find().ok();
+    let discovery_started_at = std::time::Instant::now();
+    let runner = match crate::models::vlm::VlmRunner::find(&cancel).await {
+        Ok(runner) => Some(runner),
+        Err(error) if error.downcast_ref::<crate::models::native_admission::HostAdmissionError>().is_some()
+            || !crate::models::native_process::ProcessTracker::shared().allows_discovery() => {
+            emit_scope_failure(&sink, DeepAnalyzeComplete {
+                processed: 0, failed: 1, total_seconds: discovery_started_at.elapsed().as_secs_f64(),
+                model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+            }, format!("Native CLI discovery refused: {error:#}")).await;
+            return;
+        }
+        Err(_) => None,
+    };
     if runner.is_none() {
         tracing::warn!("[VLM] llama-mtmd-cli unavailable; will rely on the persistent server");
     }
@@ -383,23 +667,32 @@ async fn run_deep_analyze_batch(
     // The per-file CLI `runner` reloads the multi-GB model on every call, which
     // is fine for a 1-file Deep Analyze but turns a whole-library pass into many
     // hours. Fall back to the CLI when weights are missing or the server can't
-    // start. The server is dropped (and killed) when this function returns —
-    // including the cancel-early path below.
-    let server = match weights {
-        Some((gguf, mmproj)) => {
-            match crate::models::vlm_server::VlmServer::start(&gguf, &mmproj, &cancel).await {
+    // start. Retained-server cleanup is awaited before batch terminal events.
+    let mut server = match weights {
+        Some(_) => {
+            match crate::models::resident_service::ResidentService::shared().acquire(model_kind, cancel.clone()).await {
                 Ok(s) => {
-                    // A2: verify the server accepts our multimodal payload shape
+                    // Verify the server accepts our multimodal payload shape
                     // BEFORE committing the whole batch to it. If it rejects the
                     // request (e.g. 400 on the image_url data-URI — a format that
                     // was never hardware-verified), fall back to the per-file CLI
                     // instead of failing every file silently.
-                    match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s).await {
+                    match crate::pipeline::deep_analyze::vlm_server_payload_ok(&s, &cancel).await {
                         Ok(()) => {
                             tracing::info!(model_kind, "[VLM-SERVER] persistent server up; payload self-test OK; using it for the batch");
                             Some(s)
                         }
                         Err(probe_err) => {
+                            let admission_failed = probe_err.downcast_ref::<crate::models::native_admission::HostAdmissionError>().is_some();
+                            let cleanup = s.shutdown().await;
+                            if admission_failed || cleanup.is_err() || !crate::models::native_process::ProcessTracker::shared().allows_fallback() {
+                                let message = cleanup.err().map_or_else(|| probe_err.to_string(), |error| format!("{probe_err}; native cleanup: {error}"));
+                                emit_scope_failure(&sink, DeepAnalyzeComplete {
+                                    processed: 0, failed: 1, total_seconds: 0.0,
+                                    model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                                }, message).await;
+                                return;
+                            }
                             tracing::warn!(?probe_err, "[VLM-SERVER] payload self-test failed; falling back to per-file CLI");
                             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                                 kind: "vlm_server_payload_rejected".into(),
@@ -415,6 +708,15 @@ async fn run_deep_analyze_batch(
                     }
                 }
                 Err(err) => {
+                    if !crate::models::native_admission::startup_allows_cli_fallback(
+                        &err, crate::models::native_process::ProcessTracker::shared(),
+                    ) {
+                        emit_scope_failure(&sink, DeepAnalyzeComplete {
+                            processed: 0, failed: 1, total_seconds: 0.0,
+                            model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                        }, err.to_string()).await;
+                        return;
+                    }
                     tracing::warn!(?err, "[VLM-SERVER] unavailable; falling back to per-file CLI");
                     None
                 }
@@ -428,12 +730,12 @@ async fn run_deep_analyze_batch(
     let mut failed = 0u64;
     // Use the persistent server until it errors; if it dies mid-batch and a CLI
     // runner exists, fall back to per-file CLI for the remaining files instead of
-    // failing every one. (audit E5)
+    // failing every one.
     let mut use_server = server.is_some();
     let started_at = Instant::now();
     // Rolling files/sec over completed files → the ETA shown on the NEXT file's
     // progress frames. EMA-smoothed (0.7 old / 0.3 new), mirroring the scan
-    // pipeline (scan_session.rs). (F-C2-008)
+    // pipeline (scan_session.rs).
     let mut rolling_fps = 0.0f64;
 
     // No runtime can run the (present) weights: the persistent server didn't
@@ -457,7 +759,7 @@ async fn run_deep_analyze_batch(
                 failed: 0,
                 total_seconds: started_at.elapsed().as_secs_f64(),
                 model_kind: model_kind.to_string(),
-                // Runtime-missing error, not a user cancel. (audit F-A2)
+                // Runtime-missing error, not a user cancel.
                 cancelled: cancel.load(Ordering::Relaxed),
             },
         ))))
@@ -465,20 +767,23 @@ async fn run_deep_analyze_batch(
         return;
     }
 
-    let selected_face_fingerprint = selected_face_model();
     for (idx, file_id) in file_ids.iter().copied().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-                DeepAnalyzeComplete {
-                    processed,
-                    failed,
-                    total_seconds: started_at.elapsed().as_secs_f64(),
-                    model_kind: model_kind.to_string(),
-                    cancelled: true,
-                },
-            ))))
-            .await;
+            finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
+                processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+                model_kind: model_kind.to_owned(), cancelled: true,
+            }, None).await;
             return;
+        }
+
+        if let Some(scope) = &scope {
+            if let Err(error) = scoped_catalog_path(&db, scope, file_id) {
+                finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
+                    processed, failed: failed + 1, total_seconds: started_at.elapsed().as_secs_f64(),
+                    model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                }, Some(error.to_string())).await;
+                return;
+            }
         }
 
         if skip_existing {
@@ -543,7 +848,7 @@ async fn run_deep_analyze_batch(
         };
         // ETA from the rate of the files completed BEFORE this one. The IPC
         // currentPath carries the real path (not redacted) for parity with the
-        // macOS reference; we never log it here. (F-C2-008)
+        // macOS reference; we never log it here.
         let eta_seconds = batch_eta_seconds(rolling_fps, idx as u64, total);
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeProgress(Wrap::new(
             DeepAnalyzeProgress {
@@ -561,7 +866,7 @@ async fn run_deep_analyze_batch(
         let model_kind_c = model_kind.to_string();
         // Carry ETA + the current file path onto the streamed caption frames too,
         // so the Deep Analyze UI keeps showing both while a caption renders
-        // token-by-token (the macOS schema usage). (F-C2-008)
+        // token-by-token (the macOS schema usage).
         let current_path_cb = current_path.clone();
         let caption_buf = Arc::new(Mutex::new(String::new()));
         let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
@@ -596,12 +901,12 @@ async fn run_deep_analyze_batch(
             )));
         };
         // Persistent server while it's healthy (model already resident); else
-        // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
+        // per-file CLI. `use_server` flips off below if the server dies.
         let server_active = if use_server { server.as_ref() } else { None };
         let file_started = Instant::now();
-        let naming_context = {
+        let face_names = {
             let conn = db.lock();
-            NamingContext::load(&conn, file_id, selected_face_fingerprint.as_deref()).ok()
+            fetch_face_names(&conn, file_id)
         };
         let outcome = if let Some(srv) = server_active {
             analyze_file_via_server(
@@ -611,20 +916,22 @@ async fn run_deep_analyze_batch(
                 model_kind,
                 mode,
                 cancel.clone(),
-                naming_context.as_ref(),
+                &face_names,
                 on_token,
+                scope.as_ref(),
             )
             .await
         } else if let Some(r) = runner.as_ref() {
-            analyze_file(
+            analyze_file_scoped(
                 db.clone(),
                 r,
                 file_id,
                 model_kind,
                 mode,
                 cancel.clone(),
-                naming_context.as_ref(),
+                &face_names,
                 on_token,
+                scope.as_ref(),
             )
             .await
         } else {
@@ -636,7 +943,7 @@ async fn run_deep_analyze_batch(
         };
 
         // Fold this file's wall time into the rolling rate driving the next
-        // file's ETA (EMA, mirroring scan_session.rs). (F-C2-008)
+        // file's ETA (EMA, mirroring scan_session.rs).
         let dt = file_started.elapsed().as_secs_f64();
         if dt > 0.0 {
             let instant = 1.0 / dt;
@@ -662,8 +969,17 @@ async fn run_deep_analyze_batch(
             }
             Err(err) => {
                 failed += 1;
+                if err.downcast_ref::<ScopeError>().is_some()
+                    || err.downcast_ref::<crate::models::native_admission::HostAdmissionError>().is_some()
+                {
+                    finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
+                        processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+                        model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                    }, Some(err.to_string())).await;
+                    return;
+                }
                 tracing::warn!(?err, file_id, "deep analyze file failed");
-                // F-C1-021: a per-file error (unreadable image, decode failure,
+                // A per-file error (unreadable image, decode failure,
                 // one rejected request) must NOT tear down a HEALTHY persistent
                 // server and downgrade the rest of the batch to the many-times
                 // slower per-file CLI. Only genuine server DEATH justifies the
@@ -671,13 +987,44 @@ async fn run_deep_analyze_batch(
                 // self-test used at startup; abandon it for the remaining files
                 // ONLY if that probe also fails (the server is actually gone).
                 if use_server && runner.is_some() {
-                    let server_dead = match server.as_ref() {
-                        Some(srv) => crate::pipeline::deep_analyze::vlm_server_payload_ok(srv)
-                            .await
-                            .is_err(),
-                        None => true,
+                    let probe = match server.as_ref() {
+                        Some(srv) => crate::models::native_admission::probe_requests_fallback(
+                            crate::pipeline::deep_analyze::vlm_server_payload_ok(srv, &cancel).await,
+                        ),
+                        None => Ok(true),
+                    };
+                    let server_dead = match probe {
+                        Ok(dead) => dead,
+                        Err(probe_error) => {
+                            let cleanup = match server.take() {
+                                Some(srv) => srv.shutdown().await,
+                                None => Ok(()),
+                            };
+                            let message = cleanup.err().map_or_else(|| probe_error.to_string(), |error| format!("{probe_error}; native cleanup: {error}"));
+                            emit_scope_failure(&sink, DeepAnalyzeComplete {
+                                processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+                                model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                            }, message).await;
+                            return;
+                        }
                     };
                     if server_dead {
+                        if let Some(srv) = server.take() {
+                            if let Err(cleanup) = srv.shutdown().await {
+                                emit_scope_failure(&sink, DeepAnalyzeComplete {
+                                    processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+                                    model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                                }, cleanup.to_string()).await;
+                                return;
+                            }
+                        }
+                        if !crate::models::native_process::ProcessTracker::shared().allows_fallback() {
+                            emit_scope_failure(&sink, DeepAnalyzeComplete {
+                                processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+                                model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
+                            }, "Native fallback blocked by failed, unconfirmed or closed cleanup".to_owned()).await;
+                            return;
+                        }
                         tracing::warn!(
                             "[DEEP-ANALYZE] persistent server is unresponsive; falling back to per-file CLI for the rest of the batch"
                         );
@@ -693,17 +1040,19 @@ async fn run_deep_analyze_batch(
         }
     }
 
-    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
-        DeepAnalyzeComplete {
-            processed,
-            failed,
-            total_seconds: started_at.elapsed().as_secs_f64(),
-            model_kind: model_kind.to_string(),
-            cancelled: false,
-        },
-    ))))
-    .await;
+    finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
+        processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
+        model_kind: model_kind.to_owned(), cancelled: false,
+    }, None).await;
 }
+
+#[cfg(test)]
+#[path = "deep_scope_handler_tests.rs"]
+mod scope_handler_tests;
+
+#[cfg(test)]
+#[path = "deep_scope_admission_tests.rs"]
+mod scope_admission_tests;
 
 #[cfg(test)]
 mod tests {
@@ -790,7 +1139,7 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    /// F-C1-005 + F-C1-022: the shared target filter selects renderable PDFs
+    /// The shared target filter selects renderable PDFs
     /// (when the pdf-analyze render path is compiled in) and excludes rows a
     /// prior GPU death marked failed=1 — parity with the macOS reference.
     #[test]
@@ -820,7 +1169,7 @@ mod tests {
         assert!(!ids.contains(&dead), "failed=1 row must be excluded");
     }
 
-    /// F-C1-020: the full-pass skip predicate keys on (file, vlm_model). A file
+    /// The full-pass skip predicate keys on (file, vlm_model). A file
     /// captioned by an OLD model is NOT "already done" for a NEW model, so a
     /// VLM switch re-analyzes instead of skipping every prior file.
     #[test]

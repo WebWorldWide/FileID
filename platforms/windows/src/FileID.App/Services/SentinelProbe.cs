@@ -76,8 +76,6 @@ internal static class SentinelProbe
             "llama_runtime_x64" => TreeContains("llama.cpp", 20_000, "llama-server.exe")
                 && TreeContains("llama.cpp", 20_000, "llama-mtmd-cli.exe")
                 && TreeContains("llama.cpp", 20_000, "mtmd.dll"),
-            "whisper" => TreeContains("whisper.cpp", 20_000, "main.exe", "whisper-cli.exe")
-                && FilePresent(Path.Combine("whisper", "ggml-base.bin"), 1_000_000),
             // cudnn64_9.dll is the small cuDNN 9 dispatch shim (~260 KB); the real
             // ops live in cudnn_ops64_9.dll / cudnn_cnn64_9.dll. A 1 MB floor made
             // this probe report an installed cuDNN pack as missing (same bug shape
@@ -113,12 +111,6 @@ internal static class SentinelProbe
                 && TreeContains("llama.cpp-cuda", 1_000_000, "cublas64_12.dll"),
             "bge_text" => FilePresent(Path.Combine("bge_text", "bge_small.onnx"), 1_000_000)
                 && FilePresent(Path.Combine("bge_text", "vocab.txt"), 1_000),
-            "florence2_base" => FilePresent(Path.Combine("florence2", "vision_encoder.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "embed_tokens.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "encoder_model.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "decoder_model_merged.onnx"), 1_000_000)
-                && FilePresent(Path.Combine("florence2", "tokenizer.json"), 1_000)
-                && FilePresent(Path.Combine("florence2", "config.json"), 1_000),
             _ => false,
         };
     }

@@ -8,42 +8,64 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
-/// Redact a user path for logs: keep last two components; pass
-/// app-structural paths verbatim.
-pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
-    use std::path::Component;
-    let s = path.as_ref().to_string_lossy().to_string();
-    let s_lower = s.to_lowercase();
-    // App-structural paths: pass through ONLY the engine's own state dir
-    // (`%LOCALAPPDATA%\FileID\…` / the per-OS equivalent). ENG-97: the old broad
-    // `\fileid\` / `/fileid/` substring match leaked any USER path that merely
-    // contained a folder named "FileID" (e.g. a dev checkout at C:\Code\FileID\…)
-    // verbatim, username and all — defeating redaction for a whole class of real
-    // paths. Anchor on the actual resolved root instead.
-    if let Ok(root) = crate::paths::root() {
-        let mut root_prefix = root.to_string_lossy().to_lowercase();
-        if !root_prefix.is_empty() {
-            if s_lower == root_prefix {
-                return s;
-            }
-            // Require a path-separator boundary so a sibling dir whose name
-            // merely STARTS with the app root (e.g. `…\Local\FileIDBackup\…`)
-            // does not string-prefix-match and leak. (ENG-97)
-            if !root_prefix.ends_with(['\\', '/']) {
-                root_prefix.push(std::path::MAIN_SEPARATOR);
-            }
-            if s_lower.starts_with(&root_prefix) {
-                return s;
-            }
+pub fn available_disk_bytes(path: &Path) -> Option<u64> {
+    let mut probe = path.to_path_buf();
+    while !probe.exists() {
+        if !probe.pop() {
+            return None;
         }
     }
-    // NOTE: no `contains("appdata\\local\\fileid\\")` fallback. The `root()`
-    // branch above already passes through THIS engine's own state tree (root()
-    // resolves from LOCALAPPDATA to exactly `…\AppData\Local\FileID`). A path
-    // under a DIFFERENT `AppData\Local\FileID` (another user, or a backup like
-    // `D:\Backups\AppData\Local\FileID\…`) is NOT this engine's tree and MUST be
-    // redacted — the old unanchored `contains` leaked those verbatim (#26).
-    //
+    available_disk_bytes_existing(&probe)
+}
+
+#[cfg(windows)]
+fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    unsafe {
+        GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut available),
+            None,
+            None,
+        )
+        .ok()?;
+    }
+    Some(available)
+}
+
+#[cfg(unix)]
+fn available_disk_bytes_existing(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let raw = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(raw.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    // statvfs field widths differ by platform: f_bavail/f_frsize are u64 on
+    // Linux glibc but f_bavail is u32 on macOS. `u64::from` widens on macOS and
+    // is an identity on Linux — allow the (Linux-only) useless_conversion so the
+    // one expression stays correct on both without a cast clippy flags either way.
+    #[allow(clippy::useless_conversion)]
+    let bytes = u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize));
+    Some(bytes)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn available_disk_bytes_existing(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Redact a path for persistent logs, retaining only its last two components.
+pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
+    use std::path::Component;
     // Only Normal components are PII candidates — Prefix (drive letter,
     // UNC server\share) and RootDir are protocol/topology, never PII.
     // Excluding them ensures C:\ → "…" and \\server\share\user\file.jpg
@@ -59,7 +81,7 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
     if parts.is_empty() {
         return "…".to_string();
     }
-    // Home-anchored masking (F-C2-004): for a file directly under a home dir
+    // Home-anchored masking: for a file directly under a home dir
     // (`…/Users/<user>/file` or `…/home/<user>/file`), the last-two-components
     // tail would be `<user>/file` and leak the username. Detect a home-root
     // keyword + username and, when the username would otherwise fall inside the
@@ -77,10 +99,10 @@ pub fn redact_path_for_log(path: impl AsRef<Path>) -> String {
             // (a) The path ends AT the home dir itself (`C:\Users\<user>`,
             // `/home/<user>`) — the username is the terminal component. Only a
             // GENUINE home root (the keyword is the first component, anchor == 0)
-            // qualifies; fully mask it (baseline F-C2-004 behavior). A nested
+            // qualifies; fully mask it (baseline behavior). A nested
             // backup tree whose terminal IS a real file (anchor > 0, e.g.
             // `E:\Backups\Users\file.txt`) is NOT a home dir and falls through
-            // so its filename survives. (audit R-06)
+            // so its filename survives.
             if user_idx == parts.len() - 1 && anchor == 0 {
                 return "…".to_string();
             }
@@ -124,18 +146,12 @@ mod redaction_tests {
     }
 
     #[test]
-    fn passes_through_app_structural_path() {
-        // The engine's OWN state tree (under the resolved root) passes through
-        // for debugging — derive it from root() rather than hardcoding a
-        // username, since only THIS engine's tree is exempt from redaction (#26).
+    fn redacts_app_structural_path() {
         if let Ok(root) = crate::paths::root() {
-            let s = root
-                .join("Models")
-                .join("arcface")
-                .join("weights.onnx")
-                .to_string_lossy()
-                .to_string();
-            assert_eq!(redact_path_for_log(&s), s);
+            let path = root.join("Models").join("arcface").join("weights.onnx");
+            let redacted = redact_path_for_log(&path);
+            assert_eq!(redacted, "…/arcface/weights.onnx");
+            assert!(!redacted.contains(&root.to_string_lossy().to_string()));
         }
     }
 
@@ -164,15 +180,11 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log(r"C:\"), "…");
     }
 
-    /// App structural paths are returned UNCHANGED — they refer to
-    /// FileID's own dirs (logs, models, sentinels) and are useful for
-    /// debugging without redaction. Derived from the resolved root so the
-    /// passthrough is keyed on THIS engine's tree, not a hardcoded username.
     #[test]
-    fn app_structural_logs_path_unchanged() {
+    fn app_structural_logs_path_is_redacted() {
         if let Ok(root) = crate::paths::root() {
-            let s = root.join("logs").join("app.log").to_string_lossy().to_string();
-            assert_eq!(redact_path_for_log(&s), s);
+            let path = root.join("logs").join("app.log");
+            assert_eq!(redact_path_for_log(path), "…/logs/app.log");
         }
     }
 
@@ -200,7 +212,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// F-C2-004: a file directly under a home dir must NOT expose the username.
+    /// A file directly under a home dir must NOT expose the username.
     /// Keeping the last two components alone would emit `…/Adam/resume.pdf` and
     /// leak the username — home-anchored masking drops the user component.
     #[test]
@@ -211,7 +223,7 @@ mod redaction_tests {
         assert!(r.ends_with("resume.pdf"), "filename lost: {r}");
     }
 
-    /// F-C2-004 (POSIX shape): `/home/<user>/file` and `/Users/<user>/file`
+    /// POSIX shape: `/home/<user>/file` and `/Users/<user>/file`
     /// must likewise mask the username. Runs on every host (the components
     /// parse the same on non-Windows).
     #[test]
@@ -225,7 +237,7 @@ mod redaction_tests {
         assert!(r2.ends_with("notes.txt"), "filename lost: {r2}");
     }
 
-    /// R-06 regression: a path that ENDS at the home dir itself (the scan root
+    /// Regression: a path that ENDS at the home dir itself (the scan root
     /// is the home directory — no file under it) must fully mask the username,
     /// not fall through to the generic tail and leak it. Genuine home root only
     /// (keyword is the first component); a nested backup tree is handled below.
@@ -235,7 +247,7 @@ mod redaction_tests {
         assert_eq!(redact_path_for_log("/home/adam"), "…");
     }
 
-    /// F-C2-004 must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
+    /// Must NOT over-redact deep paths: `…/Users/<user>/Pictures/IMG`
     /// already pushes the username off the kept tail, so the deeper context
     /// (Pictures/Vacation) survives unchanged.
     #[test]
@@ -246,7 +258,7 @@ mod redaction_tests {
         assert!(!r.contains("Adam"), "username leaked: {r}");
     }
 
-    /// R-06: a directory literally named `Users`/`home` sitting DIRECTLY above a
+    /// A directory literally named `Users`/`home` sitting DIRECTLY above a
     /// file (a backup tree, a NAS share) is not a home root and the next part is
     /// the FILENAME, not a username. Home-anchored masking must fall through to
     /// the generic tail and preserve the filename instead of collapsing to "…".
@@ -260,12 +272,12 @@ mod redaction_tests {
 
 // The dedicated-thread set/clear semantics only exist on Windows; off-Windows
 // SleepGuard is a no-op unit struct, so these thread-handoff tests run on the
-// Windows target (where the assertion is real). (F-C1-008)
+// Windows target (where the assertion is real).
 #[cfg(all(test, windows))]
 mod sleep_guard_tests {
     use super::*;
 
-    /// F-C1-008: SetThreadExecutionState is thread-scoped, so the assertion
+    /// SetThreadExecutionState is thread-scoped, so the assertion
     /// must be set AND cleared on the same thread. The guard owns a dedicated
     /// thread for the whole lifecycle, so acquiring on one thread and dropping
     /// on another (the real-world Tokio-worker case) still releases cleanly.
@@ -346,7 +358,7 @@ pub fn cpu_topology() -> CpuTopology {
         // We cast u64* → struct* directly so clippy sees the alignment is
         // satisfied; intermediate u8* hides the source alignment.
         let words = bytes.div_ceil(8) as usize;
-        // R4-03: over-allocate one full fixed-size struct of slack. windows-rs
+        // over-allocate one full fixed-size struct of slack. windows-rs
         // models SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX at its largest union
         // variant (~80 B), but a single-group RelationProcessorCore record is only
         // ~48 B. Without slack, `&*rec_ptr` on the FINAL record forms an 80-byte
@@ -521,16 +533,9 @@ pub fn dbwriter_batch_size_for(tier: MemoryTier) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub enum StorageType {
+    /// Any non-rotational fixed drive; the seek-penalty descriptor can't tell
+    /// NVMe from SATA SSD.
     Nvme,
-    /// Reserved for a future BusType-discriminator pass (would use
-    /// `STORAGE_ADAPTER_DESCRIPTOR.BusType` to distinguish NVMe from
-    /// SATA SSD; the seek-penalty descriptor alone can't tell them
-    /// apart). `walk_concurrency_for` returns a smaller budget here
-    /// than NVMe (8 vs 16 threads). Kept in the enum so call sites
-    /// don't need a non-exhaustive update when bus-type detection
-    /// lands.
-    #[allow(dead_code)]
-    SsdSata,
     Hdd,
     Removable,
     Network,
@@ -541,7 +546,6 @@ impl StorageType {
     pub fn as_str(self) -> &'static str {
         match self {
             StorageType::Nvme => "nvme",
-            StorageType::SsdSata => "ssd_sata",
             StorageType::Hdd => "hdd",
             StorageType::Removable => "removable",
             StorageType::Network => "network",
@@ -557,7 +561,6 @@ pub fn walk_concurrency_for(path: &Path) -> usize {
     let logical = num_cpus::get().max(1);
     match storage {
         StorageType::Nvme => logical.clamp(4, 16),
-        StorageType::SsdSata => logical.clamp(2, 8),
         StorageType::Hdd => 2,
         StorageType::Removable => 2,
         StorageType::Network => 2,
@@ -678,12 +681,17 @@ pub fn storage_type_for_path(_path: &Path) -> StorageType {
 // volumes the id can collide, so a cross-volume move falls through to the
 // content-hash lookup.
 
-/// 64-bit volume-local file identity for `path`, or `None` if the file can't
-/// be opened (permission, deletion mid-scan, ...). Cheap: just opens with
-/// `FILE_FLAG_BACKUP_SEMANTICS` (works for both files and directories without
-/// triggering OneDrive hydration) and reads the metadata; no content I/O.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FileIdentity {
+    pub(crate) volume: u64,
+    pub(crate) file: u64,
+}
+
+/// Volume-qualified file identity for `path`, or `None` if the entry cannot be
+/// opened. Unlike `file_ref`, this is safe to persist as mutation authority
+/// because identical file indexes on different volumes remain distinct.
 #[cfg(windows)]
-pub fn file_ref(path: &Path) -> Option<u64> {
+pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::CloseHandle;
@@ -719,29 +727,53 @@ pub fn file_ref(path: &Path) -> Option<u64> {
     if result.is_err() {
         return None;
     }
-    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+    Some(FileIdentity {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
 }
 
 #[cfg(not(windows))]
-pub fn file_ref(path: &Path) -> Option<u64> {
+pub(crate) fn file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|m| m.ino())
-}
-
-#[cfg(unix)]
-pub fn opened_file_ref(file: &std::fs::File) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    file.metadata().ok().map(|metadata| metadata.ino())
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some(FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
 }
 
 #[cfg(windows)]
-pub fn opened_file_ref(file: &std::fs::File) -> Option<u64> {
+pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdentity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info).ok()?; }
-    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+    Some(FileIdentity {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn file_identity_from_file(file: &std::fs::File) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata().ok()?;
+    Some(FileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+/// 64-bit volume-local file identity for rename/move heuristics. This legacy DB
+/// value intentionally omits the volume; destructive journals use
+/// [`file_identity`] instead.
+pub fn file_ref(path: &Path) -> Option<u64> {
+    file_identity(path).map(|identity| identity.file)
 }
 
 // ─── Battery / AC power detection ───────────────────────────────────────────
@@ -950,15 +982,38 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
     }
 }
 
+/// POSIX: when the parent exits the engine is reparented (to init or a
+/// subreaper), so a changed `getppid()` means the app is gone.
 #[cfg(not(windows))]
 pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
-    // POSIX fallback: poll getppid every 5 s; if it changes (i.e. our parent
-    // was reaped and we got reparented to init) trigger shutdown.
-    let _ = parent_pid;
-    let _ = shutdown;
+    use tokio::time::{Duration, MissedTickBehavior};
+
+    let mut poll = tokio::time::interval(Duration::from_secs(1));
+    poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        // TODO(linux): real implementation.
+        tokio::select! {
+            _ = shutdown.notified() => {
+                tracing::info!("watch_parent cancelled by shutdown signal");
+                return;
+            }
+            _ = poll.tick() => {
+                match get_parent_pid() {
+                    Some(current) if current == parent_pid => {}
+                    Some(current) => {
+                        tracing::info!(
+                            "parent process changed (was {parent_pid}, now {current}); signaling shutdown"
+                        );
+                        shutdown.notify_waiters();
+                        return;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "could not read parent pid; falling back to stdin EOF detection"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -975,11 +1030,43 @@ pub async fn watch_parent(parent_pid: u32, shutdown: Arc<Notify>) {
 // future is polled across Tokio worker threads — so a naive acquire-here /
 // clear-in-Drop would SET on one worker and CLEAR on another, leaving the
 // assertion permanently armed and the machine unable to sleep after a scan
-// (F-C1-008). We therefore pin the whole set→hold→clear lifecycle to one
+// . We therefore pin the whole set→hold→clear lifecycle to one
 // dedicated thread the guard owns; the assertion clears on the thread that set
 // it no matter which Tokio worker runs Drop.
 
 /// RAII guard. While alive, prevents Windows from sleeping the system.
+/// Configure a Linux helper as a process-group leader and have the kernel kill
+/// it if the engine disappears before normal cleanup can run.
+#[cfg(target_os = "linux")]
+pub(crate) fn configure_child_lifetime(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    let parent_pid = unsafe { libc::getpid() };
+    command.process_group(0);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(std::io::Error::from_raw_os_error(libc::EPIPE));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn terminate_child_tree(child: &mut std::process::Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Drop = release the assertion. The set and clear both run on a dedicated
 /// owned thread so the thread-scoped assertion is released on the same thread
 /// that armed it, independent of which Tokio worker polls/drops the guard.
@@ -988,6 +1075,14 @@ pub struct SleepGuard {
     stop: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(windows)]
     thread: Option<std::thread::JoinHandle<()>>,
+    // Linux: a held `systemd-inhibit … sleep infinity` child. Alive => the
+    // sleep/idle inhibitor lock is held; killed on drop => released. `None`
+    // when systemd-inhibit is absent or failed to spawn (best-effort, matching
+    // the shell/* backends — a headless box without logind just isn't inhibited).
+    #[cfg(target_os = "linux")]
+    child: Option<std::process::Child>,
+    #[cfg(target_os = "linux")]
+    inhibit_stdin: Option<std::process::ChildStdin>,
 }
 
 impl SleepGuard {
@@ -1032,8 +1127,52 @@ impl SleepGuard {
         }
     }
 
-    #[cfg(not(windows))]
+    // Linux: hold a logind sleep+idle inhibitor for the guard's lifetime by
+    // keeping a `systemd-inhibit … cat` child alive over a private stdin pipe. This is the
+    // documented, dependency-free way to block suspend without linking libsystemd
+    // (mirrors the shell/* subprocess backends). Best-effort: if systemd-inhibit
+    // is missing or spawn fails (no logind, e.g. a bare container), the guard is
+    // simply inert — a scan on such a box just isn't sleep-protected, same as the
+    // pre-existing non-Windows no-op.
+    #[cfg(target_os = "linux")]
+    pub fn acquire() -> Self {
+        use std::process::{Command, Stdio};
+        let mut command = Command::new("systemd-inhibit");
+        command
+            .args([
+                "--what=sleep:idle",
+                "--who=FileID",
+                "--why=FileID is processing your library",
+                "--mode=block",
+                // The held command exits on pipe EOF, including abrupt engine
+                // death, so no infinite descendant can be orphaned.
+                "cat",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_child_lifetime(&mut command);
+        let mut child = command.spawn().ok();
+        let inhibit_stdin = child.as_mut().and_then(|process| process.stdin.take());
+        Self { child, inhibit_stdin }
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     pub fn acquire() -> Self { Self {} }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SleepGuard {
+    fn drop(&mut self) {
+        // Kill the held systemd-inhibit child; that drops its inhibitor lock and
+        // lets the machine sleep normally again. Best-effort — if the child
+        // already exited there's nothing to release. `wait` reaps the zombie so
+        // long-running engines don't leak defunct children across many scans.
+        drop(self.inhibit_stdin.take());
+        if let Some(mut child) = self.child.take() {
+            terminate_child_tree(&mut child);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1049,6 +1188,17 @@ impl Drop for SleepGuard {
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod sleep_guard_linux_tests {
+    use super::SleepGuard;
+
+    #[test]
+    fn acquire_and_drop_is_safe_without_logind() {
+        let guard = SleepGuard::acquire();
+        drop(guard);
     }
 }
 
@@ -1152,10 +1302,10 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
         wide.push(0);
         let cookie = unsafe { AddDllDirectory(PCWSTR(wide.as_ptr())) };
         if cookie.is_null() {
-            tracing::warn!(dir = %dir.display(), "AddDllDirectory returned null");
+            tracing::warn!(dir = %redact_path_for_log(dir), "AddDllDirectory returned null");
             false
         } else {
-            tracing::info!(dir = %dir.display(), "[EP] AddDllDirectory registered pack dir");
+            tracing::info!(dir = %redact_path_for_log(dir), "[EP] AddDllDirectory registered pack dir");
             true
         }
     }
@@ -1180,6 +1330,35 @@ pub fn register_dll_dirs_under(root: &std::path::Path) -> Vec<std::path::PathBuf
     let mut failed: Vec<std::path::PathBuf> = Vec::new();
     walk(root, MAX_DEPTH, &mut failed);
     failed
+}
+
+/// Load a DLL by full path so its module identity is pinned before anything
+/// else (ORT's CUDA EP, cuDNN's dispatch shim) resolves the same name through
+/// the unordered AddDllDirectory search set. Windows resolves an import by
+/// name against already-loaded modules first, so whichever copy we load here
+/// is the one every later consumer binds. Returns the Win32 error code on
+/// failure (126 = a dependency of the DLL itself is missing).
+#[cfg(windows)]
+pub fn preload_dll(path: &std::path::Path) -> Result<(), u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::System::LibraryLoader::{
+        LoadLibraryExW, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+    };
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    unsafe {
+        LoadLibraryExW(
+            PCWSTR(wide.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        )
+    }
+    .map(|_| ())
+    // HRESULT_FROM_WIN32 shape (0x8007xxxx) → surface the familiar Win32 code
+    // (126 ERROR_MOD_NOT_FOUND, 127 ERROR_PROC_NOT_FOUND) in logs.
+    .map_err(|e| (e.code().0 as u32) & 0xFFFF)
 }
 
 #[cfg(not(windows))]
@@ -1296,36 +1475,30 @@ pub fn set_worker_background_priority() {
 #[cfg(not(windows))]
 pub fn set_worker_background_priority() {}
 
-/// Query available disk free space in bytes at `path`.
+/// Suppress Windows hard-error dialogs process-wide. A headless engine must
+/// never block on a modal error box: a llama.cpp binary that loads against a
+/// missing/mismatched CUDA DLL raises a critical-error message box
+/// (STATUS_DLL_NOT_FOUND) that would otherwise wait forever for a click that
+/// can never come, wedging Deep Analyze. `SEM_FAILCRITICALERRORS` turns that
+/// into an ordinary load failure the child reports via its exit code;
+/// `SEM_NOGPFAULTERRORBOX` suppresses the WER crash dialog on a native fault.
+/// Spawned children inherit this mode by default (no `CREATE_DEFAULT_ERROR_MODE`),
+/// so setting it once at startup covers the CLI, server, and device probes.
+/// `SetErrorMode` *replaces* the mode, so we OR onto whatever the loader set.
 #[cfg(windows)]
-pub fn available_disk_bytes(path: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let mut free_bytes_available: u64 = 0;
-    let mut total_bytes: u64 = 0;
-    let mut total_free_bytes: u64 = 0;
-    let res = unsafe {
-        GetDiskFreeSpaceExW(
-            PCWSTR(wide.as_ptr()),
-            Some(&mut free_bytes_available),
-            Some(&mut total_bytes),
-            Some(&mut total_free_bytes),
-        )
+pub fn suppress_hard_error_dialogs() {
+    use windows::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX,
     };
-    if res.is_ok() {
-        Some(free_bytes_available)
-    } else {
-        None
+    let want = SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX;
+    unsafe {
+        let prev = SetErrorMode(want);
+        let _ = SetErrorMode(prev | want);
     }
 }
 
 #[cfg(not(windows))]
-pub fn available_disk_bytes(_path: &Path) -> Option<u64> {
-    None
-}
+pub fn suppress_hard_error_dialogs() {}
 
 #[cfg(test)]
 mod adaptive_tests {
@@ -1411,7 +1584,7 @@ mod adaptive_tests {
     #[test]
     fn storage_type_string_round_trip() {
         for s in [
-            StorageType::Nvme, StorageType::SsdSata, StorageType::Hdd,
+            StorageType::Nvme, StorageType::Hdd,
             StorageType::Removable, StorageType::Network, StorageType::Unknown,
         ] {
             assert!(!s.as_str().is_empty());
@@ -1426,5 +1599,11 @@ mod adaptive_tests {
         let cwd = std::env::current_dir().unwrap();
         let _ = storage_type_for_path(&cwd);
         let _ = walk_concurrency_for(&cwd);
+    }
+
+    #[test]
+    fn available_disk_space_resolves_a_missing_child_to_its_volume() {
+        let child = std::env::temp_dir().join("fileid-space-probe").join("not-created");
+        assert!(available_disk_bytes(&child).is_some_and(|bytes| bytes > 0));
     }
 }

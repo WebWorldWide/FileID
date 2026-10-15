@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from check_runtime_egress import (
+    catalog_urls_checked,
     EXPECTED_INITIAL_GUARD,
     EXPECTED_INITIAL_PREDICATE,
     EXPECTED_REDIRECT_POLICY,
@@ -134,6 +135,32 @@ class RuntimeEgressTests(unittest.TestCase):
             self.assertTrue(any("non-Hugging-Face" in failure for failure in failures))
             self.assertTrue(any("allowlist must be exactly" in failure for failure in failures))
 
+    def test_catalog_urls_must_be_pinned_files_in_their_own_revision(self) -> None:
+        import json
+        revision = "a" * 40
+        def entry(url: str, sha: str | None = "b" * 64) -> dict:
+            return {"id": "m", "repo": "org/model-GGUF", "revision": revision, "files": [{"url": url, "sha256": sha}]}
+        good = f"https://huggingface.co/org/model-GGUF/resolve/{revision}/model-Q4_K_M.gguf"
+        cases = {
+            good: True,
+            f"https://huggingface.co/org/model-GGUF/resolve/main/model.gguf": False,
+            f"https://huggingface.co/other/model-GGUF/resolve/{revision}/model.gguf": False,
+            f"https://evil.example/org/model-GGUF/resolve/{revision}/model.gguf": False,
+            f"http://huggingface.co/org/model-GGUF/resolve/{revision}/model.gguf": False,
+            f"https://huggingface.co/org/model-GGUF/resolve/{revision}/../escape.gguf": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            for url, accepted in cases.items():
+                catalog.write_text(json.dumps({"entries": [entry(url)]}))
+                failures, urls = catalog_urls_checked(catalog)
+                self.assertEqual(not failures, accepted, url)
+                self.assertEqual(urls == {url}, accepted, url)
+            catalog.write_text(json.dumps({"entries": [entry(good, None)]}))
+            self.assertTrue(any("SHA256" in f for f in catalog_urls_checked(catalog)[0]))
+            catalog.write_text("not json")
+            self.assertTrue(catalog_urls_checked(catalog)[0])
+
     def test_rejects_dynamic_url_comment_decoy_and_redirect_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             registry, downloader = self.files(
@@ -201,6 +228,7 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/models/vlm_server.rs",
             "platforms/windows/src/engine/src/commands/prewarm.rs",
             "platforms/windows/src/engine/src/commands/bulk.rs",
+            "platforms/windows/src/engine/src/commands/video_export.rs",
             "platforms/windows/src/engine/src/main.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
@@ -221,15 +249,17 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/tui/src/models.rs",
             "platforms/tui/src/scan.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
-            # Reviewed 2026-07-29: both match the deliberately-broad raw-network
+            # The reviewed files below match deliberately broad raw-network
             # patterns on non-network constructs — restructure.rs imports the
             # Win32 FILE_SHARE_READ *filesystem* constant, and
             # EngineClient.Commands.cs declares a local `Process?` handle for the
-            # engine child. Neither performs network I/O.
+            # engine child. deep_scope.rs and native_process.rs use local
+            # Windows kernel FFI for path comparison and child ownership.
             "platforms/windows/src/engine/src/commands/restructure.rs",
+            "platforms/windows/src/engine/src/commands/deep_scope.rs",
+            "platforms/windows/src/engine/src/models/native_process.rs",
             "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
             "platforms/windows/src/engine/src/models/vlm.rs",
-            "platforms/windows/src/engine/src/models/whisper.rs",
             "platforms/windows/src/engine/src/platform.rs",
             "platforms/windows/src/engine/src/shell/mod.rs",
             "platforms/windows/src/FileID.App/Program.cs",
@@ -245,16 +275,13 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/pipeline/deep_analyze.rs",
             "platforms/windows/src/engine/src/pipeline/doc_extract.rs",
             "platforms/windows/src/engine/src/pipeline/restructure_apply.rs",
-            "platforms/windows/src/engine/src/pipeline/usn.rs",
             "platforms/windows/src/engine/src/shell/heic.rs",
             "platforms/windows/src/engine/src/shell/ocr.rs",
-            "platforms/windows/src/engine/src/shell/reveal.rs",
             "platforms/windows/src/engine/src/shell/tags.rs",
             "platforms/windows/src/engine/src/shell/thumbnail.rs",
             "platforms/windows/src/engine/src/shell/trash.rs",
             "platforms/windows/src/engine/src/shell/video.rs",
             "platforms/windows/src/engine/src/util/content_hash.rs",
-            "platforms/windows/src/engine/src/util/elevation.rs",
             "platforms/windows/src/engine/src/util/path_safety.rs",
         })
         self.assertEqual(set(REVIEWED_NETWORK_SOURCE_SHA256), RAW_NETWORK_FILES)

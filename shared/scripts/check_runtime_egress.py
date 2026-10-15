@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -74,6 +75,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/models/vlm_server.rs",
     "platforms/windows/src/engine/src/commands/prewarm.rs",
     "platforms/windows/src/engine/src/commands/bulk.rs",
+    "platforms/windows/src/engine/src/commands/video_export.rs",
     "platforms/windows/src/engine/src/main.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
     "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
@@ -95,7 +97,6 @@ RAW_NETWORK_FILES = {
     "platforms/tui/src/scan.rs",
     "platforms/windows/src/engine/src/commands/trash.rs",
     "platforms/windows/src/engine/src/models/vlm.rs",
-    "platforms/windows/src/engine/src/models/whisper.rs",
     "platforms/windows/src/engine/src/platform.rs",
     "platforms/windows/src/engine/src/shell/mod.rs",
     "platforms/windows/src/FileID.App/Program.cs",
@@ -111,77 +112,75 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/pipeline/deep_analyze.rs",
     "platforms/windows/src/engine/src/pipeline/doc_extract.rs",
     "platforms/windows/src/engine/src/pipeline/restructure_apply.rs",
-    "platforms/windows/src/engine/src/pipeline/usn.rs",
     "platforms/windows/src/engine/src/shell/heic.rs",
     "platforms/windows/src/engine/src/shell/ocr.rs",
-    "platforms/windows/src/engine/src/shell/reveal.rs",
     "platforms/windows/src/engine/src/shell/tags.rs",
     "platforms/windows/src/engine/src/shell/thumbnail.rs",
     "platforms/windows/src/engine/src/shell/trash.rs",
     "platforms/windows/src/engine/src/shell/video.rs",
     "platforms/windows/src/engine/src/util/content_hash.rs",
-    "platforms/windows/src/engine/src/util/elevation.rs",
     "platforms/windows/src/engine/src/util/path_safety.rs",
     "platforms/windows/src/engine/src/commands/restructure.rs",
+    "platforms/windows/src/engine/src/commands/deep_scope.rs",
+    "platforms/windows/src/engine/src/models/native_process.rs",
     "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs",
 }
 REVIEWED_NETWORK_SOURCE_SHA256 = {
+  "platforms/windows/src/engine/src/shell/thumbnail.rs": "f88fbb2de5867c2084e043e43cb5fb85e4a80891496984224a243553fd4ef2eb",
+  "platforms/windows/src/engine/src/models/native_process.rs": "ab6b887dc2f1500bb80b510f333ddb0fc110a5e6234b6f57502330e67fd21ad3",
+  "platforms/windows/src/engine/src/commands/deep_scope.rs": "4dca8812ea40edb2a39925693db2d8496d264b59557d42ecbf216aaff221e59a",
+  "platforms/windows/src/engine/src/commands/video_export.rs": "95af5b5609582a784c0234b2cfc5121fee4ca5a5cf6873b9fdf864db795131a9",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "9aa9563f038fbe4e72635e6517e056453da19ba91d483ed6ec69498a5dbcd099",
-  "platforms/apple/app/Sources/FileID/EngineClient.swift": "2b718da30cc9385b8938f5421beb98f45d49b0dffc1176a4f742034d8ecf3a9f",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "820c7428acee9b0aba5d4a60812e70e117c34bd5ea340c875c215e32d23752e7",
+  "platforms/apple/app/Sources/FileID/EngineClient.swift": "e3d9e5ec9ee7025c5103597f172c96a9abd5dec4980af5610a4369748eb931ec",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "a5b875ceb9c2e827778884c0f41dc1833eab00d1ee01d114ed89899556ce3482",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "9041ba708ae47e40261d8b70fabdc404a393b2c2f824dfa7e9561b41a957905b",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "0abb37d07bbebb755cec1e09bfbecf87ab903d89579debacbe740bcedd19e6cd",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift": "b35d92123749d4509347e9474d388674976bf649d549f9261267cecbb6740158",
-  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "cc6a2bd99926ce30a618138d51b447a4197a3baf5585cdfb0cf9aa6987ef0168",
+  "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift": "fcf725de54cd9aa946129672ac3d3f802e03b1f7bdad1a84311df52b6844fafd",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoConversionWorker.swift": "508d495b00b199a354cda9d0c9f29c94b5f7408432e372ab0e494eec059b4f1f",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VideoFrameWorker.swift": "731244762a453f098dff101cf9986c98cfe6cf2618a76773fe1fc9ae6c104fac",
   "platforms/apple/shared/Sources/FileIDShared/CLIPTokenizer.swift": "cd8639c15375f192d89756dc509dcc8308c30e70e55926baa4c237c29e4d6d50",
   "platforms/apple/shared/Sources/FileIDShared/ModelLicenseAcceptance.swift": "371c99d32a06dee16f7f80a1f3841fdf3307b8bce2f9112313a225448335329a",
-  "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "9c4cb927ee5be1eed4edc8afea605f7996fbc411a9a407a048e2d780f9535247",
-  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "3ed44d57fc25ebe197e40958d6f3bc6d7cb90a8a31b7b22dd5a76b89a46eac94",
+  "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift": "a2d6d7bea0e6d024080d84fb708390c64b60cf3ae991d2e7dba7e61dc56010fb",
+  "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift": "36076307e429e1589a1b0d9be947c8743c92d2b4aa49298668e1070509ffead6",
   "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
   "platforms/cli/src/scan_models.rs": "4964efabe46667a3a4019020d8ca1a85b04d9a07975d19c975d656eb6c7cd8c6",
-  "platforms/linux/src/app/src/engine_client.rs": "b84cc10d5ab5cb37f6da8b5b185edfd651046ff67acdac57452ea0d8e3fede28",
-  "platforms/linux/src/app/src/tabs/settings.rs": "afe0bcc010f14e85a4fa14f7c83de2da6fcc302552c7776341033bc995c747a7",
+  "platforms/linux/src/app/src/engine_client.rs": "b0aaa5342fa79fc0c7537818e0f75e355f78e9af5d1ca358182dcfc024cf95a8",
+  "platforms/linux/src/app/src/tabs/settings.rs": "de591bae80fb4025944b4084a0118758041087b1126b74bf148e5b62c3e0a7b2",
   "platforms/tui/src/models.rs": "bc27e7237659b63e42d2f4f8ca9d5d2a83015d849be771395654e250b0754c23",
   "platforms/tui/src/scan.rs": "d125e647269633def7438245657d0e4e447ba9e2d477aac72afda918b2330cf0",
-  "platforms/windows/src/FileID.App/App.xaml.cs": "9bd73d30158ea4a757b1ec29030261c51a37b5d566bce2cf0be44826c1bb3580",
-  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "bf3b62781682e398764bf24bfa07507a6149c9cd9580d8789c47be0ba470ce3c",
+  "platforms/windows/src/FileID.App/App.xaml.cs": "fec87e4fc50ba035defeb6ff7517859cd3f162e3a1dd7728696637abb487b4c5",
+  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "2406f5eff09b8e7d1472b8791f00ddd6b6168b250d56507ef04570a05b38307d",
   "platforms/windows/src/FileID.App/Program.cs": "e013f7f02ad596093072b50200555b1c63ce89f6e41dddd28a2f57e01dc28e47",
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "ba8cbf1070795fb5fb4a2ea5fdaa3f7828c834e9b16783d6c864e70a915e8c79",
-  "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "976fa7c8180647d6ad7e8253ce3984df95f4532e6df25649d3981c2f60a53a94",
+  "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "48373698174ed4c43575b05e85a563fd7485207819d9737c4fed9f92e0b2dd44",
   "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "c50846c16a67365d48caa6e6206f4aa291a384ac93b17a1d85923fdc5449f117",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "acc2ed85e0bb405c85f57e38391c3b4962660a93c9f4b317f148bcefd3bea18f",
-  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "a3531df5be59b71873c07362f178d86c3796244d8b99e1969acf845f1ea9b6c5",
-  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "300899ceec51d41fcacf0c34648b334c657f5f5cc1a70149bb6273b6972425b9",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "7a98a1cac07b0089ea8e80a692bb8ddae8750ff422e506f643fe54e0191f2fea",
+  "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "41a9af4acae4d9e39b00ff51e9cf16629277299304faafd9e474bd041c67e7ee",
+  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "d126da2898769a375613c9d53e89e908cc2dd3c0c8d700db6d592374e1b5d5fe",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "f06fa0c923507f380f64a1b0aedb6951466cf1b33441ecd6ac99fa1c6cf663ca",
-  "platforms/windows/src/engine/src/commands/bulk.rs": "3acd4cab45d5f1e20c984583e6a31986a069ebc3c293cc2017f3e14515fdb2a5",
-  "platforms/windows/src/engine/src/commands/prewarm.rs": "012df8c2af64b890a6b1dedfc979111fab85e7817a7b4b42a5e3877fbfa1fe1f",
-  "platforms/windows/src/engine/src/commands/restructure.rs": "84ddce8ba3e2644ece29ab71b8d36fcd36bdddacd10ed82d7737015299fd784c",
-  "platforms/windows/src/engine/src/commands/trash.rs": "196629996b04c3d6c8db3cc76936a5e3af73905cecdd7ee95bf33eaf368091fa",
-  "platforms/windows/src/engine/src/downloader.rs": "3ec3a3da33b8b42eff58676e378b6268809dceb24b29385c305604f7e060263a",
-  "platforms/windows/src/engine/src/main.rs": "71a5d56dc39d86bbd2de005e8fb09c26aef07744a66d8e63756c0f343a06e287",
-  "platforms/windows/src/engine/src/models/runtime.rs": "554fb40628ffd8653c8466ebae2a7e648e68ee3dfae99fa2a59b70b528c971b5",
-  "platforms/windows/src/engine/src/models/vlm.rs": "fa13b0ec9f0f0a7d996a3cb0bdd061017e66ebe569f1eef9e312bc5ad8a78507",
-  "platforms/windows/src/engine/src/models/vlm_server.rs": "edfc08d48cb08f2c165048726263d877ff8ff389dbdc960b9566db7adad004be",
-  "platforms/windows/src/engine/src/models/whisper.rs": "c6c6c4b288e0a6327fde8944cda3fbcfcc1cf5b30f2dd21bfbe5f388713fc0c9",
-  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "61ae6a64031f0ae16d3ef7b1de37987fcf949be2b14847ce24242dfc79c64050",
-  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "e6ec521ac65aaab03c5918d6bc3b04854b2c6a878eed6b8fad82cf0aa50f1267",
-  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "ed0a6da9d9a5afc32ca0056f0c8d92b416164d1ae2c70e0c4f2a258e60a15129",
-  "platforms/windows/src/engine/src/pipeline/usn.rs": "86737a851920b1e62e0d8ef4a573a835471867f450eb3481a3988778ed2d5829",
-  "platforms/windows/src/engine/src/platform.rs": "42b14471c3632c098e25d5914183b9a715c74e8e24f46ab8626c30358d403ad3",
-  "platforms/windows/src/engine/src/shell/heic.rs": "120cf8559214a1bf96d528d6be0e1539303dffb4ba38bad53ec18c1728588f3c",
-  "platforms/windows/src/engine/src/shell/mod.rs": "6cef0bf08549e1f1e5b845c7956e00aa58f196bb5457135823372522f93be339",
-  "platforms/windows/src/engine/src/shell/ocr.rs": "7942ee66691670d93fc5725697a817c634c10d32acafb06df9a76a5ed97995a0",
-  "platforms/windows/src/engine/src/shell/reveal.rs": "99fffa994961644a9695812f9388599f233742ff85105c107e6a76dafa30591b",
-  "platforms/windows/src/engine/src/shell/tags.rs": "ab399dfb160d51bcc0dd13120ba45ff2c156b62b3dac58d691adb4bb8d5b17e2",
-  "platforms/windows/src/engine/src/shell/thumbnail.rs": "8fa7977553d16e5cbc09ea4ae0dd1ad8867232d4f361d9425fa884cdd4674dac",
-  "platforms/windows/src/engine/src/shell/trash.rs": "f2bbe3aded885dd8609711b8da6ea6af7cd1f7efe44b7024f1ca9b38e4bd5391",
-  "platforms/windows/src/engine/src/shell/video.rs": "76dc9fb3820f464a9390f3cb11142bfd3b401fcff6d5d90fb9edaace9a3500bf",
-  "platforms/windows/src/engine/src/util/content_hash.rs": "bd242f7d035d086a034362de51df8c9598ce5028f99f84dbfec214ce5ee0c406",
-  "platforms/windows/src/engine/src/util/elevation.rs": "3da9fe31efafaa0b276693e208f3b2b97312e2801a86cdee42b56781847cc0ff",
-  "platforms/windows/src/engine/src/util/path_safety.rs": "dfcb6489754fe2fa3c8b4e4a88ebfb6754e5008ecf1efbab816dc0478627efd6",
+  "platforms/windows/src/engine/src/commands/bulk.rs": "acd9f70c831539d27340e94574caac8578eb8efe963d3515d722987788434811",
+  "platforms/windows/src/engine/src/commands/prewarm.rs": "d421167edf8b636c7682c5034a6d260981a702e89b2b924573cfa1e5790aecd2",
+  "platforms/windows/src/engine/src/commands/restructure.rs": "b0a6178e4136710f98ec01be5595427c4f882e090c32ce6a63ebc6d9e764f2e6",
+  "platforms/windows/src/engine/src/commands/trash.rs": "e9c7043e2d89d721cd05b29b675cb7e9fe92da0ae1e7aea839694b499476edbe",
+  "platforms/windows/src/engine/src/downloader.rs": "85da28fe6478033c761fdc7c756279cb819730adcb7be6355ca5a34025a2b9d8",
+  "platforms/windows/src/engine/src/main.rs": "4ba09d79f2422cc251c7884550d5a3eff767b3951028478588524def9da84cdc",
+  "platforms/windows/src/engine/src/models/runtime.rs": "1f72535377b16ccbd07104406448353ba4cac5b87bc8d2035f3d1f7611809d4e",
+  "platforms/windows/src/engine/src/models/vlm.rs": "2ce0b8372ef35f3ba545df750fb62e981a5808fd08a12f284e1fe9d84f484fe7",
+  "platforms/windows/src/engine/src/models/vlm_server.rs": "40e260d05d96072d0d48222a21d6d5e8a34d1e6d11650d9254b9c17352a50267",
+  "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "9c50f760d9d372179a3ad1df6e76a41a7d806b0b3102cab8b27198c9baa2071b",
+  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "680e893b176cd64462a1f29cd990353309f1b58b066a0c81593c1a9ac6ef46f3",
+  "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "f2df458226b36379c7368d67f254475c5a20f2b3c7006db902a91f54874a2bbf",
+  "platforms/windows/src/engine/src/platform.rs": "c48653f7bd5e0c0670ca8757b2581b37f4971d7533ffb442dadb3260871ee025",
+  "platforms/windows/src/engine/src/shell/heic.rs": "9e21d1bb73da451e67f410aa18dcf034316bc3b88ca4f2c732c32c06fe1171cf",
+  "platforms/windows/src/engine/src/shell/mod.rs": "2f3d19b1a02e2b6c478356bb1a452e2186479963f580504891cc53cc3bfdad43",
+  "platforms/windows/src/engine/src/shell/ocr.rs": "5983864f1b2f13c48d4df884ac210e69df7ce781cb69ca132ff44a7f8098259e",
+  "platforms/windows/src/engine/src/shell/tags.rs": "e3173acbbbae07939168102cbcb8a082e48e15bb92b0c82bd0eb4ffec527816a",
+  "platforms/windows/src/engine/src/shell/trash.rs": "81e1cf3e11a4d3a839fa439e014199655f8cdd91c3a09f79f1139e21b21acc99",
+  "platforms/windows/src/engine/src/shell/video.rs": "96d06fc7aa090f568732acb2c04585d66f2be5fe8994fef7bfbc48a85f8799e0",
+  "platforms/windows/src/engine/src/util/content_hash.rs": "7ee089593e70e9bcf6dd3dfe53fb16ee01eae06b561ba21409396240ebe65588",
+  "platforms/windows/src/engine/src/util/path_safety.rs": "75fc778eb1d98ed35adbfe52c1d74fa375b53b536c78f0591a82b8e63d8d45f9",
 }
 SAFE_NETWORK_CALLER_FILES = {
     "platforms/windows/src/engine/src/downloader.rs",
@@ -420,7 +419,7 @@ def _production_sources(root: Path) -> tuple[list[Path], list[str]]:
         if not path.is_file() or path.suffix.lower() not in RAW_NETWORK_PATTERNS:
             continue
         relative_parts = path.relative_to(root).parts
-        if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts):
+        if any(part.lower() in EXCLUDED_SOURCE_PARTS for part in relative_parts) or path.stem.endswith(("_test", "_tests")):
             continue
         files.append(path)
     return sorted(set(files)), []
@@ -743,6 +742,42 @@ def _file_entry_blocks(text: str) -> tuple[list[str], list[str]]:
     return blocks, failures
 
 
+CATALOG_FILE_ENTRY_URL = _normalized("url: file.url.clone()")
+CATALOG_URL_RE = re.compile(r"^https://huggingface\.co/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/resolve/([0-9a-f]{40})/([^?#]+)$")
+
+
+def catalog_for(registry: Path) -> Path:
+    """The catalog beside the registry's repository, else this script's."""
+    relative = Path("shared") / "models" / "catalog.json"
+    for parent in registry.resolve().parents:
+        if (parent / relative).is_file():
+            return parent / relative
+    return Path(__file__).resolve().parents[2] / relative
+
+
+def catalog_urls_checked(catalog: Path) -> tuple[list[str], set[str]]:
+    """Every catalog download must be an immutable Hugging Face file URL in
+    the entry's own repository and revision, with a SHA256 pin."""
+    failures: list[str] = []
+    urls: set[str] = set()
+    try:
+        document = json.loads(catalog.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        return [f"{catalog}: unreadable model catalog ({error})"], urls
+    for entry in document.get("entries", []):
+        for item in entry.get("files", []):
+            url = item.get("url", "")
+            match = CATALOG_URL_RE.match(url)
+            if not match or match.group(1) != entry.get("repo") or match.group(2) != entry.get("revision") or ".." in match.group(3):
+                failures.append(f"{catalog}: {entry.get('id')}: catalog URL is not an immutable file in its own repository: {url}")
+                continue
+            if not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256") or "")):
+                failures.append(f"{catalog}: {entry.get('id')}: catalog file is not SHA256-pinned: {url}")
+                continue
+            urls.add(url)
+    return failures, urls
+
+
 def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[str]]:
     failures: list[str] = []
     registry_text = _without_comments(
@@ -751,8 +786,14 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
     urls: set[str] = set()
     blocks, block_failures = _file_entry_blocks(registry_text)
     failures.extend(f"{registry}: {failure}" for failure in block_failures)
+    catalog_constructions = 0
     for index, block in enumerate(blocks, 1):
         matches = re.findall(r'\burl:\s*"(https?://[^"\\]+)"', block)
+        # The one reviewed catalog construction takes its URL from
+        # shared/models/catalog.json, whose URLs are verified below.
+        if not matches and CATALOG_FILE_ENTRY_URL in _normalized(block):
+            catalog_constructions += 1
+            continue
         if len(matches) != 1:
             failures.append(
                 f"{registry}: FileEntry construction {index} must contain exactly one literal http(s) url field"
@@ -761,6 +802,12 @@ def analyze(registry: Path, downloader: Path) -> tuple[list[str], set[str], set[
         urls.add(matches[0])
     if not blocks or not urls:
         failures.append(f"{registry}: no production FileEntry URL constructions found")
+    if catalog_constructions > 1:
+        failures.append(f"{registry}: only one catalog-backed FileEntry construction is reviewed")
+    if catalog_constructions:
+        catalog_failures, catalog_urls = catalog_urls_checked(catalog_for(registry))
+        failures.extend(catalog_failures)
+        urls |= catalog_urls
 
     downloader_text = _without_comments(downloader.read_text(encoding="utf-8"))
     downloader_structure = _mask_comments_and_strings(downloader_text)

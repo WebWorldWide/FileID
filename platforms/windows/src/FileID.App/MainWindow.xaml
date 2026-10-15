@@ -107,7 +107,19 @@
                     Background="{ThemeResource SurfaceBorderBrush}" />
 
             <Grid x:Name="DetailHost" Grid.Column="2">
-                <views:DetailHostView />
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="16,8">
+                    <Button Content="Search &amp; Moments" Click="OnCatalogWorkbenchClicked" />
+                    <Button Content="File Tools" Click="OnToolsWorkbenchClicked" />
+                    <Button Content="Chat" Click="OnChatWorkbenchClicked" />
+                    <Button Content="Models" Click="OnModelsWorkbenchClicked" />
+                    <Button x:Name="CloseWorkbenchButton" Content="Back to tabs" Click="OnCloseWorkbenchClicked" Visibility="Collapsed" />
+                </StackPanel>
+                <views:DetailHostView x:Name="PrimaryDetailView" Grid.Row="1" />
+                <ContentControl x:Name="WorkbenchHost" Grid.Row="1" Visibility="Collapsed" />
             </Grid>
         </Grid>
 

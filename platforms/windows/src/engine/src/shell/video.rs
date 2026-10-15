@@ -9,12 +9,12 @@ use std::path::Path;
 use std::sync::Once;
 
 use windows::core::{PCWSTR, PROPVARIANT, GUID};
-use windows::Win32::Foundation::{S_OK, FALSE, TRUE};
+use windows::Win32::Foundation::TRUE;
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromURL, MFStartup, MFVideoFormat_RGB32, MFMediaType_Video,
     MF_API_VERSION, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_PD_DURATION, MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING,
+    MF_PD_DURATION, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
     MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
     MFSTARTUP_FULL,
 };
@@ -27,6 +27,22 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 
 static MF_INIT: Once = Once::new();
+
+pub(crate) const VIDEO_DECODE_RESERVATION_BYTES: usize = 64 * 1024 * 1024;
+const VIDEO_DECODE_BYTES_PER_PIXEL: u64 = 7;
+
+fn video_decode_peak_bytes(width: u32, height: u32) -> Option<u64> {
+    u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(VIDEO_DECODE_BYTES_PER_PIXEL)
+}
+
+fn video_frame_fits_reservation(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && video_decode_peak_bytes(width, height)
+            .is_some_and(|bytes| bytes <= VIDEO_DECODE_RESERVATION_BYTES as u64)
+}
 
 /// Balances a successful `CoInitializeEx` with `CoUninitialize` on drop so the
 /// COM apartment is scoped to a single `keyframe_25pct` call.
@@ -74,13 +90,24 @@ fn ensure_mf_started() {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     /// Tightly packed RGB8.
     pub rgb: Vec<u8>,
-    pub time_seconds: f64,
+}
+
+fn scaled_video_dimensions(width: u32, height: u32, max_edge: u32) -> Option<(u32, u32)> {
+    let longest = width.max(height);
+    if width == 0 || height == 0 || max_edge < 2 || longest <= max_edge {
+        return None;
+    }
+    let scale = max_edge as f64 / longest as f64;
+    let even = |value: u32| value.max(2) & !1;
+    Some((
+        even((width as f64 * scale).round() as u32),
+        even((height as f64 * scale).round() as u32),
+    ))
 }
 
 /// Extract a frame at 25% of duration. Returns the frame as RGB8.
@@ -92,6 +119,9 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
     let _com = ComScope::enter();
     ensure_mf_started();
 
+    // Media Foundation accepts ordinary DOS paths but rejects the Win32 `\\?\`
+    // namespace for common local videos. Preserve the ordinary form; long-path
+    // support requires a byte-stream source rather than rewriting every URL.
     let path_str = path.to_str().context("video path must be UTF-8")?;
     let mut wide: Vec<u16> = path_str.encode_utf16().collect();
     wide.push(0);
@@ -103,8 +133,8 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         MFCreateAttributes(&mut attrs, 2).context("MFCreateAttributes")?;
         let attrs = attrs.context("attrs not initialized")?;
         attrs
-            .SetUINT32(&MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, 1)
-            .context("enable video processing")?;
+            .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
+            .context("enable scaled video processing")?;
 
         let reader: IMFSourceReader =
             MFCreateSourceReaderFromURL(PCWSTR::from_raw(wide.as_ptr()), &attrs)
@@ -122,13 +152,44 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         reader
             .SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, TRUE)
             .context("select video stream")?;
-        reader
-            .SetCurrentMediaType(
-                MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
-                None,
-                &media_type,
-            )
-            .context("set current media type RGB32")?;
+        let native = reader
+            .GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0)
+            .context("get native video type")?;
+        let native_size = native.GetUINT64(&MF_MT_FRAME_SIZE).unwrap_or(0);
+        let native_width = (native_size >> 32) as u32;
+        let native_height = (native_size & 0xFFFF_FFFF) as u32;
+        anyhow::ensure!(
+            native_width > 0 && native_height > 0,
+            "native video dimensions are unavailable"
+        );
+        let scaled = scaled_video_dimensions(native_width, native_height, 1_280);
+        if let Some((width, height)) = scaled {
+            let packed = (u64::from(width) << 32) | u64::from(height);
+            media_type
+                .SetUINT64(&MF_MT_FRAME_SIZE, packed)
+                .context("set scaled video frame size")?;
+        }
+        if let Err(scaled_error) = reader.SetCurrentMediaType(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+            None,
+            &media_type,
+        ) {
+            if scaled.is_none() {
+                return Err(scaled_error).context("set current media type RGB32");
+            }
+            anyhow::ensure!(
+                video_frame_fits_reservation(native_width, native_height),
+                "scaled video negotiation failed and the native frame exceeds the decode memory reservation"
+            );
+            media_type.DeleteItem(&MF_MT_FRAME_SIZE)?;
+            reader
+                .SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32,
+                    None,
+                    &media_type,
+                )
+                .context("set unscaled fallback media type RGB32")?;
+        }
 
         // Pull duration from the source's presentation descriptor and
         // seek to 25%. Duration is in 100-ns units (MFTIME).
@@ -142,7 +203,16 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             }
             Err(_) => 0,
         };
-        let target_100ns = (duration_100ns / 4).max(0);
+        // Legacy MPEG program streams (the `.mpg` files common in older family
+        // archives) often expose a duration but do not support a non-keyframe
+        // MF seek. Reading from 25% then yields only format notifications and
+        // no sample. Start at zero for those containers; the first decodable
+        // frame is still a valid preview and keeps the whole archive usable.
+        let target_100ns = if seek_to_quarter(path) {
+            (duration_100ns / 4).max(0)
+        } else {
+            0
+        };
 
         if target_100ns > 0 {
             let pv: PROPVARIANT = i64_to_propvariant(target_100ns);
@@ -156,7 +226,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
         for _ in 0..32 {
             let mut stream_index = 0u32;
             let mut flags = 0u32;
-            let mut timestamp = 0i64;
             let mut sample = None;
             reader
                 .ReadSample(
@@ -164,7 +233,7 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                     0,
                     Some(&mut stream_index),
                     Some(&mut flags),
-                    Some(&mut timestamp),
+                    None,
                     Some(&mut sample),
                 )
                 .context("ReadSample")?;
@@ -186,10 +255,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             }
             let Some(sample) = sample else { continue };
 
-            let buffer = sample
-                .ConvertToContiguousBuffer()
-                .context("ConvertToContiguousBuffer")?;
-
             let (w, h) = match last_dims {
                 Some(d) => d,
                 None => {
@@ -205,14 +270,14 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             if w == 0 || h == 0 {
                 continue;
             }
-            // Guard against absurd dimensions from malformed frame metadata:
-            // (w*h*3) as usize can overflow on 64-bit (→ a tiny alloc → an OOB
-            // write in the copy loop below). Skip any implausibly-large frame.
-            const MAX_VIDEO_PIXELS: u64 = 64_000_000; // 64 MP — far above any real frame
-            if (w as u64) * (h as u64) > MAX_VIDEO_PIXELS {
-                continue;
-            }
+            anyhow::ensure!(
+                video_frame_fits_reservation(w, h),
+                "negotiated video frame exceeds the decode memory reservation"
+            );
 
+            let buffer = sample
+                .ConvertToContiguousBuffer()
+                .context("ConvertToContiguousBuffer")?;
             let mut p_data: *mut u8 = std::ptr::null_mut();
             let mut max_len = 0u32;
             let mut cur_len = 0u32;
@@ -246,7 +311,6 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
                 width: w,
                 height: h,
                 rgb,
-                time_seconds: (timestamp as f64) / 10_000_000.0,
             });
         }
 
@@ -254,9 +318,25 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
     }
 }
 
+fn seek_to_quarter(path: &Path) -> bool {
+    !matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("mpg" | "mpeg" | "vob")
+    )
+}
+
 fn propvariant_to_i64(pv: &PROPVARIANT) -> Option<i64> {
-    // PROPVARIANT impls TryFrom for the integer variants; round-trip
-    // through &PROPVARIANT which the windows-rs macros convert.
+    // PROPVARIANT impls TryFrom for the integer variants; round-trip through
+    // &PROPVARIANT which the windows-rs macros convert. MF_PD_DURATION is
+    // delivered as VT_UI8 (UINT64), so try the unsigned conversion first and
+    // saturate into i64 — otherwise a VT_UI8 duration fails the i64 TryFrom,
+    // resolves to 0, and the keyframe is grabbed from frame 0 instead of 25%.
+    if let Ok(u) = u64::try_from(pv) {
+        return Some(u.min(i64::MAX as u64) as i64);
+    }
     i64::try_from(pv).ok()
 }
 
@@ -265,16 +345,41 @@ fn i64_to_propvariant(v: i64) -> PROPVARIANT {
     PROPVARIANT::from(v)
 }
 
-// silence: S_OK / FALSE imports are exported above for downstream parity
-// with shell helpers; not all are referenced here.
-const _: () = {
-    let _ = S_OK;
-    let _ = FALSE;
-};
-
 #[cfg(test)]
 mod tests {
-    use super::ComScope;
+    use super::{
+        scaled_video_dimensions, seek_to_quarter, video_frame_fits_reservation, ComScope,
+        VIDEO_DECODE_RESERVATION_BYTES,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn video_dimensions_scale_to_an_even_working_resolution() {
+        assert_eq!(scaled_video_dimensions(3840, 2160, 1280), Some((1280, 720)));
+        assert_eq!(scaled_video_dimensions(2160, 3840, 1280), Some((720, 1280)));
+        assert_eq!(scaled_video_dimensions(1920, 1080, 1280), Some((1280, 720)));
+        assert_eq!(scaled_video_dimensions(640, 480, 1280), None);
+        assert_eq!(scaled_video_dimensions(0, 480, 1280), None);
+    }
+
+    #[test]
+    fn unscaled_fallback_cannot_exceed_reserved_bgra_plus_rgb_memory() {
+        assert!(video_frame_fits_reservation(3840, 2160));
+        assert!(!video_frame_fits_reservation(7680, 4320));
+        assert!(!video_frame_fits_reservation(0, 1080));
+        assert!(!video_frame_fits_reservation(1920, 0));
+        let boundary_pixels = VIDEO_DECODE_RESERVATION_BYTES as u64 / 7;
+        assert!(video_frame_fits_reservation(boundary_pixels as u32, 1));
+        assert!(!video_frame_fits_reservation(boundary_pixels as u32 + 1, 1));
+    }
+
+    #[test]
+    fn legacy_mpeg_streams_start_at_a_decodable_keyframe() {
+        assert!(!seek_to_quarter(Path::new("family.mpg")));
+        assert!(!seek_to_quarter(Path::new("family.MPEG")));
+        assert!(!seek_to_quarter(Path::new("family.vob")));
+        assert!(seek_to_quarter(Path::new("family.mp4")));
+    }
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
     };

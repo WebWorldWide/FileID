@@ -13,7 +13,7 @@
 // captures the exact per-file diff so undo removes ONLY what FileID added
 // — never the user's own tags. The journal is rewritten on every bulk
 // batch (an all-unchanged batch CLEARS it) and undo is gated by an age +
-// file-identity guard, mirroring the rename journal. (F-C3-034)
+// file-identity guard, mirroring the rename journal.
 import Foundation
 
 public enum TagWriter {
@@ -120,7 +120,7 @@ public enum TagWriter {
     public static func addTagsBulk(_ tags: [String], to urls: [URL]) -> BatchResult {
         // `journal: nil` — Cleanup auto-tag and People tagging keep their prior
         // behavior of NOT feeding the Library "Undo last tags" journal, which
-        // is reserved for the explicit bulk-tag sheet. (F-C3-034)
+        // is reserved for the explicit bulk-tag sheet.
         let detailed = addTagsBulkDetailed(tags, to: urls, journal: nil)
         return BatchResult(added: detailed.outcomes.count, unchanged: detailed.unchanged,
                            failed: detailed.failed, firstError: detailed.firstError)
@@ -136,7 +136,7 @@ public enum TagWriter {
         /// Identity captured at apply time (nil in journals from older builds
         /// and from the pure `init(path:addedTags:)`). Undo skips an entry on
         /// mismatch so a same-named replacement file's tags are never
-        /// stripped. (F-C3-034)
+        /// stripped.
         public let fileSize: Int64?
         public let modifiedAt: Date?
         /// When the batch was applied — undo ignores entries older than
@@ -152,7 +152,7 @@ public enum TagWriter {
         }
 
         /// Capture the file's identity + an apply timestamp so undo can verify
-        /// the same file is still there before stripping tags. (F-C3-034)
+        /// the same file is still there before stripping tags.
         init(capturing path: String, addedTags: [String], at appliedAt: Date = Date()) {
             self.path = path
             self.addedTags = addedTags
@@ -202,7 +202,7 @@ public enum TagWriter {
         // Rewrite the undo journal on EVERY batch — including an all-unchanged
         // one (outcomes empty → journal cleared). Without this, an all-unchanged
         // batch left the PREVIOUS batch's journal in place and "Undo last tags"
-        // stripped tags from a different, earlier set of files. (F-C3-034)
+        // stripped tags from a different, earlier set of files.
         if let journal {
             recordUndoJournal(outcomes, in: journal)
         }
@@ -216,7 +216,7 @@ public enum TagWriter {
     // "Undo last tags" button can remove only what FileID just added. It lives
     // in TagWriter (not the app) so it is rewritten/cleared in lock-step with
     // the batch that produced it, mirroring the rename journal's age + file-
-    // identity guards (BulkRenameSheet). (F-C3-034)
+    // identity guards (BulkRenameSheet).
 
     /// UserDefaults key for the bulk-tag undo journal. MUST stay equal to the
     /// app's `BulkTagSheet.lastBatchKey` — both record/read this one journal,
@@ -251,7 +251,7 @@ public enum TagWriter {
         let now = Date()
         for outcome in outcomes {
             // Age guard: a stale journal is far likelier to hit a same-named
-            // replacement file than to be an intentional undo. (F-C3-034)
+            // replacement file than to be an intentional undo.
             if let applied = outcome.appliedAt,
                now.timeIntervalSince(applied) > undoJournalMaxAge {
                 skipped += 1
@@ -259,7 +259,7 @@ public enum TagWriter {
             }
             // Identity guard: if the file at this path no longer matches the
             // size/mtime captured at apply time, a DIFFERENT file occupies it —
-            // stripping tags would mangle an unrelated file. Skip it. (F-C3-034)
+            // stripping tags would mangle an unrelated file. Skip it.
             // Entries with no identity data (written by older builds) are skipped
             // too — we cannot verify them, so stripping is unsafe.
             guard let size = outcome.fileSize, let mtime = outcome.modifiedAt else {

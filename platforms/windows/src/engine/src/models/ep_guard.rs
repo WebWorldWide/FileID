@@ -17,7 +17,7 @@
 //!   EP again until the user re-enables it.
 //! - [`is_disabled`] is consulted by the provider picker (treat the pack as
 //!   absent → fall through to DirectML) and by the `ORT_DYLIB_PATH` pin.
-//! - [`reenable`] clears the disable (wired to the Settings "Verify install"
+//! - [`reenable_ep`] clears the disable (wired to the Settings "Verify install"
 //!   action / an explicit provider override / a pack reinstall).
 //!
 //! Only pack-backed GPU EPs are guarded (`cuda`, `openvino`); DirectML and CPU
@@ -33,7 +33,7 @@ use std::sync::{Mutex, OnceLock};
 /// EPs overlap (e.g. a scan-startup CUDA bind + a search-query OpenVINO bind),
 /// disabling a healthy EP while the real crasher survived. Refcounting per EP
 /// also fixes the original race where a sibling bind's disarm removed a
-/// breadcrumb a still-in-flight same-EP bind needed. (audit E7 + re-audit)
+/// breadcrumb a still-in-flight same-EP bind needed.
 fn armed() -> &'static Mutex<HashMap<String, usize>> {
     static M: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
@@ -104,7 +104,7 @@ pub fn arm(ep: &str) {
 /// The bind finished (success or a recoverable Rust error). Pass the same `ep`
 /// that was armed; the breadcrumb stops naming `ep` only once its LAST
 /// outstanding bind disarms, so a concurrent same-EP bind isn't left unguarded
-/// and a concurrent DIFFERENT-EP bind keeps its own breadcrumb entry. (audit E7)
+/// and a concurrent DIFFERENT-EP bind keeps its own breadcrumb entry.
 pub fn disarm(ep: &str) {
     if !is_guarded(ep) {
         return;
@@ -126,7 +126,7 @@ pub fn disarm(ep: &str) {
 /// `.await` never runs). Without this, a clean shutdown during the first ORT
 /// bind left `.ep_attempt` on disk and the NEXT launch false-poisoned a healthy
 /// guarded EP. A real native crash still skips the drop (the process is gone),
-/// so the over-disable-on-crash breadcrumb is preserved. (audit C1-001)
+/// so the over-disable-on-crash breadcrumb is preserved. (001)
 pub struct ArmGuard {
     ep: String,
     guarded: bool,
@@ -153,7 +153,7 @@ impl Drop for ArmGuard {
 /// overlapping binds) — disable EVERY guarded EP it names so the actual crasher
 /// can't survive; over-disabling a concurrently-arming healthy EP is recoverable
 /// (re-enable in Settings), a crash-loop is not. Returns the first EP disabled,
-/// if any (for the caller's banner). (audit E7 re-audit)
+/// if any (for the caller's banner).
 pub fn resolve_poison_at_startup() -> Option<String> {
     let attempt = attempt_path()?;
     let contents = std::fs::read_to_string(&attempt).ok()?;
@@ -202,7 +202,7 @@ pub fn is_disabled(ep: &str) -> bool {
 }
 
 /// Clear the persistent disable for ONE execution provider only — the targeted
-/// "Verify install" / per-pack reinstall path. Unlike [`reenable`] (clear-all),
+/// "Verify install" / per-pack reinstall path. Unlike a clear-all reset,
 /// this does NOT touch sibling EPs' disables, so verifying/installing the CUDA
 /// pack can't silently re-arm a separately crash-poisoned OpenVINO EP and send
 /// the next scan straight back into its bad bind (ENG-59's per-EP isolation).

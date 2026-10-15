@@ -112,7 +112,7 @@ public final class EngineClient {
 
     // MARK: - Restructure butler (engine-routed plan + apply)
     //
-    // F-C3-021-app: the macOS Restructure tab drives its plan + apply through
+    // The macOS Restructure tab drives its plan + apply through
     // the engine butler instead of the app-side classifier. These mirror the
     // published-state pattern above; the `*Signal` counters bump on every fresh
     // payload so views can react via `.onChange` even though the DTOs aren't
@@ -124,7 +124,7 @@ public final class EngineClient {
     public private(set) var bulkActionResult: BulkActionResult?
     public private(set) var bulkActionResultSignal: Int = 0
     /// True once an applyRestructure has moved files and they haven't been undone
-    /// yet — drives the "Undo last run" affordance. (R2)
+    /// yet — drives the "Undo last run" affordance.
     public private(set) var canUndoRestructure = false
     private var undoRestructureInFlight = false
 
@@ -154,7 +154,7 @@ public final class EngineClient {
     private static let respawnDelays: [UInt64] = [1, 4, 16]
     private static let respawnWindow: TimeInterval = 60
     private var respawnAttempts: [Date] = []
-    // R5-07: when the engine last reached Ready. The respawn budget is cleared
+    // When the engine last reached Ready. The respawn budget is cleared
     // only after it has been continuously Ready for `stabilitySettle` (a real
     // recovery) — not on every Ready, which would let a Ready→crash flap reset
     // the budget forever.
@@ -176,7 +176,7 @@ public final class EngineClient {
     /// AttributeGraph overflows on a fast Deep Analyze run.
     private var lastDeepAnalyzeFileDoneAt: Date = .distantPast
 
-    // R3-08: every decoded event is funnelled through ONE serial AsyncStream
+    // Every decoded event is funnelled through ONE serial AsyncStream
     // consumed by a single long-lived @MainActor task, so handleEvent runs in
     // strict receipt order. The previous per-event `Task { @MainActor }` dispatch
     // had no ordering guarantee, so events could be applied out of order — e.g.
@@ -388,19 +388,19 @@ public final class EngineClient {
         // `scanned` = count of leading buffer bytes already known newline-free,
         // so the drain resumes the newline search from where it left off instead
         // of re-scanning the whole buffer every readability tick (the old O(n²)
-        // when a large frame accumulates across ticks). (R3-07B)
+        // when a large frame accumulates across ticks).
         let stderrBuffer = MutexBox((data: Data(), scanned: 0))
         // 64 MiB inbound frame cap — matches the Windows app's inbound cap and the
         // engine's command-read cap. The engine emits whole event lines (IPCSink
         // caps OUTBOUND too and substitutes ipc_frame_too_large), and a butler
         // restructurePlan (~3.5k+ moves) blows past the old 1 MiB guard, which
         // silently dropped the frame and left the UI wedged with no plan and no
-        // error. Bumped 32→64 MiB (R3-07B/R5-12) for a whole-library plan. Still
+        // error. Bumped 32→64 MiB for a whole-library plan. Still
         // bounded so a wedged engine that never emits a newline can't grow this
         // buffer without limit and OOM the app — an oversize frame surfaces a
         // visible error instead of vanishing.
         let maxFrameBytes = 64 * 1024 * 1024
-        // R3-08: hand decoded events to the serial pump (Sendable continuation
+        // Hand decoded events to the serial pump (Sendable continuation
         // captured as a local) instead of spawning an unordered Task per event.
         let continuation = self.eventContinuation
         errPipe.fileHandleForReading.readabilityHandler = { [weak self, weak proc] handle in
@@ -454,12 +454,12 @@ public final class EngineClient {
                 Task { @MainActor in
                     self?.lastError = EngineError(
                         kind: "ipc_frame_too_large",
-                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. For a Restructure plan this large, restructure a smaller subfolder instead. (R3-07)"
+                        message: "The engine sent an oversized message (\(dropped / (1024 * 1024)) MB) over the \(maxFrameBytes / (1024 * 1024)) MB limit, so it was dropped. For a Restructure plan this large, restructure a smaller subfolder instead."
                     )
                 }
             }
             for line in lines {
-                // U4: only lines that can be JSON frames earn a decode
+                // Only lines that can be JSON frames earn a decode
                 // attempt; anything else is library chatter from an engine
                 // predating the fd-2 split (or a torn frame) — log a
                 // truncated sample so spew can't bloat app.log.
@@ -468,7 +468,7 @@ public final class EngineClient {
                     continue
                 }
                 if let event = try? IPCCoder.decoder.decode(IPCEvent.self, from: line) {
-                    // Serial, ordered hand-off to the @MainActor pump (R3-08).
+                    // Serial, ordered hand-off to the @MainActor pump.
                     continuation.yield(event)
                 } else {
                     Self.debug("ENGINE: undecodable frame: \(Self.redactFrameSample(line))")
@@ -552,7 +552,7 @@ public final class EngineClient {
         case .ready(let info):
             state = .ready(info)
             restoreSavedFolderAccess()
-            // R5-07: do NOT clear the respawn budget merely on reaching Ready — a
+            // Do NOT clear the respawn budget merely on reaching Ready — a
             // Ready→immediate-crash flap would reset it every cycle and never trip
             // the 3-in-60s cap (unbounded ~1s respawn loop). Just record when we
             // became Ready; handleEngineExit clears the budget only if the engine
@@ -725,11 +725,11 @@ public final class EngineClient {
         case .modelDownloadProgress(let p):
             // Clear the bar once the download completes so the model picker
             // doesn't show a stale "Downloading 100%" forever; otherwise track
-            // progress. (F-C4-015) It also clears on engine exit (handleEngineExit).
+            // progress. It also clears on engine exit (handleEngineExit).
             modelDownloadProgress = p.fraction >= 1.0 ? nil : p
         case .queueState(let q):
             queueState = q
-        // ── Restructure butler replies (F-C3-021-app). handleEvent already
+        // ── Restructure butler replies. handleEvent already
         //    runs on the main actor (see spawn()'s dispatch), so these
         //    assignments are isolation-safe. ──
         case .restructurePlan(let plan):
@@ -739,7 +739,7 @@ public final class EngineClient {
             restructureApplyResult = result
             restructureApplyResultSignal &+= 1
             // Toggle the "Undo last run" affordance: an apply that moved files
-            // makes the run undoable; the undo's own reply clears it. (R2)
+            // makes the run undoable; the undo's own reply clears it.
             if undoRestructureInFlight {
                 undoRestructureInFlight = false
                 // A cancelled or partially-failed undo must KEEP the
@@ -764,6 +764,9 @@ public final class EngineClient {
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
         case .healthCheckResult,
+             .modelCatalog,
+             .benchmarkProgress,
+             .benchmarkResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -791,12 +794,12 @@ public final class EngineClient {
         endDeepAnalyzeActivity()
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so without the reset the NEXT
-        // apply's result is mis-attributed as the (dead) undo's. (audit R2-app)
+        // apply's result is mis-attributed as the (dead) undo's. (app)
         undoRestructureInFlight = false
         // A crash mid-download leaves a stale sub-1.0 progress that defeats the
         // WelcomeSheet VLM "no response" watchdog and shows a phantom Deep-Analyze
         // download bar; and auto-pilot would sit at a stale stage. Clear both so the
-        // respawned (jobless) engine starts clean. (audit P2 — the comment on the
+        // respawned (jobless) engine starts clean. ( — the comment on the
         // modelDownloadProgress declaration finally holds true.)
         modelDownloadProgress = nil
         autoPilotActive = false
@@ -848,7 +851,7 @@ public final class EngineClient {
         }
 
         let now = Date()
-        // R5-07: a genuine recovery (engine stayed Ready for ≥ stabilitySettle)
+        // A genuine recovery (engine stayed Ready for ≥ stabilitySettle)
         // clears the budget; a Ready→immediate-crash flap does not, so it keeps
         // ticking toward the 3-in-60s terminal cap instead of resetting forever.
         if lastReadyAt != .distantPast, now.timeIntervalSince(lastReadyAt) >= Self.stabilitySettle {
@@ -1214,7 +1217,7 @@ public final class EngineClient {
     /// Apply the selected `moves` through the engine butler. macOS performs
     /// real on-disk moves only — there is no symlink-preview apply mode, so
     /// the engine now rejects `useSymlinks: true` with an error instead of
-    /// silently performing a real move (audit R3; see DECISIONS.md). Callers
+    /// silently performing a real move. Callers
     /// should not pass `true`; the parameter exists for wire parity with the
     /// Windows engine. The reply lands on `restructureApplyResult` and bumps
     /// `restructureApplyResultSignal`.
@@ -1236,7 +1239,7 @@ public final class EngineClient {
         // Arm the in-flight flag ONLY on a successful send. A failed send (engine
         // respawning) would otherwise latch the flag and mis-attribute the NEXT
         // apply's result as the undo's — leaving canUndoRestructure false while the
-        // on-disk journal is still undoable. (audit R2-app)
+        // on-disk journal is still undoable. (app)
         let sent = send(.undoRestructure(libraryRoot: libraryRoot))
         if sent { undoRestructureInFlight = true }
         return sent

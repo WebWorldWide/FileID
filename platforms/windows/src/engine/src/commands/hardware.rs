@@ -57,7 +57,7 @@ pub(crate) fn build_hardware_info() -> HardwareInfo {
     HardwareInfo {
         gpu_vendor: vendor_str.into(),
         adapter_name: probe.adapter_name.clone(),
-        // F-C5-005: report the EP this process ACTUALLY bound (the memoized
+        // Report the EP this process ACTUALLY bound (the memoized
         // `active_provider()`), not a fresh `probe.provider`. They agree at
         // startup, but on a `verifyCudaPack` reprobe AFTER the user installs a
         // pack, a fresh probe would advertise the now-available GPU EP even
@@ -114,6 +114,7 @@ pub(crate) async fn handle_verify_cuda_pack(sink: &Sink) {
     // crash-disable ONLY so the next engine launch re-attempts the CUDA bind.
     // (Per-EP: must not also re-arm a separately crash-disabled OpenVINO pack.)
     crate::models::ep_guard::reenable_ep("cuda");
+    crate::models::runtime::invalidate_cuda_stack_probe();
     let hardware = build_hardware_info();
     let diagnostics = crate::models::runtime::probe_cuda_pack().diagnostics;
     tracing::info!(

@@ -26,6 +26,19 @@
                 <NumberBox x:Name="Dimension" Header="Maximum pixels" Width="160" Minimum="1" Maximum="8192" Value="4096" SmallChange="1" ValueChanged="OnDimensionChanged"/>
             </StackPanel>
             <ToggleSwitch x:Name="Enlarge" Header="Enlarge smaller photos to the maximum size" Toggled="OnEnlargeChanged"/>
+            <StackPanel x:Name="VideoOptions" Orientation="Horizontal" Spacing="12" Visibility="Collapsed">
+                <ComboBox x:Name="VideoResolution" Header="Resolution" Width="190" SelectedIndex="1" SelectionChanged="OnVideoChanged">
+                    <ComboBoxItem Content="720p · 1280 pixels"/>
+                    <ComboBoxItem Content="1080p · 1920 pixels"/>
+                </ComboBox>
+                <ComboBox x:Name="VideoFrame" Header="Frame" Width="130" SelectedIndex="0" SelectionChanged="OnVideoChanged">
+                    <ComboBoxItem Content="Original" Tag="source"/>
+                    <ComboBoxItem Content="9:16" Tag="9:16"/>
+                    <ComboBoxItem Content="16:9" Tag="16:9"/>
+                    <ComboBoxItem Content="1:1" Tag="1:1"/>
+                    <ComboBoxItem Content="4:5" Tag="4:5"/>
+                </ComboBox>
+            </StackPanel>
             <TextBlock x:Name="Detail" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
         </StackPanel>
         <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="12">
@@ -36,6 +49,7 @@
             <Button x:Name="History" Content="Last export" Click="OnHistory"/>
             <Button x:Name="Preview" Content="Preview export" Click="OnPreview"/>
             <Button x:Name="Export" Content="Export new versions" Click="OnExport"/>
+            <Button x:Name="Cancel" Content="Stop export" Click="OnCancel"/>
             <Button x:Name="Undo" Content="Undo export" Click="OnUndo"/>
         </StackPanel>
         <ListView x:Name="Outputs" Grid.Row="5" AutomationProperties.Name="Export preview and results"/>

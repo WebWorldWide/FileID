@@ -21,7 +21,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use fileid_engine::ipc::{RestructureApplyResult, RestructureMove};
 use fileid_engine::pipeline::discovery::FileKind;
-use fileid_engine::pipeline::restructure::{classify, FileForClassify, ProposedMove};
+use fileid_engine::pipeline::restructure::{
+    classify, FileForClassify, PlannedIdentity, ProposedMove,
+};
 use fileid_engine::pipeline::restructure_apply::RestructureApply;
 use parking_lot::Mutex;
 use rusqlite::params;
@@ -36,7 +38,8 @@ const CLASSIFY_CHUNK: usize = 4_096;
 const PLAN_FILES_SQL: &str = "\
 SELECT f.id, f.path_text, f.kind, f.modified_at, f.created_at, f.location_lat, f.location_lon, f.has_text,
     (SELECT p.name FROM face_prints fp JOIN persons p ON p.id = fp.person_id
-     WHERE fp.file_id = f.id AND p.name IS NOT NULL AND TRIM(p.name) <> '' LIMIT 1) AS person_name
+     WHERE fp.file_id = f.id AND p.name IS NOT NULL AND TRIM(p.name) <> '' LIMIT 1) AS person_name,
+    f.vlm_proposed_name, f.content_hash, f.size_bytes, f.file_ref
 FROM files f WHERE f.failed = 0";
 
 #[derive(Debug)]
@@ -334,6 +337,13 @@ fn row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
         location_lat: row.get(5)?,
         location_lon: row.get(6)?,
         has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
+        vlm_proposed: row.get(9)?,
+        identity: Some(PlannedIdentity {
+            content_hash: row.get::<_, Option<Vec<u8>>>(10)?.map(hex::encode),
+            size_bytes: row.get::<_, Option<u64>>(11)?.unwrap_or(0),
+            file_ref: row.get(12)?,
+            modified_at: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+        }),
     })
 }
 
@@ -348,6 +358,14 @@ fn absorb_chunk(
     if files.is_empty() {
         return Ok(());
     }
+    let identities: HashMap<i64, PlannedIdentity> = files
+        .iter()
+        .filter_map(|file| {
+            file.identity
+                .clone()
+                .map(|identity| (file.file_id, identity))
+        })
+        .collect();
     for proposed in classify(files, library_root) {
         *counts.entry(proposed.category.clone()).or_default() += 1;
         *move_count += 1;
@@ -355,8 +373,11 @@ fn absorb_chunk(
             sample.push(proposed.clone());
         }
         if let Some(writer) = spool.as_mut() {
-            serde_json::to_writer(&mut *writer, &to_ipc_move(&proposed))
-                .context("encoding restructure spool row")?;
+            serde_json::to_writer(
+                &mut *writer,
+                &to_ipc_move(&proposed, identities.get(&proposed.file_id)),
+            )
+            .context("encoding restructure spool row")?;
             writer
                 .write_all(b"\n")
                 .context("writing restructure spool row")?;
@@ -652,7 +673,7 @@ fn apply_outcome(result: &RestructureApplyResult) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn to_ipc_move(pm: &ProposedMove) -> RestructureMove {
+fn to_ipc_move(pm: &ProposedMove, identity: Option<&PlannedIdentity>) -> RestructureMove {
     RestructureMove {
         file_id: pm.file_id,
         source: pm.source.to_string_lossy().into_owned(),
@@ -661,13 +682,41 @@ fn to_ipc_move(pm: &ProposedMove) -> RestructureMove {
         tier: None,
         confidence: pm.confidence.as_str().to_string(),
         reason: pm.reason.clone(),
+        content_hash: identity.and_then(|identity| identity.content_hash.clone()),
+        size_bytes: identity.map(|identity| identity.size_bytes),
+        file_ref: identity.and_then(|identity| identity.file_ref),
+        modified_at: identity.map(|identity| identity.modified_at),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fileid_engine::pipeline::restructure::Confidence;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn ipc_move_carries_plan_time_identity() {
+        let proposed = ProposedMove {
+            file_id: 7,
+            source: PathBuf::from("/library/incoming/photo.jpg"),
+            destination: PathBuf::from("/library/photos/photo.jpg"),
+            category: "photo".into(),
+            confidence: Confidence::Review,
+            reason: None,
+        };
+        let identity = PlannedIdentity {
+            content_hash: Some("aabb".into()),
+            size_bytes: 42,
+            file_ref: Some(91),
+            modified_at: 123.0,
+        };
+        let move_ = to_ipc_move(&proposed, Some(&identity));
+        assert_eq!(move_.content_hash.as_deref(), Some("aabb"));
+        assert_eq!(move_.size_bytes, Some(42));
+        assert_eq!(move_.file_ref, Some(91));
+        assert_eq!(move_.modified_at, Some(123.0));
+    }
 
     fn ca(paths: &[&str]) -> Option<PathBuf> {
         common_ancestor(paths.iter().map(Path::new))
@@ -727,6 +776,8 @@ mod tests {
                 location_lat: None,
                 location_lon: None,
                 has_text: false,
+                vlm_proposed: None,
+                identity: None,
             });
             assert!(chunk.len() <= CLASSIFY_CHUNK);
             if chunk.len() == CLASSIFY_CHUNK {

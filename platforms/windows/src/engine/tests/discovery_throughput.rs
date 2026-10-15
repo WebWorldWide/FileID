@@ -1,4 +1,4 @@
-//! Synthetic walk-throughput benchmark for V15.9 Issue 1 acceptance.
+//! Synthetic walk-throughput benchmark for decoupled discovery.
 //!
 //! Acceptance: a 10,000-file synthetic tree completes the walk phase in
 //! under 5 seconds on a CI runner. On the user's NVMe Test Data corpus
@@ -50,7 +50,7 @@ fn walk_10k_files_in_under_5_seconds() {
 
     let (count, elapsed) = rt.block_on(async {
         let coord = ScanCoordinator::new();
-        let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
+        let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
         let handle = disc.spawn();
         let mut rx = handle.rx;
         let count_ref = handle.count.clone();
@@ -84,7 +84,7 @@ fn walk_10k_files_in_under_5_seconds() {
 
 /// Counter advances at FS-walk speed, not consumer drain speed. We stall
 /// the consumer (don't drain the channel) and confirm the counter still
-/// hits the full file count within a few seconds — proving the V15.9
+/// hits the full file count within a few seconds — proving the
 /// decoupling actually decouples.
 #[test]
 #[ignore = "throughput benchmark; gated behind --ignored to keep CI fast"]
@@ -108,7 +108,7 @@ fn count_advances_independently_of_consumer_drain() {
 
     rt.block_on(async {
         let coord = ScanCoordinator::new();
-        let disc = Discovery::new_with_skip(root, coord, Arc::new(HashMap::new()));
+        let disc = Discovery::new_with_skip_and_exclusions(root, coord, Arc::new(HashMap::new()), Arc::new(Vec::new()));
         let handle = disc.spawn();
         let count = handle.count.clone();
         let done = handle.done.clone();

@@ -93,7 +93,7 @@ public actor VLMDownloader {
         }
 
         let files = try await listRepoFiles(repo: repo, revision: revision)
-        if let entry = ModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) {
+        if let entry = MLXModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) {
             let weights = files.filter { $0.path.hasSuffix(".safetensors") }
             guard weights.count == entry.files.count, entry.files.allSatisfy({ expected in
                 weights.contains { $0.path == expected.path && $0.sha256 == expected.sha256 && $0.size == expected.size }
@@ -206,7 +206,7 @@ public actor VLMDownloader {
                     let inFlight = tick.written
                     let total = await tracker.total()
                     let absDone = fileStartTotalDone + inFlight
-                    // R3-20: gate through the monotonic guard so a late-running tick
+                    // Gate through the monotonic guard so a late-running tick
                     // Task built from an earlier (smaller) snapshot can't regress
                     // the displayed fraction.
                     if let emit = await tracker.report(absDone) {
@@ -217,7 +217,7 @@ public actor VLMDownloader {
             }
             await tracker.commitFile(bytes: fileSize)
             let total = await tracker.total()
-            // R3-20: the committed total is the new max, so report() passes here
+            // The committed total is the new max, so report() passes here
             // and raises lastEmitted — rejecting any lingering smaller tick Task.
             if let emit = await tracker.report(await tracker.totalDone()) {
                 let frac = total > 0 ? min(1.0, Double(emit) / Double(total)) : 1.0
@@ -246,7 +246,7 @@ public actor VLMDownloader {
     }
 
     static func catalogSentinelIsValid(_ url: URL, repo: String) -> Bool {
-        guard let entry = ModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) else { return true }
+        guard let entry = MLXModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) else { return true }
         guard url.isFileURL, let handle = try? FileHandle(forReadingFrom: url) else { return false }
         defer { try? handle.close() }
         guard let data = try? handle.readToEnd(), let manifest = try? JSONDecoder().decode(VerifiedSentinel.self, from: data), manifest.revision == entry.revision else { return false }
@@ -328,7 +328,7 @@ public actor VLMDownloader {
 
     // MARK: - HF tree listing
 
-    /// HF tree-listing URL. `recursive=true` is required (F-C3-043): without
+    /// HF tree-listing URL. `recursive=true` is required: without
     /// it the listing is top-level only, so a repo with any subfolder fetches
     /// an INCOMPLETE set yet still writes the `.fileid-verified` sentinel — the
     /// install then wedges as "verified" forever and Deep Analyze fails offline.
@@ -411,7 +411,7 @@ private actor AggregateTracker {
     private var totalBytes: Int64 = 0
     private var lastEmitted: Int64 = -1
 
-    /// Monotonic emit guard (R3-20): returns `absDone` only when it strictly
+    /// Monotonic emit guard: returns `absDone` only when it strictly
     /// exceeds the largest value already reported, so out-of-order per-tick Tasks
     /// (unstructured `Task {}` snapshots have no execution-order guarantee) can
     /// never drive the displayed download fraction backward. Returns nil when the

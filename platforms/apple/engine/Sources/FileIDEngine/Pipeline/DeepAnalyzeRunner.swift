@@ -45,7 +45,7 @@ public enum DeepAnalyzeRunner {
                 return []
             case .folder(let prefix):
                 let p = prefix.hasSuffix("/") ? prefix : prefix + "/"
-                // F-C3-027: escape LIKE metacharacters in the folder prefix so a
+                // Escape LIKE metacharacters in the folder prefix so a
                 // folder named with `_` (any char) or `%` (any run) can't
                 // over-match a sibling subtree and pull unrelated files into the
                 // VLM pass. ESCAPE '\' pairs with escapeLike's backslashing.
@@ -172,10 +172,10 @@ public enum DeepAnalyzeRunner {
 
         // Single funnel for every terminal exit: emit exactly one
         // deepAnalyzeComplete and reset the cancel flag. Routing all exits here
-        // guarantees no run() path strands the UI (F-C3-028) and that a cancel
+        // guarantees no run() path strands the UI and that a cancel
         // consumed by THIS run is cleared for the next job — replacing the old
         // run-start clearCancel() that erased a cancel issued while queued
-        // (F-C3-025).
+        // .
         func finish(processed: Int, failed: Int, cancelled: Bool) async {
             await DeepAnalyze.shared.clearCancel()
             await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
@@ -185,7 +185,7 @@ public enum DeepAnalyzeRunner {
             )))
         }
 
-        // F-C3-025: honor a cancel issued while this job sat in the JobQueue.
+        // Honor a cancel issued while this job sat in the JobQueue.
         // (The old code clearCancel()'d here, erasing that cancel and running
         // the whole pass anyway.) Checked before the RAM probe + cold load so a
         // job the user already cancelled does no work at all.
@@ -257,7 +257,7 @@ public enum DeepAnalyzeRunner {
                 }
             }
         } catch {
-            // F-C3-024: a cancel during the cold load/download cancels the load
+            // A cancel during the cold load/download cancels the load
             // task; surface that as a user cancel, not an alarming load failure.
             // (await is hoisted out of the `||` — its RHS is a non-async autoclosure.)
             let cancelledDuringLoad = await DeepAnalyze.shared.isCancelled()
@@ -310,7 +310,7 @@ public enum DeepAnalyzeRunner {
                 currentPath: target.path, modelKind: modelKey
             )))
 
-            // V14.9-L1: per-token live caption accumulator. MLX yields chunks
+            // Per-token live caption accumulator. MLX yields chunks
             // as the model generates; throttle wire emission to 4 Hz so a
             // fast token stream doesn't flood the IPC sink. Mirror of the
             // Windows engine accumulator in main.rs::append_caption_chunk.
@@ -666,7 +666,7 @@ public enum DeepAnalyzeRunner {
 
 }
 
-/// V14.9-L1: actor-isolated state for the per-token caption accumulator
+/// Actor-isolated state for the per-token caption accumulator
 /// used by `DeepAnalyzeRunner`. Mirrors the Windows engine's
 /// `append_caption_chunk` semantics: trim each chunk, join with exactly
 /// one space, and throttle wire emission to 4 Hz so a fast MLX stream

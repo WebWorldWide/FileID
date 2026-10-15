@@ -113,7 +113,16 @@ public sealed partial class MainWindow : Window
         // InitializeComponent MUST succeed; if it throws there's no
         // window to show. Let it propagate up to the App handler.
         Trace("InitializeComponent");
-        InitializeComponent();
+        try
+        {
+            InitializeComponent();
+        }
+        catch (System.Exception ex)
+        {
+            Trace($"InitializeComponent failed (HRESULT=0x{ex.HResult:X8}): {ex}");
+            FlushTrace();
+            throw;
+        }
         Title = "FileID";
 
         Step("ApplyTitleBarChrome", ApplyTitleBarChrome);
@@ -831,7 +840,7 @@ public sealed partial class MainWindow : Window
             e.AcceptedOperation = DataPackageOperation.Copy;
             // Show the overlay. e.DragUIOverride is provided by the OS and CAN be
             // null (some drag sources / shell states don't supply it); guard it so
-            // we don't NRE and lose the accepted-operation + overlay. (audit A15)
+            // we don't NRE and lose the accepted-operation + overlay.
             if (e.DragUIOverride is { } dragUi)
             {
                 dragUi.IsCaptionVisible = false;

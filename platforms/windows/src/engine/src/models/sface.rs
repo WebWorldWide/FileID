@@ -17,8 +17,7 @@ use ort::session::{Session, SessionInputValue, SessionOutputs};
 use ort::value::Tensor;
 
 use super::runtime::{
-    classify_inference_error, configure_session_builder, execution_providers_for_chain,
-    priority_chain, RuntimeProbe,
+    classify_inference_error, commit_chain_session, ensure_gpu_inference_alive,
 };
 
 pub struct SFace {
@@ -36,31 +35,13 @@ impl SFace {
             anyhow::bail!("SFace weights missing at {}", path.display());
         }
         let before = std::fs::metadata(path)?;
-        let model_version = Self::fingerprint(path)?;
-        let probe = RuntimeProbe::shared();
-        let chain = priority_chain(probe.vendor);
-        let builder = Session::builder().context("ORT session builder")?;
-        let mut builder =
-            configure_session_builder(builder).context("configure session (SFace)")?;
-        let chain_labels: Vec<&'static str> = chain.iter().map(|e| e.as_str()).collect();
-        let providers = execution_providers_for_chain(&chain, probe.adapter_index);
-        if !providers.is_empty() {
-            builder = builder
-                .with_execution_providers(providers)
-                .context("register execution providers (SFace)")?;
-        }
-        tracing::info!(model = "SFace", chain = ?chain_labels, "EP priority chain registered");
-        let session = builder
-            .commit_from_file(path)
-            .context("ORT session commit (SFace)")?;
+        let size = before.len();
+        anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
+        let digest = crate::util::content_hash::exact_file_sha256(path, size)?;
+        let model_version = format!("sface128-sha256:{}", hex::encode(digest));
+        let (session, input_name) = commit_chain_session("SFace", path)?;
         let after = std::fs::metadata(path)?;
         anyhow::ensure!(before.len() == after.len() && before.modified()? == after.modified()?, "SFace weights changed during load");
-        let input_name = session
-            .inputs
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("SFace ONNX has no inputs"))?
-            .name
-            .clone();
 
         let mut model = Self { session, input_name, model_version };
         let warmup_started = std::time::Instant::now();
@@ -71,14 +52,6 @@ impl SFace {
             "warmup complete"
         );
         Ok(model)
-    }
-
-    pub fn fingerprint(path: impl AsRef<Path>) -> Result<String> {
-        let path = path.as_ref();
-        let size = std::fs::metadata(path)?.len();
-        anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
-        let digest = crate::util::content_hash::exact_file_sha256(path,size)?;
-        Ok(format!("sface128-sha256:{}",hex::encode(digest)))
     }
 
     pub fn model_version(&self) -> &str {
@@ -104,6 +77,7 @@ impl SFace {
 
         let input = Tensor::from_array(chw).context("SFace input tensor")?;
         let input_name = self.input_name.clone();
+        ensure_gpu_inference_alive()?;
         let outputs: SessionOutputs = self
             .session
             .run(vec![(input_name, SessionInputValue::from(input))])
@@ -151,21 +125,6 @@ pub fn default_weights_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fingerprint_is_content_scoped_and_bounded_without_loading_inference() {
-        let path = std::env::temp_dir().join(format!("fileid-sface-fingerprint-{}.onnx",uuid::Uuid::new_v4()));
-        std::fs::write(&path,b"fixture").unwrap();
-        assert_eq!(SFace::fingerprint(&path).unwrap(),"sface128-sha256:f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d");
-        assert_eq!(std::fs::read(&path).unwrap(),b"fixture");
-        std::fs::write(&path,b"changed").unwrap();
-        assert_ne!(SFace::fingerprint(&path).unwrap(),"sface128-sha256:f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d");
-        std::fs::write(&path,[]).unwrap();
-        assert!(SFace::fingerprint(&path).is_err());
-        std::fs::File::create(&path).unwrap().set_len(128*1024*1024+1).unwrap();
-        assert!(SFace::fingerprint(&path).is_err());
-        std::fs::remove_file(path).unwrap();
-    }
 
     #[test]
     fn l2_normalize_gives_unit_norm() {

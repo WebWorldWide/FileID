@@ -67,7 +67,7 @@ final class HNSWIndex {
     /// and thus the approximate kNN neighbour sets — so face clustering derives
     /// the same cluster IDs and inherited People names on every re-cluster of an
     /// unchanged library. `Float.random` (system entropy) made identities hop
-    /// run-to-run. Same constant the Windows engine pins. (audit F-C3-006)
+    /// run-to-run. Same constant the Windows engine pins. (006)
     private static let levelSeed: UInt64 = 0xF11E_1D00
     private var rngState: UInt64 = HNSWIndex.levelSeed
 
@@ -251,7 +251,7 @@ final class HNSWIndex {
         // rebuilt topology is identical to building fresh from these survivors —
         // otherwise compact() would keep drawing from the advanced stream and the
         // determinism contract above (stable cluster IDs / inherited names across
-        // re-clusters) would silently break. (audit F-C3-006)
+        // re-clusters) would silently break. (006)
         nodes = []
         entryPoint = -1
         entryLevel = 0
@@ -486,7 +486,7 @@ final class HNSWIndex {
     /// as `FaceClusteringService.l2` — returns .infinity on dim mismatch.
     private func l2(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, a.count == dim else { return .infinity }
-        // R3-09: vDSP_distancesq computes Σ(a−b)² in one pass with no temporary,
+        // vDSP_distancesq computes Σ(a−b)² in one pass with no temporary,
         // dropping the per-call dim-sized `[Float]` alloc + zero-fill that ran in
         // the innermost HNSW distance loop.
         var sumSq: Float = 0

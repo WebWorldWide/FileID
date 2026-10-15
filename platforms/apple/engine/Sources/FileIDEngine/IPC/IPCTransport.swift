@@ -1,4 +1,4 @@
-// IPC transport bootstrap (U4).
+// IPC transport bootstrap.
 //
 // IPC events travel over fd 2 — the app reads that pipe and decodes one
 // JSON event per line. But MLX/Metal/ggml C++ code also writes

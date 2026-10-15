@@ -22,6 +22,7 @@
 #   pwsh build/build-all.ps1 -SkipEngine        # WinUI-only iteration
 #   pwsh build/build-all.ps1 -SkipApp           # Engine-only iteration
 #   pwsh build/build-all.ps1 -RunTests          # cargo test + dotnet test
+#   pwsh build/build-all.ps1 -MediaDir C:\absolute\path\to\media  # verified x64 development video runtime
 #
 # Failure modes the script catches and explains (instead of leaking a
 # raw stack trace):
@@ -64,9 +65,6 @@ param(
     # aarch64-pc-windows-msvc and the .NET app for win-arm64. Implies
     # -Release because debug ARM64 + WinAppSDK has rough edges.
     [switch]$Arm64,
-    # Native llama.cpp bindings (in-process VLM). Adds ~150 MB of build
-    # artifacts + needs cmake. Off by default; enable for ship builds.
-    [switch]$VlmNative,
     # Sign every built binary using `build/sign.ps1`. Requires either
     # -Thumbprint to be set or FILEID_EV_THUMBPRINT env var.
     [switch]$Sign,
@@ -75,11 +73,19 @@ param(
     # + parallel codegen, ~40-60% faster) and dotnet runs with explicit
     # `-m` (max-CPU). Use for inner-loop iteration; ship builds use plain
     # -Release for fat LTO.
-    [switch]$Fast
+    [switch]$Fast,
+    [string]$MediaDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
+
+if ($MediaDir -and $Arm64) {
+    throw 'The approved portable media development runtime is Windows x64 only.'
+}
+if ($MediaDir -and $SkipEngine) {
+    throw 'Build the engine when staging the portable media runtime.'
+}
 
 # -Wipe and -WipeDbOnly are mutually exclusive: one is "nuke everything",
 # the other is "touch only the SQLite triplet". Combining them is ambiguous.
@@ -279,31 +285,23 @@ if (-not $SkipApp) {
 }
 
 if (-not $SkipEngine) {
-    Write-Host "Building engine ($RustProfile, $($RustTarget))$(if ($VlmNative) { ' [vlm-native]' })..." -ForegroundColor Cyan
-    if ($VlmNative) {
-        Write-Host "  vlm-native feature: requires cmake + ~150 MB build artifacts" -ForegroundColor DarkGray
-        if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-            Write-Host "ERROR: cmake not found in PATH. Install via 'winget install Kitware.CMake' before -VlmNative." -ForegroundColor Red
-            exit 1
-        }
-    }
+    Write-Host "Building engine ($RustProfile, $($RustTarget))..." -ForegroundColor Cyan
     Push-Location $EngineDir
     try {
-        $featureArgs = if ($VlmNative) { @("--features", "vlm-native") } else { @() }
         # Cargo uses every CPU by default; `-j` is redundant but explicit
         # makes the intent obvious. The big win is the profile choice
         # ($RustProfile = release-fast under -Fast).
         $jobsArg = @("-j", [Environment]::ProcessorCount.ToString())
         if ($Fast -and $Release) {
-            & cargo build --profile release-fast --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --profile release-fast --target $($RustTarget) @jobsArg
         } elseif ($Release) {
-            & cargo build --release --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --release --target $($RustTarget) @jobsArg
         } else {
-            & cargo build --target $($RustTarget) @featureArgs @jobsArg
+            & cargo build --target $($RustTarget) @jobsArg
         }
         if ($RunTests) {
             Write-Host "Running cargo tests..." -ForegroundColor Cyan
-            & cargo test --target $($RustTarget) @featureArgs @jobsArg
+            & cargo test --target $($RustTarget) @jobsArg
         }
     } finally {
         Pop-Location
@@ -358,6 +356,11 @@ if (-not $SkipEngine) {
         Write-Host "WARN: fetch-runtime-deps.ps1 not found; engine may fail to find ORT/DirectML at runtime." -ForegroundColor Yellow
         $script:RuntimeDlls = @{}
     }
+}
+
+if ($MediaDir) {
+    $stageMedia = Join-Path $ScriptDir 'stage-media.ps1'
+    & $stageMedia -SourceDir $MediaDir -DestinationRoot $StagingDir
 }
 
 # --- 4. App build -----------------------------------------------------------
@@ -429,6 +432,9 @@ if (-not $SkipApp) {
                 Copy-Item -LiteralPath $script:RuntimeDlls[$name] -Destination (Join-Path $AppOutDir $name) -Force
                 Write-Host "  $name colocated with FileID.exe" -ForegroundColor Green
             }
+        }
+        if ($MediaDir) {
+            & $stageMedia -SourceDir $MediaDir -DestinationRoot $AppOutDir
         }
     }
 

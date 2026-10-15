@@ -24,7 +24,7 @@ struct CleanupView: View {
     @State private var exactSkipped = 0
     /// Single-flight guard: the per-group/header "Delete" buttons have no
     /// confirmation, so a rapid double-tap would otherwise trash the same files
-    /// twice (the 2nd fails "already in Trash" → a confusing "1 failed"). (audit P2)
+    /// twice (the 2nd fails "already in Trash" → a confusing "1 failed").
     @State private var deleting = false
     @State private var confirmDelete: Bool = false
 
@@ -36,7 +36,7 @@ struct CleanupView: View {
 
     /// Mirrors LibraryView: true while the engine is discovering, tagging, or
     /// post-processing. Gates the exact-mode live SHA-256 re-verify off the ~1 Hz
-    /// scan batch ticks (see the batch handler). (audit — reload storm)
+    /// scan batch ticks (see the batch handler). (reload storm)
     private var scanActive: Bool {
         guard let p = engine.lastProgress else { return false }
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
@@ -84,7 +84,7 @@ struct CleanupView: View {
                 // scan reads on the same drive for the entire scan. Defer the exact
                 // re-verify to scan completion (the lastTerminalEventAt handler
                 // below). Similar mode's perceptual index is cheap and drive-light,
-                // so it keeps refreshing live. (audit — reload storm)
+                // so it keeps refreshing live. (reload storm)
                 if isSimilar || !scanActive { reload() }
             }
         }
@@ -374,7 +374,7 @@ struct CleanupView: View {
     }
 
     private func trashSelected(across groupsToScan: [DuplicateGroup]) async {
-        guard !deleting else { return }   // re-entrancy guard (audit P2)
+        guard !deleting else { return }   // re-entrancy guard
         deleting = true
         statusWarning = false
         defer { deleting = false }
@@ -474,7 +474,7 @@ struct CleanupView: View {
         }
         let keeperURLsToTag = Array(keeperURLSet)
 
-        // P5 — auto-tag keepers (Settings toggle, default on). Useful so
+        // auto-tag keepers (Settings toggle, default on). Useful so
         // the user can find "files I deduped this session" in Finder.
         let autoTagOn = UserDefaults.standard.object(forKey: AppSettings.cleanupAutoTagKey) == nil
             ? AppSettings.cleanupAutoTagDefault
@@ -528,8 +528,8 @@ struct CleanupView: View {
         // reload is already running, mark it dirty and let it re-run once when it
         // finishes — at most one in-flight + one pending. A result known-stale
         // (a newer reload was requested mid-query) is skipped, not assigned, so the
-        // final assignment is always the freshest (latest-wins). (audit R3-05 delta fix)
-        // R7: freeze the duplicate re-query + selection re-derivation while a
+        // final assignment is always the freshest (latest-wins). (05 delta fix)
+        // Freeze the duplicate re-query + selection re-derivation while a
         // destructive confirmation is on screen, so the count the user is
         // confirming can't drift mid-scan. Re-runs on dialog dismissal
         // (onChange of confirmDelete), which re-applies the keeper protection.

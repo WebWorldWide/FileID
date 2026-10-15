@@ -89,7 +89,7 @@ public static class SpringEasing
         // A GetElementVisual visual's Size is NOT populated (stays (0,0)) unless
         // explicitly bound, so deriving the center from it anchored the scale at
         // the top-left — growth/shrink wasn't symmetric. Use the element's laid-out
-        // size instead. (audit A11)
+        // size instead.
         if (element is FrameworkElement fe)
         {
             visual.CenterPoint = new System.Numerics.Vector3(

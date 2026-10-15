@@ -19,7 +19,11 @@
 // pack detection) live in `runtime.rs`.
 
 pub mod bge_text;
+pub mod catalog;
+pub mod launch_tuning;
+pub mod benchmark;
 pub mod clip_text;
+pub mod clip_space;
 pub mod clip_tokenizer;
 pub mod ep_guard;
 pub mod mobileclip;
@@ -27,15 +31,22 @@ pub mod ram_plus;
 pub mod ram_plus_batch;
 pub mod registry;
 pub mod runtime;
-pub mod florence2;
 pub mod scene_vocab;
 pub mod face_align;
-pub mod scrfd;
+pub mod face_geometry;
 pub mod sface;
 pub mod variants;
 pub mod yunet;
 pub mod vlm;
 pub mod vlm_server;
+pub(crate) mod native_process;
+pub(crate) mod native_admission;
+pub(crate) mod native_probe;
+pub(crate) mod native_runtime;
+pub(crate) mod model_provenance;
+pub(crate) mod model_job;
+pub(crate) mod runtime_cache;
+pub(crate) mod resident_service;
 pub mod wordpiece_tokenizer;
 
 pub use clip_tokenizer::ClipTokenizer;

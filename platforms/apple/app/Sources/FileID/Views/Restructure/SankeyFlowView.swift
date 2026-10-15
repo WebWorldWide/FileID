@@ -127,7 +127,7 @@ struct SankeyFlowView: View {
                                     if node.id == Self.otherSourceID {
                                         onTapSourceRollup(layout.rollupSourceFolders)
                                     } else {
-                                        // R6-03: pass the FULL path (identityKey),
+                                        // Pass the FULL path (identityKey),
                                         // not the basename `label` — two source
                                         // folders sharing a basename otherwise both
                                         // drill into the first match. Mirrors the
@@ -404,7 +404,7 @@ struct SankeyFlowView: View {
                 hoverBus.set(nil)
             }
         case .active(let point):
-            // R6-06: only write the cursor @State when actually OVER a ribbon (the
+            // Only write the cursor @State when actually OVER a ribbon (the
             // tooltip is their sole reader and only shows over a flow). Writing on
             // every mouse-move — including empty space and the node columns —
             // re-evaluated body and re-stroked all ~70 ribbon Paths at move rate.
@@ -438,7 +438,7 @@ struct SankeyFlowView: View {
                 }
             }
             if let flow = bestFlow {
-                cursorPos = point      // R6-06: only update cursor state over a ribbon
+                cursorPos = point      // Only update cursor state over a ribbon
                 cursorActive = true
                 let next: RestructureHoverContext = .flow(
                     sourceFolder: flow.sourceFolder,

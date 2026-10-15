@@ -62,7 +62,7 @@ public sealed class PreviewLifecycleContractTests
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+            if (File.Exists(Path.Combine(directory.FullName, "LICENSE"))
                 && Directory.Exists(Path.Combine(directory.FullName, "platforms", "windows")))
             {
                 return directory.FullName;

@@ -1,4 +1,4 @@
-﻿// F11: when a Similar-mode load fails (e.g. LoadSimilar's >20k image cap
+﻿// When a Similar-mode load fails (e.g. LoadSimilar's >20k image cap
 // exception), the previously loaded Exact groups must not stay rendered under
 // the Similar header. RefreshAsync clears the list via MergeByContentHash with
 // an empty row set — verify that path really empties a populated collection.
@@ -181,7 +181,7 @@ public class CleanupModeSwitchTests
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+            if (File.Exists(Path.Combine(directory.FullName, "LICENSE"))
                 && Directory.Exists(Path.Combine(directory.FullName, "platforms", "windows")))
             {
                 return directory.FullName;

@@ -1,7 +1,7 @@
 // Undo-journal invariants for bulk tagging. The journal must be rewritten on
 // EVERY batch (an all-unchanged batch CLEARS it, so "Undo last tags" can't
 // replay a different earlier batch), and undo must refuse a stale or
-// identity-mismatched entry, mirroring the rename journal. (F-C3-034)
+// identity-mismatched entry, mirroring the rename journal.
 //
 // Each test uses an isolated UserDefaults suite so the shared journal key is
 // never touched concurrently by other suites.
@@ -9,7 +9,7 @@ import Testing
 @testable import FileIDShared
 import Foundation
 
-@Suite("TagWriter — undo journal (F-C3-034)")
+@Suite("TagWriter — undo journal")
 struct TagUndoJournalTests {
 
     private func isolatedDefaults() -> (UserDefaults, String) {

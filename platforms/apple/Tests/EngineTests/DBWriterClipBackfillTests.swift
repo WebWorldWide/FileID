@@ -1,4 +1,4 @@
-// Re-audit R-14 regression: F-C6-001's discovery incremental skip drops
+// The discovery incremental skip drops
 // unchanged files (size+mtime match) upstream of the pipeline, which made
 // DBWriter's unchanged-file CLIP-backfill branch (insertOne, `if unchanged`)
 // unreachable on a normal incremental rescan — so a CLIP model installed AFTER

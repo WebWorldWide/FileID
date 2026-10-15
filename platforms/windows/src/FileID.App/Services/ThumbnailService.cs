@@ -198,7 +198,7 @@ internal sealed class ThumbnailService : IDisposable
             {
                 // Honor the PER-REQUEST token (a scrolled-away tile cancels its own
                 // request), linked with the service token, so the full shell+disk+
-                // decode doesn't run for a tile the user already scrolled past. (audit A6)
+                // decode doesn't run for a tile the user already scrolled past.
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, req.Cancellation);
                 // No ConfigureAwait(false): the returned BitmapImage is a
                 // UI-thread DispatcherObject, so keep the continuation (and the
@@ -233,7 +233,7 @@ internal sealed class ThumbnailService : IDisposable
             {
                 // Per-request cancel (tile scrolled away): complete null and keep
                 // draining. A service-token (shutdown) cancel re-throws so the
-                // loop exits as before. (audit A6)
+                // loop exits as before.
                 req.Completion.TrySetResult(null);
                 if (ct.IsCancellationRequested) throw;
             }
@@ -457,7 +457,7 @@ internal sealed class ThumbnailService : IDisposable
     /// (the shell uses the same IThumbnailProvider chain as Explorer — Office /
     /// raw / .heic all work). Do NOT add per-window DPI scaling here: the WinRT
     /// `GetWindowHandle` interop is UI-thread-affined and, called from this
-    /// worker-thread drain, poisoned later `SetSourceAsync` calls (V16.1 revert).
+    /// worker-thread drain, poisoned later `SetSourceAsync` calls.
     /// </summary>
     private const uint ThumbnailRequestPx = 192;
 
@@ -618,7 +618,7 @@ internal sealed class ThumbnailService : IDisposable
         }
         catch (Exception ex)
         {
-            // V15.6 fix: previously this `catch` returned null directly,
+            // Previously this `catch` returned null directly,
             // bypassing the image-extension fallback below. Now we log
             // the exception TYPE (was just .Message) and fall through to
             // the fallback path so a JPEG with a broken shell provider
@@ -631,7 +631,7 @@ internal sealed class ThumbnailService : IDisposable
 
         // 2) Image-extension fallback — eager-decode from the original
         //    file bytes. Reached when (a) shell returned null/empty, OR
-        //    (b) shell threw. The V15.6 bug was that case (b) skipped
+        //    (b) shell threw. The bug was that case (b) skipped
         //    this branch.
         if (isKnownImage)
         {
@@ -693,7 +693,7 @@ internal sealed class ThumbnailService : IDisposable
 
     /// <summary>Decode bytes into a BitmapImage on the UI dispatcher.
     /// Eager decode (SetSourceAsync from an InMemoryRandomAccessStream)
-    /// avoids the V15.5 lazy-UriSource bug where ImageOpened never fired
+    /// avoids the lazy-UriSource bug where ImageOpened never fired
     /// for mid-scan files.</summary>
     private static async Task<BitmapImage?> RenderFromBytesOnDispatcherAsync(
         byte[] bytes,

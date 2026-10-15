@@ -34,7 +34,7 @@ public final class ReadStore: @unchecked Sendable {
     public private(set) var totalReclaimableMB: Double = 0
     public private(set) var lastError: String?
 
-    // R3-06: `lastError` is an @Observable property SwiftUI reads on the
+    // `lastError` is an @Observable property SwiftUI reads on the
     // MainActor, but it's written from off-main detached tasks (bulk rename /
     // merge / undo). A bare off-main write of an Optional<String> racing a
     // MainActor read is undefined behavior under Swift 6. Route every write
@@ -92,7 +92,7 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public func notifyChanged() {
-        // R3-06: `version` is an @Observable property SwiftUI reads on the
+        // `version` is an @Observable property SwiftUI reads on the
         // MainActor; notifyChanged() is reached OFF main from the bulk-rename /
         // merge / undo detached tasks, so a bare `version &+= 1` is an off-main
         // write racing a MainActor read (torn RMW / lost update). Serialize the
@@ -730,7 +730,7 @@ public final class ReadStore: @unchecked Sendable {
     /// Display caps for the perceptual (similar) grouping below. Restored here
     /// after the exact-duplicate rewrite removed the shared constant block while
     /// this similar path still references them: at most 200 groups, 5,000 total
-    /// visible members across all groups, 500 members per group. (audit 2026-07-15)
+    /// visible members across all groups, 500 members per group.
     private static let cleanupMaxGroups = 200
     private static let cleanupMaxVisibleMembers = 5_000
     private static let cleanupMaxVisibleMembersPerGroup = 500
@@ -1075,7 +1075,7 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    /// R5-02: bulk mark-as-unknown for the People multi-select action. ONE write
+    /// Bulk mark-as-unknown for the People multi-select action. ONE write
     /// connection + ONE transaction for the whole selection (chunked IN),
     /// mirroring the Windows engine's single markPersonsAsUnknown command. The
     /// previous per-id updatePerson loop opened N connections + ran N transactions
@@ -1202,13 +1202,13 @@ public final class ReadStore: @unchecked Sendable {
         do {
             let queue = try writeQueue()
             let newCount: Int = try queue.write { db in
-                // R5-01 name preservation: the People drag-merge passes the DROP TARGET
+                // Name preservation: the People drag-merge passes the DROP TARGET
                 // as `target` regardless of names, so dragging a NAMED card onto an
                 // UNNAMED one would delete the typed name (persons row deleted, no undo).
                 // If `target` has no typed name but exactly one entity in the merge set
                 // does, that named one becomes the survivor instead. Every other caller
                 // already passes the named cluster as `target`, so this is a no-op for
-                // them. (audit — People drag-merge name loss)
+                // them. (People drag-merge name loss)
                 let allIDs = [target] + validSources
                 let hasTypedName = "(COALESCE(TRIM(name),'')<>'' OR COALESCE(TRIM(title),'')<>'' OR COALESCE(TRIM(first_name),'')<>'' OR COALESCE(TRIM(middle_name),'')<>'' OR COALESCE(TRIM(last_name),'')<>'' OR COALESCE(TRIM(suffix),'')<>'')"
                 let idPlaceholders = allIDs.map { _ in "?" }.joined(separator: ",")
@@ -1264,7 +1264,7 @@ public final class ReadStore: @unchecked Sendable {
     public func mergePersonsBatch(_ pairs: [(target: Int64, source: Int64)]) -> Int {
         guard !pairs.isEmpty else { return 0 }
 
-        // R5-01: name-state + size for every touched cluster, so the union
+        // name-state + size for every touched cluster, so the union
         // survivor respects name priority ACROSS CHAINS. Per-pair preferredTarget
         // does NOT compose transitively — a chain of borderline pairs linking a
         // named and an unnamed cluster could otherwise reparent the named root
@@ -1326,7 +1326,7 @@ public final class ReadStore: @unchecked Sendable {
         func union(target: Int64, source: Int64) {
             let rt = find(target), rs = find(source)
             if rt == rs { return }
-            // R5-01: keep the higher-priority root (named > larger file_count >
+            // Keep the higher-priority root (named > larger file_count >
             // lower id) so a typed name is never deleted when a chain of
             // borderline pairs links a named and an unnamed cluster — per-pair
             // preferredTarget does not compose transitively, so union order alone
@@ -1649,7 +1649,7 @@ public final class ReadStore: @unchecked Sendable {
                 if firstError == nil { firstError = lastErrorSnapshot() }
             }
         }
-        // R5-03: one observation invalidation + counter refresh for the whole
+        // One observation invalidation + counter refresh for the whole
         // batch (the per-file notifyChanged was removed from applyProposedName).
         if !renamed.isEmpty { self.notifyChanged() }
         return BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
@@ -1723,7 +1723,7 @@ public final class ReadStore: @unchecked Sendable {
     /// DB row. Returns the new path or nil on failure.
     public func applyProposedName(file: FileRow) -> URL? {
         do {
-            // R5-03: the private overload no longer fires notifyChanged per call;
+            // The private overload no longer fires notifyChanged per call;
             // fire it once here for the single-file path.
             let result = applyProposedName(file: file, on: try writeQueue())
             if result != nil { self.notifyChanged() }
@@ -1751,7 +1751,7 @@ public final class ReadStore: @unchecked Sendable {
     /// on a case-insensitive volume is recognized as the file's own slot while
     /// two genuinely distinct files on a case-sensitive volume are not. Only
     /// consulted when fileExists(target) is already true (oldURL always exists as
-    /// the move source), so resourceValues won't be missing. (R5-08)
+    /// the move source), so resourceValues won't be missing.
     private func sameFileOnDisk(_ a: URL, _ b: URL) -> Bool {
         if a == b { return true }
         guard
@@ -1769,7 +1769,7 @@ public final class ReadStore: @unchecked Sendable {
         let baseName = ext.isEmpty ? proposed : "\(proposed).\(ext)"
         var target = dir.appendingPathComponent(baseName)
         var bump = 2
-        // R5-08: identity (inode) check, NOT `target != oldURL` — on a
+        // Identity (inode) check, NOT `target != oldURL` — on a
         // case-insensitive volume a case-only rename (the engine sanitizer always
         // lowercases) makes fileExists(target) true while the case-sensitive
         // `target != oldURL` is also true, so the loop wrongly bumped the file's
@@ -1804,7 +1804,7 @@ public final class ReadStore: @unchecked Sendable {
                                 file.id]
                 )
             }
-            // R5-03: notifyChanged() is fired ONCE by the caller (per batch in
+            // notifyChanged() is fired ONCE by the caller (per batch in
             // applyProposedNamesBulk, or in the single-file public wrapper) — not
             // per file, which flooded the MainActor with N invalidations.
             return target

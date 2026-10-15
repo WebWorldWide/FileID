@@ -194,7 +194,7 @@ public class IpcEventTests
         Assert.Throws<JsonException>(() => IpcCoder.Decode<IpcEvent>(bad));
     }
 
-    // V14.9-K1: Phase G IPC round-trip tests. Newly-added VerifyCudaPack
+    // IPC round-trip tests. Newly-added VerifyCudaPack
     // command + HardwareReprobed event need coverage so a future schema
     // edit doesn't silently break the Settings → Performance Verify flow.
 
@@ -272,7 +272,7 @@ public class IpcEventTests
         Assert.Null(got.Diagnostics);
     }
 
-    // V14.9-K1: Phase I added `currentCaption: Option<String>` to
+    // Added `currentCaption: Option<String>` to
     // DeepAnalyzeProgress so the UI renders the live token stream.
     // Lock in the round-trip + absent-field decode so a wire-format
     // regression shows up in CI.

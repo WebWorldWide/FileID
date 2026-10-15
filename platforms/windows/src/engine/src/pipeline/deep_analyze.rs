@@ -1,4 +1,3 @@
-use crate::pipeline::naming_context::NamingContext;
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
 // Pipeline:
@@ -9,24 +8,22 @@ use crate::pipeline::naming_context::NamingContext;
 //   4. Persist to `deep_analyze_results` (migration v3).
 //   5. Emit `deepAnalyzeProgress` IPC events on every N files.
 
+use anyhow::Context;
+
+use super::deep_analyze_naming as naming;
+
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct AnalyzeOutcome {
     pub file_id: i64,
     pub description: Option<String>,
     pub proposed_name: Option<String>,
-    pub model: String,
-    pub elapsed_ms: u64,
 }
 
-/// What we want from this file: caption, smart filename, or both.
+/// Which VLM passes run for a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum AnalyzeMode {
-    CaptionOnly,
-    RenameOnly,
     /// Tags only — the fast path for background auto-tagging. One VLM call per
     /// file (tags) instead of three (caption + tags + rename), so a whole-library
     /// pass is ~3× faster. Caption + proposed-name columns are left untouched.
@@ -39,6 +36,18 @@ pub enum AnalyzeMode {
 }
 
 impl AnalyzeMode {
+    pub(crate) fn requests_caption(self) -> bool {
+        matches!(self, Self::Both | Self::CaptionAndTags)
+    }
+
+    pub(crate) fn requests_tags(self) -> bool {
+        matches!(self, Self::TagsOnly | Self::Both | Self::CaptionAndTags)
+    }
+
+    pub(crate) fn requests_rename(self) -> bool {
+        self == Self::Both
+    }
+
     fn establishes_completion(self) -> bool {
         matches!(self, Self::Both | Self::CaptionAndTags)
     }
@@ -67,28 +76,53 @@ pub async fn analyze_file(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    naming_context: Option<&NamingContext>,
+    face_names: &[String],
+    on_token: impl FnMut(&str),
+) -> anyhow::Result<AnalyzeOutcome> {
+    analyze_file_scoped(db, runner, file_id, model_kind, mode, cancel, face_names, on_token, None).await
+}
+
+pub(crate) async fn analyze_file_scoped(
+    db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    runner: &crate::models::vlm::VlmRunner,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    face_names: &[String],
     mut on_token: impl FnMut(&str),
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
 
-    let started = std::time::Instant::now();
-    let context = naming_context.ok_or_else(|| anyhow::anyhow!("Naming context unavailable"))?;
-    anyhow::ensure!(context.file_id == file_id, "Naming context belongs to another file");
-    let face_names = &context.subjects;
-    if mode == AnalyzeMode::RenameOnly && context.label.is_some() {
-        anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "cancelled");
-        let proposed_name = context.proposed_name();
-        persist_vlm_results(&db.lock(), file_id, model_kind, mode, None, proposed_name.as_deref(), &[], context)?;
-        return Ok(AnalyzeOutcome { file_id, description: None, proposed_name, model: model_kind.to_string(), elapsed_ms: started.elapsed().as_millis() as u64 });
+    // Documents, audio and (without installed weights) 3D models are named
+    // from their own text and metadata, so they work with no VLM at all.
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let weights_installed = naming::vlm_weights_installed(model_kind);
+    if let Some(outcome) =
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, &cancel, scope).await?
+    {
+        return Ok(outcome);
     }
 
-    // Resolve weights for this model_kind.
-    let (gguf, mmproj) = vlm::find_weights(model_kind)
-        .ok_or_else(|| anyhow::anyhow!("VLM weights for '{}' not installed", model_kind))?;
+    let verified = runner.verified_weights(model_kind, cancel.clone()).await?;
+    let (gguf, mmproj) = verified.paths();
+    let (gguf, mmproj) = (gguf.to_owned(), mmproj.to_owned());
 
-    // Resolve + rasterize the source (image as-is; video keyframe; PDF page-1).
-    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    // Resolve + rasterize the source (image; video keyframe; PDF page 1; 3D render).
+    let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id, scope).await {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(outcome) =
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel, scope).await?
+            {
+                return Ok(outcome);
+            }
+            return Err(e);
+        }
+    };
     // Guard cleans the temp frame on any exit, including the `?`/bail paths
     // below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
@@ -96,7 +130,7 @@ pub async fn analyze_file(
     let mut description: Option<String> = None;
     let mut proposed_name: Option<String> = None;
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
+    if matches!(mode, AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -132,9 +166,7 @@ pub async fn analyze_file(
         let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
         tags = parse_vlm_tags(&result.text);
     }
-    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) && context.label.is_some() {
-        proposed_name = context.proposed_name();
-    } else if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+    if mode == AnalyzeMode::Both {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -162,7 +194,6 @@ pub async fn analyze_file(
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
-            context,
         )?;
     }
 
@@ -172,8 +203,6 @@ pub async fn analyze_file(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 
@@ -184,6 +213,7 @@ pub async fn analyze_file(
 pub(crate) async fn rasterize_for_vlm(
     db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     file_id: i64,
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<(std::path::PathBuf, Option<std::path::PathBuf>)> {
     let (path_text, kind): (String, String) = {
         let conn = db.lock();
@@ -194,12 +224,17 @@ pub(crate) async fn rasterize_for_vlm(
         )?
     };
     let source_path = std::path::PathBuf::from(&path_text);
+    let source_path = match scope {
+        Some(scope) => scope.source_path(file_id, &source_path)?
+            .ok_or(crate::commands::deep_scope::ScopeError::ExcludedTarget)?,
+        None => source_path,
+    };
     if !source_path.exists() {
         anyhow::bail!("source file missing: {}", source_path.display());
     }
     match kind.as_str() {
         "image" => {
-            // C3: llama.cpp's image loader (stb_image) reads JPEG/PNG natively
+            // Llama.cpp's image loader (stb_image) reads JPEG/PNG natively
             // — pass those through untouched (the overwhelming common case).
             // Everything else (webp, bmp, tiff, gif, …) gets transcoded to a
             // temp JPEG so the VLM's mmproj doesn't silently reject it: the
@@ -214,11 +249,33 @@ pub(crate) async fn rasterize_for_vlm(
                 .unwrap_or("")
                 .to_ascii_lowercase();
             if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
-                Ok((source_path, None))
+                let checked = source_path.clone();
+                let (width, height) = tokio::task::spawn_blocking(move || {
+                    naming::validate_vlm_image_dimensions(&checked)
+                })
+                .await??;
+                // Native-resolution 24-48 MP photos multiply the VLM's prefill
+                // and mtmd preprocessing cost several-fold with no caption/tag
+                // gain — downscale oversized inputs via the transcode path.
+                if width.max(height) <= naming::MAX_VLM_INPUT_EDGE {
+                    Ok((source_path, None))
+                } else {
+                    let transcoded = transcode_image_to_jpeg(&source_path).await?;
+                    Ok((transcoded.clone(), Some(transcoded)))
+                }
             } else {
                 let transcoded = transcode_image_to_jpeg(&source_path).await?;
                 Ok((transcoded.clone(), Some(transcoded)))
             }
+        }
+        "model" => {
+            // 3D model → a shaded 3/4-view PNG the VLM can recognize.
+            let src = source_path.clone();
+            let dest = std::env::temp_dir().join(format!("fileid-obj-{}.png", uuid::Uuid::new_v4()));
+            let rendered = dest.clone();
+            tokio::task::spawn_blocking(move || crate::pipeline::obj_render::render_obj_to_png(&src, &rendered))
+                .await??;
+            Ok((dest.clone(), Some(dest)))
         }
         "video" => {
             let r = rasterize_video_keyframe(&source_path).await?;
@@ -232,33 +289,87 @@ pub(crate) async fn rasterize_for_vlm(
     }
 }
 
-/// C3: decode an arbitrary image (webp/bmp/tiff/gif/…) and re-encode it as a
-/// temp JPEG the VLM's stb_image-based loader can read. Caller cleans up the
-/// temp file. Runs on a blocking thread (image-rs decode/encode is CPU-bound).
+/// Decode an arbitrary image (webp/bmp/tiff/gif/…), downscale anything
+/// over [`naming::MAX_VLM_INPUT_EDGE`], and re-encode as a temp JPEG the VLM's
+/// stb_image-based loader can read. Caller cleans up the temp file. Runs on a
+/// blocking thread (image-rs decode/encode is CPU-bound).
 async fn transcode_image_to_jpeg(
     path: &std::path::Path,
 ) -> anyhow::Result<std::path::PathBuf> {
     let p = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> anyhow::Result<std::path::PathBuf> {
-        // Peek dimensions before decode so a tiny adversarial file that expands
-        // to a multi-GB raw buffer can't OOM this blocking thread — mirrors the
-        // MAX_DECODED_PIXELS guard in tagging::decode_image_sync_imagecrate.
-        const MAX_DECODED_PIXELS: u64 = 50_000_000;
-        let (pw, ph) = image::ImageReader::open(&p)
-            .map_err(|e| anyhow::anyhow!("open {}: {e}", p.display()))?
-            .with_guessed_format()
-            .map_err(|e| anyhow::anyhow!("guess format {}: {e}", p.display()))?
-            .into_dimensions()
-            .map_err(|e| anyhow::anyhow!("dimensions {}: {e}", p.display()))?;
-        let pixels = pw as u64 * ph as u64;
-        if pixels > MAX_DECODED_PIXELS {
-            anyhow::bail!(
-                "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
-                pw, ph, pixels, MAX_DECODED_PIXELS
-            );
-        }
-        let img = image::open(&p)
-            .map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))?;
+        let image_rs_decode = || -> anyhow::Result<image::DynamicImage> {
+            naming::validate_vlm_image_dimensions(&p)?;
+            image::open(&p).map_err(|e| anyhow::anyhow!("decode {}: {e}", p.display()))
+        };
+        let img = match image_rs_decode() {
+            Ok(img) => img,
+            Err(primary_error) => {
+                #[cfg(windows)]
+                let image = match crate::shell::heic::decode(&p) {
+                    Ok((rgb, width, height)) => {
+                        naming::validate_vlm_pixel_count(width, height)?;
+                        let image = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
+                            anyhow::anyhow!("Windows bitmap decoder returned an invalid RGB buffer")
+                        })?;
+                        image::DynamicImage::ImageRgb8(image)
+                    }
+                    Err(wic_error) => {
+                        let thumbnail = crate::shell::thumbnail::render_thumbnail_only_at(
+                            &p,
+                            naming::MAX_VLM_INPUT_EDGE as i32,
+                        )
+                        .map_err(|shell_error| {
+                            anyhow::anyhow!(
+                                "{primary_error}; Windows bitmap decoder fallback failed: {wic_error}; Windows thumbnail provider fallback failed: {shell_error}"
+                            )
+                        })?;
+                        naming::validate_vlm_pixel_count(thumbnail.width, thumbnail.height)?;
+                        let image = image::RgbaImage::from_raw(
+                            thumbnail.width,
+                            thumbnail.height,
+                            thumbnail.rgba,
+                        )
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Windows thumbnail provider returned an invalid RGBA buffer")
+                        })?;
+                        image::DynamicImage::ImageRgba8(image)
+                    }
+                };
+                #[cfg(not(windows))]
+                let image = {
+                    let ext = p
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or_default();
+                    if !ext.eq_ignore_ascii_case("heic") && !ext.eq_ignore_ascii_case("heif") {
+                        return Err(primary_error);
+                    }
+                    crate::shell::heic::decode(&p).map_err(|heic_error| {
+                        anyhow::anyhow!("{primary_error}; HEIC fallback failed: {heic_error}")
+                    })?
+                };
+                #[cfg(not(windows))]
+                let image = {
+                    let (rgb, width, height) = image;
+                    naming::validate_vlm_pixel_count(width, height)?;
+                    let image = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| {
+                        anyhow::anyhow!("HEIC decoder returned an invalid RGB buffer")
+                    })?;
+                    image::DynamicImage::ImageRgb8(image)
+                };
+                image
+            }
+        };
+        let img = if img.width().max(img.height()) > naming::MAX_VLM_INPUT_EDGE {
+            img.resize(
+                naming::MAX_VLM_INPUT_EDGE,
+                naming::MAX_VLM_INPUT_EDGE,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            img
+        };
         let dest = std::env::temp_dir().join(format!("fileid-vlm-{}.jpg", uuid::Uuid::new_v4()));
         // Flatten to RGB8 — JPEG has no alpha channel.
         image::DynamicImage::ImageRgb8(img.to_rgb8())
@@ -280,7 +391,6 @@ fn persist_vlm_results(
     description: Option<&str>,
     proposed_name: Option<&str>,
     tags: &[String],
-    context: &NamingContext,
 ) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -291,14 +401,12 @@ fn persist_vlm_results(
     // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
     // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
-    context.require_current(&tx)?;
-    let replace_name = matches!(mode, AnalyzeMode::Both | AnalyzeMode::RenameOnly) && context.label.is_some();
     if mode.establishes_completion() {
         tx.execute(
             "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
-                              vlm_proposed_name=CASE WHEN ?6 THEN ?3 ELSE COALESCE(?3, vlm_proposed_name) END, \
+                              vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
                               vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4 WHERE id=?5",
-            rusqlite::params![model_kind, description, proposed_name, now, file_id, replace_name],
+            rusqlite::params![model_kind, description, proposed_name, now, file_id],
         )?;
     } else {
         let completed_with_model = tx.query_row(
@@ -309,17 +417,17 @@ fn persist_vlm_results(
         if completed_with_model {
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=CASE WHEN ?4 THEN ?2 ELSE COALESCE(?2, vlm_proposed_name) END \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name) \
                  WHERE id=?3",
-                rusqlite::params![description, proposed_name, file_id, replace_name],
+                rusqlite::params![description, proposed_name, file_id],
             )?;
         } else {
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=CASE WHEN ?4 THEN ?2 ELSE COALESCE(?2, vlm_proposed_name) END, \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
                                   vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL \
                  WHERE id=?3",
-                rusqlite::params![description, proposed_name, file_id, replace_name],
+                rusqlite::params![description, proposed_name, file_id],
             )?;
         }
     }
@@ -339,15 +447,16 @@ fn persist_vlm_results(
     Ok(())
 }
 
-/// A2: one-shot probe that the persistent llama-server actually accepts our
+/// one-shot probe that the persistent llama-server actually accepts our
 /// multimodal `image_url` data-URI payload shape. This payload format was never
-/// hardware-verified (see NEXT.md V16.8); if the server build rejects it (e.g.
+/// hardware-verified; if the server build rejects it (e.g.
 /// 400 on the request), EVERY file in the batch would fail identically and
 /// silently. Sending one tiny throwaway JPEG up front lets the batch detect the
 /// incompatibility and fall back to the per-file CLI path (a different,
 /// known-good code path) instead of producing zero tags.
 pub(crate) async fn vlm_server_payload_ok(
     server: &crate::models::vlm_server::VlmServer,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     let test_img = std::env::temp_dir().join(format!(
         "fileid-vlm-selftest-{}.jpg",
@@ -362,44 +471,26 @@ pub(crate) async fn vlm_server_payload_ok(
     ))
     .save_with_format(&test_img, image::ImageFormat::Jpeg)
     .map_err(|e| anyhow::anyhow!("write VLM self-test image: {e}"))?;
-    let result = server.complete(&test_img, "Reply with: ok", 1).await;
+    let result = server.complete_with_cancel(&test_img, "Reply with: ok", 1, cancel.clone()).await;
     let _ = std::fs::remove_file(&test_img);
     result.map(|_| ())
 }
 
-/// Poll the cancel flag until it's set. Raced against an in-flight VLM request
-/// so a user cancel abandons the request promptly. (audit E4)
-async fn wait_cancelled(cancel: &std::sync::atomic::AtomicBool) {
-    while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-/// Run one `server.complete` but bail the moment the cancel flag flips, instead
-/// of blocking up to the client's (300 s) timeout. Dropping the losing branch's
-/// future cancels the underlying reqwest request. (audit E4)
 async fn complete_cancellable(
     server: &crate::models::vlm_server::VlmServer,
-    image: &std::path::Path,
-    prompt: &str,
-    max_tokens: u32,
-    cancel: &std::sync::atomic::AtomicBool,
+    image: &std::path::Path, prompt: &str, max_tokens: u32,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<String> {
-    tokio::select! {
-        biased;
-        _ = wait_cancelled(cancel) => anyhow::bail!("cancelled"),
-        r = server.complete(image, prompt, max_tokens) => r,
-    }
+    server.complete_with_cancel(image, prompt, max_tokens, cancel.clone()).await
 }
 
 /// Analyze one file through the PERSISTENT llama-server (model already loaded),
-/// with NO per-call model reload. `mode` selects which VLM calls run: `Both`
-/// does caption + tags + smart-rename (3 HTTP calls); `TagsOnly` does just the
-/// tag call (1 call → ~3× faster — the background auto-tag path); CaptionOnly /
-/// RenameOnly do their single call. The caption (or, in TagsOnly, the joined
-/// tags) is handed to `on_token` in one shot (these server calls are
-/// non-streaming). Mirrors `analyze_file`'s outputs so the batch loop is
-/// backend-agnostic.
+/// with NO per-call model reload. Documents are named from their text, audio
+/// from tags or a speech transcript, 3D models from a render (or their embedded
+/// names when it fails); everything else takes the visual path. `Both` and
+/// `CaptionAndTags` ask for caption, tags and filename in ONE request; the
+/// separate prompts are fallbacks for answers that miss a section. Results go
+/// to `on_token` in one shot (these server calls are non-streaming).
 pub(crate) async fn analyze_file_via_server(
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
     server: &crate::models::vlm_server::VlmServer,
@@ -407,21 +498,34 @@ pub(crate) async fn analyze_file_via_server(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    naming_context: Option<&NamingContext>,
+    face_names: &[String],
     mut on_token: impl FnMut(&str),
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
-    let started = std::time::Instant::now();
-    let context = naming_context.ok_or_else(|| anyhow::anyhow!("Naming context unavailable"))?;
-    anyhow::ensure!(context.file_id == file_id, "Naming context belongs to another file");
-    let face_names = &context.subjects;
-    if mode == AnalyzeMode::RenameOnly && context.label.is_some() {
-        anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "cancelled");
-        let proposed_name = context.proposed_name();
-        persist_vlm_results(&db.lock(), file_id, model_kind, mode, None, proposed_name.as_deref(), &[], context)?;
-        return Ok(AnalyzeOutcome { file_id, description: None, proposed_name, model: model_kind.to_string(), elapsed_ms: started.elapsed().as_millis() as u64 });
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
     }
-    let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
+    if let Some(outcome) =
+        analyze_document_via_server(&db, server, file_id, model_kind, mode, &cancel, &mut on_token, scope).await?
+    {
+        return Ok(outcome);
+    }
+    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, &cancel, scope).await? {
+        return Ok(outcome);
+    }
+    let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id, scope).await {
+        Ok(r) => r,
+        Err(e) => {
+            // A 3D model we couldn't render falls back to its embedded names.
+            if let Some(outcome) =
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel, scope).await?
+            {
+                return Ok(outcome);
+            }
+            return Err(e);
+        }
+    };
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
     let _temp_guard = TempFileGuard(temp_to_clean);
@@ -430,57 +534,63 @@ pub(crate) async fn analyze_file_via_server(
     let mut proposed_name: Option<String> = None;
     let mut tags: Vec<String> = Vec::new();
 
-    if matches!(mode, AnalyzeMode::CaptionOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
+    if mode.requests_caption() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        let cap_prompt = vlm::caption_prompt_with_faces(face_names);
-        let d = complete_cancellable(server, &rasterized, &cap_prompt, 80, &cancel).await?;
-        on_token(&d);
-        description = Some(d);
-    }
-
-    if matches!(mode, AnalyzeMode::TagsOnly | AnalyzeMode::Both | AnalyzeMode::CaptionAndTags) {
+        let include_filename = mode.requests_rename();
+        let prompt = naming::combined_visual_prompt(face_names, include_filename);
+        let raw = complete_cancellable(server, &rasterized, &prompt, if include_filename { 140 } else { 110 }, &cancel)
+            .await?;
+        (description, tags, proposed_name) = naming::parse_combined_visual_completion(&raw, include_filename);
+        if description.is_none() {
+            let cap_prompt = vlm::caption_prompt_with_faces(face_names);
+            description = Some(complete_cancellable(server, &rasterized, &cap_prompt, 80, &cancel).await?);
+        }
+        if tags.is_empty() {
+            tags = naming::grounded_fallback_tags(description.as_deref().unwrap_or(&raw));
+        }
+        if include_filename && proposed_name.is_none() {
+            proposed_name = description.as_deref().and_then(crate::util::keywords::grounded_filename);
+        }
+        if include_filename && proposed_name.is_none() {
+            let ren_prompt = vlm::rename_prompt_with_faces(face_names);
+            proposed_name = naming::generated_filename_candidate(
+                &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
+            );
+            if proposed_name.is_none() {
+                proposed_name = naming::generated_filename_candidate(
+                    &complete_cancellable(server, &rasterized, vlm::RENAME_RETRY_PROMPT, 30, &cancel).await?,
+                );
+            }
+        }
+        if let Some(value) = description.as_deref() {
+            on_token(value);
+        }
+        if !tags.is_empty() {
+            on_token(&tags.join(", "));
+        }
+    } else if mode.requests_tags() {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
-        tags = parse_vlm_tags(
-            &complete_cancellable(server, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?,
-        );
-        // Surface tags in the live stream so a tags-only pass shows feedback.
+        let raw = complete_cancellable(server, &rasterized, vlm::TAG_PROMPT, 40, &cancel).await?;
+        tags = parse_vlm_tags(&raw);
+        if tags.is_empty() {
+            tags = naming::grounded_fallback_tags(&raw);
+        }
         if !tags.is_empty() {
             on_token(&tags.join(", "));
         }
     }
 
-    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) && context.label.is_some() {
-        proposed_name = context.proposed_name();
-    } else if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
-        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            anyhow::bail!("cancelled");
-        }
-        let ren_prompt = vlm::rename_prompt_with_faces(face_names);
-        proposed_name = Some(apply_person_prefix(
-            &sanitize_proposed_name(
-                &complete_cancellable(server, &rasterized, &ren_prompt, 30, &cancel).await?,
-            ),
-            face_names,
-        ));
+    if let Some(name) = proposed_name.take() {
+        proposed_name = crate::util::smart_name::readable_stem(&apply_person_prefix(&name, face_names), face_names);
     }
-
     {
-        proposed_name = proposed_name.and_then(|name| crate::util::smart_name::readable_stem(&name, face_names));
         let conn = db.lock();
-        persist_vlm_results(
-            &conn,
-            file_id,
-            model_kind,
-            mode,
-            description.as_deref(),
-            proposed_name.as_deref(),
-            &tags,
-            context,
-        )?;
+        proposed_name = naming::vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
+        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
     }
     // (temp frame removed by `_temp_guard` on drop — #24)
 
@@ -488,9 +598,217 @@ pub(crate) async fn analyze_file_via_server(
         file_id,
         description,
         proposed_name,
-        model: model_kind.to_string(),
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+async fn complete_text_cancellable(
+    server: &crate::models::vlm_server::VlmServer,
+    prompt: &str,
+    max_tokens: u32,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<String> {
+    server.complete_text_with_cancel(prompt, max_tokens, cancel.clone()).await
+}
+
+/// File path and kind for `file_id`, resolved through the Deep Analyze scope
+/// when one applies.
+fn analysis_source(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    file_id: i64,
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
+) -> anyhow::Result<(std::path::PathBuf, String)> {
+    let (path_text, kind): (String, String) = db.lock().query_row(
+        "SELECT path_text, kind FROM files WHERE id = ?1",
+        [file_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let path = std::path::PathBuf::from(path_text);
+    let path = match scope {
+        Some(scope) => scope
+            .source_path(file_id, &path)?
+            .ok_or(crate::commands::deep_scope::ScopeError::ExcludedTarget)?,
+        None => path,
+    };
+    Ok((path, kind))
+}
+
+/// Name a document from its text with a text-only request. Returns None for
+/// every other kind so the caller continues with metadata or visual analysis.
+#[allow(clippy::too_many_arguments)]
+async fn analyze_document_via_server(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    server: &crate::models::vlm_server::VlmServer,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    on_token: &mut impl FnMut(&str),
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
+) -> anyhow::Result<Option<AnalyzeOutcome>> {
+    let (path, kind) = analysis_source(db, file_id, scope)?;
+    if kind != "doc" {
+        return Ok(None);
+    }
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let persisted: Option<String> = db
+        .lock()
+        .query_row("SELECT text FROM doc_text WHERE file_id=?1", [file_id], |row| row.get(0))
+        .ok();
+    let text = match persisted {
+        Some(text) => text,
+        None => {
+            let source = path.clone();
+            tokio::task::spawn_blocking(move || crate::pipeline::doc_extract::extract(&source, None))
+                .await
+                .context("document extraction task failed")??
+                .unwrap_or_default()
+        }
+    };
+    let Some(text) = naming::bounded_document_text(&text) else {
+        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, cancel, scope).await;
+    };
+    let (_, fallback_name, deterministic_tags) = naming::document_metadata_from_text(&text);
+    let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
+    let mut description = None;
+    let mut proposed_name = None;
+    if mode.requests_caption() || mode.requests_rename() {
+        let prompt = naming::document_analysis_prompt(extension, &text, mode)?;
+        let max_tokens = match (mode.requests_caption(), mode.requests_rename()) {
+            (true, true) => 120,
+            (true, false) => 90,
+            (false, true) => 40,
+            (false, false) => 1,
+        };
+        let raw = complete_text_cancellable(server, &prompt, max_tokens, cancel).await?;
+        let (parsed_description, parsed_name) = naming::parse_document_completion(&raw);
+        if mode.requests_caption() {
+            let grounded = naming::remove_unsupported_document_visual_claims(
+                parsed_description.as_deref().unwrap_or_default(),
+                &text,
+            );
+            on_token(&grounded);
+            description = Some(grounded);
+        }
+        if mode.requests_rename() {
+            proposed_name = naming::grounded_document_filename(parsed_name, &text).or(fallback_name);
+        }
+    }
+    let tags = if mode.requests_tags() { deterministic_tags } else { Vec::new() };
+    if !tags.is_empty() {
+        on_token(&tags.join(", "));
+    }
+    {
+        let conn = db.lock();
+        proposed_name = naming::vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
+        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+    }
+    Ok(Some(AnalyzeOutcome { file_id, description, proposed_name }))
+}
+
+/// Name audio from its tags (or a speech transcript when it has no title),
+/// documents from their text, and 3D models from their embedded object and
+/// material names. 3D models prefer the visual path when `model_to_vlm`.
+/// Returns None for every other kind.
+async fn analyze_metadata_named_file(
+    db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
+    file_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    model_to_vlm: bool,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    scope: Option<&crate::commands::deep_scope::DeepScope>,
+) -> anyhow::Result<Option<AnalyzeOutcome>> {
+    let (path, kind) = analysis_source(db, file_id, scope)?;
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).unwrap_or_default();
+    let is_model = naming::is_3d_model_ext(&ext);
+    if kind != "doc" && kind != "audio" && !is_model {
+        return Ok(None);
+    }
+    if is_model && model_to_vlm {
+        return Ok(None);
+    }
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("cancelled");
+    }
+    let (source, task_kind) = (path.clone(), kind.clone());
+    let (mut description, mut proposed_name, tags) =
+        tokio::task::spawn_blocking(move || metadata_naming_blocking(&source, &task_kind))
+            .await
+            .context("metadata naming task failed")??;
+    if kind == "audio" && proposed_name.is_none() && mode.requests_rename() {
+        if let Some((name, transcript)) = transcribe_audio_name(&path, cancel).await {
+            proposed_name = Some(name);
+            description = description.or(Some(transcript));
+        }
+    }
+    let description = if mode.requests_caption() { description } else { None };
+    let proposed_name = if mode.requests_rename() { proposed_name } else { None };
+    let tags = if mode.requests_tags() { tags } else { Vec::new() };
+    let proposed_name = {
+        let conn = db.lock();
+        let proposed_name = naming::vetted_proposed_name(&conn, file_id, proposed_name)?;
+        persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+        proposed_name
+    };
+    Ok(Some(AnalyzeOutcome { file_id, description, proposed_name }))
+}
+
+fn metadata_naming_blocking(
+    path: &std::path::Path,
+    kind: &str,
+) -> anyhow::Result<(Option<String>, Option<String>, Vec<String>)> {
+    if kind == "doc" {
+        let text = crate::pipeline::doc_extract::extract(path, None).ok().flatten().unwrap_or_default();
+        Ok(naming::document_metadata_from_text(&text))
+    } else if kind == "audio" {
+        let m = crate::pipeline::audio_meta::extract_structured(path);
+        let name = naming::build_audio_name(m.title.as_deref(), m.artist.as_deref());
+        let description = naming::audio_description(&m);
+        let mut tags: Vec<String> = Vec::new();
+        for value in [&m.artist, &m.album].into_iter().flatten() {
+            naming::push_unique(&mut tags, value);
+        }
+        Ok((description, name, tags))
+    } else {
+        let (objects, materials) = naming::parse_obj_names(path);
+        let mut tags: Vec<String> = Vec::new();
+        for value in objects.iter().chain(materials.iter()) {
+            naming::push_unique(&mut tags, value);
+        }
+        tags.truncate(6);
+        Ok((naming::obj_description(&objects, &materials), naming::build_obj_name(&objects, &materials), tags))
+    }
+}
+
+/// Transcribe the first 30 seconds of an untitled recording with the installed
+/// speech model and derive a name from what was said. Best-effort: any failure
+/// keeps the metadata result.
+async fn transcribe_audio_name(
+    path: &std::path::Path,
+    cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Option<(String, String)> {
+    let speech = crate::commands::timeline::installed_speech_model()?;
+    let (source, flag) = (path.to_path_buf(), cancel.clone());
+    let audio = tokio::task::spawn_blocking(move || crate::commands::video_export::audio_wav(&source, 0.0, 30.0, &flag))
+        .await
+        .ok()?
+        .ok()?;
+    let wav = std::env::temp_dir().join(format!("fileid-name-{}.wav", uuid::Uuid::new_v4()));
+    std::fs::write(&wav, audio).ok()?;
+    let reply = match crate::models::resident_service::ResidentService::shared().acquire(speech, cancel.clone()).await {
+        Ok(lease) => lease
+            .complete_with_cancel(&wav, crate::pipeline::timeline_analysis::SPEECH_PROMPT, 200, cancel.clone())
+            .await
+            .ok(),
+        Err(error) => {
+            tracing::debug!(?error, "speech model unavailable for audio naming");
+            None
+        }
+    };
+    let _ = std::fs::remove_file(&wav);
+    naming::name_from_transcript(&crate::pipeline::timeline_analysis::transcript_text(&reply?))
 }
 
 /// Pull a 25%-duration keyframe from a video into a temp JPEG via the
@@ -613,7 +931,7 @@ pub(crate) fn apply_person_prefix(name: &str, person_names: &[String]) -> String
     sanitize_proposed_name(&format!("{} {}", tokens.join(" "), name))
 }
 
-fn sanitize_proposed_name(raw: &str) -> String {
+pub(crate) fn sanitize_proposed_name(raw: &str) -> String {
     let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
     let lowered = trimmed.to_lowercase();
     let cleaned: String = lowered
@@ -651,7 +969,7 @@ fn sanitize_proposed_name(raw: &str) -> String {
 /// A tag is dropped if any of its words is one of these — they describe the
 /// medium, not the content, and read as noise as a Library chip ("has location"
 /// used to be the worst offender; that one is no longer emitted at all).
-const VLM_TAG_STOPWORDS: &[&str] = &[
+pub(crate) const VLM_TAG_STOPWORDS: &[&str] = &[
     "photo", "photos", "image", "images", "picture", "pictures", "object",
     "objects", "thing", "things", "scene", "background", "foreground",
     "location", "text", "item", "items", "stuff", "view", "misc", "unknown",

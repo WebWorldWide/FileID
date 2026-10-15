@@ -1,10 +1,10 @@
-// Batched MobileCLIP inference coordinator.
+// Batched CLIP image inference coordinator.
 //
 // One Session, batched inputs. A dedicated OS thread owns the
-// `MobileClipImage`. Tagging workers submit (rgb_256, oneshot) requests
+// `MobileClipImage`. Tagging workers submit (rgb, oneshot) requests
 // through a crossbeam channel. The coordinator drains up to BATCH_SIZE
 // requests (or BATCH_TIMEOUT_MS, whichever first), packs them into one
-// (N, 3, 256, 256) tensor, runs `embed_batch` once, and fans the
+// (N, 3, 224, 224) tensor, runs `embed_batch` once, and fans the
 // embeddings back through the oneshots. Per-batch GPU dispatch is one
 // wake instead of N, and VRAM stays at single-session footprint.
 //
@@ -64,7 +64,7 @@ pub static STATS_BATCH_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static STATS_BATCH_SIZE_SUM: AtomicU64 = AtomicU64::new(0);
 
 struct ClipRequest {
-    rgb_256: Vec<u8>,
+    rgb: Vec<u8>,
     response: oneshot::Sender<Result<Vec<f32>>>,
 }
 
@@ -108,9 +108,12 @@ impl ClipBatchCoordinator {
     /// Submit one image, await its embedding. Cheap-error path: returns
     /// Err if the coordinator thread has exited (process shutting down)
     /// or the underlying embed_batch failed for this batch.
-    pub async fn embed(&self, rgb_256: Vec<u8>) -> Result<Vec<f32>> {
+    pub async fn embed(&self, rgb: Vec<u8>) -> Result<Vec<f32>> {
+        if crate::coordinator::process_gpu_device_removed() {
+            return Err(anyhow!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER));
+        }
         let (tx, rx) = oneshot::channel();
-        let req = ClipRequest { rgb_256, response: tx };
+        let req = ClipRequest { rgb, response: tx };
         // Use blocking send via a tiny spawn_blocking — crossbeam's send is
         // sync. The bounded channel can apply backpressure when CLIP is the
         // pipeline bottleneck.
@@ -180,8 +183,16 @@ fn run_coordinator(
         let mut imgs: Vec<Vec<u8>> = Vec::with_capacity(batch.len());
         let mut senders: Vec<oneshot::Sender<Result<Vec<f32>>>> = Vec::with_capacity(batch.len());
         for req in batch {
-            imgs.push(req.rgb_256);
+            imgs.push(req.rgb);
             senders.push(req.response);
+        }
+        if crate::coordinator::process_gpu_device_removed() {
+            for sender in senders {
+                let _ = sender.send(Err(anyhow!(
+                    crate::models::runtime::GPU_DEVICE_REMOVED_MARKER
+                )));
+            }
+            continue;
         }
         match model.embed_batch(&imgs) {
             Ok(mut embeddings) if embeddings.len() == senders.len() => {

@@ -105,7 +105,7 @@ impl RamPlusBatchCoordinator {
         let (sender, receiver) = bounded::<RamPlusRequest>(channel_cap);
         // Degrade gracefully on spawn failure (mirrors the sibling model-load
         // sites) — batch tagging becomes unavailable and the caller falls back
-        // to the single-image pool, rather than panicking the engine. (F-C1-016)
+        // to the single-image pool, rather than panicking the engine.
         if let Err(err) = std::thread::Builder::new()
             .name("fileid-ramplus-batch".to_string())
             .spawn(move || run_coordinator(&mut tagger, receiver, batch_size, batch_timeout_ms))
@@ -120,6 +120,9 @@ impl RamPlusBatchCoordinator {
     /// Submit one image, await its tag list. Errs if the coordinator thread has
     /// exited (shutdown) or `tag_batch` failed for this batch.
     pub async fn tag(&self, rgb: Vec<u8>, width: u32, height: u32) -> TagResult {
+        if crate::coordinator::process_gpu_device_removed() {
+            return Err(anyhow!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER));
+        }
         let (tx, rx) = oneshot::channel();
         let req = RamPlusRequest { rgb, width, height, response: tx };
         let sender = self.sender.clone();
@@ -181,6 +184,14 @@ fn run_coordinator(
             .iter()
             .map(|r| (r.rgb.as_slice(), r.width, r.height))
             .collect();
+        if crate::coordinator::process_gpu_device_removed() {
+            for req in batch {
+                let _ = req.response.send(Err(anyhow!(
+                    crate::models::runtime::GPU_DEVICE_REMOVED_MARKER
+                )));
+            }
+            continue;
+        }
         match tagger.tag_batch(&imgs) {
             Ok(results) if results.len() == batch.len() => {
                 for (req, tags) in batch.into_iter().zip(results) {

@@ -50,7 +50,7 @@ internal static class SafeOpen
         if (string.IsNullOrWhiteSpace(path)) return false;
         if (!SafeFileExists(path)) return false;
         var ext = Path.GetExtension(path);
-        if (string.IsNullOrEmpty(ext) || !AllowedExts.Contains(ext))
+        if (!IsAllowedFileExtension(path))
         {
             DebugLog.Warn($"SafeOpen blocked '{ext}' — falling back to reveal.");
             return false;
@@ -70,6 +70,9 @@ internal static class SafeOpen
             return false;
         }
     }
+
+    internal static bool IsAllowedFileExtension(string? path) =>
+        !string.IsNullOrWhiteSpace(path) && AllowedExts.Contains(Path.GetExtension(path));
 
     /// <summary>
     /// Open a folder (Explorer). Folder paths are inherently safe — no

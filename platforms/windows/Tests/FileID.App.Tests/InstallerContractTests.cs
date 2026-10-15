@@ -96,7 +96,7 @@ public sealed class InstallerContractTests
         var versionVerifier = File.ReadAllText(PathInRepo(
             "platforms", "windows", "build", "verify-version.ps1"));
 
-        Assert.Equal("0.1.1", version);
+        Assert.Equal("0.1.2", version);
         Assert.Equal(version, cargoVersion);
         Assert.Contains("Verify tag matches product version", releaseWorkflow, StringComparison.Ordinal);
         Assert.Contains("SHA256SUMS.txt", releaseWorkflow, StringComparison.Ordinal);
@@ -247,7 +247,7 @@ public sealed class InstallerContractTests
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+            if (File.Exists(Path.Combine(directory.FullName, "LICENSE"))
                 && Directory.Exists(Path.Combine(directory.FullName, "platforms", "windows")))
             {
                 return directory.FullName;

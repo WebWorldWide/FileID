@@ -1,5 +1,5 @@
 // LineBuffer framing tests — newline-delimited IPC framing with a resume
-// offset (R3-07B) so a large un-terminated frame arriving across many reads is
+// offset so a large un-terminated frame arriving across many reads is
 // scanned once, not re-scanned from the front each read. These assert the
 // resume logic frames identically to a naive whole-buffer scan.
 import Testing

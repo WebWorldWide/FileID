@@ -40,18 +40,18 @@ public actor DeepAnalyze {
     /// JobQueue dispatches the work.
     private var prewarmCancelPending: Bool = false
 
-    /// Single-flight handle for an in-progress model load (F-C3-023). A
+    /// Single-flight handle for an in-progress model load. A
     /// prewarm and a Deep Analyze run that race share THIS one task instead
     /// of each downloading + loading their own container (double model RAM,
     /// mis-attributed vlm_model). It's also the cancellation handle for an
-    /// in-flight download (F-C3-024): a cancel aborts the multi-GB fetch
+    /// in-flight download: a cancel aborts the multi-GB fetch
     /// promptly. Unstructured by design (shared across callers), so
     /// cancellation is wired explicitly, not inherited.
     private var loadTask: Task<Void, Error>?
     private let residencyGate = ExclusiveResourceGate()
     private var modelMemoryLease: ResourceScheduler.MemoryLease?
     private var loadTaskKind: AIModelKind?
-    /// Waiter ref-count for the shared single-flight load (R-11). The shared
+    /// Waiter ref-count for the shared single-flight load. The shared
     /// loadTask is cancelled only when its LAST joined waiter bails, so a
     /// prewarm cancel can't abort a concurrent Deep Analyze run that joined the
     /// same download (and vice-versa). Created with each loadTask, cleared with it.
@@ -100,7 +100,7 @@ public actor DeepAnalyze {
         let wasCancelled = cancelRequested
         cancelRequested = true
         currentAnalysisTask?.cancel()
-        // F-C3-024 + R-11: abort an in-flight cold load/download so the
+        // Abort an in-flight cold load/download so the
         // single-lane JobQueue doesn't stay wedged for the whole multi-GB fetch
         // after the user cancels — but only when THIS run is the last waiter on
         // the shared single-flight load, so a concurrent prewarm of the same
@@ -147,7 +147,7 @@ public actor DeepAnalyze {
     }
 
     public func cancelPrewarm() {
-        // R-11: cancel only the prewarm's outer task — its awaitLoad bails from
+        // Cancel only the prewarm's outer task — its awaitLoad bails from
         // the shared single-flight load and, via the waiter ref-count, cancels
         // the shared load only when no other caller (a concurrent run) is still
         // joined to it. Cancelling loadTask directly here would abort a joined
@@ -219,7 +219,7 @@ public actor DeepAnalyze {
             loadState = .ready(kind)
             return
         }
-        // F-C3-023 single-flight: if a load is already running, JOIN it rather
+        // single-flight: if a load is already running, JOIN it rather
         // than starting a second download + container load.
         if let existing = loadTask {
             if loadTaskKind == kind {
@@ -259,7 +259,7 @@ public actor DeepAnalyze {
     /// cancellation into it — so a cancel that arrives before the load starts,
     /// or a prewarm cancel, still aborts the in-flight download.
     ///
-    /// R-11: each caller is one waiter on the shared load. If THIS caller's
+    /// Each caller is one waiter on the shared load. If THIS caller's
     /// enclosing task is cancelled (e.g. cancelPrewarm cancelled the prewarm
     /// task), it bails from the load — but the shared task is cancelled only
     /// when the LAST waiter bails, so a concurrent run/prewarm joined to the
@@ -486,157 +486,7 @@ public actor DeepAnalyze {
         return out
     }
 
-    public struct FaceComparison: Sendable {
-        public let sameClass: Bool
-        public let confidence: Float    // 0.0 – 1.0
-    }
-
-    /// Ask the VLM whether two face crops show the same person. Used by
-    /// the post-clustering pass to resolve the borderline L2 band that
-    /// the bootstrap face-print clustering can't reliably classify.
-    public func compareFaces(cropA: URL, cropB: URL) async -> FaceComparison {
-        guard let lease = try? await residencyGate.acquire() else { return FaceComparison(sameClass: false, confidence: 0) }
-        defer { Task { await residencyGate.release(lease) } }
-        guard let computeLease = try? await ResourceScheduler.shared.reserve(
-            ResourceScheduler.Demand(cpuUnits: 1), priority: .interactive
-        ) else { return FaceComparison(sameClass: false, confidence: 0) }
-        defer { Task { await ResourceScheduler.shared.release(computeLease) } }
-        guard let container else {
-            return FaceComparison(sameClass: false, confidence: 0)
-        }
-        // F-C3-026: decode OFF the actor so a crop on an unreachable volume
-        // can't pin the executor and stall every queued IPC command.
-        let boxA = await Self.decodeImageOffActor(url: cropA, maxPixelSize: 256)
-        let boxB = await Self.decodeImageOffActor(url: cropB, maxPixelSize: 256)
-        guard let cgA = boxA.get(), let cgB = boxB.get() else {
-            return FaceComparison(sameClass: false, confidence: 0)
-        }
-        let ciA = CIImage(cgImage: cgA)
-        let ciB = CIImage(cgImage: cgB)
-        let boxCIA = UncheckedSendableBox(ciA)
-        let boxCIB = UncheckedSendableBox(ciB)
-
-        let systemPrompt = """
-        You are a face-matching assistant. You will see two cropped face photos. Answer in EXACTLY this format on two lines:
-
-        VERDICT: SAME or DIFFERENT
-        CONFIDENCE: a single number 0.0 to 1.0
-
-        Only reply with those two lines. Lighting, angle, glasses, age, and hairstyle differences are normal and should not by themselves justify DIFFERENT — focus on facial structure.
-        """
-
-        let collector = TokenCollector()
-        let params = generateParams
-        do {
-            try await container.perform { (context: ModelContext) -> Void in
-                let chat: [Chat.Message] = [
-                    .system(systemPrompt),
-                    .user("Are these two cropped face photos of the same person?",
-                          images: [.ciImage(boxCIA.value), .ciImage(boxCIB.value)], videos: [])
-                ]
-                var userInput = UserInput(chat: chat, additionalContext: Self.templateContext)
-                userInput.processing.resize = .init(width: 256, height: 256)
-                let lmInput = try await context.processor.prepare(input: userInput)
-                let stream = try MLXLMCommon.generate(
-                    input: lmInput, parameters: params, context: context
-                )
-                for await item in stream {
-                    if let chunk = item.chunk { collector.append(chunk) }
-                }
-            }
-        } catch {
-            JSONLog.shared.warn(ev: "vlm_compare_failed", error: "\(error)")
-            return FaceComparison(sameClass: false, confidence: 0)
-        }
-        // Clear MLX cache every 50 calls. Per-call clearing thrashes
-        // the scratch allocator.
-        compareCallsSinceClear &+= 1
-        if compareCallsSinceClear >= 50 {
-            MLX.GPU.clearCache()
-            compareCallsSinceClear = 0
-        }
-        let raw = collector.snapshot()
-        // Sample the raw VLM output for the first 10 calls so we can
-        // diagnose model output formats without re-running the pass.
-        compareSampleLogged &+= 1
-        if compareSampleLogged <= 10 {
-            let sample = raw.prefix(200).replacingOccurrences(of: "\n", with: " | ")
-            JSONLog.shared.info(ev: "vlm_compare_raw_sample",
-                                extra: ["call": AnyCodable(compareSampleLogged),
-                                        "raw": AnyCodable(String(sample))])
-        }
-        return Self.parseFaceComparison(raw)
-    }
-
-    private var compareSampleLogged: Int = 0
-
-    private var compareCallsSinceClear: Int = 0
-
-    /// Parse the VLM's response into a typed result. Robust against
-    /// models that drop the structured `VERDICT:` / `CONFIDENCE:`
-    /// prefixes — without a confidence default, loosely-formatted SAME
-    /// verdicts would never clear the auto-merge threshold.
-    static func parseFaceComparison(_ raw: String) -> FaceComparison {
-        let upper = raw.uppercased()
-        let saidDifferent = upper.contains("DIFFERENT")
-        // F-C3-022: a negated "same" ("not the same person", "isn't the
-        // same") is a DIFFERENT verdict. Without this it parsed as SAME at
-        // the defaulted 0.80 confidence — above the 0.75 auto-merge
-        // threshold — and force-merged two distinct people.
-        // R-12: the negated-same override applies ONLY to the loose free-text
-        // branch — an explicit "VERDICT: SAME" line is authoritative, so
-        // incidental phrasing like "not in the same lighting" can't flip a
-        // compliant affirmative verdict to DIFFERENT (an explicit DIFFERENT
-        // still wins below via saidDifferent).
-        let negatedSame = Self.containsNegatedSame(upper)
-        let saidSame = upper.contains("VERDICT: SAME")
-            || (!negatedSame && !saidDifferent && upper.contains("SAME"))
-        let same = saidSame && !saidDifferent
-
-        var conf: Float = 0
-        var explicitlyParsed = false
-        if let r = upper.range(of: "CONFIDENCE:") {
-            let after = String(upper[r.upperBound...])
-            let scanner = Scanner(string: after)
-            scanner.charactersToBeSkipped = .whitespacesAndNewlines.union(.letters)
-            if let parsed = scanner.scanDouble() {
-                // Normalize percent-form (e.g. `92`) to fraction.
-                let normalized = parsed > 1 ? parsed / 100 : parsed
-                conf = Float(max(0, min(1, normalized)))
-                explicitlyParsed = true
-            }
-        }
-        // Default to 0.80 when the verdict is clear but no confidence
-        // number was returned. Clears the 0.75 auto-merge threshold;
-        // explicit numbers from compliant models still take precedence. A
-        // negated/DIFFERENT verdict never auto-merges regardless (sameClass is
-        // false), so this default only matters for an affirmative SAME.
-        if !explicitlyParsed && (same || saidDifferent) {
-            conf = 0.80
-        }
-        return FaceComparison(sameClass: same, confidence: conf)
-    }
-
-    /// True when `upper` (already uppercased) expresses a *negated* "same"
-    /// — "not the same", "are not the same", "isn't the same person",
-    /// "cannot be the same". Such a reply means DIFFERENT; treating it as
-    /// SAME forces a wrong face merge.
-    static func containsNegatedSame(_ upper: String) -> Bool {
-        // "NOT/CANNOT [≤2 words] SAME", and contractions ending in N'T
-        // (isn't/aren't/don't/doesn't/can't) shortly before SAME. Straight +
-        // curly apostrophes.
-        let patterns = [
-            #"\b(?:NOT|CANNOT)\b(?:\s+\S+){0,2}\s+SAME\b"#,
-            #"N['’]T\b(?:\s+\S+){0,2}\s+SAME\b"#
-        ]
-        for p in patterns where upper.range(of: p, options: .regularExpression) != nil {
-            return true
-        }
-        return false
-    }
-
-    /// Analyze a rasterizable file or bounded document text. The caller loads the model
-    /// first and throttles `onToken` before forwarding chunks over IPC.
+    /// Describe one video moment from 2–8 ordered frames sampled at `times`.
     func analyzeMomentSequence(imageURLs: [URL], times: [Double]) async -> AnalysisResult {
         await analyzeSequence(imageURLs: imageURLs, times: times, prompt: TimelineMomentAnalysis.prompt(times: times))
     }
@@ -712,7 +562,7 @@ public actor DeepAnalyze {
             return AnalysisResult(description: "Model not loaded.", proposedName: nil)
         }
         guard loadedKind?.supportsVision == true else { return AnalysisResult(description: "Inference failed: Choose a vision model for media analysis.", proposedName: nil) }
-        // F-C3-026: decode OFF the actor. A synchronous decode here pins the
+        // Decode OFF the actor. A synchronous decode here pins the
         // DeepAnalyze actor's executor, so a file on an unreachable volume
         // would block deepAnalyzeCancel (and every queued IPC command) behind
         // it. The detached task does the (possibly hanging) read; the actor
@@ -774,13 +624,13 @@ public actor DeepAnalyze {
         // FAILURE, not a successful empty caption: parse("") yields description=""
         // and the runner's COALESCE(?, vlm_description) persist would then OVERWRITE
         // a previously-good caption with "". The runner's isFailure check keys off
-        // the "Inference failed" prefix, so surface it in that shape. (audit F-A6)
+        // the "Inference failed" prefix, so surface it in that shape.
         guard !raw.isEmpty else {
             return AnalysisResult(description: "Inference failed: empty model output",
                                    proposedName: nil)
         }
         let parsed = Self.parse(rawOutput: raw)
-        // F-A6 (extended, R3-01): a NON-empty raw whose DESCRIPTION section parses
+        // A NON-empty raw whose DESCRIPTION section parses
         // to "" (e.g. "DESCRIPTION:\nFILENAME: x", or a bare "DESCRIPTION:") must
         // ALSO be a failure. The runner's isFailure check keys off the "Inference
         // failed" prefix, and persist's COALESCE(?, vlm_description) only guards
@@ -1349,7 +1199,7 @@ public actor DeepAnalyze {
     }
 
     /// Decode `url` on a detached task so a hung/slow read can't block the
-    /// DeepAnalyze actor (F-C3-026). Returns the CGImage in a Sendable box —
+    /// DeepAnalyze actor. Returns the CGImage in a Sendable box —
     /// CGImage isn't Sendable, but the box's lock makes the hand-off safe and
     /// the CIImage is built on the actor afterward.
     private nonisolated static func decodeImageOffActor(url: URL, maxPixelSize: Int) async -> ImageBox {
@@ -1380,7 +1230,7 @@ public actor DeepAnalyze {
         }
         // Try ImageIO first — fast for images via thumbnail decode.
         if let src = CGImageSourceCreateWithURL(url as CFURL, nil) {
-            // F-C3-044: refuse a decompression bomb — a small file that decodes
+            // Refuse a decompression bomb — a small file that decodes
             // to a huge raster. Peek the source pixel dimensions and bail above
             // the 50 MP cap (Windows parity: MAX_DECODED_PIXELS in deep_analyze.rs).
             if let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] {
@@ -1699,7 +1549,7 @@ public actor DeepAnalyze {
     }
 }
 
-// MARK: - Shared-load waiter ref-count (R-11)
+// MARK: - Shared-load waiter ref-count
 
 /// Ref-counts the callers joined to the shared single-flight model load so the
 /// load is cancelled only when its LAST waiter bails — a prewarm cancel must not

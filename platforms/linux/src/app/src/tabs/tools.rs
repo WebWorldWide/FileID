@@ -20,6 +20,7 @@ struct Ui {
     operation: RefCell<Option<String>>,
     executed: Cell<bool>,
     has_undo: Cell<bool>,
+    cancel_requested: Cell<bool>,
     hits: RefCell<Vec<CatalogHit>>,
     capabilities: RefCell<Vec<ToolCapability>>,
     query: gtk::SearchEntry,
@@ -29,12 +30,15 @@ struct Ui {
     kind: gtk::ComboBoxText,
     format: gtk::ComboBoxText,
     dimension: gtk::SpinButton,
+    video_size: gtk::ComboBoxText,
+    video_frame: gtk::ComboBoxText,
     enlarge: gtk::CheckButton,
     detail: gtk::Label,
     choose: gtk::Button,
     folder: gtk::Label,
     preview: gtk::Button,
     export: gtk::Button,
+    cancel: gtk::Button,
     undo: gtk::Button,
     history: gtk::Button,
     outputs: gtk::ListBox,
@@ -55,6 +59,17 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
     let dimension = gtk::SpinButton::with_range(1.0, 8192.0, 1.0);
     dimension.set_value(4096.0);
     dimension.set_tooltip_text(Some("Maximum pixels on the longest side"));
+    let video_size = gtk::ComboBoxText::new();
+    video_size.append(Some("1280"), "720p · 1280 pixels");
+    video_size.append(Some("1920"), "1080p · 1920 pixels");
+    video_size.set_active_id(Some("1920"));
+    video_size.set_visible(false);
+    let video_frame = gtk::ComboBoxText::new();
+    for (id, label) in [("source", "Original frame"), ("9:16", "9:16"), ("16:9", "16:9"), ("1:1", "1:1"), ("4:5", "4:5")] {
+        video_frame.append(Some(id), label);
+    }
+    video_frame.set_active_id(Some("source"));
+    video_frame.set_visible(false);
     let enlarge = gtk::CheckButton::with_label("Enlarge smaller photos to the maximum size");
     let detail = label("");
     let choose = gtk::Button::with_label("Choose output folder");
@@ -62,6 +77,7 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
     folder.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     let preview = gtk::Button::with_label("Preview export");
     let export = gtk::Button::with_label("Export new versions");
+    let cancel = gtk::Button::with_label("Stop export");
     let undo = gtk::Button::with_label("Undo export");
     let history = gtk::Button::with_label("Last export");
     let outputs = gtk::ListBox::new();
@@ -74,6 +90,7 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
         operation: RefCell::new(None),
         executed: Cell::new(false),
         has_undo: Cell::new(false),
+        cancel_requested: Cell::new(false),
         hits: RefCell::new(vec![]),
         capabilities: RefCell::new(vec![]),
         query,
@@ -83,12 +100,15 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
         kind,
         format,
         dimension,
+        video_size,
+        video_frame,
         enlarge,
         detail,
         choose,
         folder,
         preview,
         export,
+        cancel,
         undo,
         history,
         outputs,
@@ -124,6 +144,10 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
     recipe.append(&ui.format);
     recipe.append(&ui.dimension);
     body.append(&recipe);
+    let video_recipe = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    video_recipe.append(&ui.video_size);
+    video_recipe.append(&ui.video_frame);
+    body.append(&video_recipe);
     body.append(&ui.enlarge);
     body.append(&ui.detail);
     let folder_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -131,7 +155,7 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
     folder_row.append(&ui.folder);
     body.append(&folder_row);
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    for button in [&ui.history, &ui.preview, &ui.export, &ui.undo] {
+    for button in [&ui.history, &ui.preview, &ui.export, &ui.cancel, &ui.undo] {
         actions.append(button);
     }
     body.append(&actions);
@@ -201,18 +225,23 @@ fn clear(list: &gtk::ListBox) {
 fn recipe(ui: &Ui) -> Option<ToolRecipe> {
     let kind = ui.kind.active_id()?.to_string();
     let format = ui.format.active_text()?.to_string();
-    let value = ui.dimension.value();
-    if !value.is_finite() || value.fract() != 0.0 || !(1.0..=8192.0).contains(&value) {
-        return None;
-    }
+    let dimension = if kind == "video" {
+        ui.video_size.active_id()?.parse::<u32>().ok()?
+    } else {
+        let value = ui.dimension.value();
+        if !value.is_finite() || value.fract() != 0.0 || !(1.0..=8192.0).contains(&value) {
+            return None;
+        }
+        value as u32
+    };
     Some(ToolRecipe {
         allow_upscale: (kind == "photo").then_some(ui.enlarge.is_active()),
-        video_aspect_ratio: None,
+        video_aspect_ratio: if kind == "video" { Some(ui.video_frame.active_id()?.to_string()) } else { None },
         video_framing: None,
         video_stabilization: None,
         kind,
         format,
-        max_dimension: value as u32,
+        max_dimension: dimension,
     })
 }
 
@@ -232,6 +261,8 @@ fn update(ui: &Ui) {
     }
     ui.dimension.set_sensitive(ready);
     ui.enlarge.set_sensitive(ready);
+    ui.video_size.set_sensitive(ready);
+    ui.video_frame.set_sensitive(ready);
     ui.preview.set_sensitive(
         ready
             && !ui.files.selected_rows().is_empty()
@@ -240,6 +271,13 @@ fn update(ui: &Ui) {
     );
     ui.export
         .set_sensitive(ready && ui.operation.borrow().is_some() && !ui.executed.get());
+    ui.cancel.set_sensitive(
+        !ready
+            && ui.pending.borrow().as_ref().is_some_and(|(_, action)| action == "execute")
+            && ui.operation.borrow().is_some()
+            && ui.kind.active_id().as_deref() == Some("video")
+            && !ui.cancel_requested.get(),
+    );
     ui.undo
         .set_sensitive(ready && ui.operation.borrow().is_some() && ui.has_undo.get());
 }
@@ -249,6 +287,7 @@ fn invalidate(ui: &Ui) {
         return;
     }
     ui.operation.borrow_mut().take();
+    ui.cancel_requested.set(false);
     ui.executed.set(false);
     ui.has_undo.set(false);
     clear(&ui.outputs);
@@ -329,6 +368,7 @@ fn send(ui: &Ui, action: &str) {
         })
     };
     *ui.pending.borrow_mut() = Some((request_id, action.into()));
+    ui.cancel_requested.set(false);
     update(ui);
     ui.status.set_label("Working…");
     if ui.engine.borrow_mut().send(command).is_err() {
@@ -379,6 +419,7 @@ fn receive_tools(ui: &Ui, response: ToolResponse) {
     let Some(action) = accept(ui, &response.request_id) else {
         return;
     };
+    ui.cancel_requested.set(false);
     ui.status.set_label(if response.message.is_empty() {
         "Choose files and an output folder, then preview the export."
     } else {
@@ -433,6 +474,29 @@ fn receive_tools(ui: &Ui, response: ToolResponse) {
 }
 
 fn wire(ui: &Rc<Ui>) {
+    let weak = Rc::downgrade(ui);
+    ui.cancel.connect_clicked(move |_| {
+        let Some(ui) = weak.upgrade() else { return; };
+        if !ui.pending.borrow().as_ref().is_some_and(|(_, action)| action == "execute") || ui.cancel_requested.get() { return; }
+        let Some(operation_id) = ui.operation.borrow().clone() else { return; };
+        ui.cancel_requested.set(true);
+        update(&ui);
+        ui.status.set_label("Stopping the current video worker…");
+        let request = ToolRequest {
+            request_id: format!("gtk-tools-cancel-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            action: "cancel".into(),
+            file_ids: None,
+            destination: None,
+            recipe: None,
+            operation_id: Some(operation_id),
+            destination_bookmark: None,
+        };
+        if ui.engine.borrow_mut().send(CommandPayload::ToolRequest(ToolRequestPayload { request })).is_err() {
+            ui.cancel_requested.set(false);
+            update(&ui);
+            ui.status.set_label("The stop request did not reach the engine. Try again.");
+        }
+    });
     for (button, action) in [
         (&ui.search, "search"),
         (&ui.refresh, "capabilities"),
@@ -466,6 +530,14 @@ fn wire(ui: &Rc<Ui>) {
             invalidate(&ui);
         }
     });
+    for field in [&ui.video_size, &ui.video_frame] {
+        let weak = Rc::downgrade(ui);
+        field.connect_changed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                invalidate(&ui);
+            }
+        });
+    }
     let weak = Rc::downgrade(ui);
     ui.enlarge.connect_toggled(move |_| {
         if let Some(ui) = weak.upgrade() {
@@ -493,6 +565,8 @@ fn wire(ui: &Rc<Ui>) {
                 ui.detail.set_label(&capability.detail);
                 ui.dimension.set_visible(capability.id == "photo");
                 ui.enlarge.set_visible(capability.id == "photo");
+                ui.video_size.set_visible(capability.id == "video");
+                ui.video_frame.set_visible(capability.id == "video");
             }
         }
         invalidate(&ui);

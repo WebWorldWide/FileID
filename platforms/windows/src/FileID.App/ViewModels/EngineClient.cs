@@ -54,14 +54,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private readonly GenerationHealthWaiters _healthWaiters = new();
     private int _transportFailureGeneration = -1;
 
-    // S4: bounded engine-stdout framing — a wedged/garbled engine that never
+    // Bounded engine-stdout framing — a wedged/garbled engine that never
     // emits a newline can't grow an unbounded read buffer and OOM the UI process.
     // The 1 MiB cap this once used silently DROPPED the restructurePlan event (one
     // move per file × ~300 B) above ~3.5k moves, leaving the Restructure tab empty
     // on a real "tens of thousands of files" library. The engine caps OUTBOUND
     // frames too (sink.rs MAX_FRAME_BYTES) — over-cap it substitutes a structured
     // ipc_frame_too_large error rather than emitting a frame this reader would drop
-    // — so all four caps are kept symmetric. Bumped 32→64 MiB (R3-07B/R5-12) to hold
+    // — so all four caps are kept symmetric. Bumped 32→64 MiB to hold
     // a full ~200k-move whole-library plan while still bounding a runaway line. An
     // oversize drop is also surfaced as a visible error (see StdoutLoopAsync), never silent.
     private const int MaxFrameBytes = 64 * 1024 * 1024;
@@ -77,7 +77,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         public long BufferedBytes;
         // How many leading buffer chars are already confirmed newline-free, so a
         // multi-MB frame isn't rescanned from index 0 on every chunk (the old
-        // O(n^2) that pegged a core for minutes on a large restructurePlan). (audit A0)
+        // O(n^2) that pegged a core for minutes on a large restructurePlan).
         public int Scanned;
         public bool Resyncing;
         // Set when an over-cap frame was discarded, so StdoutLoopAsync can surface
@@ -97,7 +97,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private int _consecutiveFailures;
     private DateTime _failureWindowStart = DateTime.MinValue;
     private static readonly TimeSpan FailureWindow = TimeSpan.FromSeconds(60);
-    // R5-07: the engine must stay continuously Ready at least this long before a
+    // The engine must stay continuously Ready at least this long before a
     // subsequent crash counts as recovery (and clears the strike counter). A
     // shorter Ready→crash is a flap that must keep ticking toward the 3-strike
     // terminal cap instead of resetting every ~1s.
@@ -339,7 +339,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
     private bool _canUndoRestructure;
     /// <summary>True once an applyRestructure moved files and they haven't been
-    /// undone yet — drives the "Undo last run" button. (R2)</summary>
+    /// undone yet — drives the "Undo last run" button.</summary>
     public bool CanUndoRestructure
     {
         get => _canUndoRestructure;
@@ -581,7 +581,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // the startup (UI) thread before the first frame, and again on every
             // crash-respawn. await Task.Run keeps the security gate (the spawn still
             // waits for the verdict) while unblocking first paint; the continuation
-            // resumes on the UI thread. (audit Pc / H11)
+            // resumes on the UI thread.
             var verdict = await Task.Run(() => WinVerifyTrustChecker.Verify(
                 enginePath,
                 expectedThumbprintHex: expectedThumb,
@@ -757,7 +757,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // only the not-yet-scanned tail ([Scanned..Length)): during a long
             // frame's accumulation Scanned == Length so this is a no-op, and after
             // a Remove it rescans only the small (<= one chunk) leftover — so the
-            // multi-MB buffer is never re-indexed per chunk. (audit A0)
+            // multi-MB buffer is never re-indexed per chunk.
             int nl = -1;
             for (int i = st.Scanned; i < st.Buffer.Length; i++)
             {
@@ -824,7 +824,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // (O(read)) instead of re-indexing the StringBuilder. If this chunk
             // carries a newline, rewind Scanned to just before it so the loop's
             // indexed scan examines only this chunk's bytes — never the whole
-            // accumulated buffer (the O(n^2) on a large frame). (audit A0)
+            // accumulated buffer (the O(n^2) on a large frame).
             int bufLenBefore = st.Buffer.Length;
             st.Buffer.Append(st.Chunk, 0, read);
             st.BufferedBytes += st.Utf8Encoder.GetByteCount(st.Chunk.AsSpan(0, read), flush: false);
@@ -1029,7 +1029,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
             // Auto-respawn with bounded backoff. The 3-strike window is
             // 60 s wide; failures beyond that reset the counter.
             var now = DateTime.UtcNow;
-            // R5-07: a crash that follows a STABLE Ready (engine ran continuously
+            // A crash that follows a STABLE Ready (engine ran continuously
             // for >= StabilitySettle) is genuine recovery — clear the strike state.
             // A crash that recurs faster than that (Ready→crash flapping) is NOT
             // recovery and must keep ticking toward the 3-strike terminal cap.
@@ -1089,6 +1089,9 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     private void Cleanup()
     {
         var retiringGeneration = SpawnGeneration;
+        _workbenchRequests.FailGeneration(retiringGeneration);
+        if (ToolExecution.InvalidateGeneration(retiringGeneration)) PublishToolExecution();
+        if (ChatSend.InvalidateGeneration(retiringGeneration)) PublishChatSend();
         _healthWaiters.FailGeneration(retiringGeneration, new InvalidOperationException("The engine generation stopped."));
         RetireDeepAnalyzeGeneration(retiringGeneration);
         if (_scanStartSlot.ReleaseGeneration(SpawnGeneration) is { } scanStart)
@@ -1121,7 +1124,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         Interlocked.Increment(ref _spawnGeneration);
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpawnGeneration)));
 
-        // R5-06: release the auto-advance gates on every engine teardown. A crash
+        // Release the auto-advance gates on every engine teardown. A crash
         // mid-clustering (or mid-deep-analyze) never emits the Complete/Failed
         // event that normally clears these, so without this a respawned engine
         // would see the gate still held and skip auto face-clustering / deep
@@ -1132,13 +1135,14 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
         // Same for the undo affordance: a crash mid-undo never emits the terminal
         // restructureApplyResult that clears this, so the next apply's result would
-        // be mis-attributed as the dead undo's. (audit R2-app)
+        // be mis-attributed as the dead undo's. (app)
         UndoRestructureInFlight = false;
         Interlocked.Exchange(ref _restructureCommandInFlight, 0);
     }
 
     public void Dispose()
     {
+        _workbenchRequests.Dispose();
         Cleanup();
         _events.OnCompleted();
     }
@@ -1378,6 +1382,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
 
             try
             {
+                ApplyWorkbenchResponse(ev.Payload, generation);
                 switch (ev.Payload)
                 {
                     case ReadyEvent r:
@@ -1569,7 +1574,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         // starts with no carried-over DeepAnalyzeLast — otherwise the
                         // view's run-start _proposedNameCount reset is immediately
                         // undone when SyncStream reprocesses the stale last in the
-                        // same pass (over-counting smart-renames). (audit A13 re-audit)
+                        // same pass (over-counting smart-renames).
                         DeepAnalyzeLast = null;
                         break;
                     case DeepAnalyzeProgressEvent dap:
@@ -1589,7 +1594,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                         DeepAnalyzeComplete = dac.Result;
                         DeepAnalyzeProgress = null;
                         DeepAnalyzeStarting = null;
-                        // A1: a finished/cancelled auto-pass re-arms the gate so
+                        // A finished/cancelled auto-pass re-arms the gate so
                         // the next scan (or a later VLM-install) can trigger again.
                         Interlocked.Exchange(ref _autoDeepAnalyzeInFlight, 0);
                         break;
@@ -1627,7 +1632,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             LastRestructureResultWasShortcutApply = !UndoRestructureInFlight && _restructureApplyUsesSymlinks;
                             // Toggle the "Undo last run" affordance: an apply that
                             // moved files makes the run undoable; the undo's own reply
-                            // clears it. (R2)
+                            // clears it.
                             if (UndoRestructureInFlight)
                             {
                                 UndoRestructureInFlight = false;

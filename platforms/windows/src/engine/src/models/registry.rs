@@ -51,7 +51,7 @@ pub(crate) fn vlm_dir_name(model_kind: &str) -> Option<&'static str> {
         "qwen2_5_vl_7b" | "qwen2.5-vl-7b" => Some("qwen2.5-vl-7b"),
         "gemma_3_4b" | "gemma-3-4b" => Some("gemma-3-4b"),
         "mistral_small_3_2" | "mistral-small-3.2" => Some("mistral-small-3.2"),
-        _ => None,
+        _ => super::catalog::directory(model_kind),
     }
 }
 
@@ -336,22 +336,9 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-            // Executable runtimes are shipped in the signed application package. Only
-    // model weights remain in the downloader registry.
-    "whisper" => {
-        let model_dir = models_root.join("whisper");
-        LookupResult::Found(Model {
-            id: "whisper",
-            display_name: "Whisper (audio transcription)",
-            files: vec![FileEntry {
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-                    .to_string(),
-                dest: model_dir.join("ggml-base.bin"),
-                sha256: Some("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into()),
-                approx_bytes: 147_951_465,
-            }],
-        })
-    }        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
+        // Executable runtimes are shipped in the signed application package. Only
+        // model weights remain in the downloader registry.
+        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
             let dir = models_root.join("bge_text");
             LookupResult::Found(Model {
                 id: "bge_text",
@@ -373,58 +360,6 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-        // ── Florence-2 base (Phase 7 — registry arm + skeleton; the generation
-        // loop wiring is the documented Phase 7b follow-up). 4-ONNX split +
-        // BART tokenizer + config from the community ONNX export at
-        // `onnx-community/Florence-2-base` (Microsoft Florence-2, MIT). The
-        // model is downloadable today; `models::florence2` exposes the canonical
-        // install dir so progress UI works against the same layout the future
-        // loader will read.
-        "florence2_base" | "florence2" => {
-            let dir = models_root.join("florence2");
-            LookupResult::Found(Model {
-                id: "florence2_base",
-                display_name: "Florence-2 base (grounded regions)",
-                files: vec![
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/vision_encoder.onnx".to_string(),
-                        dest: dir.join("vision_encoder.onnx"),
-                        sha256: Some("2c7464fce495ea43b415b48afe7dbe84a9ebbe0cfe3c31fdd81c6dd66b39ff75".into()),
-                        approx_bytes: 110_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/embed_tokens.onnx".to_string(),
-                        dest: dir.join("embed_tokens.onnx"),
-                        sha256: Some("fec0fd20276af861afb6a23a11544bf1378c05e2a41001b610cc281e244c4b20".into()),
-                        approx_bytes: 25_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/encoder_model.onnx".to_string(),
-                        dest: dir.join("encoder_model.onnx"),
-                        sha256: Some("b155b5a0e56a4244c62060751bb1b70dfe481015d0dbfa6d19b1912d9e58da0d".into()),
-                        approx_bytes: 110_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/onnx/decoder_model_merged.onnx".to_string(),
-                        dest: dir.join("decoder_model_merged.onnx"),
-                        sha256: Some("6d6e1266d7f94f5d4ec9cc07d9c1f7b3e47049c9b0de7bbe82a91e62dfd152af".into()),
-                        approx_bytes: 200_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/tokenizer.json".to_string(),
-                        dest: dir.join("tokenizer.json"),
-                        sha256: Some("d69dcdb2323e124ac4f800cb9863ddccea0d7bb11e16125e8df3bd60f2f8aeac".into()),
-                        approx_bytes: 5_000_000,
-                    },
-                    FileEntry {
-                        url: "https://huggingface.co/onnx-community/Florence-2-base/resolve/main/config.json".to_string(),
-                        dest: dir.join("config.json"),
-                        sha256: Some("74efbe2299e13cfcc9e083861eae4a943d76f784ddd595d85e779d189cf0a574".into()),
-                        approx_bytes: 10_000,
-                    },
-                ],
-            })
-        }
 
         // ── Per-vendor accelerated runtimes (CUDA EP / OpenVINO EP / QNN EP)
         // are deliberately NOT downloaded by the engine: each requires a
@@ -438,8 +373,29 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
         // ship the QNN runtime. Per-model `_int8`/`_qnn` variants follow
         // the same rule — `models::variants` picks them up if dropped into
         // the model dir by hand, and falls back to the fp32 graph otherwise.
-        _ => LookupResult::Unknown,
+        _ => catalog_model(&models_root, model_kind).map_or(LookupResult::Unknown, LookupResult::Found),
     }
+}
+
+/// A runnable catalog vision model, laid out like the curated VLMs
+/// (`vlm/<dir>/model.gguf` + `mmproj.gguf`) so discovery, provenance and the
+/// resident server treat it identically.
+fn catalog_model(models_root: &std::path::Path, model_kind: &str) -> Option<Model> {
+    let entry = super::catalog::runnable(model_kind)?;
+    let dir = models_root.join("vlm").join(super::catalog::directory(model_kind)?);
+    let files = entry
+        .files
+        .iter()
+        .filter_map(|file| {
+            let name = match file.role.as_str() {
+                "model" => "model.gguf",
+                "projector" => "mmproj.gguf",
+                _ => return None,
+            };
+            Some(FileEntry { url: file.url.clone(), dest: dir.join(name), sha256: file.sha256.clone(), approx_bytes: file.bytes.unwrap_or(0) })
+        })
+        .collect();
+    Some(Model { id: entry.id.as_str(), display_name: entry.name.as_str(), files })
 }
 
 /// Stable, short token identifying the EXACT pinned artifacts of `model` —
@@ -476,13 +432,13 @@ fn revision_token(model: &Model) -> String {
 /// name. The old `{id}-<oldtoken>.installed` no longer matches, so the install
 /// gate falls through to a re-fetch instead of trusting the stale artifact on
 /// disk. This mirrors the macOS revision-keyed sentinel that self-heals across
-/// a pin change (audit C1-024; the b4404→b9254 episode).
+/// a pin change (024; the b4404→b9254 episode).
 ///
 /// Pre-revision-key Windows builds dropped a bare `{id}.installed` with no token.
 /// [`migrate_legacy_sentinel`] renames that legacy marker to the current keyed
 /// name on first read so an already-present (multi-GB) install isn't reported as
-/// not-installed and re-downloaded merely because the naming scheme changed
-/// (R-04). A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
+/// not-installed and re-downloaded merely because the naming scheme changed.
+/// A genuine pin bump still self-heals: a stale `{id}-<oldtoken>.installed`
 /// is not the legacy name and is left for the re-fetch path.
 pub fn sentinel_path(model: &Model) -> Option<PathBuf> {
     let dir = paths::models_dir().ok()?.join(".sentinels");
@@ -539,7 +495,6 @@ fn runtime_required_names(name: &str) -> Option<&'static [&'static [&'static str
             &["mtmd.dll", "libmtmd.so", "libmtmd.dylib"],
         ]),
         "cudart.zip" => Some(&[&["cudart64_12.dll"], &["cublas64_12.dll"]]),
-        "whisper-runtime.zip" => Some(&[&["main.exe", "whisper-cli.exe", "whisper-cli"]]),
         "cudnn-runtime.zip" => Some(&[&["cudnn64_9.dll"]]),
         "ort-cuda.zip" => Some(&[
             &["onnxruntime.dll"],
@@ -607,10 +562,10 @@ fn migrate_legacy_sentinel(dir: &Path, model: &Model, keyed: &Path) {
     if !legacy.exists() {
         return;
     }
-    // R5-05: a legacy bare marker carries no revision token, so it cannot signal
+    // A legacy bare marker carries no revision token, so it cannot signal
     // a pin bump on its own. Re-validate the on-disk artifacts against the CURRENT
     // pins before vouching, or a stale pre-bump install masquerades as the current
-    // one (C1-024). approx_bytes is a rounded estimate, so SHA256 (the exact,
+    // one. approx_bytes is a rounded estimate, so SHA256 (the exact,
     // mandatory pin) is the check. Runs at most once per legacy install (this
     // branch is unreachable once keyed exists or the marker is gone), so the
     // one-time hash is off the hot path.
@@ -665,7 +620,7 @@ mod tests {
         // ort_openvino IS on HF, so it belongs here for real coverage.
         let kinds = [
             "ram_plus", "mobileclip_s2", "clip_text", "bge_text", "arcface",
-            "florence2", "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
+            "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b",
             "gemma_3_4b", "mistral_small_3_2", "ort_openvino_x64",
         ];
         for kind in kinds {
@@ -798,7 +753,7 @@ mod tests {
                 let s = p.to_string_lossy();
                 assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
                 let name = p.file_name().unwrap().to_string_lossy();
-                // Revision-keyed: `ram_plus-<token>.installed` (audit C1-024).
+                // Revision-keyed: `ram_plus-<token>.installed` (024).
                 assert!(name.starts_with("ram_plus-"), "sentinel not id-prefixed: {s}");
                 assert!(name.ends_with(".installed"), "unexpected sentinel: {s}");
             }
@@ -808,7 +763,7 @@ mod tests {
     /// A pin bump (revision/sha256 change on any file) must move the sentinel
     /// filename so the stale `.installed` no longer matches and the install gate
     /// re-fetches. Before the revision-key fix the name was a bare
-    /// `{id}.installed` that survived the b4404→b9254 hash bump. (audit C1-024)
+    /// `{id}.installed` that survived the b4404→b9254 hash bump. (024)
     #[test]
     fn pin_bump_invalidates_sentinel() {
         let LookupResult::Found(model) = lookup_full("ram_plus") else {
@@ -866,9 +821,9 @@ mod tests {
         dir
     }
 
-    /// R-04: a pre-revision-key install has a bare `{id}.installed`. On first read
+    /// A pre-revision-key install has a bare `{id}.installed`. On first read
     /// it must be migrated (renamed) to the current keyed name — BUT only when the
-    /// on-disk artifacts still satisfy the current pins (R5-05). Here the lone file
+    /// on-disk artifacts still satisfy the current pins. Here the lone file
     /// is present (sha256=None → existence is the gate), so migration proceeds.
     #[test]
     fn legacy_sentinel_is_migrated_when_pins_valid() {
@@ -885,7 +840,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// R5-05: a legacy marker whose on-disk artifacts no longer satisfy the
+    /// A legacy marker whose on-disk artifacts no longer satisfy the
     /// current pins (missing file, or sha256 mismatch after a pin bump) must NOT
     /// be promoted — it is DELETED so the install gate re-fetches.
     #[test]

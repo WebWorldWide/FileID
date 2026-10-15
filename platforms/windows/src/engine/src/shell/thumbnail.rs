@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 // Thumbnail — IShellItemImageFactory::GetImage.
 //
 // Uses the system's IThumbnailProvider chain — the same code path Explorer
@@ -6,7 +5,7 @@
 // need (Office, RTF, .pages, .key, .numbers, ai, eps, psd, dwg, …) because
 // the provider is whichever the user has installed.
 //
-// Output: tightly packed RGBA8, 512×512 by default. The Win32 path is
+// Output: tightly packed RGBA8. The Win32 path is
 // HBITMAP-backed BGRA; we swap channels on extraction so callers always
 // see RGBA regardless of source.
 
@@ -16,18 +15,16 @@ use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
-    DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HBITMAP, HDC,
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::Shell::{
     IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF, SIIGBF_BIGGERSIZEOK,
-    SIIGBF_RESIZETOFIT,
+    SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
 };
-
-pub const THUMB_DIM: i32 = 512;
 
 #[derive(Debug, Clone)]
 pub struct Thumbnail {
@@ -37,14 +34,18 @@ pub struct Thumbnail {
     pub rgba: Vec<u8>,
 }
 
-/// Render the system thumbnail for `path` at the canonical 512×512 size.
-/// Returns RGBA8 bytes. Initializes COM in single-threaded apartment for
-/// the duration of the call (cheap; idempotent if the caller already did).
-pub fn render(path: &Path) -> Result<Thumbnail> {
-    render_at(path, THUMB_DIM)
+/// Render the provider thumbnail only (no icon fallback) for `path`,
+/// fitted within `dim`. Deep Analyze uses it to decode formats image-rs
+/// cannot read (RAW, PSD, …) through the codecs the user has installed.
+pub fn render_thumbnail_only_at(path: &Path, dim: i32) -> Result<Thumbnail> {
+    render_at_with_flags(
+        path,
+        dim,
+        SIIGBF(SIIGBF_RESIZETOFIT.0 | SIIGBF_BIGGERSIZEOK.0 | SIIGBF_THUMBNAILONLY.0),
+    )
 }
 
-pub fn render_at(path: &Path, dim: i32) -> Result<Thumbnail> {
+fn render_at_with_flags(path: &Path, dim: i32, flags: SIIGBF) -> Result<Thumbnail> {
     if !path.exists() {
         anyhow::bail!("thumbnail source missing: {}", path.display());
     }
@@ -69,7 +70,6 @@ pub fn render_at(path: &Path, dim: i32) -> Result<Thumbnail> {
                 .context("SHCreateItemFromParsingName")?;
 
         let size = SIZE { cx: dim, cy: dim };
-        let flags = SIIGBF(SIIGBF_RESIZETOFIT.0 | SIIGBF_BIGGERSIZEOK.0);
         let hbm: HBITMAP = factory
             .GetImage(size, flags)
             .context("IShellItemImageFactory::GetImage")?;
@@ -117,9 +117,13 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
         ..Default::default()
     };
 
+    let hdc = unsafe { CreateCompatibleDC(HDC::default()) };
+    if hdc.0.is_null() {
+        anyhow::bail!("CreateCompatibleDC returned null");
+    }
     let scanned = unsafe {
         GetDIBits(
-            HDC::default(),
+            hdc,
             hbm,
             0,
             height,
@@ -128,6 +132,7 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
             DIB_RGB_COLORS,
         )
     };
+    let _ = unsafe { DeleteDC(hdc) };
     if scanned == 0 {
         anyhow::bail!("GetDIBits returned 0");
     }
@@ -156,5 +161,34 @@ impl Drop for ComGuard {
         if self.initialized {
             unsafe { CoUninitialize() };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_only_renderer_returns_real_pixels_for_png() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-shell-thumbnail-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            96,
+            64,
+            image::Rgb([12, 120, 240]),
+        ))
+        .save_with_format(&path, image::ImageFormat::Png)
+        .unwrap();
+
+        let thumbnail = render_thumbnail_only_at(&path, 64).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(thumbnail.width > 0 && thumbnail.height > 0);
+        assert_eq!(
+            thumbnail.rgba.len(),
+            thumbnail.width as usize * thumbnail.height as usize * 4
+        );
     }
 }

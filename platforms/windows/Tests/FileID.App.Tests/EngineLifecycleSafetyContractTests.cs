@@ -683,7 +683,9 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.Contains("await EnsureScanStartConfirmedAsync();", commands, StringComparison.Ordinal);
         Assert.Contains("var predecessor = _writeTail;", commands, StringComparison.Ordinal);
         Assert.Contains("_writeTail = queued;", commands, StringComparison.Ordinal);
-        Assert.Contains("await predecessor.ConfigureAwait(false);", commands, StringComparison.Ordinal);
+        Assert.Contains("CommandWriteQueue.Enqueue(predecessor", commands, StringComparison.Ordinal);
+        var fifo = File.ReadAllText(PathInRepo("platforms", "windows", "src", "FileID.App", "ViewModels", "CommandWriteQueue.cs"));
+        Assert.Contains("await predecessor.ConfigureAwait(false);", fifo, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -692,7 +694,7 @@ public sealed class EngineLifecycleSafetyContractTests
         var commands = File.ReadAllText(PathInRepo(
             "platforms", "windows", "src", "FileID.App", "ViewModels", "EngineClient.Commands.cs"));
         var capture = commands.IndexOf("var generation = SpawnGeneration;", StringComparison.Ordinal);
-        var awaitPredecessor = commands.IndexOf("await predecessor.ConfigureAwait(false);", capture, StringComparison.Ordinal);
+        var awaitPredecessor = commands.IndexOf("CommandWriteQueue.Enqueue(predecessor", capture, StringComparison.Ordinal);
         var writeLock = commands.IndexOf("lock (_writeLock)", awaitPredecessor, StringComparison.Ordinal);
         var staleCheck = commands.IndexOf("if (generation != SpawnGeneration)", writeLock, StringComparison.Ordinal);
         var callback = commands.IndexOf("onWriteStarted?.Invoke();", staleCheck, StringComparison.Ordinal);
@@ -809,7 +811,7 @@ public sealed class EngineLifecycleSafetyContractTests
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "AGENTS.md"))
+            if (File.Exists(Path.Combine(directory.FullName, "LICENSE"))
                 && Directory.Exists(Path.Combine(directory.FullName, "platforms", "windows")))
             {
                 return directory.FullName;

@@ -10,7 +10,8 @@
 //!   v9_usn_state, v10_doc_text, v11_text_embeddings, v12_face_model_reset,
 //!   v13_face_verification_anchors, v14_files_kind_scanned_index,
 //!   v15_fts_sync_triggers, v16_path_search,
-//!   v17_face_verification_stable_keys, v18_restructure_feedback
+//!   v17_face_verification_stable_keys, v18_restructure_feedback,
+//!   v19_files_text_stage_done
 //!
 //! Migrations are append-only. NEVER edit a registered migration once
 //! committed; add a new vN+1 migration instead.
@@ -46,8 +47,8 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v16_path_search",              V16_PATH_SEARCH),
         ("v17_face_verification_stable_keys", V17_FACE_VERIFICATION_STABLE_KEYS),
         ("v18_restructure_feedback",     V18_RESTRUCTURE_FEEDBACK),
-        ("v19_files_text_stage_done", "ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;"),
-        ("v20_vlm_full_model", "ALTER TABLE files ADD COLUMN vlm_full_model TEXT;"),
+        ("v19_files_text_stage_done",    V19_FILES_TEXT_STAGE_DONE),
+        ("v20_vlm_full_model",           V20_VLM_FULL_MODEL),
         ("v21_catalog", include_str!("../../../../../../shared/catalog/v21.sql")),
         ("v22_face_cache_provenance", include_str!("../../../../../../shared/catalog/v22.sql")),
         ("v23_vector_change_tracking", include_str!("../../../../../../shared/catalog/v23.sql")),
@@ -131,13 +132,13 @@ CREATE TRIGGER IF NOT EXISTS doc_text_au AFTER UPDATE ON doc_text BEGIN
 END;
 ";
 
-/// v16: normalization-insensitive filename search (C15). SQLite LIKE compares
+/// v16: normalization-insensitive filename search. SQLite LIKE compares
 /// bytes, so an NFC query can never match an NFD-stored name (Mac/NAS/Dropbox-
 /// synced files). `path_search` holds the NFC form of `path_text`; the app
 /// NFC-normalizes the query and LIKEs against it. Both the Windows dbwriter
 /// (`nfc_path_search`) and macOS (`precomposedStringWithCanonicalMapping`)
 /// apply real NFC at their writers so the contract is symmetric across
-/// platforms (F-C2-005 — the prior verbatim `path_search = path_text`
+/// platforms (the prior verbatim `path_search = path_text`
 /// asymmetry left NFD filenames unsearchable on Windows only). This migration
 /// itself is append-only and unchanged: the bulk `UPDATE` backfills the
 /// identity case (ASCII / already-NFC rows are correct verbatim) and any
@@ -149,7 +150,7 @@ ALTER TABLE files ADD COLUMN path_search TEXT;
 UPDATE files SET path_search = path_text;
 ";
 
-/// v17: churn-stable face-verification keys (R3-15). v13's face_a/face_b are
+/// v17: churn-stable face-verification keys. v13's face_a/face_b are
 /// face_print ids, which a faces_evaluated re-scan DELETE+re-INSERTs with fresh
 /// ids — after which a stored "different people" verdict's faces no longer
 /// resolve and the anti-merge guard silently no-ops (data loss). Add (file_id,
@@ -191,12 +192,24 @@ CREATE TABLE IF NOT EXISTS restructure_feedback (
 CREATE INDEX IF NOT EXISTS idx_restructure_feedback_token ON restructure_feedback(token);
 ";
 
+// v19: records that a doc/pdf's text-extraction stage has run, so the BGE backfill
+// carve-out stops re-walking a doc that yields no embeddable text (an image-only PDF,
+// an iWork package, an empty file) on every rescan. Byte-faithful with the macOS
+// v19_files_text_stage_done migration.
+const V19_FILES_TEXT_STAGE_DONE: &str = "
+ALTER TABLE files ADD COLUMN text_stage_done INTEGER NOT NULL DEFAULT 0;
+";
+
+const V20_VLM_FULL_MODEL: &str = "
+ALTER TABLE files ADD COLUMN vlm_full_model TEXT;
+";
+
 /// Apply every registered migration that hasn't been applied yet, in
 /// registration order, each in its own transaction.
 pub fn apply(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION_TABLE_DDL).context("creating grdb_migrations")?;
 
-    // L7: a DB stamped by a NEWER engine carries identifiers this
+    // A DB stamped by a NEWER engine carries identifiers this
     // registry doesn't know; writing to it could silently break the
     // newer schema's invariants. Refuse to open instead. macOS mirror:
     // Database.swift DatabaseOpenError.newerThanEngine.
@@ -206,9 +219,10 @@ pub fn apply(conn: &Connection) -> Result<()> {
         .query_map([], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()
         .context("listing applied migrations")?;
-    let unknown: Vec<String> = applied
-        .into_iter()
-        .filter(|id| !known.contains(&id.as_str()))
+    let unknown: Vec<&str> = applied
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !known.contains(id))
         .collect();
     if !unknown.is_empty() {
         anyhow::bail!(
@@ -219,18 +233,7 @@ pub fn apply(conn: &Connection) -> Result<()> {
     }
 
     for (id, sql) in registry() {
-        let already: bool = conn
-            .query_row(
-                "SELECT 1 FROM grdb_migrations WHERE identifier = ?1 LIMIT 1",
-                [id],
-                |_row| Ok(true),
-            )
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(false),
-                other => Err(other),
-            })
-            .with_context(|| format!("checking migration {id}"))?;
-        if already {
+        if applied.iter().any(|a| a.as_str() == id) {
             continue;
         }
         tracing::info!(migration = id, "applying migration");
@@ -258,7 +261,7 @@ pub fn apply(conn: &Connection) -> Result<()> {
 // sqlite_master MUST agree across platforms so an ORM doing
 // schema-text comparisons doesn't see drift.
 //
-// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v7.
+// Verified against engine/Sources/FileIDEngine/Storage/Database.swift v19.
 
 const V1_CORE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS files (
@@ -410,7 +413,7 @@ CREATE TABLE IF NOT EXISTS text_embeddings (
 "#;
 
 // v10: document text extracted by `pipeline::doc_extract` for txt/md/docx/
-// pptx/xlsx (and a future Phase 4b pdf step). Mirrors the `ocr_text` /
+// pptx/xlsx. Mirrors the `ocr_text` /
 // `ocr_fts` shape so the dbwriter inserts are near copy-paste and the
 // existing search ranker can search `doc_fts` with the same query syntax.
 const V10_DOC_TEXT: &str = r#"
@@ -427,12 +430,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
 );
 "#;
 
-// v9: per-volume USN journal cursor. Provisioned by the Phase 3 foundation;
-// the (Windows-only) scan-driver integration that reads
-// `FSCTL_READ_USN_JOURNAL` since `next_usn` and prunes the skip-set
-// accordingly is a follow-up — until then this table stays unwritten and the
-// scan uses the (always-allowed) `jwalk` + timestamp-skip path. `journal_id`
-// detects deletion/recreation so a stale cursor never reads garbage.
+// v9: per-volume USN journal cursor. Never written: scans use the `jwalk` +
+// timestamp-skip path. Kept because applied migrations are immutable.
 const V9_USN_STATE: &str = r#"
 CREATE TABLE IF NOT EXISTS usn_state (
     volume_id       TEXT    PRIMARY KEY,
@@ -442,8 +441,8 @@ CREATE TABLE IF NOT EXISTS usn_state (
 );
 "#;
 
-// v8: rename / move identity. `content_hash` is BLAKE3 (full for ≤16 MB; a
-// head+interior-samples+tail+size composite above — see util::content_hash.
+// v8: rename / move identity. `content_hash` is the cross-platform SHA-256
+// recipe (full for ≤16 MB; head+interior-samples+tail+size composite above) — see util::content_hash.
 // The rename-heal also matches the recipe-v1 head+tail+size digest stamped by
 // pre-interior-sample builds, then re-stamps the current recipe). `file_ref`
 // is the platform's volume-local file id (NTFS MFT reference on Windows via
@@ -483,6 +482,16 @@ mod tests {
             .unwrap();
         assert_eq!(n, 24, "expected 24 applied migrations");
 
+        let full_model_column: (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT type, [notnull], dflt_value \
+                 FROM pragma_table_info('files') WHERE name='vlm_full_model'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(full_model_column, ("TEXT".into(), 0, None));
+
         // v13 added face_a + face_b to face_verifications (stable anchor keys).
         let verify_cols: i64 = conn
             .query_row(
@@ -493,7 +502,7 @@ mod tests {
             .unwrap();
         assert_eq!(verify_cols, 2, "v13 must add face_a + face_b columns");
 
-        // v17 (R3-15) added the churn-stable (file_id, bbox) keys.
+        // v17 added the churn-stable (file_id, bbox) keys.
         let stable_cols: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('face_verifications') \
@@ -553,7 +562,7 @@ mod tests {
         assert_eq!(n, 24);
     }
 
-    /// R3-15 regression: a "different people" verdict's churn-stable (file_id, bbox)
+    /// A "different people" verdict's churn-stable (file_id, bbox)
     /// key must still resolve to the CURRENT face after a faces_evaluated re-scan
     /// DELETE+re-INSERTs face_prints with fresh ids (the legacy face_a/face_b id is
     /// then dangling). macOS mirror: MigrationParityTests.verdictSurvivesFaceChurn.
@@ -589,7 +598,7 @@ mod tests {
              (101, 1, x'00', '0.1,0.1,0.2,0.2'), (202, 2, x'00', '0.3,0.3,0.2,0.2')",
             [],
         ).unwrap();
-        // The legacy face id is now dangling (the pre-R3-15 failure mode)…
+        // The legacy face id is now dangling (the earlier failure mode)…
         let legacy_resolves: i64 = conn
             .query_row("SELECT COUNT(*) FROM face_prints WHERE id IN (10, 20)", [], |r| r.get(0))
             .unwrap();
@@ -617,7 +626,7 @@ mod tests {
         assert_eq!(new_b, 202, "stable key B must resolve to the re-scanned face");
     }
 
-    /// L7 regression: a DB stamped by a newer engine must refuse to open
+    /// A DB stamped by a newer engine must refuse to open
     /// rather than silently write into a schema this build doesn't know.
     /// macOS mirror: MigrationParityTests.newerDatabaseRefusesToOpen.
     #[test]
@@ -634,7 +643,7 @@ mod tests {
         assert!(err.to_string().contains("v99_from_the_future"));
     }
 
-    /// C12 regression: the migration chains forked at v14 (macOS registered
+    /// The migration chains forked at v14 (macOS registered
     /// "v14_fts_sync_triggers" while this engine registered
     /// "v14_files_kind_scanned_index"), which made a macOS-touched library
     /// fail every Windows scan with SQLITE_CORRUPT. Both platforms pin the

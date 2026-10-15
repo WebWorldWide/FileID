@@ -20,7 +20,7 @@ struct FileIDEngineMain {
 
     static func main() async {
         if Array(CommandLine.arguments.dropFirst()) == ["--model-catalog-status"] {
-            let entries = ModelCatalog.entries
+            let entries = MLXModelCatalog.entries
             let vision = entries.filter { $0.role == .vision }.count
             if let data = try? JSONSerialization.data(withJSONObject: ["catalogEntries":entries.count,"vision":vision,"text":entries.count - vision], options:[.sortedKeys]) {
                 print(String(decoding: data, as: UTF8.self))
@@ -43,7 +43,7 @@ struct FileIDEngineMain {
         if CommandLine.arguments.dropFirst().first == "--export-photo" {
             exit(await VideoFrameWorker.runPhoto(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
-        // U4: must run before ANY library can write to fd 2 (and before
+        // Must run before ANY library can write to fd 2 (and before
         // the IPCSink singleton captures its wire handle).
         IPCTransport.bootstrap()
 
@@ -177,7 +177,7 @@ struct FileIDEngineMain {
 
         await coordinator.awaitActiveScan()
         // Also drain an in-flight restructure apply so a shutdown mid-apply lets
-        // it cancel cleanly and flush its terminal restructureApplyResult. (F-C6-013)
+        // it cancel cleanly and flush its terminal restructureApplyResult.
         await coordinator.awaitActiveRestructure()
         progressTicker.cancel()
 
@@ -195,7 +195,7 @@ struct FileIDEngineMain {
 
         // Deliver any IPC event still buffered (e.g. a terminal scanComplete /
         // restructureApplyResult the detached drainer hadn't flushed yet)
-        // before the hard exit drops it. (F-C3-040)
+        // before the hard exit drops it.
         await sink.drainAndClose()
 
         // Hard-exit. MLX's static destructors SEGV during normal atexit
@@ -286,7 +286,6 @@ struct FileIDEngineMain {
                 // A bare error leaves the app's auto-pilot stuck on "Scanning…"
                 // forever — it advances only on a scan-terminal event. Emit an
                 // empty scanComplete so the assistant leaves the scanning state.
-                // (F-C3-032)
                 await sink.emit(.scanComplete(ScanComplete(
                     sessionID: "", totalFiles: 0, processedFiles: 0,
                     failedFiles: 0, totalSeconds: 0
@@ -323,7 +322,7 @@ struct FileIDEngineMain {
             }
             let authorizedRoot = rootLease.path
             let displayPath = rootDisplay ?? authorizedRoot
-            // R4-11: allocate the scan epoch synchronously here (the command loop
+            // Allocate the scan epoch synchronously here (the command loop
             // is serial), BEFORE the next command is read, so a quick cancelScan is
             // attributed to this scan and survives startSession.
             let epoch = await coordinator.nextScanEpoch()
@@ -370,6 +369,41 @@ struct FileIDEngineMain {
                 requestID: requestID,
                 pid: ProcessInfo.processInfo.processIdentifier
             )))
+        case .listModels(let requestID, let role):
+            let roles: Set<String> = ["vision", "text", "embedding", "reranker", "speech"]
+            guard HealthCheckResult.isValidRequestID(requestID), role.map(roles.contains) ?? true else {
+                await sink.emit(.error(EngineError(
+                    kind: "invalid_list_models_request",
+                    message: "listModels needs a 1–128 character ASCII request ID and a known role."
+                )))
+                return
+            }
+            let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+            // Favorites plus the bundled MLX catalog, every entry pinned to the
+            // locked mlx-swift-lm runtime; only vision and text roles exist on macOS.
+            let models: [ModelCatalogItem] = AIModelKind.allCases.compactMap { kind in
+                let kindRole = kind.supportsVision ? "vision" : "text"
+                guard role.map({ $0 == kindRole }) ?? true else { return nil }
+                let catalog = kind.catalogEntry
+                let isFavorite = AIModelKind.favorites.contains(kind)
+                let quantization = catalog.map { "\($0.quantization.bits)bit" } ?? (kind.displayName.contains("8-bit") ? "8bit" : "4bit")
+                return ModelCatalogItem(
+                    id: kind.rawValue, name: kind.displayName, family: kind.sourceRepo.components(separatedBy: "/").last ?? kind.rawValue,
+                    upstream: catalog?.bases.first?.repo ?? kind.sourceRepo, role: kindRole, format: "mlx", quantization: quantization,
+                    license: kind.licensePolicyKey, termsRequired: kind.licensePolicyKey == "Gemma", parametersBillion: nil,
+                    downloadBytes: kind.approxBytes, estimatedResidentGB: kind.ramBudgetGB,
+                    tier: ModelCatalogItem.tier(forResidentGB: kind.ramBudgetGB), status: isFavorite ? "curated" : "candidate", runnable: true,
+                    installed: kind.isInstalledOnDisk(), fits: kind.ramBudgetGB <= memoryGB * 0.6
+                )
+            }
+            await sink.emit(.modelCatalog(ModelCatalog(requestID: requestID, physicalMemoryGB: memoryGB, vramMB: 0, models: models)))
+        case .benchmarkModel(let requestID, let modelKind, _):
+            await sink.emit(.benchmarkResult(BenchmarkResult(
+                requestID: requestID, modelKind: String(modelKind.prefix(128)), status: "error",
+                message: "On-device benchmarking is available in the shared engine on Windows and Linux; MLX benchmarking on macOS is not yet implemented."
+            )))
+        case .cancelBenchmark:
+            break
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))
@@ -383,7 +417,7 @@ struct FileIDEngineMain {
             // `awaitActiveScan()` (in main) blocks the clean exit indefinitely.
             // requestShutdown (not requestCancel) also trips the dedicated
             // shutdown mirror so a clustering pass started after a cancelled scan
-            // aborts promptly instead of running to its persist first. (R-07)
+            // aborts promptly instead of running to its persist first.
             await coordinator.requestShutdown()
         case .runFaceClustering:
             guard let database else {
@@ -593,7 +627,7 @@ struct FileIDEngineMain {
                 // Canonical cross-platform kind for "engine doesn't recognize
                 // this model id" — matches the Windows engine's `unknown_model`
                 // (was macOS `prewarm_invalid_kind`). Stamp `modelKind` so the
-                // app can route it to the right install slot. (audit F-C2-003)
+                // app can route it to the right install slot. (003)
                 await sink.emit(.error(EngineError(
                     kind: "unknown_model",
                     message: "This FileID engine doesn't recognize the model '\(modelKey)'. Reinstall or rebuild FileID so the app and engine match, then try again.",
@@ -740,7 +774,7 @@ struct FileIDEngineMain {
             // caller asking for a reversible preview got irreversible moves
             // with no warning. Checked BEFORE reserveRestructure() so a
             // rejected request never wedges later applies/undos on
-            // restructure_busy. (audit R3 — see DECISIONS.md)
+            // restructure_busy. (see DECISIONS.md)
             guard !useSymlinks else {
                 await sink.emit(.error(EngineError(
                     kind: "apply_restructure",
@@ -804,7 +838,7 @@ struct FileIDEngineMain {
         case .undoRestructure(let libraryRoot, let shortcutUndoToken):
             // Reverse the last apply by replaying the engine's on-disk undo
             // journal. Same machinery as apply (real moves, cancellable, terminal
-            // restructureApplyResult), so register it the same way. (R2)
+            // restructureApplyResult), so register it the same way.
             //
             // A non-nil shortcutUndoToken asks to undo only ONE shortcut-mode
             // (symlink) apply run, never the real-move journal (schema:
@@ -815,10 +849,10 @@ struct FileIDEngineMain {
             // would violate that contract. Checked BEFORE reserveRestructure()
             // so a rejected request can't wedge restructure_busy for every
             // later apply/undo (ScanCoordinator's reservation has no timeout).
-            // (audit R3 — see DECISIONS.md)
+            // (see DECISIONS.md)
             guard shortcutUndoToken == nil else {
                 // EngineClient's undoRestructureInFlight flag is cleared ONLY by
-                // a terminal restructureApplyResult (audit R2-app) — an .error
+                // a terminal restructureApplyResult (app) — an .error
                 // alone would leave it latched and mis-attribute the NEXT apply's
                 // result to this rejected undo. Emit both, mirroring the
                 // UndoJournalError catch arm above.
@@ -900,6 +934,11 @@ struct FileIDEngineMain {
         case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
             guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
             await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
+        case .reassignFace:
+            await sink.emit(.error(EngineError(
+                kind: "not_implemented_yet",
+                message: "This IPC command is not implemented by the macOS engine yet."
+            )))
         case .markPersonsAsUnknown(let personIDs):
             guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
             await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
@@ -1303,7 +1342,7 @@ struct FileIDEngineMain {
             JSONLog.shared.warn(ev: "scan_session_insert_failed", sess: session.id, error: "\(error)")
         }
 
-        // R4-11: a cancelScan that landed in the start window is preserved by the
+        // A cancelScan that landed in the start window is preserved by the
         // epoch check in startSession; honor it before spending the discovery walk.
         // markSessionFinal emits the cancelled terminal phase via the shielded
         // writer so the app's UI returns to idle.
@@ -1842,16 +1881,16 @@ struct FileIDEngineMain {
     /// (Anchor/Mixed/Junk) and the rolled-up `folderClassifications` are derived
     /// from `Restructure.classifyFolders` so the app renders the
     /// engine-authoritative Tidy/Keep tiles instead of its local heuristic
-    /// fallback (the "null on older engines" path). (F-C3-035 wiring)
+    /// fallback (the "null on older engines" path).
     static func restructurePlan(
         from plan: Restructure.PlanResult, libraryRoot: String
     ) -> RestructurePlan {
         // The tier map + Keep/Tidy/Junk counts are engine-authoritative and already
         // computed by `proposeAll` on the FULL pre-strip set with the semantic-claim
-        // exemption (F-C1-004) — recomputing them here on the stripped `proposals`
+        // exemption — recomputing them here on the stripped `proposals`
         // would undercount the "Keep" tile (the stripped anchor folders are gone) and
         // diverge from the Windows engine. This mapper just stamps each surviving
-        // move's tier by its source-folder parent. (audit — lockstep)
+        // move's tier by its source-folder parent. (lockstep)
         let moves = plan.proposals.map { p in
             let parent = (p.oldPath as NSString).deletingLastPathComponent
             return RestructureMove(
@@ -1893,7 +1932,7 @@ struct FileIDEngineMain {
         // and the scan runs inside a task that requestCancel() cancelled — so a
         // plain pool.write here throws CancellationError and the terminal status
         // is never written (row stuck 'running' → false 'crashed' next launch).
-        // Shield the terminal write from the cancellation. (F-C3-031)
+        // Shield the terminal write from the cancellation.
         let status = cancelled ? "cancelled" : "completed"
         let completedAt = Date().timeIntervalSince1970
         let sessionID = session.id

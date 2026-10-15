@@ -3,7 +3,7 @@ using Xunit;
 
 namespace FileID.IpcSchema.Tests;
 
-// Contract guard for the engine-side wipe (P4): the app sends `wipeLibrary`
+// Contract guard for the engine-side wipe: the app sends `wipeLibrary`
 // (empty-payload command) and the engine replies `libraryWiped` (a _0-wrapped
 // LibraryWiped). Both must round-trip in the externally-tagged shape the Swift/
 // Rust generators agree on, or the wipe flow silently breaks.

@@ -4,6 +4,7 @@
 
 pub(crate) mod bulk;
 pub(crate) mod deep_analyze;
+pub(crate) mod deep_scope;
 pub(crate) mod embed;
 pub(crate) mod face_clustering;
 pub(crate) mod hardware;
@@ -16,11 +17,17 @@ pub(crate) mod trash_log;
 pub(crate) mod wipe;
 
 pub mod catalog;
+pub(crate) mod catalog_search;
+pub(crate) mod catalog_retrieval;
+
 pub mod catalog_takes;
 mod catalog_take_suggestions;
 
 pub mod chat;
 mod chat_search;
 pub mod tools;
+pub mod models;
+pub mod benchmark;
+pub mod timeline;
+pub(crate) mod video_export;
 
-mod person_cluster_persistence;

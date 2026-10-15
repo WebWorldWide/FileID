@@ -25,9 +25,14 @@ FORBIDDEN_INSTALLER_URLS = (
 )
 SKIP_PARTS = {".git", ".ralph", "target", "node_modules", ".venv", ".venv-ramplus"}
 DIRECT_PIN_RE = re.compile(r"^[A-Za-z0-9_.-]+==[^\s]+$")
-DOWNLOAD_EXEC_ALLOWLIST = {"packaging/appimage/build-appimage.sh"}
+DOWNLOAD_EXEC_ALLOWLIST = {
+    "packaging/appimage/build-appimage.sh",
+    "shared/scripts/build_ffmpeg_lgpl_linux.sh",
+    "shared/scripts/build_ffmpeg_lgpl_windows_x64.sh",
+}
 REVIEWED_SHELL_SCRIPT_SHA256 = {
-    "build.sh": "aff5ad0d97076413c8ec88dafb81965dfd07e67ce435f05f4a70045d1310cf46",
+    "platforms/linux/src/app/tests/native_launch_smoke.sh": "6350484466b32dd622e79ca01a4fb1dfa2f3ab0fb8b26cb4031eda00e5415d55",
+    "build.sh": "0bccb6ce7c8c0c65e75a95ce112d967f7a31fe1f1e911d208d992f45bda0b203",
     "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
     "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",
     "platforms/apple/run.sh": "8bcb4be432d5e3c1ad7adc1fb9474dee574e14bcaf8ddd5eede0ab51fac87455",
@@ -40,10 +45,12 @@ REVIEWED_SHELL_SCRIPT_SHA256 = {
     "platforms/apple/scripts/testflight.sh": "8a65cfb7fa84c67cb003e20dc387390986b70d650e3aead2d9c131adc9c42833",
     "platforms/apple/scripts/release.sh": "ca05a6205cc6f39954a919dcf420ad1c8a6e4691e1e12f6c980a4e39cf2054f2",
     "platforms/apple/scripts/wipe_local_state.sh": "3f522f095384110849c618f10f62f75025eb6cabe4f6e66488aaea21a716df69",
-    "platforms/linux/build/build.sh": "988954ea1cde7499bc4bcf9b32f5c9752d0b367b15cf9672deee1106bf29b736",
+    "platforms/linux/build/build.sh": "b3fa065fd52b48578d43de536306849f92dabebf5f127a9af665836e8a5ab846",
     "scripts/build-tools.sh": "44846aea1eadbe97166bacc47486701894542681114effddcb895762e7c81bf6",
     "shared/scripts/check_tls_pins.sh": "3096b3be8c3e93030cb5c69c1157c76413e51a333c785e70392feaf46c527024",
     "shared/scripts/compare_face_clustering.sh": "79af61febba1cfbe7eae6fcd4e4450b149ab32d35ef73aa13a4dfb5c6abd7d9f",
+    "shared/scripts/build_ffmpeg_lgpl_linux.sh": "18b235201c4fa3740f7c31b8bd429558520d6084a57b0a7f94beb880098be7db",
+    "shared/scripts/build_ffmpeg_lgpl_windows_x64.sh": "9f1a958f27fcf20ec3ff762ca84528e0b4fcda1f88f81ccb988bf36ea3f10d46",
     "shared/scripts/install_onnxruntime_macos.sh": "d5c4f189b2bd770e1454fec5cc813b252a626b98c45bb8c3d7593f948d3ecb97",
     "shared/scripts/run_local_audit_gate.sh": "96f0d2d77eddece17aba99229b92d7385d2c06bbead05f275b890e3eec99a2a7",
     "shared/scripts/setup-dev.sh": "a0fc33122370e895ca2ecb2528d1d5ef8e3ef0458874eafa33e42f2e2770b1d5",

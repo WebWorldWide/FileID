@@ -3,14 +3,17 @@
 // FileID Linux — gtk4 + libadwaita entrypoint.
 //
 // Mirror of macOS FileIDApp.swift / Windows App.xaml.cs. Boots an
-// adw::Application, registers the shared brand CSS, spawns the
-// engine subprocess, and presents the main window.
+// adw::Application, installs the shared design system (palette, glass
+// surfaces, force-dark), and presents the main window over the LavaLamp
+// background. The window spawns the engine subprocess.
 
 mod app_settings;
 mod engine_client;
+mod lavalamp;
 mod model_license;
 mod spring;
 mod tabs;
+mod theme;
 mod welcome;
 mod window;
 
@@ -34,53 +37,9 @@ fn main() -> glib::ExitCode {
         .application_id(APP_ID)
         .build();
 
-    app.connect_startup(|_| {
-        load_brand_css();
-        // Force dark mode regardless of system, matching macOS + Windows.
-        // Power-users on a light desktop can override via settings later.
-        if let Some(style_manager) = adw::StyleManager::default().into() {
-            let sm: adw::StyleManager = style_manager;
-            sm.set_color_scheme(adw::ColorScheme::ForceDark);
-        }
-    });
+    app.connect_startup(|_| theme::install());
 
     app.connect_activate(window::on_activate);
 
     app.run()
-}
-
-/// Inject the FileID brand palette into the GTK CSS provider so the
-/// app feels consistent with the macOS + Windows siblings.
-/// Gold #FFCC00, lavender #B19BCE, cyan #A0E2EA, pink #F2A6C0.
-fn load_brand_css() {
-    let css = r#"
-        @define-color fileid_gold     #FFCC00;
-        @define-color fileid_lavender #B19BCE;
-        @define-color fileid_cyan     #A0E2EA;
-        @define-color fileid_pink     #F2A6C0;
-        @define-color fileid_panel    alpha(white, 0.04);
-        @define-color fileid_stroke   alpha(white, 0.10);
-        @define-color accent_bg_color  @fileid_gold;
-        @define-color accent_fg_color  #1c1c1c;
-        @define-color accent_color     @fileid_gold;
-
-        .fileid-glass {
-            background-color: @fileid_panel;
-            border: 1px solid @fileid_stroke;
-            border-radius: 12px;
-        }
-        .fileid-accent-gold { color: @fileid_gold; }
-        .fileid-headerbar {
-            background-color: transparent;
-        }
-    "#;
-    let provider = gtk::CssProvider::new();
-    provider.load_from_string(css);
-    if let Some(display) = gtk::gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
 }

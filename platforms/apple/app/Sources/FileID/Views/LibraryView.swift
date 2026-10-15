@@ -65,9 +65,9 @@ struct LibraryView: View {
     @State private var lastTagBatchAvailable: Bool = false
     @State private var undoStatus: String?
 
-    // Multi-select tag mode (P4).
+    // Multi-select tag mode.
     @State private var selectMode: Bool = false
-    // R5-04: id→FileRow (not a Set) so a selected file survives a `rows` reload
+    // id→FileRow (not a Set) so a selected file survives a `rows` reload
     // (live-scan throttle / filter change re-fetches only the top-200 window);
     // bulk-tag then targets every checked file, not just those still on screen.
     @State private var checkedFiles: [Int64: FileRow] = [:]
@@ -481,7 +481,7 @@ struct LibraryView: View {
 
                 kindPicker
 
-            // P4 — multi-select mode toggle. Tiles render with check-
+            // multi-select mode toggle. Tiles render with check-
             // boxes; "Tag selected" + "Done" appear in place of the
             // normal action set.
             if selectMode {
@@ -967,7 +967,7 @@ struct FileTile: View {
             // slow / network volumes.
             let url = row.url
             let tags = await Task.detached { TagWriter.readTags(at: url) }.value
-            // R5-10: the detached read doesn't inherit `.task` cancellation; if the
+            // The detached read doesn't inherit `.task` cancellation; if the
             // refresh token changed mid-read (a tag edit bumps editEpoch), a slow
             // stale read could land after the newer one and overwrite it. Drop it
             // once superseded.
@@ -1310,7 +1310,7 @@ private struct FilePreviewSheet: View {
                                                 let oldPath = file.pathText
                                                 if let newURL = store.applyProposedName(file: file),
                                                    newURL.path != oldPath {
-                                                    // P6 — record the single-file rename so the
+                                                    // Record the single-file rename so the
                                                     // Library "Undo last rename" button can revert
                                                     // it. Uses the same UserDefaults slot the
                                                     // bulk-rename sheet writes to.
@@ -1399,7 +1399,7 @@ private struct FilePreviewSheet: View {
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
             // drop it once `.task(id:)` superseded us, else it overwrites the current
-            // file's image. Mirrors the FinderTagsEditor read guard (R7).
+            // file's image. Mirrors the FinderTagsEditor read guard.
             guard !Task.isCancelled else { return }
             preview = image
         }
@@ -1434,7 +1434,7 @@ private struct FinderTagsEditor: View {
     @State private var tags: [String] = []
     @State private var draft: String = ""
     @State private var error: String?
-    // R5-11 delta: serial chain for off-main tag edits. addTags/removeTags are
+    // Serial chain for off-main tag edits. addTags/removeTags are
     // non-atomic read-modify-write on the xattr, so two quick edits must NOT run
     // concurrently (one would clobber the other). Each edit awaits the previous.
     @State private var tagEditChain: Task<Void, Never>?
@@ -1492,10 +1492,10 @@ private struct FinderTagsEditor: View {
             // milliseconds while the user is trying to scrub through.
             let url = file.url
             let result = await Task.detached { TagWriter.readTags(at: url) }.value
-            // R7: the detached read doesn't inherit `.task` cancellation; if the
+            // The detached read doesn't inherit `.task` cancellation; if the
             // user arrowed to another file mid-read, a slow stale read on a
             // network volume could land after the newer one and overwrite it.
-            // Mirror FileTile (R5-10): drop it once `.task(id:)` is superseded.
+            // Mirror FileTile: drop it once `.task(id:)` is superseded.
             guard !Task.isCancelled else { return }
             tags = result
             error = nil
@@ -1505,7 +1505,7 @@ private struct FinderTagsEditor: View {
     private func addDraft() {
         let trimmed = draft.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        // R5-11 delta: clear the field SYNCHRONOUSLY (the value is captured in
+        // Clear the field SYNCHRONOUSLY (the value is captured in
         // `trimmed`) so a slow off-main write can't wipe the user's next-typed tag.
         draft = ""
         runTagEdit { try TagWriter.addTags([trimmed], at: $0) }
@@ -1515,7 +1515,7 @@ private struct FinderTagsEditor: View {
         runTagEdit { try TagWriter.removeTags([tag], at: $0) }
     }
 
-    /// R5-11 (+delta): run a non-atomic xattr read-modify-write OFF the main
+    /// Run a non-atomic xattr read-modify-write OFF the main
     /// thread (slow/network volumes can stall the sheet) while SERIALIZING edits
     /// through `tagEditChain` so two quick taps can't interleave their RMW and
     /// lose one. Each edit awaits the previous, then does its write on a detached

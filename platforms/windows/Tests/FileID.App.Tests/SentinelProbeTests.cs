@@ -185,18 +185,6 @@ public sealed class SentinelProbeTests : IDisposable
         Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "ort_cuda_x64"));
     }
 
-    [Fact]
-    public void Florence_RequiresEveryRegisteredArtifact()
-    {
-        CreateSized(Path.Combine("florence2", "vision_encoder.onnx"), 1_000_000);
-        CreateSized(Path.Combine("florence2", "embed_tokens.onnx"), 1_000_000);
-        CreateSized(Path.Combine("florence2", "encoder_model.onnx"), 1_000_000);
-        CreateSized(Path.Combine("florence2", "decoder_model_merged.onnx"), 1_000_000);
-        CreateSized(Path.Combine("florence2", "tokenizer.json"), 1_000);
-        Assert.False(SentinelProbe.RequiredArtifactsPresentIn(_dir, "florence2_base"));
-        CreateSized(Path.Combine("florence2", "config.json"), 1_000);
-        Assert.True(SentinelProbe.RequiredArtifactsPresentIn(_dir, "florence2_base"));
-    }
 
     [Theory]
     [InlineData("qwen3_vl_4b", "qwen3-vl-4b")]

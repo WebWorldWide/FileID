@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 // JobQueue — single-FIFO queue for background work the engine runs.
 //
 // Categories: Scan, FaceCluster, DeepAnalyze. Only one job runs at a time;
@@ -50,6 +49,10 @@ impl JobQueue {
         inner.on_change.push(Box::new(listener));
     }
 
+    pub fn clear_listeners(&self) {
+        self.inner.lock().on_change.clear();
+    }
+
     /// Append a job to the pending list. Returns the job's ID.
     pub fn push(&self, category: JobCategory, title: impl Into<String>, eta_seconds: Option<f64>) -> JobId {
         let job = QueuedJob {
@@ -81,14 +84,6 @@ impl JobQueue {
         Some(next)
     }
 
-    /// Mark the running job complete (no replacement). Caller invokes
-    /// `promote_next` afterwards to start the next pending job.
-    pub fn complete_running(&self) {
-        let mut inner = self.inner.lock();
-        inner.running = None;
-        Self::emit_locked(&inner);
-    }
-
     /// Terminal bookkeeping for a job wherever it sits: a running job
     /// is completed and the next pending one promoted; a still-pending
     /// job is dropped. RAII guards call this on Drop so a panicking
@@ -112,23 +107,6 @@ impl JobQueue {
         if inner.pending.len() != before {
             Self::emit_locked(&inner);
         }
-    }
-
-    /// Cancel a specific pending job. Returns true if it was found.
-    pub fn cancel_pending(&self, id: &str) -> bool {
-        let mut inner = self.inner.lock();
-        let len_before = inner.pending.len();
-        inner.pending.retain(|j| j.id != id);
-        let changed = inner.pending.len() != len_before;
-        if changed {
-            Self::emit_locked(&inner);
-        }
-        changed
-    }
-
-    /// Snapshot for tests + the IPC `requestStatus` reply path.
-    pub fn snapshot(&self) -> QueueState {
-        Self::build_state(&self.inner.lock())
     }
 
     fn build_state(inner: &Inner) -> QueueState {

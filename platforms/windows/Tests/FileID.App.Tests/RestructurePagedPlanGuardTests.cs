@@ -43,7 +43,7 @@ public class RestructurePagedPlanGuardTests
         Assert.True(RestructureView.ShouldReleaseApplyGuardOnPlanArrival(false, fresh, applying));
     }
 
-    [Fact] // R6-04: a returning view re-rendering the SAME cached pre-apply plan
+    [Fact] // A returning view re-rendering the SAME cached pre-apply plan
     public void SameCachedPlanReference_NeverReleases()
     {
         var applying = new object();
@@ -51,7 +51,7 @@ public class RestructurePagedPlanGuardTests
         Assert.False(RestructureView.ShouldReleaseApplyGuardOnPlanArrival(true, applying, applying));
     }
 
-    // R6-06: engine-lifecycle release rule — the engine process that owned the
+    // engine-lifecycle release rule — the engine process that owned the
     // in-flight apply died (spawn generation moved), so its result/error can
     // never arrive and the guard must release; a live engine (generation
     // unchanged) or a disengaged guard must not.

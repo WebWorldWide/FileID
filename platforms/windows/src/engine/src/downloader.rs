@@ -132,7 +132,6 @@ const PINNED_ROOT_CERTS: [(&str, &[u8]); 11] = [
 /// reverts to the OS root store — validation only ever changes, never the
 /// egress surface — and is logged loudly as a diagnostic escape hatch for
 /// networks that intercept HTTPS.
-#[allow(dead_code)]
 pub fn fail_closed_client() -> Arc<reqwest::Client> {
     Arc::new(
         reqwest::Client::builder()
@@ -155,7 +154,7 @@ pub fn build_shared_client() -> Result<Arc<reqwest::Client>> {
         // Never follow a redirect off https. The host allowlist alone would let
         // a 302 downgrade to plaintext http:// on an allowlisted host, which an
         // on-path attacker could MITM. Every allowlisted CDN serves https, so
-        // this never blocks a legitimate redirect. (audit E11)
+        // this never blocks a legitimate redirect.
         if attempt.url().scheme() != "https" {
             return attempt.stop();
         }
@@ -320,7 +319,7 @@ const MAX_ATTEMPTS_WITHOUT_PROGRESS: u32 = 4;
 /// hammering 1 s retries after every reset. Growth is judged against a
 /// high-water mark, not the previous stat, so a discard-and-refetch cycle
 /// (416 / non-206 resume / oversized stale part) can't refund budget by
-/// re-downloading the same bytes. (audit C3)
+/// re-downloading the same bytes.
 struct RetryBudget {
     total_failures: u32,
     attempts_without_progress: u32,
@@ -748,7 +747,7 @@ where
         // Best-effort sweep of any .part-NN left by an earlier parallel attempt
         // (e.g. a prior run that partially downloaded, then this retry sees the
         // server no longer advertising ranges). download_simple uses its own
-        // "{}.part" temp and can't resume from these, so they'd leak. (audit E16)
+        // "{}.part" temp and can't resume from these, so they'd leak.
         for i in 0..PARALLEL_PARTS {
             let _ = tokio::fs::remove_file(part_file_path(&request.destination, i)).await;
         }
@@ -773,7 +772,7 @@ where
     // part contributes at most its planned range length — an OVERSIZED stale
     // part (leftover from a different-sized remote file) is discarded by
     // download_range_with_retry, so counting only the in-range prefix keeps the
-    // seed consistent with the bytes that will actually be re-used. (audit C1)
+    // seed consistent with the bytes that will actually be re-used.
     let resume_seed = resume_seed_bytes(&request.destination, &ranges).await;
 
     let bytes_done = Arc::new(AtomicU64::new(resume_seed));
@@ -1634,7 +1633,7 @@ mod tests {
         assert_eq!(stream_hard_limit(None, Some(u64::MAX)), u64::MAX);
     }
 
-    // C1: ranged resume must seed progress from bytes already on disk, so the
+    // Ranged resume must seed progress from bytes already on disk, so the
     // bar doesn't jump backward on Retry. Pre-fix, download_parallel started its
     // counter at 0 regardless of the .part-NN bytes present.
     #[tokio::test]
@@ -1668,7 +1667,7 @@ mod tests {
         // An OVERSIZED stale part (200 B in a 100 B range) contributes 0:
         // download_range_with_retry discards the WHOLE part (not just the
         // overflow), so seeding any of it would double-count against the re-
-        // download deltas and let bytes_done exceed bytes_total (R-05).
+        // download deltas and let bytes_done exceed bytes_total.
         std::fs::write(super::part_file_path(&dest, 2), vec![0u8; 200]).unwrap();
         assert_eq!(
             resume_seed_bytes(&dest, &ranges).await,
@@ -1679,7 +1678,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // C1: a 416 on a ranged resume must recover (discard the stale part + re-
+    // A 416 on a ranged resume must recover (discard the stale part + re-
     // fetch the range), matching download_simple — not hard-bail the whole
     // parallel download. Pre-fix, 416 fell through to the generic non-2xx bail.
     #[test]
