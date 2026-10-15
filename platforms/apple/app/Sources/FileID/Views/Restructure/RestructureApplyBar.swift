@@ -65,17 +65,17 @@ struct RestructureApplyBar: View {
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(canApply ? Theme.gold : Color.primary)
-                Text("of").font(.caption).foregroundStyle(.secondary)
+                Text("of").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 Text("\(totalCount)")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                Text("selected").font(.caption).foregroundStyle(.secondary)
+                Text("selected").font(Theme.Font.body(12)).foregroundStyle(.secondary)
             }
             Text(selectedCount == 0
                   ? "Approve a recommendation above to enable Apply."
                   : "Selected files are moved on disk when you apply — review first.")
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .foregroundStyle(.tertiary)
         }
     }
@@ -88,16 +88,16 @@ struct RestructureApplyBar: View {
             onCancel?()
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: "xmark.circle.fill").font(.callout.bold())
+                Image(systemName: "xmark.circle.fill").font(Theme.Font.body(13.5, .semibold))
                 Text(cancelRequested ? "Stopping…" : "Cancel")
-                    .font(.callout.weight(.semibold))
+                    .font(Theme.Font.body(13.5, .semibold))
             }
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(
                 Rectangle()
-                    .stroke(Color.red.opacity(0.55), lineWidth: 1)
+                    .stroke(Theme.danger.opacity(0.55), lineWidth: 1)
             )
-            .foregroundStyle(.red)
+            .foregroundStyle(Theme.danger)
             .opacity(cancelRequested ? 0.55 : 1.0)
         }
         .buttonStyle(.plain)
@@ -109,11 +109,11 @@ struct RestructureApplyBar: View {
     private var primaryButton: some View {
         Button(action: onApply) {
             HStack(spacing: 6) {
-                Image(systemName: "folder.fill.badge.gearshape").font(.callout.bold())
+                Image(systemName: "folder.fill.badge.gearshape").font(Theme.Font.body(13.5, .semibold))
                 Text(selectedCount > 0
                       ? "Apply moves (\(selectedCount))"
                       : "Apply moves")
-                    .font(.callout.weight(.semibold))
+                    .font(Theme.Font.body(13.5, .semibold))
             }
             .padding(.horizontal, 16).padding(.vertical, 9)
             .background(

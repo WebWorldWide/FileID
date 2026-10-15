@@ -206,10 +206,10 @@ struct LibraryView: View {
         HStack(spacing: 10) {
             Image(systemName: icon)
                 .foregroundStyle(Theme.ai)
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.callout.bold())
-                Text(detail).font(.caption2).foregroundStyle(.secondary)
+                Text(title).font(Theme.Font.body(13.5, .semibold))
+                Text(detail).font(Theme.Font.body(11)).foregroundStyle(.secondary)
             }
             Spacer()
             ProgressView().controlSize(.small).tint(Theme.ai)
@@ -247,11 +247,11 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.ai)
             VStack(alignment: .leading, spacing: 1) {
                 Text(similarSeed == nil ? "Showing keyword matches." : "Finding similar files.")
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text(hint == .preparing
                      ? "Preparing semantic search… results will refresh automatically."
                      : "Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -274,9 +274,9 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.ai)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Photos similar to \(seed.url.lastPathComponent)")
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text("Ranked by visual similarity using on-device CLIP embeddings.")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -298,20 +298,20 @@ struct LibraryView: View {
             HStack(spacing: 12) {
                 Image(systemName: "brain.head.profile")
                     .foregroundStyle(Theme.gold)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.phase == .discovering ? "Discovering files…"
                          : p.phase == .tagging ? "Tagging files…" : "Post-scan…")
-                        .font(.headline)
+                        .font(Theme.Font.body(14, .semibold))
                     Text("Tags + face detection. Smart names come later via Deep Analyze.")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text(p.total > 0
                      ? "\(p.processed) / \(p.total)  ·  \(p.discovered) found"
                      : "\(p.processed) processed  ·  \(p.discovered) found")
-                    .font(.callout.monospacedDigit())
+                    .font(Theme.Font.body(13.5).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             if p.total > 0 {
@@ -332,10 +332,10 @@ struct LibraryView: View {
                 }
                 Spacer()
                 if p.failed > 0 {
-                    Text("\(p.failed) couldn't be read").foregroundStyle(.red)
+                    Text("\(p.failed) couldn't be read").foregroundStyle(Theme.danger)
                 }
             }
-            .font(.caption.monospacedDigit())
+            .font(Theme.Font.body(12).monospacedDigit())
             .help("Memory and resource details are in Settings → Advanced.")
         }
         .padding(16)
@@ -369,18 +369,18 @@ struct LibraryView: View {
             HStack(spacing: 12) {
                 Image(systemName: "wand.and.rays")
                     .foregroundStyle(Theme.ai)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Deep Analyze running…")
-                        .font(.headline)
+                        .font(Theme.Font.body(14, .semibold))
                     Text("On-device AI is captioning images and proposing smart filenames.")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let p {
                     Text("\(p.processed) / \(p.total)")
-                        .font(.callout.monospacedDigit())
+                        .font(Theme.Font.body(13.5).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
@@ -404,7 +404,7 @@ struct LibraryView: View {
                     }
                     Spacer()
                 }
-                .font(.caption.monospacedDigit())
+                .font(Theme.Font.body(12).monospacedDigit())
                 .foregroundStyle(.tertiary)
             }
             if let last {
@@ -412,15 +412,15 @@ struct LibraryView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "wand.and.rays")
                         .foregroundStyle(Theme.gold)
-                        .font(.callout)
+                        .font(Theme.Font.body(13.5))
                     VStack(alignment: .leading, spacing: 4) {
                         if let n = last.proposedName {
                             Text(n)
-                                .font(.callout.monospaced().bold())
+                                .font(Theme.Font.mono(12.5, .semibold))
                                 .foregroundStyle(Theme.gold)
                         }
                         Text(last.description)
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .foregroundStyle(.secondary)
                             .lineLimit(3)
                     }
@@ -462,7 +462,7 @@ struct LibraryView: View {
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
                 .frame(maxWidth: 320)
-                .background(Color.black.opacity(0.3))
+                .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
                 .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
                 kindPicker
@@ -602,7 +602,7 @@ struct LibraryView: View {
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)
                         .frame(height: Theme.Metrics.control)
-                        .background(active ? Theme.gold : Color.clear)
+                        .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -825,10 +825,10 @@ struct FileTile: View {
     private var kindColor: Color {
         switch row.kind {
         case "image": return Theme.gold
-        case "video": return .purple
-        case "pdf":   return .red
-        case "doc":   return .blue
-        case "audio": return .pink
+        case "video": return Theme.ai
+        case "pdf":   return Theme.danger
+        case "doc":   return Theme.info
+        case "audio": return Theme.delight
         default:      return .secondary
         }
     }
@@ -992,7 +992,7 @@ struct FileTile: View {
                     .font(.system(size: 36))
                     .foregroundStyle(kindColor.opacity(0.7))
                 Text(row.extension.uppercased())
-                    .font(.caption2.monospaced().bold())
+                    .font(Theme.Font.mono(10.5, .semibold))
                     .foregroundStyle(.secondary)
             }
         }
@@ -1099,10 +1099,10 @@ private struct FilePreviewSheet: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file.url.lastPathComponent)
-                        .font(.title3.bold())
+                        .font(Theme.Font.body(16, .semibold))
                         .lineLimit(1).truncationMode(.middle)
                     Text(file.url.deletingLastPathComponent().path)
-                        .font(.caption.monospaced())
+                        .font(Theme.Font.mono(11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.head)
                 }
@@ -1110,7 +1110,7 @@ private struct FilePreviewSheet: View {
                 if siblings.count > 1 {
                     let idx = siblingIndex ?? 0
                     Text("\(idx + 1) of \(siblings.count)")
-                        .font(.caption.monospacedDigit())
+                        .font(Theme.Font.body(12).monospacedDigit())
                         .foregroundStyle(.secondary)
                     HStack(spacing: 4) {
                         Button { step(-1) } label: {
@@ -1160,7 +1160,7 @@ private struct FilePreviewSheet: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
 
             HStack(spacing: 0) {
                 // Preview canvas — kind-specific for fidelity, QLPreview as
@@ -1183,7 +1183,7 @@ private struct FilePreviewSheet: View {
                                 VStack {
                                     ProgressView()
                                     Text("Loading preview…")
-                                        .font(.caption)
+                                        .font(Theme.Font.body(12))
                                         .foregroundStyle(.secondary)
                                         .padding(.top, 8)
                                 }
@@ -1207,7 +1207,7 @@ private struct FilePreviewSheet: View {
                     VStack(alignment: .leading, spacing: 12) {
                         GlassCard {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Metadata").font(.headline)
+                                Text("Metadata").font(Theme.Font.body(14, .semibold))
                                 Divider().opacity(0.3)
                                 row("Path",   file.pathText)
                                 row("Kind",   file.kind)
@@ -1234,14 +1234,14 @@ private struct FilePreviewSheet: View {
                             GlassCard {
                                 VStack(alignment: .leading, spacing: 8) {
                                     HStack {
-                                        Text("Deep Analyze").font(.headline)
+                                        Text("Deep Analyze").font(Theme.Font.body(14, .semibold))
                                         Spacer()
                                         if let model = file.vlmModel,
                                            let kind = AIModelKind(rawValue: model) {
                                             BadgePill(label: kind.displayName, color: .secondary)
                                         }
                                     }
-                                    Text(caption).font(.callout)
+                                    Text(caption).font(Theme.Font.body(13.5))
                                     if let proposed = file.vlmProposedName, !proposed.isEmpty {
                                         Divider().opacity(0.3)
                                         HStack(spacing: 8) {
@@ -1249,10 +1249,10 @@ private struct FilePreviewSheet: View {
                                                 .foregroundStyle(Theme.gold)
                                             VStack(alignment: .leading, spacing: 2) {
                                                 Text("Smart name")
-                                                    .font(.caption.bold())
+                                                    .font(Theme.Font.body(12, .semibold))
                                                     .foregroundStyle(.secondary)
                                                 Text("\(proposed).\(file.extension)")
-                                                    .font(.caption.monospaced())
+                                                    .font(Theme.Font.mono(11))
                                                     .foregroundStyle(Theme.gold)
                                             }
                                             Spacer()
@@ -1284,7 +1284,7 @@ private struct FilePreviewSheet: View {
                         if !tags.isEmpty {
                             GlassCard {
                                 VStack(alignment: .leading, spacing: 8) {
-                                    Text("Tags").font(.headline)
+                                    Text("Tags").font(Theme.Font.body(14, .semibold))
                                     FlowLayout(spacing: 6) {
                                         ForEach(tags, id: \.self) { tag in
                                             BadgePill(label: tag)
@@ -1358,8 +1358,8 @@ private struct FilePreviewSheet: View {
     @ViewBuilder
     private func row(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text(k).font(.caption.bold()).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
-            Text(v).font(.caption.monospaced()).textSelection(.enabled).lineLimit(3)
+            Text(k).font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
+            Text(v).font(Theme.Font.mono(11)).textSelection(.enabled).lineLimit(3)
             Spacer()
         }
     }
@@ -1399,15 +1399,15 @@ private struct FinderTagsEditor: View {
                 HStack(spacing: 6) {
                     Image(systemName: "tag.fill")
                         .foregroundStyle(Theme.gold)
-                    Text("Finder tags").font(.headline)
+                    Text("Finder tags").font(Theme.Font.body(14, .semibold))
                     Spacer()
                     Text("(visible in Finder + Spotlight)")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.tertiary)
                 }
                 if tags.isEmpty {
                     Text("None yet — add a tag below.")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                 } else {
                     FlowLayout(spacing: 6) {
@@ -1418,8 +1418,8 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
-                        .font(.caption)
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                        .font(Theme.Font.body(12))
                         .focused(isFocused)
                     Button("Apply tag", systemImage: "checkmark", action: addDraft)
                         .buttonStyle(.dsPrimary)
@@ -1429,7 +1429,7 @@ private struct FinderTagsEditor: View {
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 if let e = error {
-                    Text(e).font(.caption2).foregroundStyle(.orange)
+                    Text(e).font(Theme.Font.body(11)).foregroundStyle(Theme.warning)
                 }
             }
         }
@@ -1500,7 +1500,7 @@ private struct FinderTagsEditor: View {
         HStack(spacing: 4) {
             Image(systemName: "tag.fill")
                 .font(.system(size: 9))
-            Text(tag).font(.caption)
+            Text(tag).font(Theme.Font.body(12))
             Button {
                 remove(tag)
             } label: {
@@ -1553,7 +1553,7 @@ private struct VideoPreview: View {
                 .buttonStyle(.plain)
                 .help("Play in QuickTime / default video app")
                 Text("Click to play")
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(12, .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 10).padding(.vertical, 4)
                     .background(Rectangle().fill(.black.opacity(0.55)))
@@ -1576,7 +1576,7 @@ private struct AudioPreview: View {
                 .font(.system(size: 96, weight: .light))
                 .foregroundStyle(Theme.gold)
             Text(url.lastPathComponent)
-                .font(.headline)
+                .font(Theme.Font.body(14, .semibold))
                 .lineLimit(1).truncationMode(.middle)
             Button {
                 NSWorkspace.shared.open(url)
@@ -1585,13 +1585,13 @@ private struct AudioPreview: View {
                     .padding(.horizontal, 16).padding(.vertical, 8)
                     .background(Rectangle().fill(Theme.gold))
                     .foregroundStyle(.black)
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
             }
             .buttonStyle(.plain)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.4))
+        .background(Color.black.opacity(0.4), ignoresSafeAreaEdges: [])
     }
 }
 
@@ -1617,7 +1617,7 @@ private struct PDFPreview: View {
                         .font(.system(size: 64))
                         .foregroundStyle(.secondary)
                     Text("Loading PDF…")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1663,10 +1663,10 @@ private struct UniversalPreview: View {
                         .font(.system(size: 96, weight: .light))
                         .foregroundStyle(.secondary)
                     Text(url.lastPathComponent)
-                        .font(.callout)
+                        .font(Theme.Font.body(13.5))
                         .lineLimit(1).truncationMode(.middle)
                     Text("Open in default app for full preview")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.tertiary)
                 }
             }

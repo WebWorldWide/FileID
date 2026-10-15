@@ -127,7 +127,8 @@ struct GlassCard<Content: View>: View {
     var body: some View {
         content
             .padding(padding)
-            .background(Theme.panel)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.panel, ignoresSafeAreaEdges: [])
             .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
     }
 }
@@ -223,7 +224,7 @@ struct ThemedSegmentedControl: View {
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)
                         .frame(height: Theme.Metrics.control)
-                        .background(selected ? Theme.gold : Color.clear)
+                        .background(selected ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

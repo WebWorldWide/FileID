@@ -19,6 +19,10 @@ struct FileIDApp: App {
     var body: some Scene {
         WindowGroup("FileID") {
             MainWindow(engine: engine)
+                .font(Theme.Font.body(13.5))
+                .toggleStyle(DSCheckboxToggleStyle())
+                .progressViewStyle(DSProgressViewStyle())
+                .buttonStyle(DSSecondaryButtonStyle())
                 .frame(minWidth: 1200, minHeight: 800)
                 .background(
                     VisualEffectView(material: .underWindowBackground,
@@ -79,6 +83,10 @@ struct FileIDApp: App {
         }
         Window("File Tools", id: "file-tools") {
             ToolsWorkbench(engine: engine, session: toolsSession)
+                .toggleStyle(DSCheckboxToggleStyle())
+                .progressViewStyle(DSProgressViewStyle())
+                .buttonStyle(DSSecondaryButtonStyle())
+                .padding(20)
                 .background { LavaLampBackground().ignoresSafeArea() }
                 .preferredColorScheme(.dark)
                 .onAppear { startEngineIfNeeded() }

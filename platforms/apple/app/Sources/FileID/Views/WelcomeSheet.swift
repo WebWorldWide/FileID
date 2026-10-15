@@ -176,7 +176,7 @@ struct WelcomeSheet: View {
             footer
         }
         .frame(width: 600)
-        .background(Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94))
+        .background(Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
         .preferredColorScheme(.dark)
         .onAppear {

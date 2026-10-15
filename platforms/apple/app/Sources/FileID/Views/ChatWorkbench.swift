@@ -27,8 +27,8 @@ struct ChatWorkbench: View {
             HStack(spacing: 10) {
                 Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ask FileID").font(.headline)
-                    Text("Your library assistant").font(.caption).foregroundStyle(.secondary)
+                    Text("Ask FileID").font(Theme.Font.body(14, .semibold))
+                    Text("Your library assistant").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Menu {
@@ -37,7 +37,7 @@ struct ChatWorkbench: View {
                     .menuStyle(.borderlessButton).fixedSize().help("Conversation options")
                 if let onClose {
                     Button { onClose() } label: {
-                        Image(systemName: "xmark").font(.caption.weight(.semibold))
+                        Image(systemName: "xmark").font(Theme.Font.body(12, .semibold))
                     }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
                         .help("Close chat").accessibilityLabel("Close chat")
                 }
@@ -48,13 +48,13 @@ struct ChatWorkbench: View {
                     LazyVStack(alignment: .leading, spacing: 18) {
                         if messages.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
-                                Text("Find the moment.").font(.title3.weight(.semibold))
+                                Text("Find the moment.").font(Theme.Font.body(16, .semibold))
                                 Text("Ask about files, people, and moments in your local library.")
-                                    .font(.callout).foregroundStyle(.secondary)
+                                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                                 ForEach(["Find birthday gift opening", "Show videos with chapter markers"], id: \.self) { suggestion in
                                     Button { input = suggestion; inputFocused = true } label: {
                                         HStack { Text(suggestion); Spacer(); Image(systemName: "arrow.up.left") }
-                                            .font(.caption).padding(10)
+                                            .font(Theme.Font.body(12)).padding(10)
                                             .background(Color.white.opacity(0.05), in: Rectangle())
                                     }.buttonStyle(.plain)
                                 }
@@ -63,13 +63,13 @@ struct ChatWorkbench: View {
                         ForEach(messages) { entry in
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(entry.role == "user" ? "You" : "FileID")
-                                    .font(.caption.weight(.semibold))
+                                    .font(Theme.Font.body(12, .semibold))
                                     .foregroundStyle(entry.role == "user" ? Theme.gold : Theme.ai)
-                                Text(entry.text).font(.callout).textSelection(.enabled)
+                                Text(entry.text).font(Theme.Font.body(13.5)).textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }.id(entry.id)
                         }
-                        if busy { HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Searching your library…").font(.caption).foregroundStyle(.secondary) } }
+                        if busy { HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Searching your library…").font(Theme.Font.body(12)).foregroundStyle(.secondary) } }
                     }.padding(16)
                 }.onChange(of: messages.last?.id) { _, id in
                     if let id { withAnimation(.easeOut(duration: 0.18)) { scroll.scrollTo(id, anchor: .bottom) } }
@@ -83,23 +83,23 @@ struct ChatWorkbench: View {
                             ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("[\(index + 1)] \(URL(fileURLWithPath: hit.path).lastPathComponent)")
-                                        .font(.caption.weight(.semibold)).lineLimit(2)
-                                    Text(hit.text).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                                        .font(Theme.Font.body(12, .semibold)).lineLimit(2)
+                                    Text(hit.text).font(Theme.Font.body(12)).foregroundStyle(.secondary).lineLimit(3)
                                     HStack {
                                         Button("Open") { open(hit) }.buttonStyle(.borderless)
-                                        if let seconds = hit.startSeconds { Text("\(seconds, specifier: "%.1f") s").font(.caption2).monospacedDigit() }
-                                        if let page = hit.page { Text("Page \(page)").font(.caption2) }
-                                        if hit.kind == "sampledFrame" { Text("Unverified frame").font(.caption2).foregroundStyle(.secondary) }
+                                        if let seconds = hit.startSeconds { Text("\(seconds, specifier: "%.1f") s").font(Theme.Font.body(11)).monospacedDigit() }
+                                        if let page = hit.page { Text("Page \(page)").font(Theme.Font.body(11)) }
+                                        if hit.kind == "sampledFrame" { Text("Unverified frame").font(Theme.Font.body(11)).foregroundStyle(.secondary) }
                                     }
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }.padding(.top, 8)
                     }.frame(maxHeight: 180)
-                }.font(.caption.weight(.semibold)).padding(16)
+                }.font(Theme.Font.body(12, .semibold)).padding(16)
             }
             Divider().overlay(Color.white.opacity(0.08))
             VStack(alignment: .leading, spacing: 10) {
-                Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+                Text(message).font(Theme.Font.body(12)).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
                 HStack(alignment: .center, spacing: 8) {
                     TextField("Ask about your files…", text: $input).textFieldStyle(.plain)
                         .focused($inputFocused).onSubmit(send)
@@ -107,18 +107,18 @@ struct ChatWorkbench: View {
                         Button { control("cancel") } label: { Image(systemName: "stop.circle.fill") }
                             .buttonStyle(.plain).help("Stop response").accessibilityLabel("Stop response")
                     } else {
-                        Button(action: send) { Image(systemName: "arrow.up.circle.fill").font(.title2).foregroundStyle(Theme.gold) }
+                        Button(action: send) { Image(systemName: "arrow.up.circle.fill").font(Theme.Font.body(20, .semibold)).foregroundStyle(Theme.gold) }
                             .buttonStyle(.plain).help("Send message").accessibilityLabel("Send message")
                             .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
                     }
                 }.padding(10).background(Color.white.opacity(0.06), in: Rectangle())
-                Toggle("Summarize with local AI", isOn: $useModel).font(.caption)
+                Toggle("Summarize with local AI", isOn: $useModel).font(Theme.Font.body(12))
                 Button { modelsPresented = true } label: {
-                    Label(AIModelKind(rawValue: chatModelKind)?.displayName ?? "Choose a model", systemImage: "cpu").font(.caption).lineLimit(1)
+                    Label(AIModelKind(rawValue: chatModelKind)?.displayName ?? "Choose a model", systemImage: "cpu").font(Theme.Font.body(12)).lineLimit(1)
                 }.buttonStyle(.plain).foregroundStyle(Theme.ai).help("Choose, download and load a local chat model")
-                Text("Keyword search works without a model.").font(.caption2).foregroundStyle(.secondary)
+                Text("Keyword search works without a model.").font(Theme.Font.body(11)).foregroundStyle(.secondary)
             }.padding(16)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.ultraThinMaterial).tint(Theme.gold)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.ultraThinMaterial, ignoresSafeAreaEdges: []).tint(Theme.gold)
             .onAppear {
                 inputFocused = true
                 if conversationID.isEmpty { conversationID = UUID().uuidString }

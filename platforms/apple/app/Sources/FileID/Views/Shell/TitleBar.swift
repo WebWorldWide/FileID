@@ -33,9 +33,13 @@ struct TitleBar: View {
         .padding(.leading, 78)
         .padding(.trailing, 14)
         .frame(height: Theme.Metrics.titleBar)
-        .onAppear { DispatchQueue.main.async { NSApp.keyWindow?.makeFirstResponder(nil) } }
-        .background(Theme.bg1.opacity(0.62))
-        .background(.ultraThinMaterial)
+        .onAppear {
+            // The window makes the first text field key on open; the search
+            // field should only light up when the user asks for it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { searchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
+        }
+        .background(Theme.bg1.opacity(0.62), ignoresSafeAreaEdges: [])
+        .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .overlay(alignment: .bottom) { Hairline() }
         .confirmationDialog("Wipe library and rescan from scratch?", isPresented: $confirmWipe, titleVisibility: .visible) {
             Button("Wipe and rescan", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
@@ -69,7 +73,7 @@ struct TitleBar: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
-                .background(Color.black.opacity(0.28))
+                .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
                 .overlay(Rectangle().stroke(folderOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                 .contentShape(Rectangle())
             }
@@ -107,7 +111,7 @@ struct TitleBar: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.panelHeader)
+            .background(Theme.panelHeader, ignoresSafeAreaEdges: [])
             .overlay(alignment: .top) { Hairline(color: Theme.hairlineStrong) }
             if pickedURL != nil {
                 HStack(spacing: 8) {
@@ -122,7 +126,7 @@ struct TitleBar: View {
             }
         }
         .frame(width: 360)
-        .background(Color(hex: 0x161618))
+        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 
@@ -140,14 +144,14 @@ struct TitleBar: View {
                         .foregroundStyle(on ? Theme.onGold : Theme.text2)
                         .padding(.horizontal, 18)
                         .frame(height: Theme.Metrics.control)
-                        .background(on ? Theme.gold : Color.clear)
+                        .background(on ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
-        .background(Color.black.opacity(0.28))
+        .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
         .disabled(pickedURL == nil && store.totalFiles == 0)
         .opacity(pickedURL == nil && store.totalFiles == 0 ? 0.5 : 1)
@@ -162,7 +166,7 @@ struct TitleBar: View {
             Button { activeTab = .settings } label: {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: 30, height: 30)
-                    .background(activeTab == .settings ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32))
+                    .background(activeTab == .settings ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
                     .overlay(Rectangle().stroke(activeTab == .settings ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                     .contentShape(Rectangle())
             }
@@ -194,7 +198,7 @@ struct TitleBar: View {
         .padding(.leading, 10).padding(.trailing, 6)
         .frame(height: Theme.Metrics.controlLarge)
         .frame(minWidth: 120, idealWidth: 280, maxWidth: 280)
-        .background(Color.black.opacity(0.32))
+        .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().stroke(searchFocused ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
         .background {
             Button("") { userOpened = true; searchFocused = true; searchOpen = true }.keyboardShortcut("k", modifiers: .command).opacity(0).frame(width: 0, height: 0)
@@ -252,7 +256,7 @@ struct TitleBar: View {
                             MetaText(item.hint, size: 11)
                         }
                         .padding(.horizontal, 12).frame(height: 32)
-                        .background(groupIndex == 0 && itemIndex == 0 ? Theme.gold.opacity(0.08) : Color.clear)
+                        .background(groupIndex == 0 && itemIndex == 0 ? Theme.gold.opacity(0.08) : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -261,7 +265,7 @@ struct TitleBar: View {
         }
         .padding(.bottom, 6)
         .frame(width: 400)
-        .background(Color(hex: 0x161618))
+        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 
@@ -336,7 +340,7 @@ struct TitleBar: View {
             }
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.controlLarge)
-            .background(Color.black.opacity(0.32))
+            .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
             .overlay(Rectangle().stroke(activityOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
             .contentShape(Rectangle())
         }
@@ -374,7 +378,7 @@ struct TitleBar: View {
             }
         }
         .frame(width: 400)
-        .background(Color(hex: 0x161618))
+        .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
 }

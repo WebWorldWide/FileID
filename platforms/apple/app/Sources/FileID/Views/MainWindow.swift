@@ -55,6 +55,9 @@ struct MainWindow: View {
     enum Area: String, CaseIterable, Identifiable {
         case browse = "Browse", analyze = "Analyze", act = "Act"
         var id: String { rawValue }
+        var shortcutHint: String {
+            switch self { case .browse: return "⌘1–3"; case .analyze: return "⌘4–6"; case .act: return "⌘7–9" }
+        }
         var tabs: [Tab] {
             switch self {
             case .browse:  return [.library, .people, .moments]
@@ -136,7 +139,7 @@ struct MainWindow: View {
             if isDragHovering {
                 Rectangle()
                     .stroke(Theme.gold, style: StrokeStyle(lineWidth: 2, dash: [10, 6]))
-                    .background(Theme.gold.opacity(0.08))
+                    .background(Theme.gold.opacity(0.08), ignoresSafeAreaEdges: [])
                     .overlay(
                         VStack(spacing: 12) {
                             Image(systemName: "arrow.down.doc.fill").font(.system(size: 40)).foregroundStyle(Theme.gold)

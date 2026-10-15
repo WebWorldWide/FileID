@@ -13,17 +13,23 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                SectionLabel(activeTab == .settings ? "Settings" : area.rawValue)
-                Spacer()
-                MetaText("\(area.tabs.count) pages", size: 11)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(MainWindow.Area.allCases) { section in
+                        HStack(alignment: .firstTextBaseline) {
+                            SectionLabel(section.rawValue, color: section == area && activeTab != .settings ? Theme.gold : Theme.label)
+                            Spacer()
+                            MetaText(section.shortcutHint, size: 11)
+                        }
+                        .padding(.horizontal, 16).padding(.top, section == .browse ? 16 : 14).padding(.bottom, 8)
+                        VStack(spacing: 0) {
+                            ForEach(section.tabs) { tab in navRow(tab) }
+                        }
+                        .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
+                    }
+                }
             }
-            .padding(.horizontal, 16).padding(.top, 18).padding(.bottom, 10)
-
-            VStack(spacing: 0) {
-                ForEach(area.tabs) { tab in navRow(tab) }
-            }
-            .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
+            .frame(maxHeight: .infinity, alignment: .top)
 
             if shouldShowEngineSection {
                 VStack(alignment: .leading, spacing: 8) {
@@ -42,8 +48,6 @@ struct Sidebar: View {
                 .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
             }
 
-            Spacer(minLength: 12)
-
             VStack(alignment: .leading, spacing: 10) {
                 if let url = pickedURL {
                     PipelineBlock(engine: engine, store: store, pickedURL: url)
@@ -59,8 +63,8 @@ struct Sidebar: View {
             .overlay(alignment: .top) { Hairline() }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.bg1.opacity(0.5))
-        .background(.ultraThinMaterial)
+        .background(Theme.bg1.opacity(0.5), ignoresSafeAreaEdges: [])
+        .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
     }
 
     private var shouldShowEngineSection: Bool {
@@ -80,8 +84,11 @@ struct Sidebar: View {
             return (store.totalFiles > 0 ? "\(store.totalFiles.formatted()) files" : "Not scanned yet", false)
         case .people:
             if engine.faceClusteringInFlight { return ("Grouping faces", true) }
-            if let r = engine.lastFaceClustering { return ("\(r.personCount) people", false) }
-            return ("Faces appear after a scan", false)
+            if let r = engine.lastFaceClustering, r.personCount > 0 { return ("\(r.personCount) people", false) }
+            if case .installed = ArcFaceModelInstaller.shared.status[.sface] ?? .unknown {
+                return (store.totalFiles > 0 ? "Group faces to name people" : "Faces appear after a scan", false)
+            }
+            return (store.totalFiles > 0 ? "Face model not installed" : "Faces appear after a scan", store.totalFiles > 0)
         case .moments:
             let running = engine.catalogJobs.filter { $0.state == "running" }.count
             return running > 0 ? ("\(running) running", true) : ("Chapters and search inside videos", false)
@@ -108,16 +115,16 @@ struct Sidebar: View {
             HStack(spacing: 12) {
                 Rectangle().fill(on ? Theme.gold : Color.clear).frame(width: 3)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(tab.rawValue).font(Theme.Font.body(14.5, on ? .semibold : .medium)).foregroundStyle(on ? Theme.gold : Theme.text1)
+                    Text(tab.rawValue).font(Theme.Font.body(14, on ? .semibold : .medium)).foregroundStyle(on ? Theme.gold : Theme.text1)
                     Text(m.text).font(Theme.Font.meta).foregroundStyle(m.hot ? (tab == .deep ? Theme.ai : Theme.textOnPanel) : Theme.text3).lineLimit(1)
                 }
                 Spacer(minLength: 0)
                 if let index = tab.shortcutIndex { MetaText("⌘\(index)", size: 11) }
             }
             .padding(.trailing, 14)
-            .frame(height: Theme.Metrics.navRow)
+            .frame(height: 44)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(on ? Theme.goldWash : Color.clear)
+            .background(on ? Theme.goldWash : Color.clear, ignoresSafeAreaEdges: [])
             .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             .contentShape(Rectangle())
         }
@@ -139,7 +146,7 @@ struct Sidebar: View {
                 .buttonStyle(.plain).help("Dismiss")
         }
         .padding(8)
-        .background(Theme.warning.opacity(0.08))
+        .background(Theme.warning.opacity(0.08), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().stroke(Theme.warning.opacity(0.4), lineWidth: 1))
     }
 }

@@ -49,7 +49,7 @@ private struct StatTile: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: outcome.icon)
-                    .font(.caption)
+                    .font(Theme.Font.body(12))
                     .foregroundStyle(outcome.tint)
                 Text(label.uppercased())
                     .font(.system(size: 10, weight: .semibold).monospaced())
@@ -61,7 +61,7 @@ private struct StatTile: View {
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(isActive ? outcome.tint : Color.primary)
-            Text(hint).font(.caption2).foregroundStyle(.tertiary)
+            Text(hint).font(Theme.Font.body(11)).foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)

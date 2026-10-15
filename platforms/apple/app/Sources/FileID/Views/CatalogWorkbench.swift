@@ -36,12 +36,12 @@ struct CatalogWorkbench: View {
             }
             HStack {
                 TextField("Search names, descriptions, chapters, or sampled video frames", text: $query)
-                    .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
+                    .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
                 Button("Search", action: search).disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Best Takes") { showingTakes = true }
                 Button("Refresh jobs") { send(CatalogRequest(requestID: UUID().uuidString, action: "jobs")) }
             }
-            if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
+            if !message.isEmpty { Text(message).font(Theme.Font.body(12)).foregroundStyle(.secondary) }
             HSplitView {
                 List(Array(hits.enumerated()), id: \.offset) { _, hit in
                     Button {
@@ -60,55 +60,52 @@ struct CatalogWorkbench: View {
                         } else { player = nil }
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(URL(fileURLWithPath: hit.path).lastPathComponent).font(.headline).lineLimit(1)
-                            if let time = hit.startSeconds { Text("At \(time, specifier: "%.1f") seconds · \(hit.kind == "sampledFrame" ? "sampled frame, unverified" : hit.kind)").font(.caption).foregroundStyle(.secondary) }
-                            if !hit.text.isEmpty { Text(hit.text).font(.caption).lineLimit(3) }
+                            Text(URL(fileURLWithPath: hit.path).lastPathComponent).font(Theme.Font.body(14, .semibold)).lineLimit(1)
+                            if let time = hit.startSeconds { Text("At \(time, specifier: "%.1f") seconds · \(hit.kind == "sampledFrame" ? "sampled frame, unverified" : hit.kind)").font(Theme.Font.body(12)).foregroundStyle(.secondary) }
+                            if !hit.text.isEmpty { Text(hit.text).font(Theme.Font.body(12)).lineLimit(3) }
                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(.plain)
-                }.frame(minWidth: 260)
+                }.dsList(empty: hits.isEmpty ? "Search names, descriptions, chapters or sampled frames." : nil).frame(minWidth: 260)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         if let selected {
-                            Text(URL(fileURLWithPath: selected.path).lastPathComponent).font(.headline)
+                            Text(URL(fileURLWithPath: selected.path).lastPathComponent).font(Theme.Font.body(14, .semibold))
                             if let player { NativeVideoPlayer(player: player).frame(height: 220) }
                             if !cast.isEmpty {
                                 VStack(alignment: .leading, spacing: 8) {
-                                    Label("People in this file", systemImage: "person.2").font(.headline).foregroundStyle(Theme.ai)
+                                    Label("People in this file", systemImage: "person.2").font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.ai)
                                     ForEach(cast, id: \.evidenceID) { appearance in
                                         Button {
                                             if let time = appearance.startSeconds { player?.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
                                         } label: {
                                             HStack {
-                                                Text(appearance.text).font(.callout).lineLimit(2)
+                                                Text(appearance.text).font(Theme.Font.body(13.5)).lineLimit(2)
                                                 Spacer()
-                                                if let time = appearance.startSeconds { Text("\(time, specifier: "%.1f")s").font(.caption.monospacedDigit()) }
+                                                if let time = appearance.startSeconds { Text("\(time, specifier: "%.1f")s").font(Theme.Font.body(12).monospacedDigit()) }
                                             }
                                         }.buttonStyle(.plain).disabled(appearance.startSeconds == nil || player == nil)
                                     }
                                     Text("Detected identities need review in People. Untimed appearances come from sampled images.")
-                                        .font(.caption2).foregroundStyle(.secondary)
+                                        .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                                 }.padding(.vertical, 8)
                             }
                             HStack {
                                 Button("Open file") { NSWorkspace.shared.open(URL(fileURLWithPath: selected.path)) }
                 if isVideo(selected.path) {
-                    Picker("Analysis", selection: $timelineMode) {
-                        Text("Quick samples").tag("sampled")
-                        Text("Significant moments").tag("moments")
-                    }.frame(width: 240)
+                    SegmentedBar(selection: $timelineMode, options: [("sampled", "Quick samples"), ("moments", "Full moments")], height: 26)
                                     Button("Analyze") {
                         send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [selected.fileID], timelineMode: timelineMode))
                                     }
                                 }
                             }
-                Text("Chapters").font(.headline)
+                Text("Chapters").font(Theme.Font.body(14, .semibold))
                 if chapters.contains(where: { $0.modelVersion.hasPrefix("timeline-moment-sequence-v1/") && !$0.userEdited && !$0.stale }) {
                     Text("Moment drafts describe sampled frame sequences. Review actions, outcomes, and timing before accepting.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 }
                             if chapters.contains(where: { $0.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") && !$0.userEdited && !$0.stale }) {
                                 Text("Draft suggestions use sparse frame samples. Review before relying on them; brief events can be missed.")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                             }
                             Button("Undo last chapter edit") {
                                 send(CatalogRequest(requestID: UUID().uuidString, action: "undoChapterEdit", fileID: selected.fileID))
@@ -126,7 +123,7 @@ struct CatalogWorkbench: View {
                                         Text("\(chapter.startSeconds, specifier: "%.1f")s · \(chapter.title)\(chapter.stale ? " · stale" : "")")
                                     }.buttonStyle(.plain)
                                     if chapter.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") && !chapter.userEdited {
-                                        Text("Draft").font(.caption).foregroundStyle(.secondary)
+                                        Text("Draft").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                                     }
                                     Spacer()
                                     Button(role: .destructive) {
@@ -134,11 +131,11 @@ struct CatalogWorkbench: View {
                                     } label: { Image(systemName: "minus.circle") }
                                 }
                             }
-                            TextField("Chapter title", text: $title).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
-                            TextField("Description", text: $summary).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                            TextField("Chapter title", text: $title).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                            TextField("Description", text: $summary).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
                             HStack {
-                                TextField("Start seconds", value: $start, format: .number).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
-                                TextField("End seconds", value: $end, format: .number).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                                TextField("Start seconds", value: $start, format: .number).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                                TextField("End seconds", value: $end, format: .number).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
                             }
                             HStack {
                                 Button(editingID == nil ? "Add chapter" : "Save chapter") {
@@ -147,16 +144,16 @@ struct CatalogWorkbench: View {
                                 }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !start.isFinite || !end.isFinite || start < 0 || end < start)
                                 if editingID != nil { Button("New chapter") { editingID = nil; title = ""; summary = "" } }
                             }
-                            Text("Markers are stored in the internal catalog. Original files are never changed.").font(.caption).foregroundStyle(.secondary)
+                            Text("Markers are stored in the internal catalog. Original files are never changed.").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                         } else { Text("Select a result to play a matching moment or edit chapters.").foregroundStyle(.secondary) }
                         Divider()
-                Text("Analysis jobs").font(.headline)
-                        Text("Visual sampling can miss events between frames. Load a model in Deep Analyze before starting.").font(.caption).foregroundStyle(.secondary)
+                Text("Analysis jobs").font(Theme.Font.body(14, .semibold))
+                        Text("Visual sampling can miss events between frames. Load a model in Deep Analyze before starting.").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                         ForEach(engine.catalogJobs, id: \.id) { job in
                             VStack(alignment: .leading, spacing: 4) {
-                        Text(job.kind == "catalogIndex" ? "Search index · \(job.state)" : "\(job.fileIDs.count) video(s) · \(job.state)").font(.subheadline)
+                        Text(job.kind == "catalogIndex" ? "Search index · \(job.state)" : "\(job.fileIDs.count) video(s) · \(job.state)").font(Theme.Font.body(12.5))
                                 ProgressView(value: job.progress)
-                                if let error = job.error { Text(error).font(.caption).foregroundStyle(.secondary) }
+                                if let error = job.error { Text(error).font(Theme.Font.body(12)).foregroundStyle(.secondary) }
                                 HStack {
                                     if ["running", "queued"].contains(job.state) { Button("Pause") { control(job, action: "pauseJob") } }
                                 if job.state == "paused" { Button("Resume") { control(job, action: "resumeJob") } }

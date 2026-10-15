@@ -35,7 +35,7 @@ struct Panel<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         VStack(alignment: .leading, spacing: 0) { content }
-            .background(Theme.panel)
+            .background(Theme.panel, ignoresSafeAreaEdges: [])
             .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
             .clipped()
     }
@@ -65,7 +65,7 @@ struct PanelFooter<Content: View>: View {
     var body: some View {
         HStack(spacing: 8) { content }
             .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(Theme.panelHeader)
+            .background(Theme.panelHeader, ignoresSafeAreaEdges: [])
             .overlay(alignment: .top) { Hairline() }
     }
 }
@@ -124,30 +124,48 @@ struct KeyValueRow: View {
 // MARK: - Buttons
 
 struct DSPrimaryButtonStyle: ButtonStyle {
-    var height: CGFloat = Theme.Metrics.controlLarge
+    var height: CGFloat? = nil
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
+    private var resolvedHeight: CGFloat {
+        if let height { return height }
+        switch controlSize {
+        case .mini, .small: return Theme.Metrics.controlSmall
+        case .large, .extraLarge: return 32
+        default: return Theme.Metrics.controlLarge
+        }
+    }
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(Theme.Font.mono(12, .semibold))
+            .font(Theme.Font.mono(controlSize == .small || controlSize == .mini ? 11 : 12, .semibold))
             .foregroundStyle(Theme.onGold)
-            .padding(.horizontal, 14)
-            .frame(height: height)
-            .background(configuration.isPressed ? Theme.goldHover : Theme.gold)
+            .padding(.horizontal, controlSize == .small || controlSize == .mini ? 10 : 14)
+            .frame(height: resolvedHeight)
+            .background(configuration.isPressed ? Theme.goldHover : Theme.gold, ignoresSafeAreaEdges: [])
             .opacity(isEnabled ? 1 : 0.38)
             .contentShape(Rectangle())
     }
 }
 
 struct DSSecondaryButtonStyle: ButtonStyle {
-    var height: CGFloat = Theme.Metrics.controlLarge
+    var height: CGFloat? = nil
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.controlSize) private var controlSize
+    private var resolvedHeight: CGFloat {
+        if let height { return height }
+        switch controlSize {
+        case .mini, .small: return Theme.Metrics.controlSmall
+        case .large, .extraLarge: return 32
+        default: return Theme.Metrics.control
+        }
+    }
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(Theme.Font.mono(12))
+            .font(Theme.Font.mono(controlSize == .small || controlSize == .mini ? 11 : 12))
             .foregroundStyle(Theme.textOnPanel)
-            .padding(.horizontal, 12)
-            .frame(height: height)
-            .background(configuration.isPressed ? Color.white.opacity(0.1) : Color.white.opacity(0.04))
+            .padding(.horizontal, controlSize == .small || controlSize == .mini ? 9 : 12)
+            .frame(height: resolvedHeight)
+            .background(configuration.isPressed ? Color.white.opacity(0.1) : Color.white.opacity(0.04), ignoresSafeAreaEdges: [])
             .overlay(Rectangle().stroke(Theme.controlBorder, lineWidth: 1))
             .opacity(isEnabled ? 1 : 0.38)
             .contentShape(Rectangle())
@@ -174,7 +192,7 @@ struct DSAccentOutlineButtonStyle: ButtonStyle {
             .foregroundStyle(color)
             .padding(.horizontal, 9)
             .frame(height: height)
-            .background(color.opacity(configuration.isPressed ? 0.2 : 0.1))
+            .background(color.opacity(configuration.isPressed ? 0.2 : 0.1), ignoresSafeAreaEdges: [])
             .overlay(Rectangle().stroke(color.opacity(0.6), lineWidth: 1))
             .contentShape(Rectangle())
     }
@@ -187,7 +205,7 @@ struct DSDangerButtonStyle: ButtonStyle {
             .foregroundStyle(configuration.isPressed ? .white : Theme.danger)
             .padding(.horizontal, 12)
             .frame(height: Theme.Metrics.controlLarge)
-            .background(configuration.isPressed ? Color(hex: 0xE8433A) : Color(hex: 0xE8433A).opacity(0.1))
+            .background(configuration.isPressed ? Color(hex: 0xE8433A) : Color(hex: 0xE8433A).opacity(0.1), ignoresSafeAreaEdges: [])
             .overlay(Rectangle().stroke(Color(hex: 0xE8433A).opacity(0.5), lineWidth: 1))
             .contentShape(Rectangle())
     }
@@ -259,7 +277,7 @@ struct SegmentedBar<T: Hashable>: View {
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 10)
                         .frame(height: height)
-                        .background(on ? Theme.gold : Color.clear)
+                        .background(on ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -373,7 +391,7 @@ struct RailRow<Content: View>: View {
             .padding(.trailing, 14)
             .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Theme.goldWash : Color.clear)
+            .background(selected ? Theme.goldWash : Color.clear, ignoresSafeAreaEdges: [])
             .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             .contentShape(Rectangle())
         }
@@ -399,7 +417,7 @@ struct KindBadge: View {
     var border: Color? = nil
     var body: some View {
         Text(text).font(Theme.Font.mono(10, .semibold)).tracking(1).textCase(.uppercase).foregroundStyle(color)
-            .padding(.horizontal, 5).padding(.vertical, 2).background(background)
+            .padding(.horizontal, 5).padding(.vertical, 2).background(background, ignoresSafeAreaEdges: [])
             .overlay { if let border { Rectangle().stroke(border, lineWidth: 1) } }
     }
 }
@@ -419,7 +437,7 @@ struct DSTextField: View {
         }
         .padding(.horizontal, 10)
         .frame(height: height)
-        .background(Color.black.opacity(0.3))
+        .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
     }
 }
@@ -472,7 +490,7 @@ struct ToastView: View {
             }
         }
         .padding(.leading, 14).padding(.trailing, 12).padding(.vertical, 9)
-        .background(Color(hex: 0x1A1A1D))
+        .background(Color(hex: 0x1A1A1D), ignoresSafeAreaEdges: [])
         .overlay(Rectangle().stroke(Color.white.opacity(0.16), lineWidth: 1))
         .shadow(color: .black.opacity(0.55), radius: 25, y: 20)
     }
@@ -483,4 +501,124 @@ struct AnyButtonStyle: ButtonStyle {
     private let make: (Configuration) -> AnyView
     init<S: ButtonStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
+
+// MARK: - App-wide native control styles
+
+/// Square checkbox: 14 pt box, gold fill with ✓ when on, label beside it.
+struct DSCheckboxToggleStyle: ToggleStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    func makeBody(configuration: Configuration) -> some View {
+        Button { configuration.isOn.toggle() } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                DSCheck(on: configuration.isOn).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+                configuration.label.font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isEnabled ? 1 : 0.4)
+        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+    }
+}
+
+/// Determinate progress draws the grained gold bar; indeterminate progress
+/// draws a short gold segment sweeping across the same square track.
+struct DSProgressViewStyle: ProgressViewStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let fraction = configuration.fractionCompleted {
+                GrainProgressBar(progress: fraction, tone: .gold)
+            } else {
+                IndeterminateBar()
+            }
+            configuration.label.font(Theme.Font.meta).foregroundStyle(Theme.text3)
+            configuration.currentValueLabel.font(Theme.Font.meta).foregroundStyle(Theme.text3)
+        }
+    }
+}
+
+struct IndeterminateBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phase: CGFloat = -0.35
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Color.white.opacity(0.07))
+                Rectangle()
+                    .fill(LinearGradient(colors: [Theme.gold.opacity(0), Theme.gold, Theme.gold.opacity(0)], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: geo.size.width * 0.35)
+                    .offset(x: geo.size.width * (reduceMotion ? 0.32 : phase))
+            }
+            .clipped()
+        }
+        .frame(height: 4)
+        .frame(minWidth: 40)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: false)) { phase = 1.0 }
+        }
+        .accessibilityLabel("In progress")
+    }
+}
+
+/// Mono label beside a control, the prototype's "RESOLUTION [720p|1080p]" row.
+struct LabeledSegment<Content: View>: View {
+    let label: String
+    @ViewBuilder var content: Content
+    init(_ label: String, @ViewBuilder content: () -> Content) { self.label = label; self.content = content() }
+    var body: some View {
+        HStack(spacing: 10) {
+            SectionLabel(label)
+            content
+        }
+    }
+}
+
+/// Aspect-ratio picker drawn as frame tiles (Original, Vertical, Horizontal, Square, Portrait).
+struct AspectTiles: View {
+    @Binding var selection: String
+    private let options: [(id: String, label: String, ratio: CGFloat)] = [
+        ("source", "Original", 16 / 9), ("9:16", "Vertical", 9 / 16), ("16:9", "Horizontal", 16 / 9), ("1:1", "Square", 1), ("4:5", "Portrait", 4 / 5)
+    ]
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(options, id: \.id) { option in
+                let on = selection == option.id
+                Button { selection = option.id } label: {
+                    VStack(spacing: 8) {
+                        Rectangle().stroke(on ? Theme.gold : Theme.text2, lineWidth: 1.5)
+                            .frame(width: option.ratio >= 1 ? 30 : 30 * option.ratio, height: option.ratio >= 1 ? 30 / option.ratio : 30)
+                            .frame(height: 32)
+                        Text(option.label).font(Theme.Font.body(13, .semibold)).foregroundStyle(on ? Theme.gold : Theme.text1)
+                        Text(option.id == "source" ? "Source" : option.id).font(Theme.Font.mono(11)).foregroundStyle(on ? Theme.gold : Theme.text3)
+                    }
+                    .frame(width: 96)
+                    .padding(.vertical, 10)
+                    .background(on ? Theme.gold.opacity(0.08) : Color.clear, ignoresSafeAreaEdges: [])
+                    .overlay(Rectangle().stroke(on ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(option.label)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+        }
+    }
+}
+
+extension View {
+    /// v3 list chrome: transparent rows on the panel fill, hairline frame, and an
+    /// optional mono empty-state line instead of a blank grey box.
+    func dsList(empty: String? = nil) -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(Theme.panel, ignoresSafeAreaEdges: [])
+            .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+            .overlay {
+                if let empty {
+                    MetaText(empty).multilineTextAlignment(.center).padding(20).allowsHitTesting(false)
+                }
+            }
+    }
 }

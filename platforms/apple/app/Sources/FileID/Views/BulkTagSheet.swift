@@ -20,19 +20,19 @@ struct BulkTagSheet: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Apply tags to \(files.count) file\(files.count == 1 ? "" : "s")")
-                        .font(.title2.bold())
+                        .font(Theme.Font.body(20, .semibold))
                     Text("Comma-separated. Existing tags on each file are preserved — only new tags get added.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
             TextField("e.g. Vacation, Family, Important", text: $rawTags)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
-                .font(.callout)
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                .font(Theme.Font.body(13.5))
             if let s = status {
-                Text(s).font(.caption).foregroundStyle(.secondary)
+                Text(s).font(Theme.Font.body(12)).foregroundStyle(.secondary)
             }
             HStack {
                 Spacer()
@@ -42,7 +42,7 @@ struct BulkTagSheet: View {
                         .padding(.horizontal, 16).padding(.vertical, 6)
                         .background(Rectangle().fill(Theme.gold))
                         .foregroundStyle(.black)
-                        .font(.callout.bold())
+                        .font(Theme.Font.body(13.5, .semibold))
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)

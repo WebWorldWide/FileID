@@ -150,13 +150,13 @@ struct CleanupView: View {
                         systemImage: "trash"
                     )
                     .fontWeight(.semibold)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.danger)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Color.red.opacity(0.12))
+                    .background(Theme.danger.opacity(0.12), ignoresSafeAreaEdges: [])
                     .overlay(
                         Rectangle()
-                            .stroke(Color.red.opacity(0.5), lineWidth: 1)
+                            .stroke(Theme.danger.opacity(0.5), lineWidth: 1)
                     )
                     .clipShape(Rectangle())
                 }
@@ -253,31 +253,31 @@ struct CleanupView: View {
                     // CRITICAL safety UX: similar groups are NOT byte-identical.
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Theme.warning)
                         Text("**Visually similar — review before deleting (not identical).** These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected: open each, confirm it's a true duplicate, then choose which copies to Trash.")
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(Rectangle().fill(Color.orange.opacity(0.10)))
-                    .overlay(Rectangle().stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                    .background(Rectangle().fill(Theme.warning.opacity(0.10)))
+                    .overlay(Rectangle().stroke(Theme.warning.opacity(0.35), lineWidth: 1))
                     .padding(.bottom, 4)
                 } else {
                     HStack(spacing: 8) {
                         Image(systemName: exactPreviewPartial
                               ? "exclamationmark.triangle.fill" : "info.circle")
-                            .foregroundStyle(exactPreviewPartial ? .orange : .green)
+                            .foregroundStyle(exactPreviewPartial ? Theme.warning : Theme.delight)
                         Text(exactPreviewPartial
                              ? "**Verified preview is partial.** Every group shown passed a live full-file SHA-256 check, but candidate/read limits may leave additional duplicates undisplayed. Selected copies are re-read again immediately before Trash."
                              : "Each group was verified with a live full-file SHA-256. The **KEEPER** is the copy we recommend you keep. Selected copies are re-read again immediately before Trash; you can restore them if you change your mind.")
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
                     .background(Rectangle().fill(
-                        (exactPreviewPartial ? Color.orange : Color.green).opacity(0.08)))
+                        (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.08)))
                     .overlay(Rectangle().stroke(
-                        (exactPreviewPartial ? Color.orange : Color.green).opacity(0.3),
+                        (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.3),
                         lineWidth: 1))
                     .padding(.bottom, 4)
                 }
@@ -297,9 +297,9 @@ struct CleanupView: View {
                     HStack(spacing: 10) {
                         Image(systemName: statusWarning
                               ? "exclamationmark.triangle.fill" : "trash.fill")
-                            .foregroundStyle(statusWarning ? .orange : .green)
+                            .foregroundStyle(statusWarning ? Theme.warning : Theme.delight)
                         Text(s)
-                            .font(.callout)
+                            .font(Theme.Font.body(13.5))
                         Spacer()
                         Button("Open Trash") {
                             NSWorkspace.shared.open(
@@ -316,9 +316,9 @@ struct CleanupView: View {
                     }
                     .padding(12)
                     .background(Rectangle().fill(
-                        (statusWarning ? Color.orange : Color.green).opacity(0.10)))
+                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
                     .overlay(Rectangle().stroke(
-                        (statusWarning ? Color.orange : Color.green).opacity(0.4),
+                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
                         lineWidth: 1))
                     .help("Files moved to Trash can be restored in Finder: open Trash, right-click a file, and choose Put Back.")
                 }
@@ -632,7 +632,7 @@ private struct GroupCard: View {
                         Button("Invert") { onInvert() }
                     } label: {
                         Label("Select…", systemImage: "checkmark.circle")
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                     }
                     .menuStyle(.borderlessButton)
                     .frame(width: 100)
@@ -683,8 +683,8 @@ private struct CopyTile: View {
     @State private var hovering = false
 
     private var borderColor: Color {
-        if isSelected { return .red }
-        if isKeeper   { return .green }
+        if isSelected { return Theme.danger }
+        if isKeeper   { return Theme.delight }
         return Color.white.opacity(0.10)
     }
 
@@ -763,7 +763,7 @@ private struct CopyTile: View {
     private var badgeOverlay: some View {
         ZStack(alignment: .topLeading) {
             if isKeeper {
-                BadgePill(label: "KEEPER", color: .green)
+                BadgePill(label: "KEEPER", color: Theme.delight)
                     .padding(6)
                     .help("This is the copy we recommend you keep — usually the largest / highest-resolution one. The other copies in this group are duplicates of it. You can override by clicking another tile to make it the keeper instead.")
             }
@@ -771,7 +771,7 @@ private struct CopyTile: View {
             Button(action: onToggle) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 22))
-                    .foregroundStyle(isSelected ? Color.red : Color.white.opacity(0.85))
+                    .foregroundStyle(isSelected ? Theme.danger : Color.white.opacity(0.85))
                     .background(Circle().fill(.black.opacity(0.4)))
             }
             .buttonStyle(.plain)

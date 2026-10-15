@@ -28,9 +28,9 @@ struct ModelCatalogBrowser: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Find a local model").font(.title2.bold())
+                    Text("Find a local model").font(Theme.Font.body(20, .semibold))
                     Text("\(MLXModelCatalog.entries.count) audited catalog entries · \(Int(ramGB)) GB Mac")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark") }
@@ -43,67 +43,65 @@ struct ModelCatalogBrowser: View {
             }.padding(10).background(.white.opacity(0.06), in: Rectangle())
             HStack {
                 if !visionOnly {
-                    Picker("Capability", selection: $role) {
-                        Text("All").tag("all"); Text("Vision").tag("vision"); Text("Text").tag("text")
-                    }.pickerStyle(.segmented).frame(maxWidth: 280)
+                    SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Vision"), ("text", "Text")], height: 26)
                 }
                 Spacer()
-                Toggle("Fits this Mac", isOn: $fitsOnly).toggleStyle(.checkbox)
-                Toggle("Downloaded", isOn: $installedOnly).toggleStyle(.checkbox)
-            }.font(.caption)
+                Toggle("Fits this Mac", isOn: $fitsOnly)
+                Toggle("Downloaded", isOn: $installedOnly)
+            }.font(Theme.Font.body(12))
             List(selection: $selection) {
                 ForEach(filtered, id: \.rawValue) { kind in
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: kind.supportsVision ? "photo.on.rectangle" : "text.bubble")
                             .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(kind.displayName).font(.callout.weight(.semibold)).lineLimit(1)
-                            Text(kind.sourceRepo).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Text(kind.displayName).font(Theme.Font.body(13.5, .semibold)).lineLimit(1)
+                            Text(kind.sourceRepo).font(Theme.Font.body(12)).foregroundStyle(.secondary).lineLimit(1)
                             Text("\(kind.supportsVision ? "Vision + chat" : "Text + chat") · \(kind.licenseName)")
-                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                .font(Theme.Font.body(11)).foregroundStyle(.secondary).lineLimit(1)
                         }
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 4) {
                             Text(ByteCountFormatter.string(fromByteCount: kind.approxBytes, countStyle: .file)).monospacedDigit()
                             Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
                                 .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : .secondary)
-                            if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(.orange) }
-                        }.font(.caption2)
+                            if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
+                        }.font(Theme.Font.body(11))
                     }.padding(.vertical, 6).tag(kind.rawValue)
                 }
-            }.listStyle(.inset).overlay {
+            }.dsList().listStyle(.inset).overlay {
                 if filtered.isEmpty {
                     VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").font(.title).foregroundStyle(.secondary)
-                        Text("No models match these filters").font(.headline)
+                        Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(.secondary)
+                        Text("No models match these filters").font(Theme.Font.body(14, .semibold))
                         Button("Reset filters") { query = ""; fitsOnly = false; installedOnly = false; role = "all" }
                     }
                 }
             }
             if let selected {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(selected.displayName).font(.headline).lineLimit(2)
+                    Text(selected.displayName).font(Theme.Font.body(14, .semibold)).lineLimit(2)
                     Text("Estimated memory: \(String(format: "%.1f", selected.ramBudgetGB)) GB. Runtime compatibility is registered; quality and speed vary by model.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                     if let entry = selected.catalogEntry {
                         Text("\(entry.quantization.bits)-bit · \(entry.bases.count) audited upstream license\(entry.bases.count == 1 ? "" : "s")")
-                            .font(.caption2).foregroundStyle(.secondary)
+                            .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                     }
                 }
             }
             if let progress = engine.modelDownloadProgress {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(progress.message).font(.caption).lineLimit(2)
+                        Text(progress.message).font(Theme.Font.body(12)).lineLimit(2)
                         ProgressView(value: progress.fraction).tint(Theme.gold)
                     }
                     Button("Cancel") { engine.cancelPrewarm() }
                 }
             }
-            if !statusMessage.isEmpty { Text(statusMessage).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if !statusMessage.isEmpty { Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(.secondary).textSelection(.enabled) }
             HStack {
                 Text("Downloads require your action. Inference stays on this Mac.")
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                 Spacer()
                 Button(selected.map { ModelInstallStatus.isInstalled(kind: $0) ? "Load model" : "Download & load" } ?? "Download & load") {
                     if let selected {

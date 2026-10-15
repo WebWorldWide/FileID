@@ -45,54 +45,64 @@ struct ToolsWorkbench: View {
         VStack(alignment: .leading, spacing: 14) {
             if !inline { HStack { Text("File Tools").font(Theme.Font.display(24)); Spacer(); Button("Done") { dismiss() }.buttonStyle(.dsSecondary) } }
             HStack {
-                TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
+                TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
                 Button("Find", action: search).disabled(!session.pending.isEmpty || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.disabled(!session.pending.isEmpty)
             List(session.hits, id: \.fileID) { hit in
                 Toggle(isOn: Binding(get: { session.selection.contains(hit.fileID) }, set: { value in
                     if value { session.selection.insert(hit.fileID) } else { session.selection.remove(hit.fileID) }; invalidate()
                 })) { Text(hit.path).lineLimit(1).truncationMode(.middle) }
-            }.frame(minHeight: 150).disabled(!session.pending.isEmpty)
-            HStack {
-                Picker("Tool", selection: $session.kind) { Text("Photo conversion").tag("photo"); Text("Chapter export").tag("chapters"); Text("Video conversion").tag("video") }
-                Picker("Output", selection: $session.format) {
-                    if session.kind == "photo" { Text("PNG").tag("png"); Text("JPEG").tag("jpeg"); Text("TIFF").tag("tiff") }
-                    else if session.kind == "video" { Text("MP4 · H.264").tag("mp4") }
-                    else { Text("JSON markers").tag("json"); Text("WebVTT chapters").tag("vtt") }
+            }.dsList(empty: session.hits.isEmpty ? "Search the catalog above, then tick the files to export." : nil).frame(minHeight: 150).disabled(!session.pending.isEmpty)
+            HStack(spacing: 18) {
+                LabeledSegment("Recipe") {
+                    SegmentedBar(selection: $session.kind, options: [("photo", "Photo"), ("video", "Video"), ("chapters", "Chapters")])
                 }
-                if session.kind == "photo" { TextField("Maximum pixels", value: $session.maxDimension, format: .number).frame(width: 100) }
-                if session.kind == "video" { Picker("Resolution", selection: $session.maxDimension) { Text("720p · 1280 pixels").tag(1280); Text("1080p · 1920 pixels").tag(1920); Text("4K · 3840 pixels").tag(3840) } }
+                LabeledSegment("Format") {
+                    if session.kind == "photo" {
+                        SegmentedBar(selection: $session.format, options: [("png", "PNG"), ("jpeg", "JPEG"), ("tiff", "TIFF")])
+                    } else if session.kind == "video" {
+                        SegmentedBar(selection: $session.format, options: [("mp4", "MP4 · H.264")])
+                    } else {
+                        SegmentedBar(selection: $session.format, options: [("vtt", "WebVTT"), ("json", "JSON")])
+                    }
+                }
+                if session.kind == "photo" {
+                    LabeledSegment("Max px") {
+                        TextField("4096", value: $session.maxDimension, format: .number).textFieldStyle(.plain).font(Theme.Font.mono(12))
+                            .padding(.horizontal, 8).frame(width: 84, height: 26).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
+                            .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                    }
+                }
+                if session.kind == "video" {
+                    LabeledSegment("Resolution") {
+                        SegmentedBar(selection: $session.maxDimension, options: [(1280, "720p"), (1920, "1080p"), (3840, "4K")])
+                    }
+                }
+                Spacer(minLength: 0)
             }.disabled(!session.pending.isEmpty)
             if ["photo", "video"].contains(session.kind) {
                 Toggle("Enlarge smaller media to the maximum size", isOn: $session.allowUpscale)
                     .disabled(!session.pending.isEmpty)
                 Text("Conventional resizing increases pixel dimensions; it does not recover missing detail.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
             }
             if session.kind == "video" {
-                Picker("Frame", selection: $session.videoAspectRatio) {
-                    Text("Original").tag("source")
-                    Text("Vertical · 9:16").tag("9:16")
-                    Text("Horizontal · 16:9").tag("16:9")
-                    Text("Square · 1:1").tag("1:1")
-                    Text("Portrait · 4:5").tag("4:5")
-                }.disabled(!session.pending.isEmpty)
+                AspectTiles(selection: $session.videoAspectRatio).disabled(!session.pending.isEmpty)
                 if session.videoAspectRatio != "source" {
-                    Picker("Framing", selection: $session.videoFraming) {
-                        Text("Fit full picture").tag("fit")
-                        Text("Follow people").tag("auto")
+                    LabeledSegment("Framing") {
+                        SegmentedBar(selection: $session.videoFraming, options: [("fit", "Fit full picture"), ("auto", "Follow people")])
                     }.disabled(!session.pending.isEmpty)
                 }
                 Text(session.videoFraming == "auto" && session.videoAspectRatio != "source"
                      ? "Follows detected people with smooth crops and fits the full picture when people are lost or a group cannot fit. Clips up to ten minutes; samples twice per second. Review the exported framing."
                      : "Fits the full picture inside the selected frame; empty space is padded.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
             }
             if session.kind == "video" {
                 Toggle("Stabilize shaky video", isOn: $session.videoStabilization).disabled(!session.pending.isEmpty)
                 if session.videoStabilization {
                     Text("Corrects estimated translation and rotation during export. Up to 12% zoom covers exposed edges; unsafe motion remains uncorrected. Clips up to ten minutes and 60 fps. Review the result.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 }
             }
             HStack {
@@ -100,7 +110,7 @@ struct ToolsWorkbench: View {
                 Spacer()
                 Button("Choose output folder", action: chooseDestination)
             }.disabled(!session.pending.isEmpty)
-            Text(session.capabilities.first(where: { $0.id == session.kind })?.detail ?? "Loading local capabilities…").font(.caption).foregroundStyle(.secondary)
+            Text(session.capabilities.first(where: { $0.id == session.kind })?.detail ?? "Loading local capabilities…").font(Theme.Font.body(12)).foregroundStyle(.secondary)
             HStack {
                 Button("Last export") { send(ToolRequest(requestID: UUID().uuidString, action: "history")) }.disabled(!session.pending.isEmpty)
                 Button("Preview export") {
@@ -126,14 +136,14 @@ struct ToolsWorkbench: View {
                     Button("Cancel") { _ = engine.send(.toolRequest(request: ToolRequest(requestID: UUID().uuidString, action: "cancel", operationID: session.operationID))); session.message = "Stopping export…" }
                 }
             }
-            Text(session.message).font(.callout).textSelection(.enabled)
+            Text(session.message).font(Theme.Font.body(13.5)).textSelection(.enabled)
             List(Array(session.outputs.enumerated()), id: \.offset) { _, output in
                 VStack(alignment: .leading) {
                     Text(output.outputPath).lineLimit(1).truncationMode(.middle)
-                    Text("\(output.state) · \(output.message)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text("\(output.state) · \(output.message)").font(Theme.Font.body(12)).foregroundStyle(.secondary).textSelection(.enabled)
                 }
-            }.frame(minHeight: 130)
-            Text("Review reframed exports before sharing. Originals stay in your library.").font(.caption).foregroundStyle(.secondary)
+            }.dsList(empty: session.outputs.isEmpty ? "Preview an export to see the files it will write." : nil).frame(minHeight: 130)
+            Text("Review reframed exports before sharing. Originals stay in your library.").font(Theme.Font.body(12)).foregroundStyle(.secondary)
         }
         .padding(20).frame(minWidth: 850, minHeight: 650).tint(Theme.gold)
         .onAppear {

@@ -62,7 +62,7 @@ struct TakeWorkbench: View {
                 if !inline { Button("Done") { dismiss() } }
             }
             Text("Group related clips, describe the result you want, and review each outcome. FileID only recommends a winner when the evidence supports it.")
-                .font(.subheadline).foregroundStyle(.secondary)
+                .font(Theme.Font.body(12.5)).foregroundStyle(.secondary)
             HSplitView {
                 VStack {
                     HStack {
@@ -80,12 +80,12 @@ struct TakeWorkbench: View {
                             load(event.id)
                         } label: {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(event.title).font(.headline)
-                                Text("\(event.fileIDs.count) files · \(event.goal)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                Text(event.title).font(Theme.Font.body(14, .semibold))
+                                Text("\(event.fileIDs.count) files · \(event.goal)").font(Theme.Font.body(12)).foregroundStyle(.secondary).lineLimit(2)
                             }
                         }
                         .buttonStyle(.plain)
-                    }
+                    }.dsList(empty: events.isEmpty ? "No groups yet. Find related takes or make a new group." : nil)
                 }
                 .frame(minWidth: 220)
 
@@ -109,7 +109,7 @@ struct TakeWorkbench: View {
                         if let job = goalJob {
                             HStack {
                                 ProgressView(value: job.progress).frame(width: 130)
-                                Text("Goal analysis: " + job.state).font(.caption)
+                                Text("Goal analysis: " + job.state).font(Theme.Font.body(12))
                                 if ["running", "queued"].contains(job.state) {
                                     Button("Pause") { send("pauseJob", jobID: job.id) }
                                 }
@@ -120,12 +120,12 @@ struct TakeWorkbench: View {
                             }
                         }
                         Text("Save the goal before analyzing a video group. Load a visual model in Deep Analyze first. Automatic scores are drafts from sampled frames; hidden outcomes and unknown identities require review.")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                         Text("Select at least two files from the search results to make a group. Originals are never changed.")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                         if !suggestedGroups.isEmpty {
                             Text("Possible groups from visual similarity and file dates. Check the files; this does not detect the desired outcome.")
-                                .font(.caption).foregroundStyle(.secondary)
+                                .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                             ForEach(suggestedGroups.indices, id: \.self) { index in
                                 let suggestion = suggestedGroups[index]
                                 RelatedTakeSuggestionRow(suggestion: suggestion) {
@@ -148,8 +148,8 @@ struct TakeWorkbench: View {
                         }
                         Divider()
                         if let recommendation {
-                            Text("Recommendation: \(recommendation.status.capitalized)").font(.headline)
-                            Text(recommendation.reason).font(.subheadline).foregroundStyle(.secondary)
+                            Text("Recommendation: \(recommendation.status.capitalized)").font(Theme.Font.body(14, .semibold))
+                            Text(recommendation.reason).font(Theme.Font.body(12.5)).foregroundStyle(.secondary)
                         }
                         ForEach(takes, id: \.fileID) { take in
                             VStack(alignment: .leading, spacing: 6) {
@@ -158,7 +158,7 @@ struct TakeWorkbench: View {
                                         selectedTakeID = take.fileID
                                         player = AVPlayer(url: URL(fileURLWithPath: take.path))
                                     }
-                                    .buttonStyle(.plain).font(.headline)
+                                    .buttonStyle(.plain).font(Theme.Font.body(14, .semibold))
                                     Spacer()
                                     if recommendation?.fileIDs.contains(take.fileID) == true {
                                         Image(systemName: "star.fill").foregroundStyle(Theme.gold)
@@ -166,7 +166,7 @@ struct TakeWorkbench: View {
                                     Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: take.path)) }
                                 }
                                 Text(take.stale ? "Needs review after source changed" : outcomeText(take))
-                                    .font(.caption).foregroundStyle(.secondary)
+                                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                                 if let event = selectedEvent {
                                     HStack {
                                         Button("Goal met") { feedback(event.id, take, outcome: 1) }
@@ -191,7 +191,7 @@ struct TakeWorkbench: View {
                 }
                 .frame(minWidth: 560)
             }
-            if !message.isEmpty { Text(message).font(.caption).foregroundStyle(.secondary) }
+            if !message.isEmpty { Text(message).font(Theme.Font.body(12)).foregroundStyle(.secondary) }
         }
         .padding(20)
         .frame(minWidth: 900, minHeight: 650)
@@ -313,7 +313,7 @@ private struct RelatedTakeSuggestionRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(names).lineLimit(2)
                 Text("Visual similarity \(similarity) · \(suggestion.reason)")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
             }
             Spacer()
             Button("Review group", action: onReview)

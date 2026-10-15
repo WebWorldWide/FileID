@@ -482,7 +482,7 @@ struct SankeyFlowView: View {
                                        design: .rounded).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                     Text("file\(count == 1 ? "" : "s") moving")
-                        .font(.caption.weight(.semibold))
+                        .font(Theme.Font.body(12, .semibold))
                         .foregroundStyle(.primary)
                     Spacer(minLength: 0)
                 }
@@ -497,7 +497,7 @@ struct SankeyFlowView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
-                .font(.caption2.monospaced())
+                .font(Theme.Font.mono(10.5))
                 .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)

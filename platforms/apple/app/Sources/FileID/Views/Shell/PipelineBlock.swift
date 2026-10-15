@@ -85,12 +85,36 @@ struct PipelineBlock: View {
                 }
             }
             Text(s.sub).font(Theme.Font.meta).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-            if let p = progress, p.failed > 0 { MetaText("\(p.failed) failed", color: Theme.danger, size: 11) }
+            if let p = progress, p.phase != .idle { stats(p) }
             controls
         }
         .onChange(of: engine.lastProgress?.phase) { _, new in if new != nil && new != .idle { startRequested = false } }
         .onChange(of: engine.lastErrorSignal) { _, _ in startRequested = false }
         .onChange(of: engine.engineResetSignal) { _, _ in startRequested = false }
+    }
+
+    /// The scan counters the previous sidebar showed: found, tagged, rate,
+    /// engine memory and failures.
+    @ViewBuilder
+    private func stats(_ p: ScanProgress) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            statRow("Found", p.discovered.formatted(), trailing: p.etaSeconds.flatMap { $0 > 0 && scanRunning ? ProcessingControl.formatETA($0) + " left" : nil })
+            statRow("Tagged", p.processed.formatted(), trailing: p.filesPerSecond > 0 ? String(format: "%.1f/s", p.filesPerSecond) : nil)
+            statRow("Memory", "\(p.residentMB) MB", trailing: "\(p.availableMB) MB free", warn: p.residentMB > 1200)
+            if p.failed > 0 { statRow("Failed", p.failed.formatted(), trailing: nil, danger: true) }
+        }
+        .padding(.vertical, 6)
+        .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
+        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+    }
+
+    private func statRow(_ key: String, _ value: String, trailing: String?, warn: Bool = false, danger: Bool = false) -> some View {
+        HStack(spacing: 6) {
+            Text(key).font(Theme.Font.mono(10.5)).tracking(1).textCase(.uppercase).foregroundStyle(Theme.label).frame(width: 60, alignment: .leading)
+            Text(value).font(Theme.Font.mono(11.5)).foregroundStyle(danger ? Theme.danger : warn ? Theme.warning : Theme.text2)
+            Spacer(minLength: 4)
+            if let trailing { Text(trailing).font(Theme.Font.mono(11)).foregroundStyle(Theme.text3) }
+        }
     }
 
     @ViewBuilder

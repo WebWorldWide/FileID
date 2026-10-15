@@ -48,9 +48,9 @@ struct BulkRenameSheet: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Apply smart names")
-                    .font(.title2.bold())
+                    .font(Theme.Font.body(20, .semibold))
                 Text("Deep Analyze produced a smart filename for each photo based on its content. Pick which ones to apply.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
             }
             Spacer()
             Button("Done") { dismiss() }
@@ -64,9 +64,9 @@ struct BulkRenameSheet: View {
             Image(systemName: "wand.and.rays")
                 .font(.system(size: 48, weight: .light))
                 .foregroundStyle(.secondary)
-            Text("No smart names yet").font(.title3.bold())
+            Text("No smart names yet").font(Theme.Font.body(16, .semibold))
             Text("Run Deep Analyze on your photos first — smart filenames will appear here.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
         }
@@ -77,7 +77,7 @@ struct BulkRenameSheet: View {
     private var actionsBar: some View {
         HStack(spacing: 8) {
             Text("\(selectedIDs.count) of \(files.count) selected")
-                .font(.caption.monospaced())
+                .font(Theme.Font.mono(11))
             Spacer()
             Button("Select all") { selectedIDs = Set(files.map(\.id)) }
                 .buttonStyle(.dsSecondary)
@@ -93,7 +93,7 @@ struct BulkRenameSheet: View {
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(Rectangle().fill(Theme.gold))
                     .foregroundStyle(.black)
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
             }
             .buttonStyle(.plain)
             .disabled(selectedIDs.isEmpty || inFlight)
@@ -109,7 +109,7 @@ struct BulkRenameSheet: View {
                 Text("This will rename \(selectedIDs.count) files on disk. The Library 'Undo last rename' button can revert it, but it won't restore filenames you've moved or renamed again afterwards.")
             }
             if let s = status {
-                Text(s).font(.caption2).foregroundStyle(.secondary)
+                Text(s).font(Theme.Font.body(11)).foregroundStyle(.secondary)
             }
         }
         .padding(12)
@@ -287,7 +287,7 @@ private struct BulkRenameRow: View {
                         .transition(.opacity)
                 } else {
                     Image(systemName: kindFallbackIcon(file.kind))
-                        .font(.title3)
+                        .font(Theme.Font.body(16, .semibold))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -298,16 +298,16 @@ private struct BulkRenameRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(oldName)
-                    .font(.caption.monospaced())
+                    .font(Theme.Font.mono(11))
                     .foregroundStyle(.secondary)
                     .strikethrough(isSelected, color: .secondary.opacity(0.5))
                     .lineLimit(1).truncationMode(.middle)
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.right")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.tertiary)
                     Text(newName)
-                        .font(.caption.monospaced().bold())
+                        .font(Theme.Font.mono(11, .semibold))
                         .foregroundStyle(Theme.gold)
                         .lineLimit(1).truncationMode(.middle)
                 }

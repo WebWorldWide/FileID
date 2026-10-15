@@ -6,17 +6,17 @@ struct EngineStatusRow: View {
         switch state {
         case .starting:
             Label("Starting…", systemImage: "hourglass")
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
                 .foregroundStyle(.secondary)
         case .ready(let info):
             Label("Ready", systemImage: "checkmark.circle.fill")
-                .font(.callout.bold())
-                .foregroundStyle(.green)
+                .font(Theme.Font.body(13.5, .semibold))
+                .foregroundStyle(Theme.delight)
                 .help("\(info.workerCap) workers · \(Int(info.physicalMemoryGB)) GB RAM · pid \(info.pid)")
         case .crashed(let reason):
             Label(reason, systemImage: "xmark.octagon.fill")
-                .font(.caption)
-                .foregroundStyle(.red)
+                .font(Theme.Font.body(12))
+                .foregroundStyle(Theme.danger)
                 .lineLimit(2)
         }
     }
