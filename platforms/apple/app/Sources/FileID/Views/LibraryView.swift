@@ -461,13 +461,19 @@ struct LibraryView: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
-                .frame(maxWidth: 320)
+                .frame(minWidth: 140, maxWidth: 320)
+                .layoutPriority(1)
                 .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
                 .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
                 kindPicker
 
-                MetaText("\(rows.count.formatted()) of \(store.totalFiles.formatted()) shown", size: 11)
+                ViewThatFits(in: .horizontal) {
+                    MetaText("\(rows.count.formatted()) of \(store.totalFiles.formatted()) shown", size: 11).fixedSize()
+                    MetaText("\(rows.count.formatted())/\(store.totalFiles.formatted())", size: 11).fixedSize()
+                    Color.clear.frame(width: 0, height: 0)
+                }
+                .fixedSize(horizontal: false, vertical: true)
 
                 Spacer(minLength: 8)
 
@@ -488,8 +494,9 @@ struct LibraryView: View {
                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
                 .keyboardShortcut(.escape, modifiers: [])
             } else {
-                Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square") }
+                Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                .fixedSize()
                 .help("Enter multi-select mode to apply tags to many files at once")
             }
 

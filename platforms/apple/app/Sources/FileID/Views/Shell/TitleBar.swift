@@ -10,6 +10,7 @@ struct TitleBar: View {
     @Binding var activeTab: MainWindow.Tab
     @Binding var pickedURL: URL?
     @Binding var sidebarVisible: Bool
+    @Binding var chatPresented: Bool
     var pickFolder: () -> Void
 
     @State private var folderOpen = false
@@ -163,6 +164,18 @@ struct TitleBar: View {
         HStack(spacing: 8) {
             searchField
             activityButton
+            Button { chatPresented.toggle() } label: {
+                Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(chatPresented ? Theme.gold : Theme.text2)
+                    .frame(width: 30, height: 30)
+                    .background(chatPresented ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
+                    .overlay(Rectangle().stroke(chatPresented ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(chatPresented ? "Close chat (⌘⇧K)" : "Open chat beside this page (⌘⇧K)")
+            .keyboardShortcut("k", modifiers: [.command, .shift])
+            .disabled(activeTab == .chat)
             Button { activeTab = .settings } label: {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: 30, height: 30)
@@ -199,7 +212,7 @@ struct TitleBar: View {
         .frame(height: Theme.Metrics.controlLarge)
         .frame(minWidth: 120, idealWidth: 280, maxWidth: 280)
         .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-        .overlay(Rectangle().stroke(searchFocused ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+        .overlay(Rectangle().stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
         .background {
             Button("") { userOpened = true; searchFocused = true; searchOpen = true }.keyboardShortcut("k", modifiers: .command).opacity(0).frame(width: 0, height: 0)
         }
@@ -214,7 +227,7 @@ struct TitleBar: View {
         if !q.isEmpty {
             groups.append(("Ask Chat", [SearchItem(id: "ask", label: "“\(q)”", hint: "↵", color: Theme.ai) {
                 UserDefaults.standard.set(q, forKey: "chatDraft")
-                activeTab = .chat
+                if activeTab != .chat { chatPresented = true }
             }]))
             groups.append(("Library", [SearchItem(id: "lib", label: "Find “\(q)” in the library", hint: "Library", color: Theme.text1) {
                 UserDefaults.standard.set(q, forKey: "libraryQueryHandoff")

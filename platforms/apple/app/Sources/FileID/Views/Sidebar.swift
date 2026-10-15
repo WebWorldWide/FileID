@@ -88,7 +88,7 @@ struct Sidebar: View {
             if case .installed = ArcFaceModelInstaller.shared.status[.sface] ?? .unknown {
                 return (store.totalFiles > 0 ? "Group faces to name people" : "Faces appear after a scan", false)
             }
-            return (store.totalFiles > 0 ? "Face model not installed" : "Faces appear after a scan", store.totalFiles > 0)
+            return (store.totalFiles > 0 ? "No face model yet" : "Faces appear after a scan", store.totalFiles > 0)
         case .moments:
             let running = engine.catalogJobs.filter { $0.state == "running" }.count
             return running > 0 ? ("\(running) running", true) : ("Chapters and search inside videos", false)
@@ -107,19 +107,31 @@ struct Sidebar: View {
         }
     }
 
+    /// Keep the list as calm as the old sidebar: a second line only when it
+    /// says something live (counts, progress, a missing model).
+    private func showsMeta(_ tab: MainWindow.Tab, _ m: (text: String, hot: Bool)) -> Bool {
+        m.hot || tab == .library || (tab == .people && store.totalFiles > 0)
+    }
+
     @ViewBuilder
     private func navRow(_ tab: MainWindow.Tab) -> some View {
         let on = activeTab == tab
         let m = meta(for: tab)
         Button { activeTab = tab } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 Rectangle().fill(on ? Theme.gold : Color.clear).frame(width: 3)
-                VStack(alignment: .leading, spacing: 3) {
+                Image(systemName: tab.systemImage)
+                    .font(.system(size: 13, weight: on ? .semibold : .regular))
+                    .foregroundStyle(on ? Theme.gold : Theme.text2)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(tab.rawValue).font(Theme.Font.body(14, on ? .semibold : .medium)).foregroundStyle(on ? Theme.gold : Theme.text1)
-                    Text(m.text).font(Theme.Font.meta).foregroundStyle(m.hot ? (tab == .deep ? Theme.ai : Theme.textOnPanel) : Theme.text3).lineLimit(1)
+                    if showsMeta(tab, m) {
+                        Text(m.text).font(Theme.Font.mono(10.5)).foregroundStyle(m.hot ? (tab == .deep || tab == .people ? Theme.ai : Theme.textOnPanel) : Theme.text3).lineLimit(1)
+                    }
                 }
                 Spacer(minLength: 0)
-                if let index = tab.shortcutIndex { MetaText("⌘\(index)", size: 11) }
+                if let index = tab.shortcutIndex { Text("⌘\(index)").font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3.opacity(on ? 1 : 0.7)) }
             }
             .padding(.trailing, 14)
             .frame(height: 44)

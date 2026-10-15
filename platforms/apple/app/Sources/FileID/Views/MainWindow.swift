@@ -14,6 +14,7 @@ struct MainWindow: View {
     @AppStorage("sidebarVisible") private var sidebarVisible: Bool = true
     @State private var pickedURL: URL?
     @State private var isDragHovering = false
+    @State private var chatPresented = false
     private let toasts = ToastCenter.shared
 
     /// Ten pages in three areas plus Settings. Raw values are persisted,
@@ -94,9 +95,10 @@ struct MainWindow: View {
 
             VStack(spacing: 0) {
                 TitleBar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL,
-                         sidebarVisible: $sidebarVisible, pickFolder: pickFolder)
+                         sidebarVisible: $sidebarVisible, chatPresented: $chatPresented, pickFolder: pickFolder)
+                GeometryReader { geometry in
                 HStack(spacing: 0) {
-                    if sidebarVisible {
+                    if sidebarVisible && (!chatPresented || geometry.size.width >= 1440) {
                         Sidebar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL, pickFolder: pickFolder)
                             .frame(width: Theme.Metrics.sidebar)
                             .transition(.move(edge: .leading).combined(with: .opacity))
@@ -105,10 +107,22 @@ struct MainWindow: View {
                     Detail(engine: engine, store: store, toolsSession: toolsSession, activeTab: activeTab,
                            pickedURL: $pickedURL, onSwitchTab: { activeTabBinding.wrappedValue = $0 }, pickFolder: pickFolder)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // Chat stays beside the current page, as before the redesign;
+                    // the Chat page is the same conversation at full width.
+                    if chatPresented && activeTab != .chat {
+                        VHairline()
+                        ChatWorkbench(engine: engine, onClose: { chatPresented = false })
+                            .frame(width: 380)
+                            .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.86), ignoresSafeAreaEdges: [])
+                            .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
+                            .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
                 }
             }
             .preferredColorScheme(.dark)
             .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: sidebarVisible)
+            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
             .accentColor(Theme.gold)
             .background { shortcutHost }
             .onAppear {

@@ -25,24 +25,24 @@ struct ChatWorkbench: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Theme.gold)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Ask FileID").font(Theme.Font.body(14, .semibold))
-                    Text("Your library assistant").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    SectionLabel("Chat")
+                    MetaText(useModel ? "Answers cite your files · on this Mac" : "Keyword search only", size: 11)
                 }
                 Spacer()
-                Menu {
-                    Button("Delete conversation", role: .destructive) { control("clear") }
-                } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton).fixedSize().help("Conversation options")
+                Button("Clear") { control("clear") }
+                    .buttonStyle(.dsGhost)
+                    .help("Delete this conversation")
                 if let onClose {
                     Button { onClose() } label: {
-                        Image(systemName: "xmark").font(Theme.Font.body(12, .semibold))
+                        Image(systemName: "xmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.text2)
+                            .frame(width: 24, height: 24).contentShape(Rectangle())
                     }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
                         .help("Close chat").accessibilityLabel("Close chat")
                 }
-            }.padding(16)
-            Divider().overlay(Color.white.opacity(0.08))
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            Hairline()
             ScrollViewReader { scroll in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 18) {
