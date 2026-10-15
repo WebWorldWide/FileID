@@ -1969,8 +1969,7 @@ public enum FaceClustering {
 
     /// Path on disk for a given face_prints row's crop JPEG.
     public static func faceCropURL(faceID: Int64) -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("FileID/face_crops", isDirectory: true)
+        EngineStateRoot.directory.appendingPathComponent("face_crops", isDirectory: true)
             .appendingPathComponent("\(faceID).jpg")
     }
 

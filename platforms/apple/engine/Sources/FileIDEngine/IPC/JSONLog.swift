@@ -19,9 +19,7 @@ public final class JSONLog: @unchecked Sendable {
     private let encoder: JSONEncoder
 
     public init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("FileID/logs", isDirectory: true)
+        let base = EngineStateRoot.logsDirectory
         self.url = base.appendingPathComponent("scan.jsonl")
 
         let e = JSONEncoder()

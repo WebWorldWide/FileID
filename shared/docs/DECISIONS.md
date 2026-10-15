@@ -3900,3 +3900,15 @@ The pre-rollback engine binds each move to the stored `file_ref`; `main` compare
 
 The per-file CLI is optional. When `llama-mtmd-cli` is missing, a single-file request uses the resident llama-server lease like the batch path, so a server-only runtime (the Linux source build) analyzes individual files.
 
+
+## 2026-10-15 — Two model catalogs, one per runtime
+
+The Mac completion branch and `main` each shipped a `shared/models/catalog.json` in incompatible shapes: 265 MLX conversions filtered to the pinned `mlx-swift-lm 3.32.3` factories (architectures, affine quantization, group sizes) versus 333 GGUF/MLX candidates for the portable llama.cpp engine. They answer different questions, so neither was rewritten into the other. The portable file keeps the shared path and its `build_model_catalog.py`/egress-gate wiring; the MLX list lives only as the Mac resource `FileIDShared/Resources/model-catalog.json` behind `MLXModelCatalog` (renamed from `ModelCatalog` to stop clashing with the IPC `ModelCatalog` DTO). The Mac engine's `listModels` now reports favorites as `curated` and bundled entries as `candidate` with their real vision/text role, so a future cross-platform browser sees the same vocabulary. Merging the lists is deferred until an MLX entry can carry portable hashes without losing the per-runtime filter.
+
+## 2026-10-15 — Shared-engine port slice dropped in favour of the restored engine
+
+The branch also carried an unlanded Rust slice (portable face refresh, crop publication, naming context, a `face_active` scan gate) written against the pre-#248 engine. PR #248 restored the pre-rollback shared engine and rewrote the same files (`face_clustering.rs`, `main.rs`, `tagging.rs`, `bulk.rs`, `dbwriter.rs`), with real-engine IPC verification. Re-basing the slice onto that would have meant redoing it blind, with no Windows/Linux hardware in the session. `main`'s versions were kept; only the IPC mirrors (`videoFraming`, `videoStabilization`, `modelKind`, `deferredFaces`), the goal-change take invalidation and `face_bbox` (used by the GTK People tab) were retained. The slice is recoverable from commit `03c50bcd`; MAC_FINISH.md already lists it as port handoff work.
+
+## 2026-10-15 — IPC 1.16.0 is the union, not a renumbering
+
+Both sides had minted "1.15.0" for different additions. Rather than pick one, the merged schema is 1.16.0 and contains every optional field from both lineages; all additions are optional with `skip_serializing_if`, so 1.12–1.15 peers still parse.

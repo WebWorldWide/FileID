@@ -934,10 +934,11 @@ struct FileIDEngineMain {
         case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
             guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
             await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
-        case .reassignFace:
-            await sink.emit(.error(EngineError(
-                kind: "not_implemented_yet",
-                message: "This IPC command is not implemented by the macOS engine yet."
+        case .reassignFace(let faceID, let destinationPersonID, let createNewPerson):
+            guard let database else { await emitDbUnavailable(sink, action: "reassignFace"); return }
+            await sink.emit(.bulkActionResult(await reassignFace(
+                database: database, faceID: faceID,
+                destinationPersonID: destinationPersonID, createNewPerson: createNewPerson
             )))
         case .markPersonsAsUnknown(let personIDs):
             guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
@@ -1164,6 +1165,89 @@ struct FileIDEngineMain {
             return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
         } catch {
             return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
+        }
+    }
+
+    /// Mirrors the shared engine: move one face to an existing or new person,
+    /// recompute both people's counts/representatives, drop an emptied
+    /// unnamed source and its person-level (face-less) verdicts.
+    static func reassignFace(database: Database, faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool) async -> BulkActionResult {
+        func failure(_ message: String) -> BulkActionResult {
+            BulkActionResult(action: "reassignFace", succeeded: 0, failed: 1, messages: [item(faceID, ok: false, message)])
+        }
+        if createNewPerson && destinationPersonID != nil {
+            return failure("Choose either a new person or an existing destination, not both.")
+        }
+        do {
+            let outcome: Result<Int64?, ReassignFaceRefusal> = try await database.pool.write { db in
+                guard let previousRow = try Row.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id = ?", arguments: [faceID]) else {
+                    return .failure(.missingFace)
+                }
+                let previous: Int64? = previousRow["person_id"]
+                let destination: Int64?
+                if createNewPerson {
+                    try db.execute(sql: "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, ?)",
+                                   arguments: [Date().timeIntervalSince1970])
+                    destination = db.lastInsertedRowID
+                } else if let destinationPersonID {
+                    let exists = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?)", arguments: [destinationPersonID]) ?? false
+                    guard exists else { return .failure(.missingDestination) }
+                    destination = destinationPersonID
+                } else {
+                    destination = nil
+                }
+                if destination == previous { return .success(nil) }
+                try db.execute(sql: "UPDATE face_prints SET person_id = ? WHERE id = ?", arguments: [destination, faceID])
+                for personID in Set([previous, destination].compactMap { $0 }) {
+                    try db.execute(sql: """
+                        UPDATE persons
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                            representative_face_id = COALESCE(
+                                (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
+                                 ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
+                                (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1
+                                 ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1)),
+                            centroid = NULL, anchor_radius = NULL, last_clustered_at = NULL
+                        WHERE id = ?1
+                        """, arguments: [personID])
+                }
+                if let previous {
+                    try db.execute(sql: """
+                        DELETE FROM persons
+                        WHERE id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM face_prints WHERE person_id = ?1)
+                          AND COALESCE(TRIM(name), '') = '' AND COALESCE(TRIM(title), '') = ''
+                          AND COALESCE(TRIM(first_name), '') = '' AND COALESCE(TRIM(middle_name), '') = ''
+                          AND COALESCE(TRIM(last_name), '') = '' AND COALESCE(TRIM(suffix), '') = ''
+                        """, arguments: [previous])
+                    if db.changesCount > 0 {
+                        try db.execute(sql: """
+                            DELETE FROM face_verifications
+                            WHERE (person_a = ?1 OR person_b = ?1) AND (face_a IS NULL OR face_b IS NULL)
+                            """, arguments: [previous])
+                    }
+                }
+                return .success(destination)
+            }
+            switch outcome {
+            case .success(let destination):
+                return BulkActionResult(action: "reassignFace", succeeded: 1, failed: 0,
+                                        messages: [item(faceID, ok: true, destination.map { "Assigned to person #\($0)." })])
+            case .failure(let refusal):
+                return failure(refusal.message)
+            }
+        } catch {
+            return failure(error.localizedDescription)
+        }
+    }
+
+    private enum ReassignFaceRefusal: Error {
+        case missingFace, missingDestination
+        var message: String {
+            switch self {
+            case .missingFace: return "This face no longer exists; refresh People and try again."
+            case .missingDestination: return "The destination person no longer exists; refresh People and try again."
+            }
         }
     }
 

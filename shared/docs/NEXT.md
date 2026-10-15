@@ -2,17 +2,19 @@
 
 Short, current priorities only. History lives in `STATE.md` (newest first) and git; release gates live in `SHIP.md`; the feature ledger lives in `NEXT_VERSION.md`; model choices live in `MODELS.md`.
 
-## Where things stand (2026-10-14)
+## Where things stand (2026-10-15)
 
-- `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags.
+- `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags; the pre-merge Mac completion checkpoint (including its dropped portable face-refresh Rust slice) is commit `03c50bcd`.
+- The Mac completion pass (best takes, video tools, moments/cast, reviewed naming, People refresh, MLX model browser, right-side chat) is folded into `main` together with the restored shared engine (#248) and the GTK theme fix (#249); IPC is 1.16.0.
 - The shared Rust engine (`platforms/windows/src/engine`) serves Windows, Linux, the CLI and the TUI. macOS has its own Swift engine and remains the behavioral reference.
 - Test hosts: the Linux VM (`adlon-ci-linux`), the Windows 11 VM (`ADLON-CI-WIN`, also a self-hosted CI runner) and the owner's Mac (headless `swift build`/`swift test` over SSH only; the owner does interactive macOS testing and package signing locally).
 
 ## In flight
 
-0. **Finish the August-rollback restore** (engine landed first): restore the GTK app (paged restructure plans, engine client, settings), the WinUI app (47 conflicted files) and the macOS app/engine (57) area by area, each as its own PR verified on its host. Implement `reassignFace` in the macOS engine (currently `not_implemented_yet`).
+0. **Finish the August-rollback restore** (engine landed first): restore the GTK app (paged restructure plans, engine client, settings) and the WinUI app (47 conflicted files) area by area, each as its own PR verified on its host. The macOS engine now implements `reassignFace`; the remaining portable-only commands (`findMergeSuggestions`, `embedTextQuery`, `embedImageQuery`, `restoreFromTrash`, `revertMerge`, `generateVideoThumbnail`) are served in-app on macOS and stay `not_implemented_yet` in its engine.
 1. **Redesign** (FileID Prototype v3): blocked until the design files are exported into the repo or the Design connector is authorized from an interactive session; then port to SwiftUI, WinUI and GTK keeping the palette, springs and `LavaLampBackground`.
-2. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; add MLX benchmarking and catalog MLX loading on macOS.
+2. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; add MLX benchmarking on macOS (catalog MLX loading exists through the bundled `MLXModelCatalog`; `listModels` reports bundled entries as `candidate`).
+3. **Portable People/naming parity**: re-derive the dropped portable face-refresh/crop-publication/naming-context slice (commit `03c50bcd`) on top of the restored shared engine, per the MAC_FINISH.md handoff matrix.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 

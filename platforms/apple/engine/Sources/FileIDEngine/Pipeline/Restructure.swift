@@ -1081,8 +1081,7 @@ public enum Restructure {
     private static let storedPlanVersion = 2
 
     private static var storedPlansDirectory: URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("FileID/restructure_plans", isDirectory: true)
+        EngineStateRoot.directory.appendingPathComponent("restructure_plans", isDirectory: true)
     }
 
     static func storePlan(
@@ -1590,8 +1589,7 @@ public enum Restructure {
     /// apply run's inverse moves. A forward apply fails before its first move if
     /// Application Support or the journal is unavailable.
     static var defaultUndoJournalURL: URL? {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("FileID/restructure_undo.ndjson")
+        EngineStateRoot.directory.appendingPathComponent("restructure_undo.ndjson")
     }
 
     /// Open the undo journal truncating (fresh batch) for incremental append.
@@ -1857,9 +1855,7 @@ public enum Restructure {
     /// next scan (which self-heals the row) never runs. NDJSON, append-only;
     /// written beside the engine log.
     static func recordPathUpdateFailure(fileID: Int64, src: String, dst: String) {
-        guard let dir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("FileID/logs", isDirectory: true) else { return }
+        let dir = EngineStateRoot.logsDirectory
         guard (try? ReadOnlyLocations.requireWritable(dir)) != nil else { return }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("restructure_recover.ndjson")
