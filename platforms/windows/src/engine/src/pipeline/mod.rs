@@ -17,6 +17,7 @@ pub(crate) mod deep_analyze_naming;
 pub mod restructure;
 pub mod restructure_apply;
 pub mod restructure_feedback;
+pub mod restructure_respect;
 pub mod restructure_semantic;
 pub mod audio_meta;
 pub mod obj_render;

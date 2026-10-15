@@ -66,7 +66,7 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [ ] People, Cleanup and Moments lists: apply the same treatment where they hold hundreds of items.
 - [ ] Database at 100k files: measure keyword search (LIKE scans on path/description/tags), counters and FTS on a synthetic 100k-row catalog; add trigram FTS for paths if LIKE dominates.
 - [x] Restructure (macOS): respect-your-organization stage (see RESTRUCTURE.md); Adlon/Camera 2,966 shuffling moves → 0, 28 folders kept; planning >10 min → ~19 s; "Staying put" shows real file count; models banner offers Rescan when CLIP is installed but files were scanned before it.
-- [ ] Restructure (shared Rust engine): port RestructureRespect to `platforms/windows/src/engine` (restructure.rs / restructure_semantic.rs) so Windows and Linux behave the same.
+- [x] Restructure (shared Rust engine): `pipeline/restructure_respect.rs` ports the same rules and Keep accounting for Windows, Linux, CLI and TUI; 6 Rust tests mirror the Swift ones; strict Clippy clean.
 - [ ] Restructure: test on a genuinely messy folder (Downloads-style dump) with CLIP embeddings present, and review the loose-file folder names it proposes.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
