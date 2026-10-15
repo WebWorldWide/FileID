@@ -24,7 +24,11 @@ impl Fixture {
     fn file(&self, directory: &Path, name: &str) -> PathBuf {
         assert!(directory.starts_with(&self.root));
         let path = directory.join(name);
-        std::fs::write(&path, b"generated scope fixture; not decoded or inferred").unwrap();
+        if std::path::Path::new(name).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("png")) {
+            image::RgbImage::new(2, 2).save(&path).unwrap();
+        } else {
+            std::fs::write(&path, b"generated scope fixture; not decoded or inferred").unwrap();
+        }
         path
     }
     fn row(&self, id: i64, path: &Path, kind: &str, failed: i64) {

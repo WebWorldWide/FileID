@@ -18,7 +18,6 @@ const CANONICAL_KINDS: &[&str] = &[
     "qwen3_vl_8b",
     "gemma_3_4b",
     "bge_text",
-    "whisper",
 ];
 
 fn manifest() -> serde_json::Value {

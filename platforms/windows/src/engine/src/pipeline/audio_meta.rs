@@ -80,10 +80,78 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<
     out
 }
 
+/// Structured title / artist / album for Deep Analyze smart-renaming. Reuses the same
+/// `symphonia` probe as [`extract`] but keeps the fields SEPARATE so a descriptive
+/// filename can be built ("Artist - Title"). Path-based open only (the rename pass has
+/// no pre-read buffer). Best-effort — any field symphonia can't expose stays None.
+#[derive(Default, Debug, Clone)]
+pub(crate) struct AudioTags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+pub(crate) fn extract_structured(path: &Path) -> AudioTags {
+    let p = crate::util::path_safety::to_extended_length(path);
+    let file = match std::fs::File::open(&p) {
+        Ok(f) => f,
+        Err(_) => return AudioTags::default(),
+    };
+    let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    let mut probed = match symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(p) => p,
+        Err(_) => return AudioTags::default(),
+    };
+    let mut format = probed.format;
+    let mut tags = AudioTags::default();
+    if let Some(rev) = probed.metadata.get().as_ref().and_then(|m| m.current()) {
+        collect_structured(&mut tags, rev);
+    }
+    if let Some(rev) = format.metadata().current() {
+        collect_structured(&mut tags, rev);
+    }
+    tags
+}
+
+/// RIFF INFO and ID3v1 values are NUL-padded fixed-width fields.
+fn tag_text(raw: &str) -> String {
+    raw.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string()
+}
+
+/// First-non-empty per field, matching `push_metadata`'s standard-key set. Artist
+/// prefers the track Artist over AlbumArtist (both map to `artist`).
+fn collect_structured(tags: &mut AudioTags, rev: &symphonia::core::meta::MetadataRevision) {
+    for tag in rev.tags() {
+        let value = match &tag.value {
+            Value::String(s) => tag_text(s),
+            _ => continue,
+        };
+        if value.is_empty() {
+            continue;
+        }
+        match tag.std_key {
+            Some(StandardTagKey::TrackTitle) if tags.title.is_none() => tags.title = Some(value),
+            Some(StandardTagKey::Artist) if tags.artist.is_none() => tags.artist = Some(value),
+            Some(StandardTagKey::AlbumArtist) if tags.artist.is_none() => tags.artist = Some(value),
+            Some(StandardTagKey::Album) if tags.album.is_none() => tags.album = Some(value),
+            _ => {}
+        }
+    }
+}
+
 fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::meta::MetadataRevision) {
     for tag in rev.tags() {
         let value = match &tag.value {
-            Value::String(s) => s.trim().to_string(),
+            Value::String(s) => tag_text(s),
             Value::UnsignedInt(n) => n.to_string(),
             Value::SignedInt(n) => n.to_string(),
             _ => continue,
@@ -99,7 +167,10 @@ fn push_metadata(out: &mut Vec<(String, Option<f32>)>, rev: &symphonia::core::me
             Some(StandardTagKey::Date | StandardTagKey::OriginalDate) => {
                 // Keep only the year (first 4 digits) so different date formats
                 // collapse to a single tag (mm/dd/yyyy, yyyy-mm-dd, yyyy).
-                value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect()
+                // Emit as "Year_NNN" to match the enriched-extras format used by
+                // all other file kinds — prevents a double tag ("2019" + "Year_2019").
+                let year: String = value.chars().take_while(|c| c.is_ascii_digit()).take(4).collect();
+                if year.len() == 4 { format!("Year_{year}") } else { continue }
             }
             _ => continue,
         };
@@ -150,6 +221,12 @@ impl symphonia::core::io::MediaSource for BytesMediaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_text_strips_nul_padding() {
+        assert_eq!(tag_text("Test Tone\0"), "Test Tone");
+        assert_eq!(tag_text(" FileID QA\0\0 "), "FileID QA");
+    }
 
     #[test]
     fn extract_returns_empty_for_nonexistent_path() {

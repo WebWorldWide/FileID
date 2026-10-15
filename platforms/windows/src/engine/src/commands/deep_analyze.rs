@@ -99,6 +99,57 @@ fn format_person_ref(title: Option<&str>, first: Option<&str>, legacy: Option<&s
     legacy.unwrap_or("").trim().to_string()
 }
 
+/// Reject Deep Analyze after the GPU device was removed in this process: one
+/// diagnostic plus a terminal complete, so the app never waits on a run that
+/// cannot start.
+pub(crate) async fn send_gpu_failure_complete(
+    sink: &Sink,
+    model_kind: &str,
+    processed: u64,
+    failed: u64,
+    total_seconds: f64,
+) {
+    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
+        kind: "gpu_device_removed".into(),
+        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
+        path: None,
+        model_kind: Some(model_kind.to_string()),
+    }))))
+    .await;
+    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
+        DeepAnalyzeComplete {
+            processed,
+            failed,
+            total_seconds,
+            model_kind: model_kind.to_string(),
+            cancelled: false,
+        },
+    ))))
+    .await;
+}
+
+enum SingleFileBackend {
+    Cli(crate::models::vlm::VlmRunner),
+    Server(crate::models::resident_service::ResidentLease),
+}
+
+/// The per-file CLI is optional: a runtime that only ships llama-server must
+/// still analyze a single file, the same way the batch path falls back.
+async fn single_file_backend(model_kind: &str, cancel: &Arc<AtomicBool>) -> anyhow::Result<SingleFileBackend> {
+    let cli_error = match crate::models::vlm::VlmRunner::find(cancel).await {
+        Ok(runner) => return Ok(SingleFileBackend::Cli(runner)),
+        Err(error) => error,
+    };
+    if crate::models::vlm::find_weights(model_kind).is_none() {
+        return Err(cli_error);
+    }
+    let server = crate::models::resident_service::ResidentService::shared()
+        .acquire(model_kind, cancel.clone())
+        .await
+        .map_err(|server_error| anyhow::anyhow!("{cli_error:#}; llama-server: {server_error:#}"))?;
+    Ok(SingleFileBackend::Server(server))
+}
+
 pub(crate) async fn handle_deep_analyze_file(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
@@ -114,12 +165,12 @@ pub(crate) async fn handle_deep_analyze_file(
     ))))
     .await;
 
-    let runner = match crate::models::vlm::VlmRunner::find(&cancel).await {
-        Ok(r) => r,
+    let backend = match single_file_backend(&payload.model_kind, &cancel).await {
+        Ok(backend) => backend,
         Err(err) => {
             sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
                 kind: "llama_cpp_missing".into(),
-                message: format!("{err}"),
+                message: format!("{err:#}"),
                 path: None,
                 model_kind: None,
             }))))
@@ -158,15 +209,7 @@ pub(crate) async fn handle_deep_analyze_file(
         let conn = db.lock();
         fetch_face_names(&conn, file_id)
     };
-    let outcome = analyze_file(
-        db,
-        &runner,
-        file_id,
-        &model_kind,
-        AnalyzeMode::Both,
-        cancel.clone(),
-        &face_names,
-        move |chunk| {
+    let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
             // send.await }) pattern would pile up unbounded tasks if the
@@ -198,9 +241,20 @@ pub(crate) async fn handle_deep_analyze_file(
                     current_caption: Some(snapshot),
                 },
             ))));
-        },
-    )
-    .await;
+    };
+    let outcome = match &backend {
+        SingleFileBackend::Cli(runner) => {
+            analyze_file(db, runner, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token).await
+        }
+        SingleFileBackend::Server(server) => {
+            analyze_file_via_server(db, server, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token, None).await
+        }
+    };
+    if let SingleFileBackend::Server(server) = backend {
+        if let Err(error) = server.finish(outcome.is_ok() && !cancel.load(Ordering::Relaxed)).await {
+            tracing::warn!(?error, "[VLM-SERVER] single-file lease cleanup failed");
+        }
+    }
 
     match outcome {
         Ok(out) => {

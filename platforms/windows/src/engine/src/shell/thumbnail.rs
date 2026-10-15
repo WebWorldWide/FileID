@@ -1,0 +1,194 @@
+// Thumbnail — IShellItemImageFactory::GetImage.
+//
+// Uses the system's IThumbnailProvider chain — the same code path Explorer
+// uses to render thumbnails in Detail/List view. Handles every kind we
+// need (Office, RTF, .pages, .key, .numbers, ai, eps, psd, dwg, …) because
+// the provider is whichever the user has installed.
+//
+// Output: tightly packed RGBA8. The Win32 path is
+// HBITMAP-backed BGRA; we swap channels on extraction so callers always
+// see RGBA regardless of source.
+
+use anyhow::{Context, Result};
+use std::path::Path;
+
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::SIZE;
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
+};
+use windows::Win32::System::Com::{
+    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+};
+use windows::Win32::UI::Shell::{
+    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF, SIIGBF_BIGGERSIZEOK,
+    SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
+};
+
+#[derive(Debug, Clone)]
+pub struct Thumbnail {
+    pub width: u32,
+    pub height: u32,
+    /// Tightly packed RGBA8, top-left origin.
+    pub rgba: Vec<u8>,
+}
+
+/// Render the provider thumbnail only (no icon fallback) for `path`,
+/// fitted within `dim`. Deep Analyze uses it to decode formats image-rs
+/// cannot read (RAW, PSD, …) through the codecs the user has installed.
+pub fn render_thumbnail_only_at(path: &Path, dim: i32) -> Result<Thumbnail> {
+    render_at_with_flags(
+        path,
+        dim,
+        SIIGBF(SIIGBF_RESIZETOFIT.0 | SIIGBF_BIGGERSIZEOK.0 | SIIGBF_THUMBNAILONLY.0),
+    )
+}
+
+fn render_at_with_flags(path: &Path, dim: i32, flags: SIIGBF) -> Result<Thumbnail> {
+    if !path.exists() {
+        anyhow::bail!("thumbnail source missing: {}", path.display());
+    }
+
+    unsafe {
+        // Initialize COM apartment for this call. CoUninitialize on every
+        // exit path. RPC_E_CHANGED_MODE means the apartment is already set
+        // (the caller initialized it MTA), which we accept silently.
+        let init = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _com_guard = ComGuard {
+            initialized: init.is_ok(),
+        };
+
+        let path_str = path
+            .to_str()
+            .context("thumbnail path must be UTF-8")?;
+        let mut wide: Vec<u16> = path_str.encode_utf16().collect();
+        wide.push(0);
+
+        let factory: IShellItemImageFactory =
+            SHCreateItemFromParsingName(PCWSTR::from_raw(wide.as_ptr()), None)
+                .context("SHCreateItemFromParsingName")?;
+
+        let size = SIZE { cx: dim, cy: dim };
+        let hbm: HBITMAP = factory
+            .GetImage(size, flags)
+            .context("IShellItemImageFactory::GetImage")?;
+
+        let result = hbitmap_to_rgba(hbm);
+        let _ = DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(hbm.0));
+        result
+    }
+}
+
+unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
+    // Pull dimensions via GetObject(BITMAP).
+    let mut bitmap = BITMAP::default();
+    let written = unsafe {
+        GetObjectW(
+            windows::Win32::Graphics::Gdi::HGDIOBJ(hbm.0),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bitmap as *mut BITMAP as *mut _),
+        )
+    };
+    if written == 0 {
+        anyhow::bail!("GetObjectW returned 0 — invalid HBITMAP");
+    }
+
+    let width = bitmap.bmWidth.max(0) as u32;
+    let height = bitmap.bmHeight.max(0) as u32;
+    if width == 0 || height == 0 {
+        anyhow::bail!("HBITMAP has zero extent");
+    }
+
+    let row_bytes = (width as usize) * 4;
+    let mut bgra = vec![0u8; row_bytes * (height as usize)];
+
+    let mut bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            // Negative height = top-down DIB; matches our RGBA expectation.
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let hdc = unsafe { CreateCompatibleDC(HDC::default()) };
+    if hdc.0.is_null() {
+        anyhow::bail!("CreateCompatibleDC returned null");
+    }
+    let scanned = unsafe {
+        GetDIBits(
+            hdc,
+            hbm,
+            0,
+            height,
+            Some(bgra.as_mut_ptr() as *mut _),
+            &mut bi as *mut _,
+            DIB_RGB_COLORS,
+        )
+    };
+    let _ = unsafe { DeleteDC(hdc) };
+    if scanned == 0 {
+        anyhow::bail!("GetDIBits returned 0");
+    }
+
+    // BGRA → RGBA swap. The HBITMAP from the shell may have premultiplied
+    // alpha; Explorer renders correctly because it uses BGRA throughout.
+    // We swap channels so callers see canonical RGBA.
+    let mut rgba = bgra;
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+
+    Ok(Thumbnail {
+        width,
+        height,
+        rgba,
+    })
+}
+
+struct ComGuard {
+    initialized: bool,
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.initialized {
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumbnail_only_renderer_returns_real_pixels_for_png() {
+        let path = std::env::temp_dir().join(format!(
+            "fileid-shell-thumbnail-{}-{}.png",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            96,
+            64,
+            image::Rgb([12, 120, 240]),
+        ))
+        .save_with_format(&path, image::ImageFormat::Png)
+        .unwrap();
+
+        let thumbnail = render_thumbnail_only_at(&path, 64).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert!(thumbnail.width > 0 && thumbnail.height > 0);
+        assert_eq!(
+            thumbnail.rgba.len(),
+            thumbnail.width as usize * thumbnail.height as usize * 4
+        );
+    }
+}

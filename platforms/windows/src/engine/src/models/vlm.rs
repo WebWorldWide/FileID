@@ -21,7 +21,9 @@ pub const CAPTION_PROMPT: &str = "Describe this image in one specific, factual s
 
 /// Default rename prompt — produces a short, kebab-cased filename
 /// suitable for `sanitize_proposed_name`.
-pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), hyphen-separated, no quotes, no extension.";
+pub const RENAME_PROMPT: &str = "Suggest a 3 to 5 word lowercase filename that names the SPECIFIC subject of this image (never generic words like photo, image, or picture), using separate words joined by hyphens. Never concatenate words. No quotes or extension. For a form, receipt, or repeated document type, include a visible name or reference that distinguishes this file from similar copies. Only include a date when it is visibly legible in the image or document; never infer or invent a year.";
+
+pub const RENAME_RETRY_PROMPT: &str = "Return only a filename stem made of exactly 3 to 5 separate lowercase words joined by hyphens. Use only visible subjects, text, setting, or actions. Do not concatenate words, add quotes, an extension, a date unless visibly legible, or any explanation. Example: boy-getting-face-paint";
 
 /// Tagging prompt — produces 1–2 specific, concrete content tags. Parsed by
 /// `deep_analyze::parse_vlm_tags` (which caps at 2 and drops generic tokens)
@@ -104,7 +106,30 @@ impl VlmRunner {
 /// Resolve the (gguf, mmproj) pair for a given model_kind. Returns None
 /// if either file is missing — the caller surfaces "model not installed"
 /// without crashing.
+///
+/// Resolution goes through the registry: the wire kind is snake_case
+/// ("mistral_small_3_2") but the installer writes the registry's dotted
+/// dir ("vlm/mistral-small-3.2"), so a naive join(model_kind) never found
+/// installed weights and Deep Analyze reported every model missing.
 pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
+    if let crate::models::registry::LookupResult::Found(model) =
+        crate::models::registry::lookup_full(model_kind)
+    {
+        let dest = |name: &str| {
+            model
+                .files
+                .iter()
+                .map(|f| f.dest.clone())
+                .find(|d| d.file_name().is_some_and(|n| n == name))
+        };
+        if let (Some(gguf), Some(mmproj)) = (dest("model.gguf"), dest("mmproj.gguf")) {
+            if gguf.exists() && mmproj.exists() {
+                return Some((gguf, mmproj));
+            }
+        }
+    }
+    // Unregistered kinds (or callers passing a literal dir name) keep the
+    // direct-layout fallback.
     let root = crate::paths::models_dir().ok()?;
     find_weights_at(&root, model_kind)
 }
@@ -144,8 +169,8 @@ pub async fn caption(
     if req.greedy {
         cmd.arg("--temp").arg("0");
     }
-    // Don't print the prompt back at us; we only want the completion.
-    cmd.arg("--no-display-prompt");
+    // Never pass `--no-display-prompt`: llama-mtmd-cli rejects that llama-cli
+    // flag with `invalid argument`, and mtmd-cli never echoes the prompt.
     // Offload all layers to the GPU, mirroring the persistent server
     // (vlm_server.rs). Modern llama.cpp defaults to 0 GPU layers, so without
     // this the per-file CLI path ran the entire VLM decode + vision
@@ -264,35 +289,15 @@ fn parse_best_vulkan_device(text: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_weights_at, parse_best_vulkan_device};
+    use super::{find_weights_at, parse_best_vulkan_device, RENAME_PROMPT, RENAME_RETRY_PROMPT};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
-    fn installed_weights_resolve_from_wire_model_kind() {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "fileid-vlm-weights-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        for (kind, dir) in [
-            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
-            ("gemma_3_4b", "gemma-3-4b"),
-            ("mistral_small_3_2", "mistral-small-3.2"),
-            ("qwen3_vl_4b", "qwen3-vl-4b"),
-            ("qwen3_vl_8b", "qwen3-vl-8b"),
-        ] {
-            let installed = root.join("vlm").join(dir);
-            std::fs::create_dir_all(&installed).unwrap();
-            let gguf = installed.join("model.gguf");
-            let mmproj = installed.join("mmproj.gguf");
-            std::fs::write(&gguf, b"gguf").unwrap();
-            assert_eq!(find_weights_at(&root, kind), None, "incomplete {kind}");
-            std::fs::write(&mmproj, b"mmproj").unwrap();
-            assert_eq!(find_weights_at(&root, kind), Some((gguf, mmproj)));
-        }
-        assert_eq!(find_weights_at(&root, "unknown"), None);
-        std::fs::remove_dir_all(root).unwrap();
+    fn rename_prompt_forbids_invented_dates() {
+        assert!(RENAME_PROMPT.contains("visibly legible"));
+        assert!(RENAME_PROMPT.contains("never infer or invent a year"));
+        assert!(RENAME_PROMPT.contains("Never concatenate words"));
+        assert!(RENAME_RETRY_PROMPT.contains("exactly 3 to 5 separate lowercase words"));
     }
 
     #[test]
@@ -323,4 +328,36 @@ mod tests {
         let out = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4070 (8188 MiB, free)\n";
         assert_eq!(parse_best_vulkan_device(out), None);
     }
+
+    /// The wire kind is snake_case but the installer writes the registry's
+    /// dotted dir — a naive join(model_kind) reported every installed VLM as
+    /// missing (Deep Analyze "model isn't installed" on a complete install).
+    #[test]
+    fn installed_weights_resolve_from_wire_model_kind() {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fileid-vlm-weights-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (kind, dir) in [
+            ("qwen2_5_vl_7b", "qwen2.5-vl-7b"),
+            ("gemma_3_4b", "gemma-3-4b"),
+            ("mistral_small_3_2", "mistral-small-3.2"),
+            ("qwen3_vl_4b", "qwen3-vl-4b"),
+            ("qwen3_vl_8b", "qwen3-vl-8b"),
+        ] {
+            let installed = root.join("vlm").join(dir);
+            std::fs::create_dir_all(&installed).unwrap();
+            let gguf = installed.join("model.gguf");
+            let mmproj = installed.join("mmproj.gguf");
+            std::fs::write(&gguf, b"gguf").unwrap();
+            assert_eq!(find_weights_at(&root, kind), None, "incomplete {kind}");
+            std::fs::write(&mmproj, b"mmproj").unwrap();
+            assert_eq!(find_weights_at(&root, kind), Some((gguf, mmproj)));
+        }
+        assert_eq!(find_weights_at(&root, "unknown"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
 }

@@ -336,22 +336,9 @@ pub fn lookup_full(model_kind: &str) -> LookupResult {
             })
         }
 
-            // Executable runtimes are shipped in the signed application package. Only
-    // model weights remain in the downloader registry.
-    "whisper" => {
-        let model_dir = models_root.join("whisper");
-        LookupResult::Found(Model {
-            id: "whisper",
-            display_name: "Whisper (audio transcription)",
-            files: vec![FileEntry {
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-                    .to_string(),
-                dest: model_dir.join("ggml-base.bin"),
-                sha256: Some("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe".into()),
-                approx_bytes: 147_951_465,
-            }],
-        })
-    }        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
+        // Executable runtimes are shipped in the signed application package. Only
+        // model weights remain in the downloader registry.
+        "bge_text" | "bge_small_en_v1_5" | "bge_small" => {
             let dir = models_root.join("bge_text");
             LookupResult::Found(Model {
                 id: "bge_text",
@@ -508,7 +495,6 @@ fn runtime_required_names(name: &str) -> Option<&'static [&'static [&'static str
             &["mtmd.dll", "libmtmd.so", "libmtmd.dylib"],
         ]),
         "cudart.zip" => Some(&[&["cudart64_12.dll"], &["cublas64_12.dll"]]),
-        "whisper-runtime.zip" => Some(&[&["main.exe", "whisper-cli.exe", "whisper-cli"]]),
         "cudnn-runtime.zip" => Some(&[&["cudnn64_9.dll"]]),
         "ort-cuda.zip" => Some(&[
             &["onnxruntime.dll"],
