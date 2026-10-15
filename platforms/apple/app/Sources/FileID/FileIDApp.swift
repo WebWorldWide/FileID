@@ -51,6 +51,18 @@ struct FileIDApp: App {
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .help) {
+                Button("FileID Help") { NSWorkspace.shared.open(URL(string: "https://github.com/WebWorldWide/FileID#readme")!) }
+                Button("Show Welcome Sheet…") { showWelcome = true }
+                Divider()
+                Button("Privacy on this Mac") {
+                    let alert = NSAlert()
+                    alert.messageText = "Everything stays on this Mac"
+                    alert.informativeText = "FileID never sends telemetry. The only network use is a model download you start yourself, fetched from huggingface.co and verified against pinned hashes."
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                }
+            }
             CommandGroup(after: .appInfo) {
                 Button("About FileID") {
                     let info = Bundle.main.infoDictionary

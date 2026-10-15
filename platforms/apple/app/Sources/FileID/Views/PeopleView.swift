@@ -705,32 +705,27 @@ private struct PersonCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Color.black.opacity(0.4)
+            Color.white.opacity(person.hasAnyName ? 0.04 : 0.03)
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(faceCrop)
+                .overlay(LinearGradient(colors: [.white.opacity(0.06), .black.opacity(0.3)], startPoint: .top, endPoint: .bottom))
                 .overlay(selectionOverlay)
                 .clipShape(Rectangle())
-            VStack(alignment: .leading, spacing: 2) {
-                Text(displayName)
-                    .font(.callout.bold())
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.horizontal, 4)
+                .overlay {
+                    if person.hasAnyName {
+                        Rectangle().stroke(Theme.hairline, lineWidth: 1)
+                    } else {
+                        Rectangle().stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
+                    }
+                }
+            Text(displayName)
+                .font(Theme.Font.body(14, .semibold))
+                .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")", size: 11)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(8)
-        .background(
-            Rectangle()
-                .fill(.ultraThinMaterial)
-        )
-        .overlay(
-            Rectangle()
-                .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
-        )
         .task(id: thumbnailIdentity) {
             await loadThumb()
         }
@@ -761,9 +756,9 @@ private struct PersonCard: View {
                 .resizable()
                 .scaledToFill()
         } else {
-            Image(systemName: "person.crop.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(Theme.gold.opacity(0.4))
+            Text(person.hasAnyName ? String(displayName.split(separator: " ").prefix(2).compactMap(\.first)) : "?")
+                .font(Theme.Font.display(44))
+                .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
         }
     }
 
@@ -779,14 +774,7 @@ private struct PersonCard: View {
                         .fill(selectionTint.opacity(0.18))
                 }
                 VStack {
-                    HStack {
-                        Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 26))
-                            .foregroundStyle(isChecked ? selectionTint : Color.white.opacity(0.85))
-                            .background(Circle().fill(.black.opacity(0.45)))
-                            .padding(8)
-                        Spacer()
-                    }
+                    HStack { DSCheck(on: isChecked).padding(8); Spacer() }
                     Spacer()
                 }
             }

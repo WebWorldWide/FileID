@@ -602,33 +602,25 @@ private struct GroupCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    BadgePill(label: "\(group.totalFileCount) \(group.isSimilar ? "images" : "copies")")
+                HStack(spacing: 10) {
+                    SectionLabel(group.isSimilar ? "Look-alike · \(group.totalFileCount) images" : "Exact copies · \(group.totalFileCount)")
                     if group.isSimilar {
-                        BadgePill(label: "Visually similar", color: .orange)
+                        BadgePill(label: "perceptual match", color: Theme.warning)
                             .help("Matched by perceptual hash (dHash), NOT byte-for-byte. Resizes, re-encodes, crops, and light edits land here — review each before deleting.")
                     }
                     Text(String(format: "%.1f MB total · %.1f MB if you keep 1",
                                 Double(group.totalBytes) / 1_048_576,
                                 Double(group.reclaimableBytes) / 1_048_576))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                    if group.isTruncated {
-                        Text("showing \(group.files.count)")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
+                        .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                    if group.isTruncated { MetaText("showing \(group.files.count)", size: 11) }
                     Spacer()
                     if selectedInGroup > 0 {
-                        Text(String(format: "%d selected · %.1f MB",
-                                    selectedInGroup,
-                                    Double(selectedBytes) / 1_048_576))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.red)
+                        MetaText(String(format: "%d selected · %.1f MB", selectedInGroup, Double(selectedBytes) / 1_048_576), color: Theme.danger, size: 11)
                     }
                 }
+                .padding(.horizontal, 14).padding(.top, 10)
 
                 HStack(spacing: 6) {
                     Menu {
@@ -645,28 +637,17 @@ private struct GroupCard: View {
                     .menuStyle(.borderlessButton)
                     .frame(width: 100)
 
-                    Button {
-                        onDeleteGroup()
-                    } label: {
-                        Label("Delete \(selectedInGroup) from this group",
-                              systemImage: "trash")
-                            .font(.caption)
-                            .foregroundStyle(selectedInGroup > 0 ? .red : .secondary)
-                    }
-                    .buttonStyle(.bordered)
+                    Button { onDeleteGroup() } label: { Label("Trash \(selectedInGroup)", systemImage: "trash") }
+                    .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle(height: 26)))
                     .disabled(selectedInGroup == 0)
 
-                    Button {
-                        onSkip()
-                    } label: {
-                        Label("Skip group", systemImage: "eye.slash")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
+                    Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
                     .help("Hide this group — useful for false positives.")
 
                     Spacer()
                 }
+                .padding(.horizontal, 14)
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
@@ -685,7 +666,9 @@ private struct GroupCard: View {
                             )
                         }
                     }
+                    .padding(.horizontal, 14)
                 }
+                .padding(.bottom, 12)
             }
         }
     }

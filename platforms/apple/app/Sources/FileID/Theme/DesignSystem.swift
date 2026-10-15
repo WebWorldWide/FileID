@@ -477,3 +477,10 @@ struct ToastView: View {
         .shadow(color: .black.opacity(0.55), radius: 25, y: 20)
     }
 }
+
+/// Type-erased button style for call sites that choose a style at runtime.
+struct AnyButtonStyle: ButtonStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: ButtonStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
+}
