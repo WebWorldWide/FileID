@@ -36,7 +36,15 @@ const CSS: &str = r#"
 @define-color fileid_lavender #B19BCE;
 @define-color fileid_cyan     #A0E2EA;
 @define-color fileid_pink     #F2A6C0;
-@define-color fileid_base     #0E0E12;
+@define-color fileid_base     #0B0B0C;
+/* Prototype v3 tokens (shared/docs/DESIGN_V3.md) */
+@define-color fileid_bg0      #070708;
+@define-color fileid_text1    #F0F1F2;
+@define-color fileid_text2    #CFD3D8;
+@define-color fileid_text3    #A6ACB3;
+@define-color fileid_label    #AEB4BB;
+@define-color fileid_danger   #FF6A5E;
+@define-color fileid_warning  #E0A340;
 
 /* ── Recolor libadwaita so every stock widget inherits the brand ──────────── */
 /* Gold is the one primary/accent colour (macOS/Windows discipline). */
@@ -44,17 +52,17 @@ const CSS: &str = r#"
 @define-color accent_fg_color  #000000;
 @define-color accent_color     #F4C430;   /* readable gold for text/icon accents on dark */
 
-@define-color window_bg_color    #0E0E12;
-@define-color window_fg_color    #FFFFFF;
+@define-color window_bg_color    #0B0B0C;
+@define-color window_fg_color    #F0F1F2;
 @define-color view_bg_color      transparent;   /* let the LavaLamp read through content */
 @define-color view_fg_color      #FFFFFF;
 @define-color headerbar_bg_color transparent;
 @define-color headerbar_fg_color #FFFFFF;
-@define-color card_bg_color      alpha(#FFFFFF, 0.06);
-@define-color card_fg_color      #FFFFFF;
-@define-color popover_bg_color   #17171C;
-@define-color dialog_bg_color    #131318;
-@define-color sidebar_bg_color   alpha(#000000, 0.28);
+@define-color card_bg_color      alpha(#18181B, 0.78);
+@define-color card_fg_color      #F0F1F2;
+@define-color popover_bg_color   #161618;
+@define-color dialog_bg_color    #161618;
+@define-color sidebar_bg_color   alpha(#0B0B0C, 0.5);
 
 /* ── Typography ───────────────────────────────────────────────────────────── */
 /* Set the font + ramp EXPLICITLY so the app looks identical on GNOME / KDE /
@@ -63,19 +71,24 @@ const CSS: &str = r#"
    we ship a fallback chain so it degrades gracefully where Inter is absent.
    Font properties inherit in GTK CSS, so setting them on `window` cascades. */
 window {
-    font-family: "Inter", "Inter Display", "Roboto", "Noto Sans", "Cantarell", sans-serif;
-    font-size: 13px;
+    font-family: "Archivo", "Inter", "Roboto", "Noto Sans", "Cantarell", sans-serif;
+    font-size: 13.5px;
 }
 label, button, entry, headerbar, .nav-row, row, popover, gridview, listview {
-    font-family: "Inter", "Inter Display", "Roboto", "Noto Sans", "Cantarell", sans-serif;
+    font-family: "Archivo", "Inter", "Roboto", "Noto Sans", "Cantarell", sans-serif;
 }
-/* Page titles / section headings — bold, tight tracking like SF Pro Display. */
-.title-1 { font-size: 21pt; font-weight: 800; letter-spacing: -0.6px; }
-.title-2 { font-size: 15pt; font-weight: 700; letter-spacing: -0.4px; }
-.title-3 { font-size: 12pt; font-weight: 700; letter-spacing: -0.2px; }
-.heading { font-weight: 700; letter-spacing: -0.1px; }
-.caption { font-size: 9pt; }
-.monospace { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; }
+/* Prototype v3: serif page titles, mono section labels, square geometry. */
+.title-1 { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 34px; font-weight: 400; letter-spacing: 0; }
+.title-2 { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 24px; font-weight: 400; letter-spacing: 0; }
+.title-3 { font-size: 14px; font-weight: 600; letter-spacing: 0; }
+.heading { font-weight: 600; letter-spacing: 0; }
+.caption { font-size: 11px; }
+.monospace, .section-label, .meta { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; }
+.section-label { font-size: 11px; font-weight: 600; letter-spacing: 1.5px; color: @fileid_label; }
+.meta { font-size: 11.5px; color: @fileid_text3; }
+button, entry, .card, .glass-card, .padded-card, .fileid-glass, popover > contents, .nav-row, check, radio, switch, switch > slider, progressbar > trough, progressbar > trough > progress, .pill, .chip {
+    border-radius: 0;
+}
 
 /* ── Backgrounds: keep content transparent so the signature LavaLamp shows ── */
 .fileid-tab, viewstack, stack,
@@ -94,16 +107,16 @@ window { background-color: @fileid_base; }
 /* GTK has no backdrop blur; approximate the Windows AcrylicBrush (black @0.5 +
    white @0.06 + 1px white @0.08) with a dark translucent fill + highlight. */
 .glass-card, .padded-card {
-    background-color: alpha(#16161B, 0.64);
-    border: 1px solid alpha(#FFFFFF, 0.10);
-    border-radius: 12px;
-    padding: 16px;
-    box-shadow: 0 4px 18px alpha(#000000, 0.38);
+    background-color: alpha(#18181B, 0.78);
+    border: 1px solid alpha(#FFFFFF, 0.11);
+    border-radius: 0;
+    padding: 14px;
+    box-shadow: none;
 }
 .fileid-glass {
-    background-color: alpha(#16161B, 0.64);
-    border: 1px solid alpha(#FFFFFF, 0.10);
-    border-radius: 12px;
+    background-color: alpha(#18181B, 0.78);
+    border: 1px solid alpha(#FFFFFF, 0.11);
+    border-radius: 0;
 }
 
 /* ── Header bar floats over the LavaLamp like the macOS unified toolbar ───── */
@@ -118,22 +131,25 @@ headerbar windowcontrols button:hover { background-color: alpha(#FFFFFF, 0.10); 
 
 /* ── Left sidebar nav (the macOS/Windows structure, not GNOME top tabs) ───── */
 .fileid-sidebar {
-    background-color: alpha(#000000, 0.30);
+    background-color: alpha(#0B0B0C, 0.5);
     border-right: 1px solid alpha(#FFFFFF, 0.08);
-    padding: 10px 10px 14px 10px;
+    padding: 0;
 }
 .sidebar-heading {
-    color: alpha(#FFFFFF, 0.42);
-    font-size: 9pt;
-    font-weight: 800;
-    letter-spacing: 1.2px;
-    margin: 14px 10px 4px 10px;
+    color: @fileid_label;
+    font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    margin: 18px 16px 10px 16px;
 }
 .nav-row {
     background: transparent;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 8px 12px;
+    border: none;
+    border-left: 3px solid transparent;
+    border-bottom: 1px solid alpha(#FFFFFF, 0.06);
+    border-radius: 0;
+    padding: 12px 14px 12px 11px;
     color: alpha(#FFFFFF, 0.82);
     font-weight: 500;
     box-shadow: none;
@@ -142,10 +158,11 @@ headerbar windowcontrols button:hover { background-color: alpha(#FFFFFF, 0.10); 
 }
 .nav-row:hover { background-color: alpha(#FFFFFF, 0.06); }
 .nav-row.active {
-    background-color: alpha(@fileid_gold, 0.18);
-    border-color: alpha(@fileid_gold, 0.55);
+    background-color: alpha(@fileid_gold, 0.07);
+    border-left-color: @fileid_gold;
+    border-bottom-color: alpha(#FFFFFF, 0.06);
     color: @fileid_gold;
-    font-weight: 700;
+    font-weight: 600;
 }
 .nav-row image { color: alpha(#FFFFFF, 0.75); }
 .nav-row.active image { color: @fileid_gold; }
