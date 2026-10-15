@@ -416,6 +416,50 @@ public actor DeepAnalyze {
         }
     }
 
+    var isAnalyzing: Bool { currentAnalysisTask != nil }
+    var loadedModelKind: AIModelKind? { loadedKind }
+
+    /// One fixed-prompt generation for ModelBenchmarkRunner: greedy decoding
+    /// so runs are comparable, throughput from MLX's own completion info.
+    func benchmarkPass(prompt: String, image: CIImage?, maxTokens: Int) async throws -> ModelBenchmarkRunner.Sample {
+        let lease = try await residencyGate.acquire()
+        defer { Task { await residencyGate.release(lease) } }
+        guard let container else { throw CancellationError() }
+        let collector = TokenCollector()
+        let info = CompletionInfoBox()
+        let boxed = image.map { UncheckedSendableBox($0) }
+        let vision = loadedKind?.supportsVision == true
+        let parameters = MLXLMCommon.GenerateParameters(maxTokens: maxTokens, temperature: 0, topP: 1)
+        let start = ContinuousClock.now
+        try await container.perform { (context: ModelContext) -> Void in
+            let message: Chat.Message = if vision, let boxed {
+                .user(prompt, images: [.ciImage(boxed.value)], videos: [])
+            } else {
+                .user(prompt, images: [], videos: [])
+            }
+            var input = UserInput(chat: [message], additionalContext: Self.templateContext)
+            input.processing.resize = .init(width: 448, height: 448)
+            let prepared = try await context.processor.prepare(input: input)
+            let stream = try MLXLMCommon.generate(input: prepared, parameters: parameters, context: context)
+            for await item in stream {
+                try Task.checkCancellation()
+                if let chunk = item.chunk { collector.append(chunk) }
+                if let completion = item.info { info.set(completion.promptTokensPerSecond, completion.tokensPerSecond) }
+            }
+        }
+        let wall = ModelBenchmarkRunner.durationSeconds(ContinuousClock.now - start)
+        let rates = info.get()
+        return ModelBenchmarkRunner.Sample(promptTokensPerSecond: rates.prompt, generatedTokensPerSecond: rates.generated,
+                                           wallSeconds: wall, output: collector.snapshot())
+    }
+
+    private final class CompletionInfoBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var prompt = Double.nan, generated = Double.nan
+        func set(_ p: Double, _ g: Double) { lock.lock(); prompt = p; generated = g; lock.unlock() }
+        func get() -> (prompt: Double, generated: Double) { lock.lock(); defer { lock.unlock() }; return (prompt, generated) }
+    }
+
     /// Mark a model dir "fully installed" by writing a sentinel file.
     /// Called as soon as VLMDownloader.fetchRepo confirms every file
     /// is on disk — i.e. the user has finished paying the multi-GB

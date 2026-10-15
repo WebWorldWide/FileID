@@ -379,6 +379,7 @@ struct FileIDEngineMain {
                 return
             }
             let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
+            let benchmarks = ModelBenchmarkStore.all()
             // Favorites plus the bundled MLX catalog, every entry pinned to the
             // locked mlx-swift-lm runtime; only vision and text roles exist on macOS.
             let models: [ModelCatalogItem] = AIModelKind.allCases.compactMap { kind in
@@ -393,17 +394,58 @@ struct FileIDEngineMain {
                     license: kind.licensePolicyKey, termsRequired: kind.licensePolicyKey == "Gemma", parametersBillion: nil,
                     downloadBytes: kind.approxBytes, estimatedResidentGB: kind.ramBudgetGB,
                     tier: ModelCatalogItem.tier(forResidentGB: kind.ramBudgetGB), status: isFavorite ? "curated" : "candidate", runnable: true,
-                    installed: kind.isInstalledOnDisk(), fits: kind.ramBudgetGB <= memoryGB * 0.6
+                    installed: kind.isInstalledOnDisk(), fits: kind.ramBudgetGB <= memoryGB * 0.6,
+                    benchmark: benchmarks[kind.rawValue]
                 )
             }
             await sink.emit(.modelCatalog(ModelCatalog(requestID: requestID, physicalMemoryGB: memoryGB, vramMB: 0, models: models)))
         case .benchmarkModel(let requestID, let modelKind, _):
-            await sink.emit(.benchmarkResult(BenchmarkResult(
-                requestID: requestID, modelKind: String(modelKind.prefix(128)), status: "error",
-                message: "On-device benchmarking is available in the shared engine on Windows and Linux; MLX benchmarking on macOS is not yet implemented."
-            )))
+            let reportedKind = String(modelKind.prefix(128))
+            guard HealthCheckResult.isValidRequestID(requestID), let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.benchmarkResult(BenchmarkResult(
+                    requestID: String(requestID.prefix(128)), modelKind: reportedKind, status: "error",
+                    message: "benchmarkModel needs a valid request ID and model kind.")))
+                return
+            }
+            guard ModelLicenseAcceptance.isAccepted(for: kind) else {
+                await sink.emit(.benchmarkResult(BenchmarkResult(
+                    requestID: requestID, modelKind: reportedKind, status: "error",
+                    message: "Accept the source terms for \(kind.displayName) before benchmarking it.")))
+                return
+            }
+            let claimed = await ModelBenchmarkSlot.shared.claim {
+                Task.detached(priority: .userInitiated) {
+                    SleepGuard.shared.begin(reason: "Model benchmark")
+                    defer { SleepGuard.shared.end() }
+                    JSONLog.shared.info(ev: "benchmark_started", extra: ["kind": AnyCodable(kind.rawValue)])
+                    do {
+                        let benchmark = try await ModelBenchmarkRunner.run(kind: kind) { phase, completed, total in
+                            await sink.emit(.benchmarkProgress(BenchmarkProgress(
+                                requestID: requestID, modelKind: reportedKind, phase: phase, completed: completed, total: total)))
+                        }
+                        ModelBenchmarkStore.save(benchmark, for: kind.rawValue)
+                        await sink.emit(.benchmarkResult(BenchmarkResult(
+                            requestID: requestID, modelKind: reportedKind, status: "ok", benchmark: benchmark)))
+                        JSONLog.shared.info(ev: "benchmark_done", extra: ["kind": AnyCodable(kind.rawValue)])
+                    } catch is CancellationError {
+                        await sink.emit(.benchmarkResult(BenchmarkResult(
+                            requestID: requestID, modelKind: reportedKind, status: "cancelled",
+                            message: "Benchmark cancelled; no result was stored.")))
+                    } catch {
+                        await sink.emit(.benchmarkResult(BenchmarkResult(
+                            requestID: requestID, modelKind: reportedKind, status: "error",
+                            message: String(error.localizedDescription.prefix(2_000)))))
+                    }
+                    await ModelBenchmarkSlot.shared.finish()
+                }
+            }
+            if !claimed {
+                await sink.emit(.benchmarkResult(BenchmarkResult(
+                    requestID: requestID, modelKind: reportedKind, status: "error",
+                    message: "Another benchmark is already running.")))
+            }
         case .cancelBenchmark:
-            break
+            await ModelBenchmarkSlot.shared.cancel()
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))

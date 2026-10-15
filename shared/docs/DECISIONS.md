@@ -3924,3 +3924,11 @@ Instrument Serif and Archivo are the Prototype v3 faces. Both are SIL OFL, so th
 ## 2026-10-15 — Square everything, including legacy views
 
 Rather than restyle 12,000 lines of SwiftUI view-by-view, the shared primitives (`GlassCard`, `BadgePill`, `ThemedSegmentedControl`, `GoldButton`, text fields, bordered buttons) were redefined in the v3 geometry and every remaining `RoundedRectangle`/`Capsule`/`cornerRadius` in `app/Sources/FileID/Views` was replaced mechanically. Pages inherit the look immediately; their v3 layouts are finished one by one.
+
+## 2026-10-15 — Rounded corners and Archivo text replace the square v3 geometry
+
+The owner asked for less sharpness, more roundness and more readable type, pointing at the cosmic-studio reference. The tokens moved to a small continuous radius scale (4/6/8/10), and every shape the earlier "square everything" pass flattened was converted back with one rule: a stroke uses the same radius as the clip it outlines, and 1–3 px rules and hit-test shapes stay square. UI text and numbers moved from mono to Archivo with tabular digits; mono remains only where character alignment matters (paths, filenames, shortcuts). This supersedes "Square everything, including legacy views" above; `DESIGN_V3.md` carries the revision.
+
+## 2026-10-15 — macOS benchmarks measure MLX directly and never download
+
+`benchmarkModel` on macOS follows the Magnitude-style approach the shared engine uses: a cold load, fixed prompts run twice with greedy decoding, medians, peak memory and a hardware fingerprint. Throughput comes from MLX's own completion info (prefill and decode tokens per second); seconds per image uses a synthetic, deterministic test card so no personal file is read, and the card doubles as a one-word colour probe. Only installed models qualify, so the command can never start a download. Results are stored per model in the engine state root and dropped when the hardware fingerprint changes, and `listModels` attaches them. `tune` is accepted and ignored because MLX has no launch flags to search. If the benchmark loaded a different model than the one Deep Analyze had resident, it unloads afterwards; it refuses to run while Deep Analyze is mid-file.

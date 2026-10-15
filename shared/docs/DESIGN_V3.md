@@ -4,7 +4,7 @@ Source of truth: the claude.ai/design project `FileID Prototype v3.dc.html` (thr
 
 ## Geometry
 
-- **Square corners everywhere.** No rounded rectangles, no capsules. Panes, panels, tiles, chips, buttons and progress bars are rectangles.
+- **Subtle continuous corners** (revised 2026-10-15 at the owner's request, after the cosmic-studio reference): radius xs 4 / s 6 / m 8 / l 10 with continuous curvature. Controls, chips and inline fills use s; cards, tiles and selection rings use m; floating cards (scan card, popovers) use l. Progress bars and the toggle track are capsules; radios are circles. A stroke always uses the same radius as the clip it outlines. Hairlines, 1–3 px rules and hit-test shapes stay square.
 - **1 px hairlines** split everything: `rgba(255,255,255,.08)` default, `.06` soft (list rows), `.14` strong (panel/control borders), `.18` control border.
 - Sidebar, page and side panes sit flush, separated by hairlines. Panels float on `rgba(24,24,27,.78)` with a strong hairline.
 - Spacing: page inset 26 px horizontal / 20 px top; panel padding 14 px horizontal / 10 px vertical; grid gaps 12 px; tiles `minmax(150px,1fr)`, people tiles 1:1, library tiles 4:3.
@@ -29,7 +29,7 @@ Selection wash: `rgba(255,204,0,.07)` background + 3 px gold rail on the left of
 
 - **Instrument Serif** (SIL OFL, bundled `Resources/Fonts`): page titles 34 px, window wordmark 18–20 px, hero/empty titles 28–56 px, people initials 44 px. Regular weight only.
 - **Archivo** (SIL OFL, bundled, variable `wdth,wght`): all UI text. 13–14.5 px, weights 500/600.
-- **Mono** (platform mono: SF Mono on macOS, Cascadia Mono on Windows, the system monospace on GNOME — JetBrains Mono in the prototype): section labels 11 px / 600 / letter-spacing .14em / uppercase; meta 11–11.5 px; control labels 11.5–12 px; metric values 20 px / 600.
+- **Mono** (revised 2026-10-15: UI text, labels, counts and section headers use Archivo; mono is kept for paths, filenames, shortcuts and code-like values) (platform mono: SF Mono on macOS, Cascadia Mono on Windows, the system monospace on GNOME — JetBrains Mono in the prototype): section labels 11 px / 600 / letter-spacing .14em / uppercase; meta 11–11.5 px; control labels 11.5–12 px; metric values 20 px / 600.
 
 ## Shell
 
@@ -51,7 +51,7 @@ Selection wash: `rgba(255,204,0,.07)` background + 3 px gold rail on the left of
 - **Folder switcher** popover: current folder with path and file count, Add folder…, Rescan, Clear folder, Wipe library + rescan (destructive, confirmed).
 - **Search or ask**: one field. Results group into Ask Chat (lavender), Library (query handoff), Pages (name · area · shortcut). Enter picks the first row.
 - **Activity** button: label + mini grained bar + percent; colour gold while scanning/exporting/moving, lavender while a model runs, cyan idle. Its popover lists each job (name, sub, state, bar, Pause/Resume or Cancel, Open <page>).
-- **Sidebar rows** are 50 px: 3 px rail, label 14.5 px (gold when selected), mono meta line, shortcut at the right. The footer pipeline block shows title + percent, a 10 px grained bar, the five stage labels (SCAN TAG FACES CAPTIONS DONE; current stage coloured), a mono sub line, and the scan controls (Scan / Pause / Resume / Cancel / Rescan).
+- **Sidebar** (revised 2026-10-15 for readability): one list grouped Browse / Analyze / Act under small uppercase headers; 32 px rows with icon, 13.5 px label and a trailing badge only when it says something (file count, Setup, live percent, Plan); the selected row is a radius-m gold tint. Shortcuts live in the tooltip. The footer scan card (radius l) shows title + percent, a 6 px capsule bar, a five-segment step indicator with "Step N of 5 · Stage", one sub line, collapsible counters (found, tagged, rate, memory, failures) and the scan controls (Scan / Pause / Resume / Cancel / Rescan).
 - **Toast** bottom-centre: pink dot, mono text, optional gold outline Undo/Open button, auto-dismiss 5–7 s.
 
 ## Components
@@ -61,7 +61,7 @@ Selection wash: `rgba(255,204,0,.07)` background + 3 px gold rail on the left of
 - **Key/value row**: 80 px uppercase mono key + 13 px value, soft hairline below.
 - **Segmented bar**: hairline-bordered row of 24–28 px buttons, selected = gold fill with `#141414` text.
 - **Buttons**: primary gold 30 px (28/32 variants), secondary hairline on `rgba(255,255,255,.04)`, ghost text-only, accent-outline (gold 60% border, 10% fill) for Accept/Undo, danger red outline.
-- **Toggle**: 30×16 square track, 12 px square knob, gold when on. **Radio**: 12 px square with 6 px gold dot. **Check**: 14 px square, gold fill with ✓.
+- **Toggle**: 30×16 capsule track, 12 px round knob, gold when on. **Radio**: 12 px circle with 6 px gold dot. **Check**: 14 px, radius 4, gold fill with ✓.
 - **Chips**: tag chips mono 11 with strong hairline; kind badges mono 10/600 uppercase on `rgba(0,0,0,.55)`; status pills (ACCEPTED/KEPT) outlined.
 - **Progress bar**: square track `rgba(255,255,255,.07)`, fill = gradient drawn across the full track and masked to the fraction (gold `#FF8A1A→#FFB000→#FFCC00→#FFE9A3`, lavender `#7462A6→#B19BCE→#DED2F2`, done `#FFB000→#FFCC00→#F2A6C0`, paused grey), fine grain overlay at ≈0.4 opacity, width animates 0.45 s.
 - **Grain**: a 140 px tile of smoothed multi-octave noise around mid-grey (prototype: SVG fractalNoise, baseFrequency 0.95, 3 octaves) at 2× pixel density; ≈0.14 over the window, ≈0.4 over bars, overlay blend. Never per-pixel static.

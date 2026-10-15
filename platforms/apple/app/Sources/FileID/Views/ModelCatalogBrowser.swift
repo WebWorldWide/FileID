@@ -66,6 +66,9 @@ struct ModelCatalogBrowser: View {
                             Text(ModelInstallStatus.isInstalled(kind: kind) ? "Downloaded" : "Not downloaded")
                                 .foregroundStyle(ModelInstallStatus.isInstalled(kind: kind) ? Theme.info : .secondary)
                             if !kind.fits(ramGB: ramGB) { Text("Needs more memory").foregroundStyle(Theme.warning) }
+                            if let decode = engine.benchmarkResults[kind.rawValue]?.generatedTokensPerSecond {
+                                Text("\(Int(decode.rounded())) tok/s here").foregroundStyle(Theme.gold).monospacedDigit()
+                            }
                         }.font(Theme.Font.body(11))
                     }.padding(.vertical, 6).tag(kind.rawValue)
                 }
@@ -87,6 +90,7 @@ struct ModelCatalogBrowser: View {
                         Text("\(entry.quantization.bits)-bit · \(entry.bases.count) audited upstream license\(entry.bases.count == 1 ? "" : "s")")
                             .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                     }
+                    ModelBenchmarkPanel(engine: engine, kind: selected)
                 }
             }
             if let progress = engine.modelDownloadProgress {
@@ -113,7 +117,7 @@ struct ModelCatalogBrowser: View {
                 }.buttonStyle(.dsPrimary).tint(Theme.gold).disabled(selected == nil || selected?.fits(ramGB: ramGB) != true)
             }
         }.padding(24).frame(minWidth: 600, idealWidth: 760, minHeight: 520, idealHeight: 650)
-            .onAppear { selection = initialSelection?.rawValue }
+            .onAppear { selection = initialSelection?.rawValue; engine.refreshModelCatalog() }
             .onChange(of: engine.lastErrorSignal) { _, _ in
                 if let error = engine.lastError, let selected, error.modelKind == selected.rawValue || error.kind.hasPrefix("prewarm") { statusMessage = error.message }
             }
@@ -121,5 +125,92 @@ struct ModelCatalogBrowser: View {
                 if let selection, !visible.contains(selection) { self.selection = nil }
             }
             .onExitCommand { dismiss() }
+    }
+}
+
+/// Magnitude-style score for one model on this Mac.
+struct ModelBenchmarkPanel: View {
+    let engine: EngineClient
+    let kind: AIModelKind
+
+    private var running: Bool { engine.benchmarkModelKind == kind.rawValue }
+    private var installed: Bool { ModelInstallStatus.isInstalled(kind: kind) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("Speed on this Mac").font(Theme.Font.body(12.5, .semibold))
+                Spacer()
+                if running {
+                    Button("Cancel") { engine.cancelBenchmark() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3))
+                } else {
+                    Button { engine.benchmarkModel(kind) } label: {
+                        Label(engine.benchmarkResults[kind.rawValue] == nil ? "Benchmark" : "Run again", systemImage: "speedometer")
+                    }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
+                    .disabled(!installed || engine.benchmarkModelKind != nil || engine.modelDownloadProgress != nil)
+                    .help(installed ? "Runs fixed prompts twice on this Mac and keeps the medians. Nothing is downloaded." : "Download the model first. Benchmarks never download.")
+                }
+            }
+            if running, let progress = engine.benchmarkProgress {
+                VStack(alignment: .leading, spacing: 4) {
+                    GrainProgressBar(progress: progress.total > 0 ? Double(progress.completed) / Double(progress.total) : 0, tone: .ai, height: 5)
+                    Text(Self.phaseLabel(progress.phase)).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+                }
+            } else if let result = engine.benchmarkResults[kind.rawValue] {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                    GridRow {
+                        metric("Cold load", String(format: "%.1f s", result.loadSeconds))
+                        metric("Reading", result.promptTokensPerSecond.map { "\(Int($0.rounded())) tok/s" })
+                        metric("Writing", result.generatedTokensPerSecond.map { "\(Int($0.rounded())) tok/s" })
+                    }
+                    GridRow {
+                        metric("Per image", result.secondsPerImage.map { String(format: "%.1f s", $0) })
+                        metric("Peak memory", result.peakResidentGB.map { String(format: "%.1f GB", $0) })
+                        metric("Valid JSON", result.jsonValidRate.map { "\(Int(($0 * 100).rounded()))%" })
+                    }
+                }
+                Text(Self.footnote(result)).font(Theme.Font.body(11)).foregroundStyle(Theme.text3).lineLimit(2)
+            } else if let message = engine.benchmarkMessage, message.modelKind == kind.rawValue {
+                Text(message.text).font(Theme.Font.body(11.5)).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(installed ? "Not measured yet. A run takes about a minute and loads the model once."
+                               : "Download this model to measure it on this Mac.")
+                    .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+            }
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
+        .animation(Theme.quick, value: running)
+    }
+
+    @ViewBuilder
+    private func metric(_ label: String, _ value: String?) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+            Text(value ?? "—").font(Theme.Font.body(13, .semibold)).monospacedDigit().foregroundStyle(Theme.text1)
+        }
+    }
+
+    static func phaseLabel(_ phase: String) -> String {
+        switch phase {
+        case "load": return "Loading the model from disk"
+        case "text": return "Writing structured tags"
+        case "rename": return "Suggesting filenames"
+        case "vision": return "Describing a test image"
+        case "probe": return "Checking what it sees"
+        default: return "Finishing"
+        }
+    }
+
+    static func footnote(_ result: ModelBenchmark) -> String {
+        var parts: [String] = []
+        if let date = ISO8601DateFormatter().date(from: result.measuredAt) {
+            parts.append("Measured " + date.formatted(.relative(presentation: .named)))
+        }
+        if let probe = result.probeAccuracy { parts.append(probe >= 1 ? "saw the test image correctly" : "misread the test image") }
+        parts.append(result.hardware)
+        return parts.joined(separator: " · ")
     }
 }
