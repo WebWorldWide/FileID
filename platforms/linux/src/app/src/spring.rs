@@ -34,8 +34,9 @@ where
     W: IsA<gtk::Widget>,
     F: Fn(f64) + 'static,
 {
-    let animations_enabled = gtk::Settings::default()
-        .map_or(true, |settings| settings.property::<bool>("gtk-enable-animations"));
+    let animations_enabled = gtk::Settings::default().map_or(true, |settings| {
+        settings.property::<bool>("gtk-enable-animations")
+    });
     if !animations_enabled {
         setter(to);
     }

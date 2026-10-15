@@ -73,9 +73,21 @@ pub fn on_activate(app: &adw::Application) {
         .margin_start(16)
         .margin_end(16)
         .build();
-    pages.add_titled(&crate::tabs::library::build(engine.clone()), Some("library"), "Library");
-    pages.add_titled(&crate::tabs::people::build(engine.clone()), Some("people"), "People");
-    pages.add_titled(&crate::tabs::cleanup::build_cleanup_tab(engine.clone()), Some("cleanup"), "Cleanup");
+    pages.add_titled(
+        &crate::tabs::library::build(engine.clone()),
+        Some("library"),
+        "Library",
+    );
+    pages.add_titled(
+        &crate::tabs::people::build(engine.clone()),
+        Some("people"),
+        "People",
+    );
+    pages.add_titled(
+        &crate::tabs::cleanup::build_cleanup_tab(engine.clone()),
+        Some("cleanup"),
+        "Cleanup",
+    );
     pages.add_titled(
         &crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone()),
         Some("deep-analyze"),
@@ -86,8 +98,19 @@ pub fn on_activate(app: &adw::Application) {
         Some("restructure"),
         "Restructure",
     );
-    pages.add_titled(&crate::tabs::settings::build(engine.clone()), Some("settings"), "Settings");
-    let valid_tabs = ["library", "people", "cleanup", "deep-analyze", "restructure", "settings"];
+    pages.add_titled(
+        &crate::tabs::settings::build(engine.clone()),
+        Some("settings"),
+        "Settings",
+    );
+    let valid_tabs = [
+        "library",
+        "people",
+        "cleanup",
+        "deep-analyze",
+        "restructure",
+        "settings",
+    ];
     let active_tab = crate::app_settings::active_tab()
         .filter(|tab| valid_tabs.contains(&tab.as_str()))
         .unwrap_or_else(|| "library".to_owned());
@@ -100,7 +123,10 @@ pub fn on_activate(app: &adw::Application) {
     let navigation = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     navigation.append(&switcher);
     for (title, build) in [
-        ("Search & Moments", crate::tabs::workbenches::catalog as fn(_) -> _),
+        (
+            "Search & Moments",
+            crate::tabs::workbenches::catalog as fn(_) -> _,
+        ),
         ("File Tools", crate::tabs::workbenches::tools as fn(_) -> _),
         ("Chat", crate::tabs::workbenches::chat as fn(_) -> _),
     ] {
@@ -204,22 +230,33 @@ pub fn on_activate(app: &adw::Application) {
                 .title("Pick a folder to organize")
                 .modal(true)
                 .build();
-            dialog.select_folder(Some(&window), gtk::gio::Cancellable::NONE, clone!(
-                #[weak] folder_label, #[weak] start_btn,
-                #[strong] selected_folder, #[strong] can_scan,
-                move |result| {
-                    if let Ok(file) = result {
-                        if let Some(path) = file.path() {
-                            let display = path.file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                            folder_label.set_label(&display);
-                            crate::app_settings::remember_folder(&path);
-                            *selected_folder.borrow_mut() = Some(path.to_string_lossy().into_owned());
-                            start_btn.set_sensitive(can_scan.get());
+            dialog.select_folder(
+                Some(&window),
+                gtk::gio::Cancellable::NONE,
+                clone!(
+                    #[weak]
+                    folder_label,
+                    #[weak]
+                    start_btn,
+                    #[strong]
+                    selected_folder,
+                    #[strong]
+                    can_scan,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let display = path
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                                folder_label.set_label(&display);
+                                crate::app_settings::remember_folder(&path);
+                                *selected_folder.borrow_mut() =
+                                    Some(path.to_string_lossy().into_owned());
+                                start_btn.set_sensitive(can_scan.get());
+                            }
                         }
                     }
-                }
                 ),
             );
         }

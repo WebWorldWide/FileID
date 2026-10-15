@@ -254,11 +254,10 @@ fn wire_actions(ui: &Rc<Ui>) {
             ui.rows.borrow_mut().clear();
             clear_list(&ui.list);
             update_controls(&ui);
-            let command =
-                CommandPayload::PlanRestructure(PlanRestructurePayload {
-                    library_root: root,
-                    supports_paged_plans: false,
-                });
+            let command = CommandPayload::PlanRestructure(PlanRestructurePayload {
+                library_root: root,
+                supports_paged_plans: false,
+            });
             if let Err(error) = ui.engine.borrow_mut().send(command) {
                 ui.operation.set(None);
                 ui.status
@@ -321,7 +320,10 @@ fn wire_actions(ui: &Rc<Ui>) {
                 .set_label("Undoing the last completed move batch…");
             update_controls(&ui);
             if let Err(error) = ui.engine.borrow_mut().send(CommandPayload::UndoRestructure(
-                UndoRestructurePayload { library_root: root, shortcut_undo_token: None },
+                UndoRestructurePayload {
+                    library_root: root,
+                    shortcut_undo_token: None,
+                },
             )) {
                 ui.operation.set(None);
                 ui.status

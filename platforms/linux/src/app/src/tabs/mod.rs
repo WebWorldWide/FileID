@@ -3,14 +3,14 @@
 pub mod cleanup;
 pub mod deep_analyze;
 pub mod library;
+mod model_catalog;
 pub mod people;
 pub mod restructure;
 pub mod settings;
-mod model_catalog;
 mod util;
 
-mod tools;
 mod catalog;
+mod tools;
 mod workbench_state;
 pub mod workbenches;
 

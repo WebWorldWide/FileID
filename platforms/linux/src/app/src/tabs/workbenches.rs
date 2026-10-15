@@ -319,10 +319,15 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
                 return;
             }
             let Some(hit) = ui.selected.borrow().clone() else {
-                ui.status.set_label("Select a video result (Chapters) first.");
+                ui.status
+                    .set_label("Select a video result (Chapters) first.");
                 return;
             };
-            let mode = if timeline_mode.selected() == 1 { "moments" } else { "sampled" };
+            let mode = if timeline_mode.selected() == 1 {
+                "moments"
+            } else {
+                "sampled"
+            };
             ui.send("timeline", timeline_request(vec![hit.file_id], mode));
         });
     }
@@ -690,6 +695,7 @@ fn choose_indexed_files(ui: &Rc<ToolsUi>) {
             search: String::new(),
             kind: None,
             limit: 1000,
+            offset: 0,
         });
     glib::MainContext::default().spawn_local(async move {
         match rx.recv().await {
@@ -1110,16 +1116,28 @@ mod tests {
         }
     }
     fn actions(job: &CatalogJob) -> Vec<&'static str> {
-        job_controls(job).into_iter().map(|(action, _)| action).collect()
+        job_controls(job)
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect()
     }
     #[test]
     fn job_controls_follow_engine_transitions() {
-        assert_eq!(actions(&job("timelineSample", "running")), ["pauseJob", "cancelJob"]);
-        assert_eq!(actions(&job("timelineSample", "paused")), ["resumeJob", "cancelJob"]);
+        assert_eq!(
+            actions(&job("timelineSample", "running")),
+            ["pauseJob", "cancelJob"]
+        );
+        assert_eq!(
+            actions(&job("timelineSample", "paused")),
+            ["resumeJob", "cancelJob"]
+        );
         assert_eq!(actions(&job("timelineSample", "failed")), ["retryTimeline"]);
         assert!(actions(&job("timelineSample", "completed")).is_empty());
         assert_eq!(actions(&job("catalogIndex", "failed")), ["resumeJob"]);
-        assert_eq!(actions(&job("catalogIndex", "paused")), ["resumeJob", "cancelJob"]);
+        assert_eq!(
+            actions(&job("catalogIndex", "paused")),
+            ["resumeJob", "cancelJob"]
+        );
         assert!(actions(&job("unknown", "paused")).is_empty());
     }
     #[test]
@@ -1129,9 +1147,19 @@ mod tests {
         assert_eq!(request.file_ids.as_deref(), Some(&[42][..]));
         assert_eq!(request.timeline_mode.as_deref(), Some("moments"));
         let retry = job_request("retryTimeline", &job("timelineSample", "failed"));
-        assert_eq!((retry.action.as_str(), retry.file_ids.as_deref(), retry.job_id.as_deref()), ("enqueueTimeline", Some(&[7, 42][..]), None));
+        assert_eq!(
+            (
+                retry.action.as_str(),
+                retry.file_ids.as_deref(),
+                retry.job_id.as_deref()
+            ),
+            ("enqueueTimeline", Some(&[7, 42][..]), None)
+        );
         let pause = job_request("pauseJob", &job("timelineSample", "running"));
-        assert_eq!((pause.action.as_str(), pause.job_id.as_deref()), ("pauseJob", Some("job")));
+        assert_eq!(
+            (pause.action.as_str(), pause.job_id.as_deref()),
+            ("pauseJob", Some("job"))
+        );
     }
 }
 

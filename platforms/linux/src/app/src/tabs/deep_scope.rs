@@ -8,8 +8,10 @@ fn exclusions_at(path: &Path) -> Result<Vec<PathBuf>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(error) => return Err(format!("Cannot validate Deep Analyze exclusions: {error}")),
     };
-    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(&bytes)
-        .map_err(|_| "Cannot validate Deep Analyze exclusions: settings are malformed.".to_owned())?;
+    let map: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&bytes).map_err(|_| {
+            "Cannot validate Deep Analyze exclusions: settings are malformed.".to_owned()
+        })?;
     let Some(value) = map.get("deepAnalyzeExcludedFolders") else {
         return Ok(vec![]);
     };
@@ -116,7 +118,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("fileid-deep-exclusions-{}-{stamp}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "fileid-deep-exclusions-{}-{stamp}",
+            std::process::id()
+        ));
         std::fs::write(&path, r#"{"deepAnalyzeExcludedFolders":["relative"]}"#).unwrap();
         assert!(exclusions_at(&path).is_err());
         std::fs::write(&path, b"not json").unwrap();

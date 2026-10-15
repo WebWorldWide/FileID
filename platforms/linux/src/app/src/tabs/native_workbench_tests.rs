@@ -138,7 +138,10 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     assert!(!descendants(&catalog)
         .into_iter()
         .filter_map(|w| w.downcast::<gtk::Button>().ok())
-        .any(|b| matches!(b.label().as_deref(), Some("Pause" | "Resume" | "Retry" | "Cancel"))));
+        .any(|b| matches!(
+            b.label().as_deref(),
+            Some("Pause" | "Resume" | "Retry" | "Cancel")
+        )));
     let read = fileid_engine::db::open_read(&db_path).unwrap();
     assert_eq!(
         read.query_row(

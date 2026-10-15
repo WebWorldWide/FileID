@@ -45,7 +45,11 @@ pub enum EngineState {
     ModelCatalog(fileid_engine::ipc::ModelCatalog),
     BenchmarkProgress(fileid_engine::ipc::BenchmarkProgress),
     BenchmarkResult(fileid_engine::ipc::BenchmarkResult),
-    Error { kind: String, message: String, model_kind: Option<String> },
+    Error {
+        kind: String,
+        message: String,
+        model_kind: Option<String>,
+    },
     Failed(String),
     Exited,
 }
@@ -56,6 +60,8 @@ pub struct QuerySpec {
     pub search: String,
     pub kind: Option<String>,
     pub limit: i64,
+    /// Rows to skip; the Library pages in as the grid nears its end.
+    pub offset: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -191,22 +197,33 @@ impl EngineClient {
     }
 
     pub fn list_models(&mut self, request_id: &str, role: Option<&str>) -> Result<()> {
-        self.send(CommandPayload::ListModels(fileid_engine::ipc::ListModelsPayload {
-            request_id: request_id.to_owned(),
-            role: role.map(str::to_owned),
-        }))
+        self.send(CommandPayload::ListModels(
+            fileid_engine::ipc::ListModelsPayload {
+                request_id: request_id.to_owned(),
+                role: role.map(str::to_owned),
+            },
+        ))
     }
 
-    pub fn benchmark_model(&mut self, request_id: &str, model_kind: &str, tune: bool) -> Result<()> {
-        self.send(CommandPayload::BenchmarkModel(fileid_engine::ipc::BenchmarkModelPayload {
-            request_id: request_id.to_owned(),
-            model_kind: model_kind.to_owned(),
-            tune,
-        }))
+    pub fn benchmark_model(
+        &mut self,
+        request_id: &str,
+        model_kind: &str,
+        tune: bool,
+    ) -> Result<()> {
+        self.send(CommandPayload::BenchmarkModel(
+            fileid_engine::ipc::BenchmarkModelPayload {
+                request_id: request_id.to_owned(),
+                model_kind: model_kind.to_owned(),
+                tune,
+            },
+        ))
     }
 
     pub fn cancel_benchmark(&mut self) -> Result<()> {
-        self.send(CommandPayload::CancelBenchmark(fileid_engine::ipc::Empty {}))
+        self.send(CommandPayload::CancelBenchmark(
+            fileid_engine::ipc::Empty {},
+        ))
     }
 
     pub fn cancel_prewarm(&mut self, model_kind: &str) -> Result<()> {
@@ -242,7 +259,10 @@ impl EngineClient {
         dim: i32,
     ) -> Receiver<Option<DecodedImage>> {
         let (tx, rx) = async_channel::bounded(1);
-        thread::spawn(move || {
+        thumbnail_pool().spawn(move || {
+            if tx.receiver_count() == 0 {
+                return;
+            }
             let image = fileid_engine::shell::thumbnail::render_at(Path::new(&path), dim).ok();
             let _ = tx.send_blocking(image);
         });
@@ -255,7 +275,10 @@ impl EngineClient {
         dim: i32,
     ) -> Receiver<Option<DecodedImage>> {
         let (tx, rx) = async_channel::bounded(1);
-        thread::spawn(move || {
+        thumbnail_pool().spawn(move || {
+            if tx.receiver_count() == 0 {
+                return;
+            }
             let image = fileid_engine::shell::video::keyframe_25pct(Path::new(&path))
                 .ok()
                 .filter(|frame| frame.width <= dim as u32 && frame.height <= dim as u32)
@@ -319,33 +342,41 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
         "SELECT f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, \
          f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, \
          f.vlm_description, f.vlm_proposed_name \
-         FROM files f WHERE {filter} ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?3"
+         FROM files f WHERE {filter} ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?3 OFFSET ?4"
     ))?;
     let rows = stmt
-        .query_map((pattern.as_str(), kind, spec.limit.clamp(1, 1000)), |row| {
-            let path: String = row.get(1)?;
-            let name = Path::new(&path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            Ok(FileRow {
-                id: row.get(0)?,
-                path,
-                name,
-                kind: row.get(2)?,
-                extension: row.get(3)?,
-                size_bytes: row.get(4)?,
-                created_at: row.get(5)?,
-                modified_at: row.get(6)?,
-                has_faces: row.get(7)?,
-                has_text: row.get(8)?,
-                file_ref: row.get(9)?,
-                content_hash: row.get(10)?,
-                description: row.get(11)?,
-                proposed_name: row.get(12)?,
-            })
-        })?
+        .query_map(
+            (
+                pattern.as_str(),
+                kind,
+                spec.limit.clamp(1, 1000),
+                spec.offset.max(0),
+            ),
+            |row| {
+                let path: String = row.get(1)?;
+                let name = Path::new(&path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                Ok(FileRow {
+                    id: row.get(0)?,
+                    path,
+                    name,
+                    kind: row.get(2)?,
+                    extension: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    created_at: row.get(5)?,
+                    modified_at: row.get(6)?,
+                    has_faces: row.get(7)?,
+                    has_text: row.get(8)?,
+                    file_ref: row.get(9)?,
+                    content_hash: row.get(10)?,
+                    description: row.get(11)?,
+                    proposed_name: row.get(12)?,
+                })
+            },
+        )?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok((rows, total))
 }
@@ -439,10 +470,13 @@ fn drain_engine_stdout(
             }
             EventPayload::BulkActionResult(result) => EngineState::BulkActionResult(result.inner),
             EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
-            EventPayload::ModelDownloadProgress(progress) =>
-                EngineState::ModelDownloadProgress(progress.inner),
+            EventPayload::ModelDownloadProgress(progress) => {
+                EngineState::ModelDownloadProgress(progress.inner)
+            }
             EventPayload::ModelCatalog(catalog) => EngineState::ModelCatalog(catalog.inner),
-            EventPayload::BenchmarkProgress(progress) => EngineState::BenchmarkProgress(progress.inner),
+            EventPayload::BenchmarkProgress(progress) => {
+                EngineState::BenchmarkProgress(progress.inner)
+            }
             EventPayload::BenchmarkResult(result) => EngineState::BenchmarkResult(result.inner),
             EventPayload::Error(error) => match error.inner.kind.as_str() {
                 "face_clustering_failed" => EngineState::FaceClusteringFailed(error.inner.message),
@@ -468,6 +502,42 @@ fn drain_engine_stdout(
     publish(&subscribers, EngineState::Exited);
 }
 
+/// A few long-lived decode threads for grid thumbnails. A fast scroll used to
+/// start one OS thread per tile; jobs whose tile was rebound (receiver dropped)
+/// are skipped before decoding.
+pub struct ThumbnailPool {
+    jobs: async_channel::Sender<Box<dyn FnOnce() + Send>>,
+}
+
+impl ThumbnailPool {
+    fn new(workers: usize) -> Self {
+        let (jobs, rx) = async_channel::unbounded::<Box<dyn FnOnce() + Send>>();
+        for _ in 0..workers {
+            let rx = rx.clone();
+            thread::spawn(move || {
+                while let Ok(job) = rx.recv_blocking() {
+                    job();
+                }
+            });
+        }
+        Self { jobs }
+    }
+
+    pub fn spawn(&self, job: impl FnOnce() + Send + 'static) {
+        let _ = self.jobs.send_blocking(Box::new(job));
+    }
+}
+
+pub fn thumbnail_pool() -> &'static ThumbnailPool {
+    static POOL: std::sync::OnceLock<ThumbnailPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let workers = thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 6))
+            .unwrap_or(4);
+        ThumbnailPool::new(workers)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,18 +550,33 @@ mod tests {
         let events = client.subscribe();
         assert!(!client.is_ready());
         client.publish_test_event(EngineState::Ready);
-        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Ready));
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            EngineState::Ready
+        ));
         assert!(client.is_ready());
         client.publish_test_event(EngineState::Scanning);
-        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Scanning));
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            EngineState::Scanning
+        ));
         assert!(client.is_ready());
         client.publish_test_event(EngineState::Failed("generated fixture failure".into()));
-        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Failed(_)));
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            EngineState::Failed(_)
+        ));
         assert!(!client.is_ready());
         client.publish_test_event(EngineState::Ready);
-        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Ready));
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            EngineState::Ready
+        ));
         client.publish_test_event(EngineState::Exited);
-        assert!(matches!(events.recv_blocking().unwrap(), EngineState::Exited));
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            EngineState::Exited
+        ));
         assert!(!client.is_ready());
     }
 
@@ -723,6 +808,7 @@ mod tests {
                     search: search.to_owned(),
                     kind: kind.map(str::to_owned),
                     limit,
+                    offset: 0,
                 },
             )
             .unwrap()
@@ -748,6 +834,7 @@ mod tests {
                 search: String::new(),
                 kind: None,
                 limit: 10,
+                offset: 0,
             }
         )
         .is_err());

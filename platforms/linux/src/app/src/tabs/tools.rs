@@ -65,7 +65,13 @@ pub fn present(engine: &Rc<RefCell<EngineClient>>, parent: &gtk::Button) {
     video_size.set_active_id(Some("1920"));
     video_size.set_visible(false);
     let video_frame = gtk::ComboBoxText::new();
-    for (id, label) in [("source", "Original frame"), ("9:16", "9:16"), ("16:9", "16:9"), ("1:1", "1:1"), ("4:5", "4:5")] {
+    for (id, label) in [
+        ("source", "Original frame"),
+        ("9:16", "9:16"),
+        ("16:9", "16:9"),
+        ("1:1", "1:1"),
+        ("4:5", "4:5"),
+    ] {
         video_frame.append(Some(id), label);
     }
     video_frame.set_active_id(Some("source"));
@@ -236,7 +242,11 @@ fn recipe(ui: &Ui) -> Option<ToolRecipe> {
     };
     Some(ToolRecipe {
         allow_upscale: (kind == "photo").then_some(ui.enlarge.is_active()),
-        video_aspect_ratio: if kind == "video" { Some(ui.video_frame.active_id()?.to_string()) } else { None },
+        video_aspect_ratio: if kind == "video" {
+            Some(ui.video_frame.active_id()?.to_string())
+        } else {
+            None
+        },
         video_framing: None,
         video_stabilization: None,
         kind,
@@ -273,7 +283,11 @@ fn update(ui: &Ui) {
         .set_sensitive(ready && ui.operation.borrow().is_some() && !ui.executed.get());
     ui.cancel.set_sensitive(
         !ready
-            && ui.pending.borrow().as_ref().is_some_and(|(_, action)| action == "execute")
+            && ui
+                .pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, action)| action == "execute")
             && ui.operation.borrow().is_some()
             && ui.kind.active_id().as_deref() == Some("video")
             && !ui.cancel_requested.get(),
@@ -476,14 +490,33 @@ fn receive_tools(ui: &Ui, response: ToolResponse) {
 fn wire(ui: &Rc<Ui>) {
     let weak = Rc::downgrade(ui);
     ui.cancel.connect_clicked(move |_| {
-        let Some(ui) = weak.upgrade() else { return; };
-        if !ui.pending.borrow().as_ref().is_some_and(|(_, action)| action == "execute") || ui.cancel_requested.get() { return; }
-        let Some(operation_id) = ui.operation.borrow().clone() else { return; };
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if !ui
+            .pending
+            .borrow()
+            .as_ref()
+            .is_some_and(|(_, action)| action == "execute")
+            || ui.cancel_requested.get()
+        {
+            return;
+        }
+        let Some(operation_id) = ui.operation.borrow().clone() else {
+            return;
+        };
         ui.cancel_requested.set(true);
         update(&ui);
         ui.status.set_label("Stopping the current video worker…");
         let request = ToolRequest {
-            request_id: format!("gtk-tools-cancel-{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            request_id: format!(
+                "gtk-tools-cancel-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
             action: "cancel".into(),
             file_ids: None,
             destination: None,
@@ -491,10 +524,16 @@ fn wire(ui: &Rc<Ui>) {
             operation_id: Some(operation_id),
             destination_bookmark: None,
         };
-        if ui.engine.borrow_mut().send(CommandPayload::ToolRequest(ToolRequestPayload { request })).is_err() {
+        if ui
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::ToolRequest(ToolRequestPayload { request }))
+            .is_err()
+        {
             ui.cancel_requested.set(false);
             update(&ui);
-            ui.status.set_label("The stop request did not reach the engine. Try again.");
+            ui.status
+                .set_label("The stop request did not reach the engine. Try again.");
         }
     });
     for (button, action) in [

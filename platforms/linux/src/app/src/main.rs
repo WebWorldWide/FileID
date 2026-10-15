@@ -33,9 +33,7 @@ fn main() -> glib::ExitCode {
         .with_target(false)
         .init();
 
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
 
     app.connect_startup(|_| theme::install());
 

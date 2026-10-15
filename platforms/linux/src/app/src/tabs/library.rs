@@ -25,7 +25,7 @@ use gtk::glib::BoxedAnyObject;
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent, FileRow, QuerySpec};
 
-const QUERY_LIMIT: i64 = 1000;
+const QUERY_LIMIT: i64 = 600;
 const TILE_THUMB_PX: i32 = 256;
 const PREVIEW_PX: i32 = 1280;
 
@@ -151,6 +151,15 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             search_text: search_text.clone(),
             kind_filter: kind_filter.clone(),
             query_gen: query_gen.clone(),
+            has_more: Rc::new(Cell::new(false)),
+            loading_more: Rc::new(Cell::new(false)),
+            total: Rc::new(Cell::new(0)),
+        });
+        let near_end = ctx.clone();
+        scroller.vadjustment().connect_value_changed(move |adj| {
+            if adj.value() + adj.page_size() * 3.0 >= adj.upper() {
+                load_more(&near_end);
+            }
         });
         Rc::new(move || run_reload(&ctx))
     };
@@ -239,6 +248,43 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 }
 
 // ── Reload ───────────────────────────────────────────────────────────────────
+/// Appends the next page when the grid nears its end.
+fn load_more(ctx: &Rc<ReloadCtx>) {
+    if !ctx.has_more.get() || ctx.loading_more.get() {
+        return;
+    }
+    ctx.loading_more.set(true);
+    let g = ctx.query_gen.get();
+    let offset = ctx.model.n_items() as i64;
+    let spec = QuerySpec {
+        search: ctx.search_text.borrow().clone(),
+        kind: ctx.kind_filter.borrow().clone(),
+        limit: QUERY_LIMIT,
+        offset,
+    };
+    let rx = ctx.engine.borrow().query_files(spec);
+    let ctx = ctx.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let result = rx.recv().await;
+        ctx.loading_more.set(false);
+        if ctx.query_gen.get() != g || ctx.model.n_items() as i64 != offset {
+            return;
+        }
+        let Ok(Ok((rows, total))) = result else {
+            return;
+        };
+        let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
+        ctx.model.extend_from_slice(&items);
+        let shown = ctx.model.n_items() as i64;
+        ctx.total.set(total);
+        ctx.has_more.set(!rows.is_empty() && shown < total);
+        ctx.count_label.set_text(&if shown < total {
+            format!("{shown} of {total} files")
+        } else {
+            format!("{shown} files")
+        });
+    });
+}
 
 struct ReloadCtx {
     engine: Rc<RefCell<EngineClient>>,
@@ -249,6 +295,9 @@ struct ReloadCtx {
     search_text: Rc<RefCell<String>>,
     kind_filter: Rc<RefCell<Option<String>>>,
     query_gen: Rc<Cell<u64>>,
+    has_more: Rc<Cell<bool>>,
+    loading_more: Rc<Cell<bool>>,
+    total: Rc<Cell<i64>>,
 }
 
 fn run_reload(ctx: &Rc<ReloadCtx>) {
@@ -258,7 +307,9 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         search: ctx.search_text.borrow().clone(),
         kind: ctx.kind_filter.borrow().clone(),
         limit: QUERY_LIMIT,
+        offset: 0,
     };
+    ctx.has_more.set(false);
     let searched = spec.search.trim().to_string();
     let filtered = !searched.is_empty() || spec.kind.is_some();
     let rx = ctx.engine.borrow().query_files(spec);
@@ -280,13 +331,14 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
             }
             Err(_) => return,
         };
-        ctx.model.remove_all();
-        for row in &rows {
-            ctx.model.append(&BoxedAnyObject::new(row.clone()));
-        }
+        // One items-changed signal for the whole page instead of one per row.
+        let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
+        ctx.model.splice(0, ctx.model.n_items(), &items);
+        ctx.total.set(total);
+        ctx.has_more.set(total > rows.len() as i64);
         if total > rows.len() as i64 {
             ctx.count_label
-                .set_text(&format!("showing {} of {} files", rows.len(), total));
+                .set_text(&format!("{} of {} files", rows.len(), total));
         } else {
             ctx.count_label.set_text(&format!("{} files", rows.len()));
         }
