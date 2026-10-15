@@ -51,11 +51,12 @@ enum Theme {
         static let xl: CGFloat = 40
     }
 
-    /// Prototype v3 is square everywhere; kept so call sites compile.
+    /// Subtle corners (cosmic-studio): 6 controls, 8 cards and rows, 10 panels.
     enum Radius {
-        static let s:  CGFloat = 0
-        static let m:  CGFloat = 0
-        static let l:  CGFloat = 0
+        static let xs: CGFloat = 4
+        static let s:  CGFloat = 6
+        static let m:  CGFloat = 8
+        static let l:  CGFloat = 10
     }
 
     enum Metrics {
@@ -75,16 +76,19 @@ enum Theme {
         /// registered at launch by `BrandFonts`; SwiftUI falls back to the system
         /// faces if registration fails.
         static func display(_ size: CGFloat) -> SwiftUI.Font { BrandFonts.registered ? .custom("Instrument Serif", size: size) : .system(size: size, weight: .regular, design: .serif) }
+        /// Numbers, shortcuts and paths only; labels and prose use Archivo.
         static func mono(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { .system(size: size, weight: weight, design: .monospaced) }
         static func body(_ size: CGFloat = 14, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { BrandFonts.registered ? .custom("Archivo", size: size).weight(weight) : .system(size: size, weight: weight) }
-        static let sectionLabel = mono(11, .semibold)
-        static let meta = mono(11)
-        static let metaStrong = mono(11.5, .semibold)
-        static let control = mono(11.5)
-        static let pageTitle = display(34)
+        static var sectionLabel: SwiftUI.Font { body(11, .semibold) }
+        static var meta: SwiftUI.Font { body(12) }
+        static var metaStrong: SwiftUI.Font { body(12, .semibold) }
+        static var control: SwiftUI.Font { body(13, .medium) }
+        static var pageTitle: SwiftUI.Font { display(34) }
     }
 
-    static let spring = Animation.spring(response: 0.35, dampingFraction: 0.8)
+    /// One quick, well-damped spring for every state change; nothing bounces.
+    static let spring = Animation.spring(response: 0.24, dampingFraction: 0.9)
+    static let quick = Animation.easeOut(duration: 0.14)
 }
 
 /// Registers the bundled brand fonts once per process. The resource bundle
@@ -128,8 +132,10 @@ struct GlassCard<Content: View>: View {
         content
             .padding(padding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.panel, ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
+            .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
+            .background(Color.clear, ignoresSafeAreaEdges: [])
+
     }
 }
 
@@ -141,14 +147,12 @@ struct BadgePill: View {
 
     var body: some View {
         Text(label)
-            .font(Theme.Font.mono(10.5, .semibold))
-            .tracking(0.8)
-            .textCase(.uppercase)
+            .font(Theme.Font.body(11, .semibold))
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 7)
             .padding(.vertical, 2)
-            .overlay(Rectangle().stroke(color.opacity(0.5), lineWidth: 1))
+            .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.xs, style: .continuous))
     }
 }
 
@@ -207,32 +211,9 @@ struct GoldButton: View {
 // MARK: - ThemedSegmentedControl → square segmented bar
 
 struct ThemedSegmentedControl: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var selection: String
     let options: [(tag: String, label: String)]
-
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(options, id: \.tag) { opt in
-                let selected = selection == opt.tag
-                Button {
-                    selection = opt.tag
-                } label: {
-                    Text(opt.label)
-                        .font(Theme.Font.mono(11.5, selected ? .semibold : .medium))
-                        .foregroundStyle(selected ? Theme.onGold : Theme.text2)
-                        .lineLimit(1).fixedSize()
-                        .padding(.horizontal, 12)
-                        .frame(height: Theme.Metrics.control)
-                        .background(selected ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(opt.label))
-                .accessibilityAddTraits(selected ? .isSelected : [])
-            }
-        }
-        .animation(reduceMotion ? nil : Theme.spring, value: selection)
-        .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+        SegmentedBar(selection: $selection, options: options.map { ($0.tag, $0.label) })
     }
 }

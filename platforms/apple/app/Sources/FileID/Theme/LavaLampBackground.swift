@@ -68,7 +68,6 @@ struct LavaLampBackground: View {
                         AtmosphereTimeline(paused: paused || reduceMotion) { time in
                             Canvas { ctx, size in
                                 let slow = mode == .calm ? 1.7 : 1.0
-                                ctx.addFilter(.blur(radius: 28))
                                 ctx.blendMode = .screen
                                 for blob in Self.blobs {
                                     let t = time + blob.delay
@@ -80,10 +79,10 @@ struct LavaLampBackground: View {
                                     let rect = CGRect(x: cx - r, y: cy - r * 1.1, width: r * 2, height: r * 2.2)
                                     ctx.fill(Path(ellipseIn: rect), with: .radialGradient(
                                         Gradient(stops: [
-                                            .init(color: blob.color.opacity(0.9 * blob.opacity), location: 0),
-                                            .init(color: blob.color.opacity(0.62 * blob.opacity), location: 0.22),
-                                            .init(color: blob.color.opacity(0.32 * blob.opacity), location: 0.48),
-                                            .init(color: blob.color.opacity(0.1 * blob.opacity), location: 0.74),
+                                            .init(color: blob.color.opacity(0.78 * blob.opacity), location: 0),
+                                            .init(color: blob.color.opacity(0.52 * blob.opacity), location: 0.25),
+                                            .init(color: blob.color.opacity(0.26 * blob.opacity), location: 0.52),
+                                            .init(color: blob.color.opacity(0.08 * blob.opacity), location: 0.78),
                                             .init(color: blob.color.opacity(0), location: 1)
                                         ]), center: CGPoint(x: cx, y: cy), startRadius: 0, endRadius: r * 1.1))
                                 }

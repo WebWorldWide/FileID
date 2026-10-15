@@ -91,7 +91,7 @@ struct BulkRenameSheet: View {
                       : "Rename \(selectedIDs.count) file\(selectedIDs.count == 1 ? "" : "s")",
                       systemImage: "wand.and.rays")
                     .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Rectangle().fill(Theme.gold))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                     .foregroundStyle(.black)
                     .font(Theme.Font.body(13.5, .semibold))
             }
@@ -275,7 +275,7 @@ private struct BulkRenameRow: View {
             // Thumbnail — reuses ThumbnailService (QuickLookThumbnailing
             // backed). Works for images, videos, PDFs, and Office docs.
             ZStack {
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Color.secondary.opacity(0.10))
                     .frame(width: 64, height: 64)
                 if let thumb {
@@ -283,7 +283,7 @@ private struct BulkRenameRow: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 64, height: 64)
-                        .clipShape(Rectangle())
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                         .transition(.opacity)
                 } else {
                     Image(systemName: kindFallbackIcon(file.kind))
@@ -292,7 +292,7 @@ private struct BulkRenameRow: View {
                 }
             }
             .overlay(
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
             )
 
@@ -319,7 +319,7 @@ private struct BulkRenameRow: View {
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(isSelected ? Theme.gold.opacity(0.05) : Color.clear)
         )
         .task(id: file.id) {

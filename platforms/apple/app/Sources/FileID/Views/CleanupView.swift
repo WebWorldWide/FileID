@@ -155,10 +155,10 @@ struct CleanupView: View {
                     .padding(.vertical, 8)
                     .background(Theme.danger.opacity(0.12), ignoresSafeAreaEdges: [])
                     .overlay(
-                        Rectangle()
+                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                             .stroke(Theme.danger.opacity(0.5), lineWidth: 1)
                     )
-                    .clipShape(Rectangle())
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
@@ -190,8 +190,9 @@ struct CleanupView: View {
                 : "\(g) similar group\(g == 1 ? "" : "s") · review each before deleting — these are NOT byte-identical"
         } else {
             let bytes = visibleGroups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
-            let mb = String(format: "%.1f", Double(bytes) / 1_048_576)
-            base = "\(g) verified duplicate group\(g == 1 ? "" : "s") · \(mb) MB reclaimable if you keep 1 per group"
+            base = g == 0
+                ? "No verified duplicate groups"
+                : "\(g.formatted()) verified duplicate group\(g == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) reclaimable if you keep 1 per group"
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
@@ -238,7 +239,7 @@ struct CleanupView: View {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No duplicates found",
-                message: "All \(store.totalFiles) indexed files considered — none in this verified preview are byte-for-byte identical."
+                message: "All \(store.totalFiles.formatted()) indexed files considered — none in this verified preview are byte-for-byte identical."
             )
         }
     }
@@ -259,8 +260,8 @@ struct CleanupView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(Rectangle().fill(Theme.warning.opacity(0.10)))
-                    .overlay(Rectangle().stroke(Theme.warning.opacity(0.35), lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.10)))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.35), lineWidth: 1))
                     .padding(.bottom, 4)
                 } else {
                     HStack(spacing: 8) {
@@ -274,9 +275,9 @@ struct CleanupView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(Rectangle().fill(
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
                         (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.08)))
-                    .overlay(Rectangle().stroke(
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
                         (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.3),
                         lineWidth: 1))
                     .padding(.bottom, 4)
@@ -315,9 +316,9 @@ struct CleanupView: View {
                             .buttonStyle(.borderless)
                     }
                     .padding(12)
-                    .background(Rectangle().fill(
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
                         (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
-                    .overlay(Rectangle().stroke(
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
                         (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
                         lineWidth: 1))
                     .help("Files moved to Trash can be restored in Finder: open Trash, right-click a file, and choose Put Back.")
@@ -697,9 +698,9 @@ private struct CopyTile: View {
             Color.white.opacity(0.04)
                 .frame(width: 132, height: 132)
                 .overlay(thumbContent)
-                .clipShape(Rectangle())
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .stroke(borderColor, lineWidth: borderWidth)
                 )
                 .overlay(badgeOverlay)

@@ -61,14 +61,15 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
         }
         .opacity(isApproved || isInformational ? 1.0 : 0.55)
         .background(
-            Rectangle().fill(
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
                 highlighted ? outcome.tint.opacity(0.06) : Color.clear
             )
         )
         .overlay(alignment: .leading) {
-            Rectangle()
+            Capsule()
                 .fill(outcome.tint)
-                .frame(width: 2)
+                .frame(width: 3)
+                .padding(.vertical, 6)
                 .opacity(highlighted ? 1.0 : 0.0)
         }
         .contentShape(Rectangle())
@@ -87,7 +88,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
     @ViewBuilder
     private var iconBadge: some View {
         ZStack {
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(outcome.tint.opacity(0.18))
                 .frame(width: 38, height: 38)
             Image(systemName: outcome.icon)
@@ -128,7 +129,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
             .background(
-                Rectangle().stroke(
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
                     isExpanded ? outcome.tint.opacity(0.7) : Color.secondary.opacity(0.5),
                     lineWidth: 1
                 )
@@ -153,7 +154,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
                 Text(label).font(Theme.Font.body(12, .semibold))
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(Rectangle().fill(bgFill))
+            .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(bgFill))
             .foregroundStyle(fg)
         }
         .buttonStyle(.plain)

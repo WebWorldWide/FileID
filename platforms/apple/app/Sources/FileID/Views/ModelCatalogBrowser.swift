@@ -40,7 +40,7 @@ struct ModelCatalogBrowser: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search model, publisher or license", text: $query).textFieldStyle(.plain)
                     .accessibilityLabel("Search models")
-            }.padding(10).background(.white.opacity(0.06), in: Rectangle())
+            }.padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
             HStack {
                 if !visionOnly {
                     SegmentedBar(selection: $role, options: [("all", "All"), ("vision", "Vision"), ("text", "Text")], height: 26)

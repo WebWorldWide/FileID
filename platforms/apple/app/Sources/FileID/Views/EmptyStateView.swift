@@ -38,7 +38,7 @@ struct EmptyStateView: View {
                     Text(action.label)
                         .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 18).padding(.vertical, 10)
-                        .background(Rectangle().fill(Theme.gold))
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.plain)

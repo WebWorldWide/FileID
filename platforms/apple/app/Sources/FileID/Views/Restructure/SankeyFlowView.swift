@@ -307,7 +307,7 @@ struct SankeyFlowView: View {
         let isRollup = node.id == Self.otherSourceID || node.id == Self.otherDestID
         HStack(spacing: 8) {
             ZStack {
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(node.tint.opacity(isFocused ? 0.32 : 0.18))
                     .frame(width: 24, height: 24)
                 Image(systemName: node.icon)
@@ -337,7 +337,7 @@ struct SankeyFlowView: View {
                                  : AnyShapeStyle(.ultraThinMaterial))
         )
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(
                     node.tint.opacity(isFocused ? 0.95 : (isRollup ? 0.18 : 0.30)),
                     lineWidth: isFocused ? 1.5 : 1
@@ -503,10 +503,10 @@ struct SankeyFlowView: View {
             .padding(.horizontal, 10).padding(.vertical, 7)
             .frame(width: tooltipW, alignment: .leading)
             .background(
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(.regularMaterial)
                     .overlay(
-                        Rectangle()
+                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                             .stroke(Theme.gold.opacity(0.45), lineWidth: 1)
                     )
             )

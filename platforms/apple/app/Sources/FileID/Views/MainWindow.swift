@@ -151,7 +151,7 @@ struct MainWindow: View {
             }
 
             if isDragHovering {
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(Theme.gold, style: StrokeStyle(lineWidth: 2, dash: [10, 6]))
                     .background(Theme.gold.opacity(0.08), ignoresSafeAreaEdges: [])
                     .overlay(

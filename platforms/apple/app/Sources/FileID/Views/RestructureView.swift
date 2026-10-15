@@ -436,7 +436,7 @@ struct RestructureView: View {
     private var missingContentModelsBanner: some View {
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Theme.warning.opacity(0.18))
                     .frame(width: 38, height: 38)
                 Image(systemName: "wand.and.stars.inverse")
@@ -458,16 +458,16 @@ struct RestructureView: View {
                 Label("Open Settings", systemImage: "gearshape")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Rectangle().fill(Theme.warning.opacity(0.85)))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.85)))
                     .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
         }
         .padding(14)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(Theme.warning.opacity(0.08))
-                .overlay(Rectangle()
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(Theme.warning.opacity(0.25), lineWidth: 1))
         )
     }
@@ -478,7 +478,7 @@ struct RestructureView: View {
         let pct = Int((captionedFraction * 100).rounded())
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Theme.ai.opacity(0.18))
                     .frame(width: 38, height: 38)
                 Image(systemName: "sparkles")
@@ -505,7 +505,7 @@ struct RestructureView: View {
                         .font(Theme.Font.body(12, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(
-                            Rectangle().fill(Theme.ai.opacity(0.85))
+                            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.85))
                         )
                         .foregroundStyle(.black)
                 }
@@ -520,10 +520,10 @@ struct RestructureView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Theme.ai.opacity(0.30), lineWidth: 1)
                 )
         )
@@ -539,10 +539,10 @@ struct RestructureView: View {
         // Background lives on its own subtree so the cached blur +
         // shadow don't re-rasterize when interactive children update.
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Color.white.opacity(0.07), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.28), radius: 22, y: 8)
@@ -689,11 +689,11 @@ struct RestructureView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
         )
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(Theme.gold.opacity(0.25), lineWidth: 1)
         )
     }
@@ -797,7 +797,7 @@ struct RestructureView: View {
             }
             .padding(.horizontal, 6).padding(.vertical, 3)
             .background(
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Theme.delight.opacity(isHovered ? 0.10 : 0))
             )
             .contentShape(Rectangle())
@@ -852,7 +852,7 @@ struct RestructureView: View {
             // its motion budget.
             ZStack {
                 Theme.panel
-                Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1)
                 VStack(spacing: 10) {
                     IndeterminateBar().frame(width: 220)
                     Text("Computing proposals…")
@@ -867,7 +867,7 @@ struct RestructureView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 240)
             .overlay(
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
             )
         } else {
@@ -1321,7 +1321,7 @@ struct RestructureView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(
-                Rectangle().fill(active ? Theme.gold : Color.clear)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(active ? Theme.gold : Color.clear)
             )
             .foregroundStyle(active ? .black : Color.primary.opacity(0.7))
         }

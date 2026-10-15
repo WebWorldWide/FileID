@@ -878,17 +878,18 @@ struct FaceEmbedderCard: View {
 struct AppearanceCard: View {
     @AppStorage("lavaMode") private var lavaMode: String = LavaMode.full.rawValue
     var body: some View {
-        Panel {
-            PanelHeader("Appearance")
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Lava lamp").font(Theme.Font.body(14)).foregroundStyle(Theme.text1)
-                    MetaText("Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it.")
+        GlassCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Appearance").font(Theme.Font.body(14, .semibold))
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Lava lamp").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
+                        MetaText("Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it.")
+                    }
+                    Spacer()
+                    SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) }, height: 26)
                 }
-                Spacer()
-                SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) }, height: 24)
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
         }
     }
 }

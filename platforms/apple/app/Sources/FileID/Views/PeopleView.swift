@@ -378,7 +378,7 @@ struct PeopleView: View {
                       systemImage: "forward.fill")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Rectangle().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.6), lineWidth: 1))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -387,8 +387,8 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(Rectangle().fill(Color.secondary.opacity(0.08)))
-        .overlay(Rectangle().stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Color.secondary.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
     }
 
     /// Item 2: positive "keep moving" affordance — once at least one person is
@@ -412,7 +412,7 @@ struct PeopleView: View {
                 Label("Continue to Deep Analyze", systemImage: "arrow.forward.circle.fill")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Rectangle().fill(Theme.gold))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                     .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
@@ -421,8 +421,8 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(Rectangle().fill(Theme.gold.opacity(0.10)))
-        .overlay(Rectangle().stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.10)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
     }
 
     private var headerSubtitle: String {
@@ -475,7 +475,7 @@ struct PeopleView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(done ? Theme.delight.opacity(0.10) : Color.white.opacity(0.04))
         )
     }
@@ -708,12 +708,12 @@ private struct PersonCard: View {
                 .overlay(faceCrop)
                 .overlay(LinearGradient(colors: [.white.opacity(0.06), .black.opacity(0.3)], startPoint: .top, endPoint: .bottom))
                 .overlay(selectionOverlay)
-                .clipShape(Rectangle())
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay {
                     if person.hasAnyName {
-                        Rectangle().stroke(Theme.hairline, lineWidth: 1)
+                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairline, lineWidth: 1)
                     } else {
-                        Rectangle().stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
+                        RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
                     }
                 }
             Text(displayName)
@@ -764,11 +764,11 @@ private struct PersonCard: View {
     private var selectionOverlay: some View {
         if selectionMode {
             ZStack {
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(isChecked ? selectionTint : Color.white.opacity(0.25),
                             lineWidth: isChecked ? 3 : 1.5)
                 if isChecked {
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .fill(selectionTint.opacity(0.18))
                 }
                 VStack {
@@ -1107,7 +1107,7 @@ private struct PersonDetailSheet: View {
                 .font(Theme.Font.body(12, .semibold))
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: text)
-                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .frame(minWidth: 140)
         }
     }
@@ -1144,9 +1144,9 @@ private struct PersonFileTile: View {
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(tile)
                 .overlay(selectionOverlay)
-                .clipShape(Rectangle())
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .stroke(isChecked ? Theme.gold : Color.clear,
                                 lineWidth: isChecked ? 2 : 0)
                 )
@@ -1312,7 +1312,7 @@ private struct SuggestedMergesSheet: View {
                           systemImage: "checkmark.circle.fill")
                         .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Rectangle().fill(Theme.delight.opacity(0.18)))
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.delight.opacity(0.18)))
                         .foregroundStyle(Theme.delight)
                 }
                 .buttonStyle(.plain)
@@ -1325,7 +1325,7 @@ private struct SuggestedMergesSheet: View {
                           systemImage: "rectangle.stack.fill")
                         .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(Rectangle().stroke(Color.secondary, lineWidth: 1))
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary, lineWidth: 1))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -1392,7 +1392,7 @@ private struct SuggestedMergesSheet: View {
             }
             .padding(10)
             .background(
-                Rectangle()
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(.ultraThinMaterial)
             )
         }
@@ -1481,11 +1481,11 @@ private struct MergeTargetPickerSheet: View {
                             }
                             .padding(10)
                             .background(
-                                Rectangle()
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                                     .fill(.ultraThinMaterial)
                             )
                             .overlay(
-                                Rectangle()
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                                     .stroke(person.hasAnyName
                                               ? Theme.gold.opacity(0.6)
                                               : Color.white.opacity(0.10),

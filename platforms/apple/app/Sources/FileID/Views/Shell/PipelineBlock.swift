@@ -68,24 +68,43 @@ struct PipelineBlock: View {
         return (startRequested ? "Starting" : "Not scanned yet", 0, .gold, Theme.text2, "\(pickedURL.lastPathComponent) is ready to scan")
     }
 
+    @State private var showDetails = false
+
     var body: some View {
         let s = state
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(s.title).font(Theme.Font.body(14)).foregroundStyle(Theme.textOnPanel).lineLimit(1)
+                Text(s.title).font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
                 Spacer()
-                Text("\(Int(s.fraction * 100))%").font(Theme.Font.mono(13)).foregroundStyle(s.color)
+                Text("\(Int(s.fraction * 100))%").font(Theme.Font.body(12.5, .semibold)).monospacedDigit().foregroundStyle(s.color)
             }
-            GrainProgressBar(progress: s.fraction, tone: s.tone, height: 10)
-            HStack {
+            GrainProgressBar(progress: s.fraction, tone: s.tone, height: 6)
+            HStack(spacing: 4) {
                 ForEach(Stage.allCases, id: \.rawValue) { st in
-                    Text(st.label).font(Theme.Font.mono(10.5)).tracking(1.2).textCase(.uppercase)
-                        .foregroundStyle(st == stage ? (stage == .captions && captionsRunning ? Theme.ai : s.color) : (st.rawValue < stage.rawValue ? Theme.text2 : Theme.text3))
-                    if st != .done { Spacer(minLength: 2) }
+                    Capsule()
+                        .fill(st.rawValue < stage.rawValue ? Theme.text2.opacity(0.7)
+                              : st == stage ? (stage == .captions && captionsRunning ? Theme.ai : s.color) : Color.white.opacity(0.12))
+                        .frame(height: 3)
                 }
             }
-            Text(s.sub).font(Theme.Font.meta).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-            if let p = progress, p.phase != .idle { stats(p) }
+            HStack(spacing: 4) {
+                Text("Step \(stage.rawValue + 1) of 5 · \(stage.label)").font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
+                Spacer(minLength: 4)
+                if let p = progress, p.phase != .idle {
+                    Button { withAnimation(Theme.spring) { showDetails.toggle() } } label: {
+                        Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
+                            .rotationEffect(.degrees(showDetails ? 180 : 0))
+                            .foregroundStyle(Theme.text3)
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.dsRow)
+                    .help(showDetails ? "Hide scan details" : "Show scan details")
+                }
+            }
+            Text(s.sub).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            if showDetails, let p = progress, p.phase != .idle {
+                stats(p).transition(.opacity)
+            }
             controls
         }
         .onChange(of: engine.lastProgress?.phase) { _, new in if new != nil && new != .idle { startRequested = false } }
@@ -110,10 +129,10 @@ struct PipelineBlock: View {
 
     private func statRow(_ key: String, _ value: String, trailing: String?, warn: Bool = false, danger: Bool = false) -> some View {
         HStack(spacing: 6) {
-            Text(key).font(Theme.Font.mono(10.5)).tracking(1).textCase(.uppercase).foregroundStyle(Theme.label).frame(width: 60, alignment: .leading)
-            Text(value).font(Theme.Font.mono(11.5)).foregroundStyle(danger ? Theme.danger : warn ? Theme.warning : Theme.text2)
+            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 62, alignment: .leading)
+            Text(value).font(Theme.Font.body(12, .medium)).monospacedDigit().foregroundStyle(danger ? Theme.danger : warn ? Theme.warning : Theme.text1)
             Spacer(minLength: 4)
-            if let trailing { Text(trailing).font(Theme.Font.mono(11)).foregroundStyle(Theme.text3) }
+            if let trailing { Text(trailing).font(Theme.Font.body(11.5)).monospacedDigit().foregroundStyle(Theme.text3) }
         }
     }
 

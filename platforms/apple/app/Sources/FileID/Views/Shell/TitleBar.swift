@@ -75,7 +75,7 @@ struct TitleBar: View {
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
                 .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
-                .overlay(Rectangle().stroke(folderOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(folderOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -153,7 +153,7 @@ struct TitleBar: View {
             }
         }
         .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
-        .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         .disabled(pickedURL == nil && store.totalFiles == 0)
         .opacity(pickedURL == nil && store.totalFiles == 0 ? 0.5 : 1)
     }
@@ -169,7 +169,7 @@ struct TitleBar: View {
                     .foregroundStyle(chatPresented ? Theme.gold : Theme.text2)
                     .frame(width: 30, height: 30)
                     .background(chatPresented ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-                    .overlay(Rectangle().stroke(chatPresented ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(chatPresented ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -180,7 +180,7 @@ struct TitleBar: View {
                 Image(systemName: "gearshape").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
                     .frame(width: 30, height: 30)
                     .background(activeTab == .settings ? Theme.gold.opacity(0.14) : Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-                    .overlay(Rectangle().stroke(activeTab == .settings ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activeTab == .settings ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -206,13 +206,13 @@ struct TitleBar: View {
                 .onExitCommand { searchFocused = false; searchText = "" }
             Text("⌘K").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                 .padding(.horizontal, 5).padding(.vertical, 2)
-                .overlay(Rectangle().stroke(Color.white.opacity(0.16), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.white.opacity(0.16), lineWidth: 1))
         }
         .padding(.leading, 10).padding(.trailing, 6)
         .frame(height: Theme.Metrics.controlLarge)
         .frame(minWidth: 120, idealWidth: 280, maxWidth: 280)
         .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-        .overlay(Rectangle().stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
         .background {
             Button("") { userOpened = true; searchFocused = true; searchOpen = true }.keyboardShortcut("k", modifiers: .command).opacity(0).frame(width: 0, height: 0)
         }
@@ -346,15 +346,15 @@ struct TitleBar: View {
         let a = currentActivity
         return Button { activityOpen.toggle() } label: {
             HStack(spacing: 8) {
-                Rectangle().fill(a.color).frame(width: 6, height: 6)
-                Text(a.label).font(Theme.Font.mono(11.5)).tracking(0.7).textCase(.uppercase).foregroundStyle(Theme.text1)
+                Circle().fill(a.color).frame(width: 6, height: 6)
+                Text(a.label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text1)
                 GrainProgressBar(progress: a.progress, tone: a.tone).frame(width: 54)
-                if !a.idle { Text("\(Int(a.progress * 100))%").font(Theme.Font.mono(11.5)).foregroundStyle(a.color).frame(minWidth: 28, alignment: .trailing) }
+                if !a.idle { Text("\(Int(a.progress * 100))%").font(Theme.Font.body(12.5, .semibold)).monospacedDigit().foregroundStyle(a.color).frame(minWidth: 28, alignment: .trailing) }
             }
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.controlLarge)
             .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(activityOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activityOpen ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

@@ -66,7 +66,9 @@ struct AtmosphereTimeline<Content: View>: View {
     }
 
     var body: some View {
-        TimelineView(.animation(paused: AtmosphereMotionScheduling.isPaused(
+        // The wax drifts over tens of seconds; 30 fps is visually identical to
+        // 120 and quarters the GPU/compositor work behind every other view.
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: AtmosphereMotionScheduling.isPaused(
             localSuspension: suspension, windowActive: windowActive
         ))) { _ in
             content(delivery.elapsed(at: ProcessInfo.processInfo.systemUptime))

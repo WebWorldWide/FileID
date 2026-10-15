@@ -65,9 +65,9 @@ private struct StatTile: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Rectangle().fill(.ultraThinMaterial))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.ultraThinMaterial))
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(
                     isActive ? outcome.tint.opacity(0.7) : Color.white.opacity(0.06),
                     lineWidth: isActive ? 1.5 : 1

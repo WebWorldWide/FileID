@@ -215,8 +215,8 @@ struct LibraryView: View {
             ProgressView().controlSize(.small).tint(Theme.ai)
         }
         .padding(10)
-        .background(Rectangle().fill(Theme.ai.opacity(0.08)))
-        .overlay(Rectangle().stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -260,8 +260,8 @@ struct LibraryView: View {
             }
         }
         .padding(10)
-        .background(Rectangle().fill(Theme.ai.opacity(0.08)))
-        .overlay(Rectangle().stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -284,8 +284,8 @@ struct LibraryView: View {
                 .buttonStyle(.dsSecondary)
         }
         .padding(10)
-        .background(Rectangle().fill(Theme.ai.opacity(0.10)))
-        .overlay(Rectangle().stroke(Theme.ai.opacity(0.4), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.10)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -340,10 +340,10 @@ struct LibraryView: View {
         }
         .padding(16)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
                 )
         )
@@ -430,10 +430,10 @@ struct LibraryView: View {
         }
         .padding(16)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
                 )
         )
@@ -464,7 +464,7 @@ struct LibraryView: View {
                 .frame(minWidth: 140, maxWidth: 320)
                 .layoutPriority(1)
                 .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
-                .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
                 kindPicker
 
@@ -599,12 +599,12 @@ struct LibraryView: View {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
                 Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                    withAnimation(Theme.spring) {
                         kindFilterRaw = k.value ?? ""
                     }
                 } label: {
                     Text(k.label)
-                        .font(Theme.Font.mono(11.5, active ? .semibold : .medium))
+                        .font(Theme.Font.body(12.5, active ? .semibold : .medium))
                         .foregroundStyle(active ? Theme.onGold : Theme.text2)
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)
@@ -616,7 +616,7 @@ struct LibraryView: View {
                 .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
-        .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
     // MARK: - Grid
@@ -655,7 +655,7 @@ struct LibraryView: View {
                             }
                         }
                         .background(
-                            Rectangle()
+                            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                                 .stroke(previewSelectedID == row.id && !selectMode
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
@@ -865,8 +865,8 @@ struct FileTile: View {
                     LinearGradient(stops: [.init(color: .white.opacity(0.07), location: 0), .init(color: .clear, location: 0.4), .init(color: .black.opacity(0.38), location: 1)],
                                    startPoint: .top, endPoint: .bottom)
                 )
-                .clipShape(Rectangle())
-                .overlay(Rectangle().stroke(Color.white.opacity(hovering ? 0.28 : 0.08), lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Color.white.opacity(hovering ? 0.28 : 0.08), lineWidth: 1))
                 .animation(.easeOut(duration: 0.18), value: hovering)
                 .animation(.easeOut(duration: 0.40), value: thumb != nil)
                 .onHover { hovering = $0 }
@@ -956,7 +956,7 @@ struct FileTile: View {
         if selectMode {
             ZStack(alignment: .topLeading) {
                 if isChecked {
-                    Rectangle().fill(Theme.gold.opacity(0.14)).overlay(Rectangle().stroke(Theme.gold, lineWidth: 2))
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.14)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 2))
                 }
                 DSCheck(on: isChecked).padding(8)
             }
@@ -1425,7 +1425,7 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                         .font(Theme.Font.body(12))
                         .focused(isFocused)
                     Button("Apply tag", systemImage: "checkmark", action: addDraft)
@@ -1520,8 +1520,8 @@ private struct FinderTagsEditor: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(Rectangle().fill(Theme.gold.opacity(0.15)))
-        .overlay(Rectangle().stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.15)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.3), lineWidth: 1))
         .foregroundStyle(Theme.gold)
     }
 }
@@ -1563,7 +1563,7 @@ private struct VideoPreview: View {
                     .font(Theme.Font.body(12, .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Rectangle().fill(.black.opacity(0.55)))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.black.opacity(0.55)))
             }
         }
         .task(id: url) {
@@ -1590,7 +1590,7 @@ private struct AudioPreview: View {
             } label: {
                 Label("Play in default app", systemImage: "play.fill")
                     .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(Rectangle().fill(Theme.gold))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                     .foregroundStyle(.black)
                     .font(Theme.Font.body(13.5, .semibold))
             }

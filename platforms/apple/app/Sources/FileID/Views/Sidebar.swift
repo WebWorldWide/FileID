@@ -1,4 +1,5 @@
-// Sidebar: the pages of the current area, then the pipeline block.
+// Sidebar: every page in one calm list (grouped Browse / Analyze / Act), then
+// a compact scan card. Mirrors the old sidebar's simplicity in the v3 look.
 import SwiftUI
 import FileIDShared
 
@@ -9,25 +10,23 @@ struct Sidebar: View {
     @Binding var pickedURL: URL?
     var pickFolder: () -> Void
 
-    private var area: MainWindow.Area { activeTab.area ?? .browse }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 2) {
                     ForEach(MainWindow.Area.allCases) { section in
-                        HStack(alignment: .firstTextBaseline) {
-                            SectionLabel(section.rawValue, color: section == area && activeTab != .settings ? Theme.gold : Theme.label)
-                            Spacer()
-                            MetaText(section.shortcutHint, size: 11)
-                        }
-                        .padding(.horizontal, 16).padding(.top, section == .browse ? 16 : 14).padding(.bottom, 8)
-                        VStack(spacing: 0) {
-                            ForEach(section.tabs) { tab in navRow(tab) }
-                        }
-                        .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
+                        Text(section.rawValue)
+                            .font(Theme.Font.body(11, .semibold))
+                            .tracking(0.6)
+                            .textCase(.uppercase)
+                            .foregroundStyle(Theme.text3)
+                            .padding(.horizontal, 18)
+                            .padding(.top, section == .browse ? 14 : 16)
+                            .padding(.bottom, 4)
+                        ForEach(section.tabs) { tab in navRow(tab) }
                     }
                 }
+                .padding(.bottom, 10)
             }
             .frame(maxHeight: .infinity, alignment: .top)
 
@@ -36,34 +35,37 @@ struct Sidebar: View {
                     EngineStatusRow(state: engine.state)
                     if let err = engine.lastError { engineErrorRow(err) }
                 }
-                .padding(.horizontal, 14).padding(.vertical, 12)
+                .padding(.horizontal, 12).padding(.bottom, 10)
             }
 
             if !engine.queueState.pending.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     SectionLabel("Queue")
                     QueueListView(state: engine.queueState)
                 }
-                .padding(.horizontal, 14).padding(.vertical, 12)
-                .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
+                .padding(.horizontal, 14).padding(.bottom, 10)
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            Group {
                 if let url = pickedURL {
                     PipelineBlock(engine: engine, store: store, pickedURL: url)
                 } else {
-                    SectionLabel("Get started")
-                    Button { pickFolder() } label: { Label("Pick a folder…", systemImage: "folder.badge.plus") }
-                        .buttonStyle(.dsPrimary)
-                        .keyboardShortcut("o", modifiers: .command)
-                    MetaText("Or drop a folder on the window.")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Pick a folder to start").font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1)
+                        Button { pickFolder() } label: { Label("Pick a folder…", systemImage: "folder.badge.plus") }
+                            .buttonStyle(DSPrimaryButtonStyle(height: 30))
+                            .keyboardShortcut("o", modifiers: .command)
+                        MetaText("Or drop a folder on the window.")
+                    }
                 }
             }
-            .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 18)
-            .overlay(alignment: .top) { Hairline() }
+            .padding(12)
+            .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
+            .padding(10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.bg1.opacity(0.5), ignoresSafeAreaEdges: [])
+        .background(Theme.bg1.opacity(0.55), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
     }
 
@@ -75,74 +77,73 @@ struct Sidebar: View {
         }
     }
 
-    private func meta(for tab: MainWindow.Tab) -> (text: String, hot: Bool) {
+    /// Short trailing badge; nil when there is nothing worth saying.
+    private func badge(for tab: MainWindow.Tab) -> (text: String, color: Color)? {
         switch tab {
         case .library:
             if let p = engine.lastProgress, p.phase == .discovering || p.phase == .tagging {
-                return ("\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files", true)
+                let total = max(p.total, p.discovered)
+                return (total > 0 ? "\(Int(Double(p.processed) / Double(total) * 100))%" : "…", Theme.gold)
             }
-            return (store.totalFiles > 0 ? "\(store.totalFiles.formatted()) files" : "Not scanned yet", false)
+            return store.totalFiles > 0 ? (compact(store.totalFiles), Theme.text3) : nil
         case .people:
-            if engine.faceClusteringInFlight { return ("Grouping faces", true) }
-            if let r = engine.lastFaceClustering, r.personCount > 0 { return ("\(r.personCount) people", false) }
-            if case .installed = ArcFaceModelInstaller.shared.status[.sface] ?? .unknown {
-                return (store.totalFiles > 0 ? "Group faces to name people" : "Faces appear after a scan", false)
-            }
-            return (store.totalFiles > 0 ? "No face model yet" : "Faces appear after a scan", store.totalFiles > 0)
-        case .moments:
-            let running = engine.catalogJobs.filter { $0.state == "running" }.count
-            return running > 0 ? ("\(running) running", true) : ("Chapters and search inside videos", false)
+            if engine.faceClusteringInFlight { return ("…", Theme.ai) }
+            if let r = engine.lastFaceClustering, r.personCount > 0 { return (compact(r.personCount), Theme.text3) }
+            if store.totalFiles > 0, !isFaceModelInstalled { return ("Setup", Theme.warning) }
+            return nil
         case .deep:
             if engine.deepAnalyzeInFlight, let d = engine.deepAnalyzeProgress, d.total > 0 {
-                return ("\(Int(Double(d.processed) / Double(d.total) * 100))% · running", true)
+                return ("\(Int(Double(d.processed) / Double(d.total) * 100))%", Theme.ai)
             }
-            if let done = engine.deepAnalyzeComplete, done.processed > 0 { return ("\(done.processed.formatted()) captioned", false) }
-            return ("Captions and names", false)
-        case .chat:        return ("Ask about your files", false)
-        case .takes:       return ("Pick the best attempt", false)
-        case .cleanup:     return ("Find extra copies", false)
-        case .restructure: return (engine.restructurePlan == nil ? "Preview a layout" : "Plan ready", engine.restructurePlan != nil)
-        case .tools:       return ("Convert, crop, export", false)
-        case .settings:    return ("", false)
+            return nil
+        case .moments:
+            let running = engine.catalogJobs.filter { $0.state == "running" }.count
+            return running > 0 ? ("\(running)", Theme.ai) : nil
+        case .restructure:
+            return engine.restructurePlan != nil ? ("Plan", Theme.gold) : nil
+        default:
+            return nil
         }
     }
 
-    /// Keep the list as calm as the old sidebar: a second line only when it
-    /// says something live (counts, progress, a missing model).
-    private func showsMeta(_ tab: MainWindow.Tab, _ m: (text: String, hot: Bool)) -> Bool {
-        m.hot || tab == .library || (tab == .people && store.totalFiles > 0)
+    private var isFaceModelInstalled: Bool {
+        if case .installed = ArcFaceModelInstaller.shared.status[.sface] ?? .unknown { return true }
+        return false
+    }
+
+    private func compact(_ n: Int) -> String {
+        n >= 10_000 ? String(format: "%.0fk", Double(n) / 1000) : n.formatted()
     }
 
     @ViewBuilder
     private func navRow(_ tab: MainWindow.Tab) -> some View {
         let on = activeTab == tab
-        let m = meta(for: tab)
         Button { activeTab = tab } label: {
             HStack(spacing: 10) {
-                Rectangle().fill(on ? Theme.gold : Color.clear).frame(width: 3)
                 Image(systemName: tab.systemImage)
                     .font(.system(size: 13, weight: on ? .semibold : .regular))
                     .foregroundStyle(on ? Theme.gold : Theme.text2)
                     .frame(width: 18)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(tab.rawValue).font(Theme.Font.body(14, on ? .semibold : .medium)).foregroundStyle(on ? Theme.gold : Theme.text1)
-                    if showsMeta(tab, m) {
-                        Text(m.text).font(Theme.Font.mono(10.5)).foregroundStyle(m.hot ? (tab == .deep || tab == .people ? Theme.ai : Theme.textOnPanel) : Theme.text3).lineLimit(1)
-                    }
+                Text(tab.rawValue)
+                    .font(Theme.Font.body(13.5, on ? .semibold : .regular))
+                    .foregroundStyle(on ? Theme.gold : Theme.text1)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let b = badge(for: tab) {
+                    Text(b.text).font(Theme.Font.body(11.5, .medium)).foregroundStyle(b.color).monospacedDigit()
                 }
-                Spacer(minLength: 0)
-                if let index = tab.shortcutIndex { Text("⌘\(index)").font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3.opacity(on ? 1 : 0.7)) }
             }
-            .padding(.trailing, 14)
-            .frame(height: 44)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(on ? Theme.goldWash : Color.clear, ignoresSafeAreaEdges: [])
-            .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
-            .contentShape(Rectangle())
+            .background(on ? Theme.gold.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.dsRow)
+        .padding(.horizontal, 8)
+        .help(tab.shortcutIndex.map { "\(tab.rawValue) (⌘\($0))" } ?? tab.rawValue)
         .accessibilityLabel("\(tab.rawValue) page")
         .accessibilityAddTraits(on ? [.isSelected, .isButton] : [.isButton])
+        .animation(Theme.quick, value: on)
     }
 
     @ViewBuilder
@@ -150,15 +151,15 @@ struct Sidebar: View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
-                Text(err.kind).font(Theme.Font.metaStrong).foregroundStyle(Theme.text1)
-                Text(err.message).font(Theme.Font.meta).foregroundStyle(Theme.text3).lineLimit(3)
+                Text(err.kind).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
+                Text(err.message).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
             }
             Spacer(minLength: 4)
             Button { engine.clearLastError() } label: { Image(systemName: "xmark").foregroundStyle(Theme.text3) }
                 .buttonStyle(.plain).help("Dismiss")
         }
         .padding(8)
-        .background(Theme.warning.opacity(0.08), ignoresSafeAreaEdges: [])
-        .overlay(Rectangle().stroke(Theme.warning.opacity(0.4), lineWidth: 1))
+        .background(Theme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.warning.opacity(0.35), lineWidth: 1))
     }
 }

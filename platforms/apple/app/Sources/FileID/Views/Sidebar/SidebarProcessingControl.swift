@@ -134,11 +134,11 @@ struct ProcessingControl: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 10)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(Color.white.opacity(0.04))
         )
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         )
 
@@ -158,9 +158,9 @@ struct ProcessingControl: View {
             .padding(8)
             .background(Theme.warning.opacity(0.10), ignoresSafeAreaEdges: [])
             .overlay(
-                Rectangle().stroke(Theme.warning.opacity(0.5), lineWidth: 1)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.5), lineWidth: 1)
             )
-            .clipShape(Rectangle())
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         }
         // Lid-closed safety hint moved to Settings → Engine info to
         // keep the sidebar focused on actionable scan controls.
@@ -273,10 +273,10 @@ struct ProcessingControl: View {
                 .background(filled ? color.opacity(disabled ? 0.4 : 1.0)
                                    : color.opacity(0.18))
                 .overlay(
-                    Rectangle()
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(color.opacity(filled ? 1.0 : 0.6), lineWidth: 1)
                 )
-                .clipShape(Rectangle())
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(disabled)

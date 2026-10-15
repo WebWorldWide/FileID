@@ -127,7 +127,7 @@ struct TreeDiffView: View {
                             .font(Theme.Font.body(12, .semibold))
                             .padding(.horizontal, 10).padding(.vertical, 4)
                             .background(
-                                Rectangle().fill(filter == mode
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(filter == mode
                                                 ? Theme.gold
                                                 : Color.secondary.opacity(0.10))
                             )
@@ -205,8 +205,8 @@ struct TreeDiffView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .background(Rectangle().fill(.ultraThinMaterial))
-        .overlay(Rectangle().stroke(Color.secondary.opacity(0.20), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.ultraThinMaterial))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 1))
         .frame(minHeight: 280, idealHeight: 420, maxHeight: 600)
     }
 
@@ -259,11 +259,11 @@ struct TreeDiffView: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
         )
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
                           lineWidth: isHighlighted ? 1 : 0)
         )
@@ -319,11 +319,11 @@ struct TreeDiffView: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
         )
         .overlay(
-            Rectangle()
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
                           lineWidth: isHighlighted ? 1 : 0)
         )

@@ -45,7 +45,7 @@ struct ToolsWorkbench: View {
         VStack(alignment: .leading, spacing: 14) {
             if !inline { HStack { Text("File Tools").font(Theme.Font.display(24)); Spacer(); Button("Done") { dismiss() }.buttonStyle(.dsSecondary) } }
             HStack {
-                TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
+                TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
                 Button("Find", action: search).disabled(!session.pending.isEmpty || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.disabled(!session.pending.isEmpty)
             List(session.hits, id: \.fileID) { hit in
@@ -70,7 +70,7 @@ struct ToolsWorkbench: View {
                     LabeledSegment("Max px") {
                         TextField("4096", value: $session.maxDimension, format: .number).textFieldStyle(.plain).font(Theme.Font.mono(12))
                             .padding(.horizontal, 8).frame(width: 84, height: 26).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
-                            .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                     }
                 }
                 if session.kind == "video" {

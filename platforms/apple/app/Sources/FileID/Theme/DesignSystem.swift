@@ -1,7 +1,13 @@
 import SwiftUI
 
-// Prototype v3 primitives: hairline panels, mono section labels, metric
-// cells, square controls and the grained progress bar.
+// FileID design primitives (Prototype v3, softened after cosmic-studio):
+// frosted panels with subtle corners, Archivo for every label, Instrument
+// Serif for titles, monospace only for numbers and shortcuts, one gold accent
+// for selection and primary actions, and quick well-damped motion.
+
+private func rounded(_ radius: CGFloat) -> RoundedRectangle {
+    RoundedRectangle(cornerRadius: radius, style: .continuous)
+}
 
 // MARK: - Labels
 
@@ -12,7 +18,7 @@ struct SectionLabel: View {
     var body: some View {
         Text(text)
             .font(Theme.Font.sectionLabel)
-            .tracking(1.5)
+            .tracking(0.6)
             .textCase(.uppercase)
             .foregroundStyle(color)
             .lineLimit(1)
@@ -22,10 +28,10 @@ struct SectionLabel: View {
 struct MetaText: View {
     let text: String
     var color: Color = Theme.text3
-    var size: CGFloat = 11.5
-    init(_ text: String, color: Color = Theme.text3, size: CGFloat = 11.5) { self.text = text; self.color = color; self.size = size }
+    var size: CGFloat = 12
+    init(_ text: String, color: Color = Theme.text3, size: CGFloat = 12) { self.text = text; self.color = color; self.size = max(size, 11.5) }
     var body: some View {
-        Text(text).font(Theme.Font.mono(size)).foregroundStyle(color)
+        Text(text).font(Theme.Font.body(size)).foregroundStyle(color)
     }
 }
 
@@ -35,9 +41,9 @@ struct Panel<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         VStack(alignment: .leading, spacing: 0) { content }
-            .background(Theme.panel, ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
-            .clipped()
+            .background(Theme.panel, in: rounded(Theme.Radius.l))
+            .clipShape(rounded(Theme.Radius.l))
+            .overlay(rounded(Theme.Radius.l).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
     }
 }
 
@@ -109,10 +115,10 @@ struct MetricRow: View {
 struct KeyValueRow: View {
     let key: String
     let value: String
-    var keyWidth: CGFloat = 80
+    var keyWidth: CGFloat = 84
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(key).font(Theme.Font.meta).tracking(0.9).textCase(.uppercase).foregroundStyle(Theme.label).frame(width: keyWidth, alignment: .leading)
+            Text(key).font(Theme.Font.body(12, .medium)).foregroundStyle(Theme.label).frame(width: keyWidth, alignment: .leading)
             Text(value).font(Theme.Font.body(13)).foregroundStyle(Theme.textOnPanel).textSelection(.enabled)
             Spacer(minLength: 0)
         }
@@ -123,91 +129,153 @@ struct KeyValueRow: View {
 
 // MARK: - Buttons
 
+/// Hover is tracked per button so every control shows it is clickable before
+/// the click, and pressed state shows the click landed.
+private struct HoverTracking: ViewModifier {
+    @Binding var hovering: Bool
+    func body(content: Content) -> some View {
+        content.onHover { inside in withAnimation(Theme.quick) { hovering = inside } }
+    }
+}
+
+private func resolvedHeight(_ explicit: CGFloat?, _ size: ControlSize, regular: CGFloat) -> CGFloat {
+    if let explicit { return explicit }
+    switch size {
+    case .mini, .small: return Theme.Metrics.controlSmall
+    case .large, .extraLarge: return 32
+    default: return regular
+    }
+}
+
 struct DSPrimaryButtonStyle: ButtonStyle {
     var height: CGFloat? = nil
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.controlSize) private var controlSize
-    private var resolvedHeight: CGFloat {
-        if let height { return height }
-        switch controlSize {
-        case .mini, .small: return Theme.Metrics.controlSmall
-        case .large, .extraLarge: return 32
-        default: return Theme.Metrics.controlLarge
+    func makeBody(configuration: Configuration) -> some View { DSPrimaryFace(configuration: configuration, height: height) }
+    fileprivate struct DSPrimaryFace: View {
+        let configuration: Configuration
+        let height: CGFloat?
+        @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.controlSize) private var controlSize
+        @State private var hovering = false
+        var body: some View {
+            let small = controlSize == .small || controlSize == .mini
+            configuration.label
+                .font(Theme.Font.body(small ? 12 : 13, .semibold))
+                .foregroundStyle(Theme.onGold)
+                .padding(.horizontal, small ? 10 : 14)
+                .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.controlLarge))
+                .background(configuration.isPressed ? Theme.goldDim : (hovering && isEnabled ? Theme.goldHover : Theme.gold), in: rounded(Theme.Radius.s))
+                .opacity(isEnabled ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.98 : 1)
+                .contentShape(rounded(Theme.Radius.s))
+                .modifier(HoverTracking(hovering: $hovering))
+                .animation(Theme.quick, value: configuration.isPressed)
         }
-    }
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(Theme.Font.mono(controlSize == .small || controlSize == .mini ? 11 : 12, .semibold))
-            .foregroundStyle(Theme.onGold)
-            .padding(.horizontal, controlSize == .small || controlSize == .mini ? 10 : 14)
-            .frame(height: resolvedHeight)
-            .background(configuration.isPressed ? Theme.goldHover : Theme.gold, ignoresSafeAreaEdges: [])
-            .opacity(isEnabled ? 1 : 0.38)
-            .contentShape(Rectangle())
     }
 }
 
 struct DSSecondaryButtonStyle: ButtonStyle {
     var height: CGFloat? = nil
-    @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.controlSize) private var controlSize
-    private var resolvedHeight: CGFloat {
-        if let height { return height }
-        switch controlSize {
-        case .mini, .small: return Theme.Metrics.controlSmall
-        case .large, .extraLarge: return 32
-        default: return Theme.Metrics.control
+    func makeBody(configuration: Configuration) -> some View { DSSecondaryFace(configuration: configuration, height: height) }
+    fileprivate struct DSSecondaryFace: View {
+        let configuration: Configuration
+        let height: CGFloat?
+        @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.controlSize) private var controlSize
+        @State private var hovering = false
+        var body: some View {
+            let small = controlSize == .small || controlSize == .mini
+            configuration.label
+                .font(Theme.Font.body(small ? 12 : 13, .medium))
+                .foregroundStyle(Theme.text1)
+                .padding(.horizontal, small ? 9 : 12)
+                .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.control))
+                .background(Color.white.opacity(configuration.isPressed ? 0.14 : (hovering && isEnabled ? 0.09 : 0.05)), in: rounded(Theme.Radius.s))
+                .overlay(rounded(Theme.Radius.s).stroke(Color.white.opacity(hovering && isEnabled ? 0.24 : 0.14), lineWidth: 1))
+                .opacity(isEnabled ? 1 : 0.4)
+                .contentShape(rounded(Theme.Radius.s))
+                .modifier(HoverTracking(hovering: $hovering))
+                .animation(Theme.quick, value: configuration.isPressed)
         }
-    }
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(Theme.Font.mono(controlSize == .small || controlSize == .mini ? 11 : 12))
-            .foregroundStyle(Theme.textOnPanel)
-            .padding(.horizontal, controlSize == .small || controlSize == .mini ? 9 : 12)
-            .frame(height: resolvedHeight)
-            .background(configuration.isPressed ? Color.white.opacity(0.1) : Color.white.opacity(0.04), ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(Theme.controlBorder, lineWidth: 1))
-            .opacity(isEnabled ? 1 : 0.38)
-            .contentShape(Rectangle())
     }
 }
 
 struct DSGhostButtonStyle: ButtonStyle {
     var color: Color = Theme.text3
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(Theme.Font.mono(11.5))
-            .foregroundStyle(configuration.isPressed ? Theme.text1 : color)
-            .padding(.horizontal, 4)
-            .contentShape(Rectangle())
+    func makeBody(configuration: Configuration) -> some View { DSGhostFace(configuration: configuration, color: color) }
+    fileprivate struct DSGhostFace: View {
+        let configuration: Configuration
+        let color: Color
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .font(Theme.Font.body(12.5, .medium))
+                .foregroundStyle(configuration.isPressed || hovering ? Theme.text1 : color)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(Color.white.opacity(hovering ? 0.06 : 0), in: rounded(Theme.Radius.xs))
+                .contentShape(rounded(Theme.Radius.xs))
+                .modifier(HoverTracking(hovering: $hovering))
+        }
     }
 }
 
 struct DSAccentOutlineButtonStyle: ButtonStyle {
     var color: Color = Theme.gold
     var height: CGFloat = Theme.Metrics.controlSmall
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(Theme.Font.mono(11))
-            .foregroundStyle(color)
-            .padding(.horizontal, 9)
-            .frame(height: height)
-            .background(color.opacity(configuration.isPressed ? 0.2 : 0.1), ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(color.opacity(0.6), lineWidth: 1))
-            .contentShape(Rectangle())
+    func makeBody(configuration: Configuration) -> some View { DSAccentOutlineFace(configuration: configuration, color: color, height: height) }
+    fileprivate struct DSAccentOutlineFace: View {
+        let configuration: Configuration
+        let color: Color
+        let height: CGFloat
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .font(Theme.Font.body(12, .semibold))
+                .foregroundStyle(color)
+                .padding(.horizontal, 10)
+                .frame(height: height)
+                .background(color.opacity(configuration.isPressed ? 0.24 : (hovering ? 0.16 : 0.1)), in: rounded(Theme.Radius.s))
+                .overlay(rounded(Theme.Radius.s).stroke(color.opacity(0.5), lineWidth: 1))
+                .contentShape(rounded(Theme.Radius.s))
+                .modifier(HoverTracking(hovering: $hovering))
+        }
     }
 }
 
 struct DSDangerButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(Theme.Font.mono(12, .semibold))
-            .foregroundStyle(configuration.isPressed ? .white : Theme.danger)
-            .padding(.horizontal, 12)
-            .frame(height: Theme.Metrics.controlLarge)
-            .background(configuration.isPressed ? Color(hex: 0xE8433A) : Color(hex: 0xE8433A).opacity(0.1), ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(Color(hex: 0xE8433A).opacity(0.5), lineWidth: 1))
-            .contentShape(Rectangle())
+    func makeBody(configuration: Configuration) -> some View { DSDangerFace(configuration: configuration) }
+    fileprivate struct DSDangerFace: View {
+        let configuration: Configuration
+        @State private var hovering = false
+        var body: some View {
+            let red = Color(hex: 0xE8433A)
+            configuration.label
+                .font(Theme.Font.body(13, .semibold))
+                .foregroundStyle(configuration.isPressed || hovering ? .white : Theme.danger)
+                .padding(.horizontal, 12)
+                .frame(height: Theme.Metrics.controlLarge)
+                .background(configuration.isPressed ? red : red.opacity(hovering ? 0.85 : 0.12), in: rounded(Theme.Radius.s))
+                .overlay(rounded(Theme.Radius.s).stroke(red.opacity(0.5), lineWidth: 1))
+                .contentShape(rounded(Theme.Radius.s))
+                .modifier(HoverTracking(hovering: $hovering))
+        }
+    }
+}
+
+/// Plain clickable rows and tiles: whole frame is the hit area, with a soft
+/// hover wash so it reads as clickable.
+struct DSRowButtonStyle: ButtonStyle {
+    var radius: CGFloat = Theme.Radius.m
+    func makeBody(configuration: Configuration) -> some View { DSRowFace(configuration: configuration, radius: radius) }
+    fileprivate struct DSRowFace: View {
+        let configuration: Configuration
+        let radius: CGFloat
+        @State private var hovering = false
+        var body: some View {
+            configuration.label
+                .contentShape(rounded(radius))
+                .background(Color.white.opacity(configuration.isPressed ? 0.08 : (hovering ? 0.045 : 0)), in: rounded(radius))
+                .modifier(HoverTracking(hovering: $hovering))
+        }
     }
 }
 
@@ -216,6 +284,7 @@ extension ButtonStyle where Self == DSSecondaryButtonStyle { static var dsSecond
 extension ButtonStyle where Self == DSGhostButtonStyle { static var dsGhost: DSGhostButtonStyle { .init() } }
 extension ButtonStyle where Self == DSAccentOutlineButtonStyle { static var dsAccentOutline: DSAccentOutlineButtonStyle { .init() } }
 extension ButtonStyle where Self == DSDangerButtonStyle { static var dsDanger: DSDangerButtonStyle { .init() } }
+extension ButtonStyle where Self == DSRowButtonStyle { static var dsRow: DSRowButtonStyle { .init() } }
 
 // MARK: - Toggle / radio / check
 
@@ -224,17 +293,17 @@ struct DSToggleStyle: ToggleStyle {
         Button { configuration.isOn.toggle() } label: {
             HStack(spacing: 10) {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
-                    Rectangle().fill(configuration.isOn ? Theme.gold.opacity(0.16) : Color.clear)
-                        .overlay(Rectangle().stroke(configuration.isOn ? Theme.gold : Color.white.opacity(0.25), lineWidth: 1))
-                    Rectangle().fill(configuration.isOn ? Theme.gold : Theme.text3).frame(width: 12, height: 12).padding(1)
+                    Capsule().fill(configuration.isOn ? Theme.gold : Color.white.opacity(0.14))
+                    Circle().fill(configuration.isOn ? Theme.onGold : Theme.text2).frame(width: 12, height: 12).padding(2)
                 }
                 .frame(width: 30, height: 16)
-                .animation(.easeOut(duration: 0.15), value: configuration.isOn)
+                .animation(Theme.spring, value: configuration.isOn)
                 configuration.label
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
     }
 }
 
@@ -242,10 +311,10 @@ struct DSRadio: View {
     let on: Bool
     var body: some View {
         ZStack {
-            Rectangle().stroke(on ? Theme.gold : Color.white.opacity(0.3), lineWidth: 1).frame(width: 12, height: 12)
-            if on { Rectangle().fill(Theme.gold).frame(width: 6, height: 6) }
+            Circle().stroke(on ? Theme.gold : Color.white.opacity(0.3), lineWidth: 1.2).frame(width: 13, height: 13)
+            if on { Circle().fill(Theme.gold).frame(width: 7, height: 7) }
         }
-        .frame(width: 14, height: 14)
+        .frame(width: 15, height: 15)
     }
 }
 
@@ -253,10 +322,11 @@ struct DSCheck: View {
     let on: Bool
     var body: some View {
         ZStack {
-            Rectangle().fill(on ? Theme.gold : Color.clear).frame(width: 14, height: 14)
-                .overlay(Rectangle().stroke(on ? Theme.gold : Color.white.opacity(0.3), lineWidth: 1))
-            if on { Text("✓").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.onGold) }
+            rounded(Theme.Radius.xs).fill(on ? Theme.gold : Color.white.opacity(0.04)).frame(width: 15, height: 15)
+                .overlay(rounded(Theme.Radius.xs).stroke(on ? Theme.gold : Color.white.opacity(0.3), lineWidth: 1))
+            if on { Image(systemName: "checkmark").font(.system(size: 9, weight: .heavy)).foregroundStyle(Theme.onGold) }
         }
+        .animation(Theme.quick, value: on)
     }
 }
 
@@ -266,25 +336,30 @@ struct SegmentedBar<T: Hashable>: View {
     @Binding var selection: T
     let options: [(T, String)]
     var height: CGFloat = 26
+    @Namespace private var pill
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 2) {
             ForEach(options, id: \.0) { option in
                 let on = selection == option.0
-                Button { selection = option.0 } label: {
+                Button { withAnimation(Theme.spring) { selection = option.0 } } label: {
                     Text(option.1)
-                        .font(Theme.Font.mono(11.5, on ? .semibold : .medium))
+                        .font(Theme.Font.body(12.5, on ? .semibold : .medium))
                         .foregroundStyle(on ? Theme.onGold : Theme.text2)
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 10)
-                        .frame(height: height)
-                        .background(on ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
-                        .contentShape(Rectangle())
+                        .frame(height: height - 4)
+                        .background {
+                            if on { rounded(Theme.Radius.xs).fill(Theme.gold).matchedGeometryEffect(id: "pill", in: pill) }
+                        }
+                        .contentShape(rounded(Theme.Radius.xs))
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
-        .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+        .padding(2)
+        .background(Color.black.opacity(0.28), in: rounded(Theme.Radius.s))
+        .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 }
 
@@ -310,21 +385,21 @@ struct GrainProgressBar: View {
         GeometryReader { geo in
             let p = max(0, min(1, progress.isFinite ? progress : 0))
             ZStack(alignment: .leading) {
-                Rectangle().fill(Color.white.opacity(0.07))
+                Capsule().fill(Color.white.opacity(0.07))
                 LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
                     .frame(width: geo.size.width)
-                    .mask(alignment: .leading) { Rectangle().frame(width: geo.size.width * p) }
-                GrainOverlay().opacity(0.4).blendMode(.overlay)
+                    .mask(alignment: .leading) { Capsule().frame(width: max(p > 0 ? height : 0, geo.size.width * p)) }
+                GrainOverlay().opacity(0.3).blendMode(.overlay).clipShape(Capsule())
             }
         }
         .frame(height: height)
-        .animation(.easeOut(duration: 0.45), value: progress)
+        .animation(.easeOut(duration: 0.3), value: progress)
         .accessibilityElement()
         .accessibilityValue(Text("\(Int((progress.isFinite ? progress : 0) * 100)) percent"))
     }
 }
 
-/// Fine procedural noise tiled from one cached 140 px texture, so progress
+/// Fine procedural noise tiled from one cached 140 pt texture, so progress
 /// bars and the window grain share a single bitmap instead of a per-frame filter.
 struct GrainOverlay: View {
     var body: some View {
@@ -374,7 +449,7 @@ enum GrainTexture {
     }()
 }
 
-// MARK: - Rail row (selected list item with a 3 px gold rail)
+// MARK: - Selectable row
 
 struct RailRow<Content: View>: View {
     let selected: Bool
@@ -383,19 +458,18 @@ struct RailRow<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
-                Rectangle().fill(selected ? Theme.gold : Color.clear).frame(width: 3)
+            HStack(spacing: 10) {
                 content
                 Spacer(minLength: 0)
             }
-            .padding(.trailing, 14)
+            .padding(.horizontal, 10)
             .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Theme.goldWash : Color.clear, ignoresSafeAreaEdges: [])
-            .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
-            .contentShape(Rectangle())
+            .background(selected ? Theme.gold.opacity(0.12) : Color.clear, in: rounded(Theme.Radius.m))
+            .overlay(rounded(Theme.Radius.m).stroke(selected ? Theme.gold.opacity(0.45) : Color.clear, lineWidth: 1))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.dsRow)
+        .padding(.horizontal, 6)
     }
 }
 
@@ -404,9 +478,9 @@ struct RailRow<Content: View>: View {
 struct TagChip: View {
     let text: String
     var body: some View {
-        Text(text).font(Theme.Font.meta).foregroundStyle(Theme.text2)
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+        Text(text).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2)
+            .padding(.horizontal, 7).padding(.vertical, 2)
+            .background(Color.white.opacity(0.07), in: rounded(Theme.Radius.xs))
     }
 }
 
@@ -416,9 +490,10 @@ struct KindBadge: View {
     var background: Color = Color.black.opacity(0.55)
     var border: Color? = nil
     var body: some View {
-        Text(text).font(Theme.Font.mono(10, .semibold)).tracking(1).textCase(.uppercase).foregroundStyle(color)
-            .padding(.horizontal, 5).padding(.vertical, 2).background(background, ignoresSafeAreaEdges: [])
-            .overlay { if let border { Rectangle().stroke(border, lineWidth: 1) } }
+        Text(text.capitalized).font(Theme.Font.body(10.5, .semibold)).foregroundStyle(color)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(background, in: rounded(Theme.Radius.xs))
+            .overlay { if let border { rounded(Theme.Radius.xs).stroke(border, lineWidth: 1) } }
     }
 }
 
@@ -437,8 +512,8 @@ struct DSTextField: View {
         }
         .padding(.horizontal, 10)
         .frame(height: height)
-        .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
-        .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
+        .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
+        .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 }
 
@@ -454,7 +529,7 @@ struct DashedNotice: View {
         }
         .frame(maxWidth: .infinity)
         .padding(40)
-        .overlay(Rectangle().stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.16)))
+        .overlay(rounded(Theme.Radius.l).stroke(style: StrokeStyle(lineWidth: 1, dash: [5, 4])).foregroundStyle(Color.white.opacity(0.16)))
     }
 }
 
@@ -482,17 +557,18 @@ final class ToastCenter {
 struct ToastView: View {
     let toast: ToastCenter.Toast
     var body: some View {
-        HStack(spacing: 14) {
-            Rectangle().fill(Theme.delight).frame(width: 6, height: 6)
-            Text(toast.text).font(Theme.Font.mono(12)).foregroundStyle(Theme.text1).lineLimit(1)
+        HStack(spacing: 12) {
+            Circle().fill(Theme.delight).frame(width: 7, height: 7)
+            Text(toast.text).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
             if let label = toast.actionLabel {
                 Button(label) { toast.action?(); ToastCenter.shared.dismiss() }.buttonStyle(.dsAccentOutline)
             }
         }
-        .padding(.leading, 14).padding(.trailing, 12).padding(.vertical, 9)
-        .background(Color(hex: 0x1A1A1D), ignoresSafeAreaEdges: [])
-        .overlay(Rectangle().stroke(Color.white.opacity(0.16), lineWidth: 1))
-        .shadow(color: .black.opacity(0.55), radius: 25, y: 20)
+        .padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: rounded(Theme.Radius.l))
+        .background(Color(hex: 0x1A1A1D).opacity(0.85), in: rounded(Theme.Radius.l))
+        .overlay(rounded(Theme.Radius.l).stroke(Color.white.opacity(0.14), lineWidth: 1))
+        .shadow(color: .black.opacity(0.45), radius: 20, y: 12)
     }
 }
 
@@ -505,13 +581,13 @@ struct AnyButtonStyle: ButtonStyle {
 
 // MARK: - App-wide native control styles
 
-/// Square checkbox: 14 pt box, gold fill with ✓ when on, label beside it.
+/// Checkbox: 15 pt rounded box, gold fill with a check when on, label beside it.
 struct DSCheckboxToggleStyle: ToggleStyle {
     @Environment(\.isEnabled) private var isEnabled
     func makeBody(configuration: Configuration) -> some View {
         Button { configuration.isOn.toggle() } label: {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                DSCheck(on: configuration.isOn).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
+            HStack(alignment: .center, spacing: 8) {
+                DSCheck(on: configuration.isOn)
                 configuration.label.font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
             }
             .contentShape(Rectangle())
@@ -523,7 +599,7 @@ struct DSCheckboxToggleStyle: ToggleStyle {
 }
 
 /// Determinate progress draws the grained gold bar; indeterminate progress
-/// draws a short gold segment sweeping across the same square track.
+/// draws a short gold segment sweeping across the same track.
 struct DSProgressViewStyle: ProgressViewStyle {
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -544,32 +620,32 @@ struct IndeterminateBar: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Rectangle().fill(Color.white.opacity(0.07))
-                Rectangle()
+                Capsule().fill(Color.white.opacity(0.07))
+                Capsule()
                     .fill(LinearGradient(colors: [Theme.gold.opacity(0), Theme.gold, Theme.gold.opacity(0)], startPoint: .leading, endPoint: .trailing))
                     .frame(width: geo.size.width * 0.35)
                     .offset(x: geo.size.width * (reduceMotion ? 0.32 : phase))
             }
-            .clipped()
+            .clipShape(Capsule())
         }
         .frame(height: 4)
         .frame(minWidth: 40)
         .onAppear {
             guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: false)) { phase = 1.0 }
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: false)) { phase = 1.0 }
         }
         .accessibilityLabel("In progress")
     }
 }
 
-/// Mono label beside a control, the prototype's "RESOLUTION [720p|1080p]" row.
+/// Label beside a control, the prototype's "Resolution [720p|1080p]" row.
 struct LabeledSegment<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
     init(_ label: String, @ViewBuilder content: () -> Content) { self.label = label; self.content = content() }
     var body: some View {
         HStack(spacing: 10) {
-            SectionLabel(label)
+            Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
             content
         }
     }
@@ -585,9 +661,9 @@ struct AspectTiles: View {
         HStack(spacing: 8) {
             ForEach(options, id: \.id) { option in
                 let on = selection == option.id
-                Button { selection = option.id } label: {
-                    VStack(spacing: 8) {
-                        Rectangle().stroke(on ? Theme.gold : Theme.text2, lineWidth: 1.5)
+                Button { withAnimation(Theme.spring) { selection = option.id } } label: {
+                    VStack(spacing: 7) {
+                        rounded(3).stroke(on ? Theme.gold : Theme.text2, lineWidth: 1.5)
                             .frame(width: option.ratio >= 1 ? 30 : 30 * option.ratio, height: option.ratio >= 1 ? 30 / option.ratio : 30)
                             .frame(height: 32)
                         Text(option.label).font(Theme.Font.body(13, .semibold)).foregroundStyle(on ? Theme.gold : Theme.text1)
@@ -595,11 +671,10 @@ struct AspectTiles: View {
                     }
                     .frame(width: 96)
                     .padding(.vertical, 10)
-                    .background(on ? Theme.gold.opacity(0.08) : Color.clear, ignoresSafeAreaEdges: [])
-                    .overlay(Rectangle().stroke(on ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
-                    .contentShape(Rectangle())
+                    .background(on ? Theme.gold.opacity(0.1) : Color.white.opacity(0.02), in: rounded(Theme.Radius.m))
+                    .overlay(rounded(Theme.Radius.m).stroke(on ? Theme.gold : Theme.hairlineStrong, lineWidth: 1))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.dsRow)
                 .accessibilityLabel(option.label)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
@@ -608,13 +683,14 @@ struct AspectTiles: View {
 }
 
 extension View {
-    /// v3 list chrome: transparent rows on the panel fill, hairline frame, and an
-    /// optional mono empty-state line instead of a blank grey box.
+    /// List chrome: transparent rows on the panel fill, rounded frame, and an
+    /// optional empty-state line instead of a blank grey box.
     func dsList(empty: String? = nil) -> some View {
         self
             .scrollContentBackground(.hidden)
-            .background(Theme.panel, ignoresSafeAreaEdges: [])
-            .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+            .background(Theme.panel, in: rounded(Theme.Radius.l))
+            .clipShape(rounded(Theme.Radius.l))
+            .overlay(rounded(Theme.Radius.l).stroke(Theme.hairlineStrong, lineWidth: 1))
             .overlay {
                 if let empty {
                     MetaText(empty).multilineTextAlignment(.center).padding(20).allowsHitTesting(false)

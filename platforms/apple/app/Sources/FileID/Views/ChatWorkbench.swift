@@ -55,7 +55,7 @@ struct ChatWorkbench: View {
                                     Button { input = suggestion; inputFocused = true } label: {
                                         HStack { Text(suggestion); Spacer(); Image(systemName: "arrow.up.left") }
                                             .font(Theme.Font.body(12)).padding(10)
-                                            .background(Color.white.opacity(0.05), in: Rectangle())
+                                            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
                                     }.buttonStyle(.plain)
                                 }
                             }.padding(.vertical, 12)
@@ -111,7 +111,7 @@ struct ChatWorkbench: View {
                             .buttonStyle(.plain).help("Send message").accessibilityLabel("Send message")
                             .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
                     }
-                }.padding(10).background(Color.white.opacity(0.06), in: Rectangle())
+                }.padding(10).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
                 Toggle("Summarize with local AI", isOn: $useModel).font(Theme.Font.body(12))
                 Button { modelsPresented = true } label: {
                     Label(AIModelKind(rawValue: chatModelKind)?.displayName ?? "Choose a model", systemImage: "cpu").font(Theme.Font.body(12)).lineLimit(1)
