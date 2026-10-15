@@ -885,6 +885,7 @@ public final class ReadStore: @unchecked Sendable {
         public let representativeFileID: Int64?
         public let representativeBBox: String?
         public let representativePath: String?
+        public let representativeCacheRevision: String?
         public let fileCount: Int
         public let faceCount: Int
 
@@ -925,6 +926,9 @@ public final class ReadStore: @unchecked Sendable {
                       p.representative_face_id, p.file_count,
                       f.bbox AS rep_bbox, f.file_id AS rep_file_id,
                       files.path_text AS rep_path,
+                      COALESCE(f.embedding_model,'') || '|' || COALESCE(f.processing_version,'') || '|' ||
+                      COALESCE(f.source_revision,'') || '|' || COALESCE(CAST(files.size_bytes AS TEXT),'') || ':' ||
+                      COALESCE(CAST(files.modified_at AS TEXT),'') AS rep_cache_revision,
                       COUNT(fp.id) AS face_count
                     FROM persons p
                     LEFT JOIN face_prints f ON f.id = p.representative_face_id
@@ -948,6 +952,7 @@ public final class ReadStore: @unchecked Sendable {
                         representativeFileID: r["rep_file_id"],
                         representativeBBox: r["rep_bbox"],
                         representativePath: r["rep_path"],
+                        representativeCacheRevision: r["rep_cache_revision"],
                         fileCount: r["file_count"] ?? 0,
                         faceCount: r["face_count"] ?? 0
                     )

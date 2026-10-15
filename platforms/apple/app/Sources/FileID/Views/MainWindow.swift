@@ -6,6 +6,7 @@ struct MainWindow: View {
     @State private var catalogPresented = false
     @Environment(\.openWindow) private var openWindow
     @State private var chatPresented = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let engine: EngineClient
     @State private var store = ReadStore()
     @AppStorage("activeTabRawValue") private var activeTabRaw: String = Tab.library.rawValue
@@ -58,8 +59,9 @@ struct MainWindow: View {
         ZStack {
             LavaLampBackground()
                 .ignoresSafeArea()
+            GeometryReader { geometry in
             HStack(spacing: 0) {
-                if sidebarVisible {
+                if sidebarVisible && (!chatPresented || geometry.size.width >= 1460) {
                     Sidebar(engine: engine, store: store,
                             activeTab: activeTabBinding,
                             pickedURL: $pickedURL,
@@ -76,16 +78,24 @@ struct MainWindow: View {
                        onSwitchTab: { activeTabRaw = $0.rawValue })
                     .preferredColorScheme(.dark)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if chatPresented {
+                    Divider().overlay(Color.white.opacity(0.08))
+                    ChatWorkbench(engine: engine, onClose: { chatPresented = false })
+                        .preferredColorScheme(.dark)
+                        .frame(width: 380)
+                        .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                }
             }
+            }
+            .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
             .accentColor(Theme.gold)
         .toolbar {
-            Button { chatPresented = true } label: { Label("Chat", systemImage: "bubble.left.and.bubble.right") }.keyboardShortcut("k", modifiers: .command)
+            Button { chatPresented.toggle() } label: { Label("Chat", systemImage: "bubble.left.and.bubble.right") }.keyboardShortcut("k", modifiers: .command)
             Button { openWindow(id: "file-tools") } label: { Label("File Tools", systemImage: "wand.and.stars") }
             Button { catalogPresented = true } label: { Label("Search & Moments", systemImage: "sparkle.magnifyingglass") }
                 .keyboardShortcut("j", modifiers: .command)
         }
         .sheet(isPresented: $catalogPresented) { CatalogWorkbench(engine: engine) }
-        .sheet(isPresented: $chatPresented) { ChatWorkbench(engine: engine) }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()

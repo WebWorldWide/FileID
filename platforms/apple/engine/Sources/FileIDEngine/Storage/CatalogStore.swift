@@ -13,8 +13,11 @@ public enum CatalogStore {
                 return try await CatalogTakes.handle(request, database: database)
             case "detail":
                 guard let fileID = request.fileID else { throw InvalidRequest() }
-                let chapters = try await database.pool.read { db in try Self.chapters(db, fileID: fileID) }
-                return CatalogResponse(requestID: request.requestID, status: "ok", chapters: chapters)
+                let detail = try await database.pool.read { db in
+                    let expectedFaceModel = ArcFaceService.shared.modelVersion ?? "sface128-sha256:" + (ModelManifest.artifacts.first { $0.id == "sface_embedder" }?.sha256 ?? "")
+                    return (try Self.chapters(db, fileID: fileID), try CatalogCast.hits(db, fileID: fileID, faceModel: expectedFaceModel))
+                }
+                return CatalogResponse(requestID: request.requestID, status: "ok", hits: detail.1, chapters: detail.0)
             case "saveChapter":
                 guard var chapter = request.chapter, !chapter.id.isEmpty, chapter.id.count <= 200,
                     chapter.startSeconds.isFinite, chapter.endSeconds.isFinite,

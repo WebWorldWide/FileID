@@ -91,6 +91,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
                 if (_unloaded) return;
                 try { await ViewModel.RefreshAsync(CancellationToken.None); }
                 catch (Exception ex) { DebugLog.Warn("PeopleView post-clustering refresh threw: " + ex.Message); }
+                if (!_unloaded) OnPropertyChanged(nameof(StatusText));
             });
         });
 
@@ -338,11 +339,12 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             {
                 return "Loading clusters…";
             }
+            string coverage = ViewModels.PeopleViewModel.DeferredFaceStatus(ViewModels.EngineClient.Instance.LastFaceClustering?.DeferredFaces);
             if (ViewModel.Clusters.Count == 0)
             {
-                return "No people yet — run face clustering after a scan.";
+                return string.IsNullOrEmpty(coverage) ? "No people yet — run face clustering after a scan." : coverage;
             }
-            return $"{ViewModel.Clusters.Count} clusters";
+            return $"{ViewModel.Clusters.Count} clusters" + (string.IsNullOrEmpty(coverage) ? string.Empty : $" · {coverage}");
         }
     }
 

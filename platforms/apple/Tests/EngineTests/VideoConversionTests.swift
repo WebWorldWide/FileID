@@ -106,7 +106,7 @@ struct VideoConversionTests {
         #expect(FileManager.default.fileExists(atPath: output.path))
     }
 
-    @Test func portraitExportReopensPreservesOriginalAndSupportsUndo() async throws {
+    @Test(arguments: ["fit", "auto"]) func portraitExportReopensPreservesOriginalAndSupportsUndo(framing: String) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -118,14 +118,18 @@ struct VideoConversionTests {
             try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?,1,100,0,'video','mov')", arguments: [source.path])
         }
         let tools = MediaTools()
-        let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1280, videoAspectRatio: "16:9")
+        let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1280, videoAspectRatio: "16:9", videoFraming: framing)
         let preview = await tools.handle(ToolRequest(requestID: "preview", action: "preview", fileIDs: [1], destination: root.path, recipe: recipe), database: database)
         #expect(preview.status == "ok", Comment(rawValue: preview.message))
         let id = try #require(preview.operationID)
         let exported = await tools.handle(ToolRequest(requestID: "execute", action: "execute", destination: root.path, operationID: id), database: database)
         #expect(exported.status == "ok", Comment(rawValue: exported.message))
         let output = URL(fileURLWithPath: try #require(exported.outputs.first).outputPath)
-        #expect(output.lastPathComponent.contains("16x9 Fit"))
+        #expect(output.lastPathComponent.contains(framing == "auto" ? "16x9 People" : "16x9 Fit"))
+        if framing == "auto" {
+            #expect(preview.outputs.first?.message.contains("full-picture samples") == true)
+            #expect(exported.outputs.first?.message.contains("full-picture samples") == true)
+        }
         let probe = try await VideoConversionWorker.request(source: output, recipe: recipe)
         #expect(probe.width > probe.height)
         #expect(probe.audioCount == 0)
@@ -195,4 +199,24 @@ struct VideoConversionTests {
             Issue.record("Unsupported video resolution must fail.")
         } catch {}
     }
+    @Test func conventionalVideoEnlargementIsOptInAndPreservesTiming() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fileid-upscale-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source.mov")
+        try await movie(at: source)
+        let original = try MediaTools.hash(source)
+        let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1280, allowUpscale: true)
+        #expect(MediaTools.supports(recipe))
+        #expect(MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 3840, allowUpscale: true)))
+        let output = root.appendingPathComponent("enlarged.mp4")
+        let before = try await VideoConversionWorker.request(source: source, recipe: recipe)
+        let after = try await VideoConversionWorker.request(source: source, output: output, recipe: recipe)
+        #expect(max(after.width, after.height) == 1280)
+        #expect(max(before.width, before.height) < max(after.width, after.height))
+        #expect(abs(after.duration - before.duration) < 0.1)
+        #expect(after.audioCount == before.audioCount)
+        #expect(try MediaTools.hash(source) == original)
+    }
+
 }

@@ -165,7 +165,7 @@ public enum Restructure {
                         personName: firstPersonName(names),
                         lat: row["location_lat"], lon: row["location_lon"],
                         hasText: (row["has_text"] ?? 0) != 0,
-                        vlmProposed: row["vlm_proposed_name"])
+                        vlmProposed: (try? CatalogNamingContext.load(sourceDB, fileID: row["id"], faceModel: ArcFaceService.shared.modelVersion))?.proposedName ?? row["vlm_proposed_name"])
                 }
             }
             guard !chunk.isEmpty else { break }
@@ -394,7 +394,7 @@ public enum Restructure {
                     lat: row["location_lat"],
                     lon: row["location_lon"],
                     hasText: row["has_text"] ?? 0,
-                    vlmProposed: row["vlm_proposed_name"],
+                    vlmProposed: (try? CatalogNamingContext.load(db, fileID: row["id"], faceModel: ArcFaceService.shared.modelVersion))?.proposedName ?? row["vlm_proposed_name"],
                     personNames: row["names"]
                 )
             }

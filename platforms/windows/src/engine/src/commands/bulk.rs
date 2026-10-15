@@ -963,6 +963,24 @@ pub(crate) async fn handle_mark_persons_different(
 /// genuine same-person fragments that over-split stranded above the Pass-1
 /// threshold. Pairs already confirmed-different in face_verifications are
 /// filtered out so the suggested-merges sheet doesn't keep re-prompting.
+fn compatible_merge_candidates(conn: &rusqlite::Connection, selected_model: &str) -> anyhow::Result<Vec<(i64,i64,i64,Vec<f32>)>> {
+    let mut members=std::collections::BTreeMap::<i64,Vec<crate::pipeline::face_clustering::FaceRow>>::new();
+    for (face,person) in super::face_clustering::load_current_face_members(conn,selected_model)? {
+        if let Some(person)=person { members.entry(person).or_default().push(face); }
+    }
+    let mut query=conn.prepare("SELECT id,representative_face_id FROM persons WHERE COALESCE(is_unknown,0)=0 ORDER BY id")?;
+    let mut rows=query.query([])?;
+    let mut candidates=Vec::new();
+    while let Some(row)=rows.next()? {
+        let person:i64=row.get(0)?;
+        let representative:Option<i64>=row.get(1)?;
+        let Some(faces)=members.get(&person) else { continue; };
+        let anchor=faces.iter().find(|face| Some(face.face_id)==representative).or_else(|| faces.iter().max_by(|a,b| a.quality.total_cmp(&b.quality).then_with(|| b.face_id.cmp(&a.face_id)))).expect("nonempty person members");
+        candidates.push((person,anchor.face_id,faces.len() as i64,anchor.embedding.clone()));
+    }
+    Ok(candidates)
+}
+
 pub(crate) async fn handle_find_merge_suggestions(
     sink: Sink,
     db_path: std::path::PathBuf,
@@ -971,52 +989,9 @@ pub(crate) async fn handle_find_merge_suggestions(
         // Read-only connection so this never contends on the single writer mutex
         // (clustering can hold it for seconds on a large over-split library).
         let conn = crate::db::open_read(&db_path)?;
-        // One row per person via a JOIN to the representative face (its anchor
-        // embedding + id) plus a COUNT JOIN for member size — replaces the two
-        // per-person correlated subqueries the old query ran. representative_
-        // face_id is the cluster anchor (highest-quality embedded face), kept
-        // current by clustering + handle_merge_clusters.
-        // Scope the prepared statement so its borrow of `conn` ends here,
-        // letting the writer lock be released before the cosine sweep below.
-        let rows: Vec<(i64, i64, i64, Vec<u8>)> = {
-            let mut stmt = conn.prepare(
-                "SELECT p.id,
-                        COALESCE(p.representative_face_id, (SELECT fp2.id FROM face_prints fp2 WHERE fp2.person_id = p.id AND fp2.arcface_embedding IS NOT NULL ORDER BY COALESCE(fp2.face_quality, 0) DESC LIMIT 1)) AS anchor_id,
-                        COUNT(fpc.id),
-                        rep.arcface_embedding
-                 FROM persons p
-                 JOIN face_prints rep ON rep.id = COALESCE(p.representative_face_id, (SELECT fp2.id FROM face_prints fp2 WHERE fp2.person_id = p.id AND fp2.arcface_embedding IS NOT NULL ORDER BY COALESCE(fp2.face_quality, 0) DESC LIMIT 1))
-                 JOIN face_prints fpc ON fpc.person_id = p.id
-                 WHERE COALESCE(p.is_unknown, 0) = 0
-                 GROUP BY p.id",
-            )?;
-            // Bind to a local so the borrowing iterator temporary is dropped at
-            // this `;` — before `stmt` — letting the block return an owned Vec.
-            let collected: Vec<(i64, i64, i64, Vec<u8>)> = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                        r.get::<_, Vec<u8>>(3).unwrap_or_default(),
-                    ))
-                })?
-                .filter_map(|r| r.ok())
-                .filter(|(_, _, _, blob)| !blob.is_empty() && blob.len() % 4 == 0)
-                .collect();
-            collected
-        };
-
-        let decode = |blob: &[u8]| -> Vec<f32> {
-            blob.as_chunks::<4>().0.iter()
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        };
-        // Length guard: a dimension mismatch must never masquerade as a
-        // near-merge. zip() silently truncates to the shorter slice, inflating
-        // the dot product; returning -1.0 is safely excluded by the
-        // MERGE_SUGGEST_COS_LOW band check below so a mismatched pair is never
-        // suggested (#17).
+        conn.execute_batch("BEGIN")?;
+        let model=crate::models::sface::SFace::fingerprint(crate::models::sface::default_weights_path()?)?;
+        let rows=compatible_merge_candidates(&conn,&model)?;
         let cos = |a: &[f32], b: &[f32]| -> f32 {
             if a.len() != b.len() {
                 return -1.0;
@@ -1141,10 +1116,7 @@ pub(crate) async fn handle_find_merge_suggestions(
             }
         }
 
-        let embeddings: Vec<(i64, i64, i64, Vec<f32>)> = rows
-            .into_iter()
-            .map(|(pid, anchor_id, count, blob)| (pid, anchor_id, count, decode(&blob)))
-            .collect();
+        let embeddings=rows;
 
         // Every DB read is done; the O(P²) cosine sweep below is pure in-memory
         // math. Release the single-writer lock so the (potentially multi-second
@@ -1493,4 +1465,39 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod compatible_merge_tests {
+    use super::*;
+    use crate::pipeline::face_analysis_cache::{Input, PROCESSING_VERSION};
+    use rusqlite::{params, Connection};
+
+    #[test]
+    fn suggestions_use_current_members_and_reject_incompatible_or_wrong_owner_anchors() -> anyhow::Result<()> {
+        let conn=Connection::open_in_memory()?;
+        crate::db::migrations::apply(&conn)?;
+        conn.execute_batch("INSERT INTO persons(id,is_unknown,created_at,representative_face_id) VALUES(7,0,1,2),(8,0,1,3),(9,1,1,4),(10,0,1,11),(11,0,1,7),(12,0,1,8),(13,0,1,9),(14,0,1,10)")?;
+        let mut blob=vec![0_u8;512];blob[..4].copy_from_slice(&1_f32.to_le_bytes());
+        for (id,person,quality) in [(1,7,0.4),(2,7,1.0),(3,8,0.5),(4,9,0.6),(5,10,0.3),(6,10,0.99),(7,11,0.4),(8,12,0.5),(9,13,0.7),(10,14,0.8),(11,7,0.6),(12,10,0.9)] {
+            let path=format!("/tmp/fileid-merge-fixture-{id}.png");
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?1,4,42,1,'image','png')",params![id,path])?;
+            let revision=Input{id,file_id:id,bbox:"0,0,1,1".into(),path,size:4,modified:Some(42.0),file_ref:None}.revision();
+            conn.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?1,?2,'file-stat-v1',1)",params![id,revision])?;
+            conn.execute("INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality,embedding_model,processing_version,source_revision) VALUES(?1,?1,?2,X'00','0,0,1,1',?3,?4,'selected',?5,?6)",params![id,person,blob,quality,PROCESSING_VERSION,revision])?;
+        }
+        conn.execute_batch("UPDATE face_prints SET processing_version='rust-align112-v1' WHERE id=2; UPDATE face_prints SET embedding_model='other-model' WHERE id=3; UPDATE face_prints SET excluded=1 WHERE id=6; UPDATE files SET failed=1 WHERE id=8; UPDATE face_prints SET arcface_embedding=NULL WHERE id=10")?;
+        conn.execute("UPDATE face_prints SET arcface_embedding=?1 WHERE id=9",[vec![f32::NAN.to_le_bytes();128].concat()])?;
+        let old:String=conn.query_row("SELECT revision FROM catalog_revisions WHERE file_id=12",[],|row| row.get(0))?;
+        conn.execute("UPDATE files SET modified_at=84 WHERE id=12",[])?;
+        conn.execute("INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(12,?1,'file-stat-v1',1)",[old])?;
+        let candidates=compatible_merge_candidates(&conn,"selected")?;
+        assert_eq!(candidates.iter().map(|(person,anchor,count,_)| (*person,*anchor,*count)).collect::<Vec<_>>(),vec![(7,11,2),(10,5,1),(11,7,1)]);
+        assert!(candidates.iter().all(|(_,_,_,embedding)| embedding.len()==128 && embedding[0].to_bits()==1_f32.to_bits()));
+        assert_eq!(compatible_merge_candidates(&conn,"other-model")?.iter().map(|(person,anchor,count,_)| (*person,*anchor,*count)).collect::<Vec<_>>(),vec![(8,3,1)]);
+        conn.execute("UPDATE face_prints SET source_revision='outdated' WHERE id=7",[])?;
+        assert_eq!(compatible_merge_candidates(&conn,"selected")?.iter().map(|(person,_,_,_)| *person).collect::<Vec<_>>(),vec![7,10]);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM face_prints",[],|row| row.get::<_,i64>(0))?,12);
+        Ok(())
+    }
 }

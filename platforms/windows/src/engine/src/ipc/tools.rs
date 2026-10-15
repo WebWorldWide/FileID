@@ -10,6 +10,10 @@ pub struct ToolRecipe {
     pub allow_upscale: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_aspect_ratio: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_framing: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_stabilization: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

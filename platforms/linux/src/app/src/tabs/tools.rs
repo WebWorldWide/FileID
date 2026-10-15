@@ -208,6 +208,8 @@ fn recipe(ui: &Ui) -> Option<ToolRecipe> {
     Some(ToolRecipe {
         allow_upscale: (kind == "photo").then_some(ui.enlarge.is_active()),
         video_aspect_ratio: None,
+        video_framing: None,
+        video_stabilization: None,
         kind,
         format,
         max_dimension: value as u32,

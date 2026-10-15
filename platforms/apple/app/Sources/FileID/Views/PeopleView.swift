@@ -62,7 +62,7 @@ struct PeopleView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
         .onChange(of: store.version) { _, _ in reload() }
-        .onChange(of: engine.lastFaceClustering?.personCount) { _, _ in reload() }
+        .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload() }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .personDetail(let pid):
@@ -197,6 +197,11 @@ struct PeopleView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 headerActions
+            }
+            if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
+                Text("\(count) face\(count == 1 ? "" : "s") await processing. Unknown people are excluded.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
             if mergeMode || unknownMode {
                 bulkActionStrip
@@ -730,7 +735,7 @@ private struct PersonCard: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
         )
-        .task(id: person.id) {
+        .task(id: thumbnailIdentity) {
             await loadThumb()
         }
         .accessibilityElement(children: .combine)
@@ -792,52 +797,37 @@ private struct PersonCard: View {
         }
     }
 
-    /// Thumbnail for the representative file, cropped to the face bbox
-    /// (falls back to the whole image when bbox is missing).
-    private func loadThumb() async {
-        guard let path = person.representativePath else { return }
-        let url = URL(fileURLWithPath: path)
-        guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360) else { return }
-        guard let bboxStr = person.representativeBBox,
-              let cropped = Self.cropFace(in: full, bbox: bboxStr) else {
-            self.thumbnail = full
-            return
-        }
-        self.thumbnail = cropped
+    private var thumbnailIdentity: String {
+        [String(person.id), String(person.representativeFaceID ?? 0),
+         person.representativePath ?? "", person.representativeBBox ?? "",
+         person.representativeCacheRevision ?? ""].joined(separator: "|")
     }
 
-    /// Crop an NSImage to a Vision normalized "x,y,w,h" bbox, padded 20%.
-    static func cropFace(in img: NSImage, bbox: String) -> NSImage? {
-        // Format-tolerant (FaceBBox): macOS CSV-normalized OR a Windows-scanned
-        // library's JSON pixel bbox → normalized bottom-left. Pixel dims (not the
-        // points `img.size`) are needed to normalize the Windows pixel form.
-        let pw = img.representations.first?.pixelsWide ?? Int(img.size.width)
-        let ph = img.representations.first?.pixelsHigh ?? Int(img.size.height)
-        guard let b = FaceBBox.parseNormalized(bbox, imageWidth: pw, imageHeight: ph) else { return nil }
-        let pad: CGFloat = 0.20
-        let x = max(0, CGFloat(b.x) - CGFloat(b.w) * pad)
-        let y = max(0, CGFloat(b.y) - CGFloat(b.h) * pad)
-        let w = min(1 - x, CGFloat(b.w) * (1 + 2 * pad))
-        let h = min(1 - y, CGFloat(b.h) * (1 + 2 * pad))
-        let imgSize = img.size
-        let pixelRect = NSRect(
-            x: x * imgSize.width,
-            y: y * imgSize.height,
-            width: w * imgSize.width,
-            height: h * imgSize.height
-        )
-        guard pixelRect.width > 4, pixelRect.height > 4 else { return nil }
-        let out = NSImage(size: NSSize(width: pixelRect.width, height: pixelRect.height))
-        out.lockFocus()
-        defer { out.unlockFocus() }
-        img.draw(
-            in: NSRect(origin: .zero, size: pixelRect.size),
-            from: pixelRect,
-            operation: .copy,
-            fraction: 1.0
-        )
-        return out
+    private func loadThumb() async {
+        guard !Task.isCancelled else { return }
+        thumbnail = nil
+        guard let path = person.representativePath else { return }
+        let url = URL(fileURLWithPath: path)
+        guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360,
+                  revision: person.representativeCacheRevision), !Task.isCancelled else { return }
+        guard let bbox = person.representativeBBox else {
+            thumbnail = full
+            return
+        }
+        let orientation: Int
+        if bbox.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {
+            guard let value = await ThumbnailService.sourceOrientation(for: url), !Task.isCancelled else {
+                if !Task.isCancelled { thumbnail = full }
+                return
+            }
+            orientation = value
+        } else {
+            orientation = 1
+        }
+        guard !Task.isCancelled else { return }
+        thumbnail = ThumbnailService.cropFace(in: full, bbox: bbox, sourceOrientation: orientation) ?? full
     }
+
 }
 
 // MARK: - Person detail sheet

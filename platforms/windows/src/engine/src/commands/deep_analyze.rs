@@ -2,6 +2,7 @@
 //! prefix, or whole library. Streams per-token caption chunks to the UI at
 //! 4 Hz so a 50-tok/sec VLM doesn't flood the sink.
 
+use crate::pipeline::naming_context::{NamingContext, selected_face_model};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -42,59 +43,6 @@ fn batch_eta_seconds(rolling_fps: f64, completed: u64, total: u64) -> Option<f64
     } else {
         None
     }
-}
-
-/// Distinct named people in a file, formatted for display. Skips clusters flagged
-/// `is_unknown` (explicitly opted out). Feeds the Deep Analyze prompt + the
-/// deterministic filename prefix so renames carry the people you've named.
-/// Byte-faithful with the macOS engine's `fetchFaceNames`. (item 3)
-fn fetch_face_names(conn: &rusqlite::Connection, file_id: i64) -> Vec<String> {
-    let mut stmt = match conn.prepare(
-        "SELECT DISTINCT persons.title, persons.first_name, persons.name \
-         FROM persons \
-         INNER JOIN face_prints ON face_prints.person_id = persons.id \
-         WHERE face_prints.file_id = ?1 \
-           AND IFNULL(persons.is_unknown, 0) = 0",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let rows = stmt.query_map([file_id], |row| {
-        let title: Option<String> = row.get(0)?;
-        let first: Option<String> = row.get(1)?;
-        let legacy: Option<String> = row.get(2)?;
-        Ok(format_person_ref(
-            title.as_deref(),
-            first.as_deref(),
-            legacy.as_deref(),
-        ))
-    });
-    let mut names = Vec::new();
-    if let Ok(rows) = rows {
-        for formatted in rows.flatten() {
-            if !formatted.is_empty() {
-                names.push(formatted);
-            }
-        }
-    }
-    names
-}
-
-/// `title + first_name`, else `first_name`, else `title`, else legacy `name`
-/// (each trimmed). Matches the macOS `formatPersonRef`. (item 3)
-fn format_person_ref(title: Option<&str>, first: Option<&str>, legacy: Option<&str>) -> String {
-    let t = title.unwrap_or("").trim();
-    let f = first.unwrap_or("").trim();
-    if !t.is_empty() && !f.is_empty() {
-        return format!("{t} {f}");
-    }
-    if !f.is_empty() {
-        return f.to_string();
-    }
-    if !t.is_empty() {
-        return t.to_string();
-    }
-    legacy.unwrap_or("").trim().to_string()
 }
 
 pub(crate) async fn handle_deep_analyze_file(
@@ -152,9 +100,10 @@ pub(crate) async fn handle_deep_analyze_file(
     let last_emit = Arc::new(Mutex::new(Instant::now().checked_sub(Duration::from_millis(500)).unwrap_or_else(Instant::now)));
     let caption_buf_cb = caption_buf.clone();
     let last_emit_cb = last_emit.clone();
-    let face_names = {
+    let selected_face_fingerprint = selected_face_model();
+    let naming_context = {
         let conn = db.lock();
-        fetch_face_names(&conn, file_id)
+        NamingContext::load(&conn, file_id, selected_face_fingerprint.as_deref()).ok()
     };
     let outcome = analyze_file(
         db,
@@ -163,7 +112,7 @@ pub(crate) async fn handle_deep_analyze_file(
         &model_kind,
         AnalyzeMode::Both,
         cancel.clone(),
-        &face_names,
+        naming_context.as_ref(),
         move |chunk| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
             // can fire 50+/sec and the original tokio::spawn(async {
@@ -516,6 +465,7 @@ async fn run_deep_analyze_batch(
         return;
     }
 
+    let selected_face_fingerprint = selected_face_model();
     for (idx, file_id) in file_ids.iter().copied().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
@@ -649,9 +599,9 @@ async fn run_deep_analyze_batch(
         // per-file CLI. `use_server` flips off below if the server dies. (audit E5)
         let server_active = if use_server { server.as_ref() } else { None };
         let file_started = Instant::now();
-        let face_names = {
+        let naming_context = {
             let conn = db.lock();
-            fetch_face_names(&conn, file_id)
+            NamingContext::load(&conn, file_id, selected_face_fingerprint.as_deref()).ok()
         };
         let outcome = if let Some(srv) = server_active {
             analyze_file_via_server(
@@ -661,7 +611,7 @@ async fn run_deep_analyze_batch(
                 model_kind,
                 mode,
                 cancel.clone(),
-                &face_names,
+                naming_context.as_ref(),
                 on_token,
             )
             .await
@@ -673,7 +623,7 @@ async fn run_deep_analyze_batch(
                 model_kind,
                 mode,
                 cancel.clone(),
-                &face_names,
+                naming_context.as_ref(),
                 on_token,
             )
             .await

@@ -23,6 +23,22 @@ struct TakeWorkbench: View {
     @State private var pendingID = ""
     @State private var pendingAction = ""
     @State private var message = ""
+    @State private var goalJobID: String?
+    @State private var goalEventID: String?
+    @State private var goalRequestedIDs: Set<Int64> = []
+    @State private var previousJobIDs: Set<String> = []
+
+    private var goalJob: CatalogJob? {
+        engine.catalogJobs.first { $0.id == goalJobID && selectedEvent?.id == goalEventID }
+    }
+
+    private func canAnalyzeGoal(_ event: CatalogEvent) -> Bool {
+        let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "webm", "3gp", "mpeg", "mpg", "mts", "m2ts"]
+        return pendingID.isEmpty && goal.trimmingCharacters(in: .whitespacesAndNewlines) == event.goal
+            && selectedIDs == Set(event.fileIDs) && takes.count == event.fileIDs.count
+            && takes.allSatisfy { videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) }
+            && !["queued", "running", "paused"].contains(goalJob?.state ?? "")
+    }
 
     private var uniqueCandidates: [CatalogHit] {
         var seen = Set<Int64>()
@@ -80,6 +96,8 @@ struct TakeWorkbench: View {
                             Button("Save group") { saveGroup() }
                                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedIDs.count < 2)
                             if let event = selectedEvent {
+                                Button("Analyze goal") { analyzeGoal(event) }.disabled(!canAnalyzeGoal(event))
+                                Button("Refresh scores") { load(event.id) }
                                 Button("Undo group edit") { send("undoEventEdit", eventID: event.id) }
                                 Button("Delete group") {
                                     lastDeletedEventID = event.id
@@ -87,6 +105,21 @@ struct TakeWorkbench: View {
                                 }
                             }
                         }
+                        if let job = goalJob {
+                            HStack {
+                                ProgressView(value: job.progress).frame(width: 130)
+                                Text("Goal analysis: " + job.state).font(.caption)
+                                if ["running", "queued"].contains(job.state) {
+                                    Button("Pause") { send("pauseJob", jobID: job.id) }
+                                }
+                                if job.state == "paused" { Button("Resume") { send("resumeJob", jobID: job.id) } }
+                                if ["running", "queued", "paused"].contains(job.state) {
+                                    Button("Cancel") { send("cancelJob", jobID: job.id) }
+                                }
+                            }
+                        }
+                        Text("Save the goal before analyzing a video group. Load a visual model in Deep Analyze first. Automatic scores are drafts from sampled frames; hidden outcomes and unknown identities require review.")
+                            .font(.caption).foregroundStyle(.secondary)
                         Text("Select at least two files from the search results to make a group. Originals are never changed.")
                             .font(.caption).foregroundStyle(.secondary)
                         if !suggestedGroups.isEmpty {
@@ -164,13 +197,15 @@ struct TakeWorkbench: View {
         .tint(Theme.gold)
         .task { send("listEvents") }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
+        .onChange(of: engine.catalogJobs) { _, _ in refreshGoalJob() }
     }
 
     private func outcomeText(_ take: CatalogTake) -> String {
         if take.preferred { return "Preferred by you" }
-        guard let score = take.outcomeScore else { return "Outcome not reviewed" }
-        if score >= 0.5 { return "Goal met · \(take.explanation ?? "")" }
-        return "Goal not met · \(take.explanation ?? "")"
+        guard let score = take.outcomeScore else { return take.modelVersion?.hasPrefix("take-outcome-sequence-v1/") == true ? "Insufficient sampled evidence" : "Outcome not reviewed" }
+        let draft = take.modelVersion?.hasPrefix("take-outcome-sequence-v1/") == true ? "Draft · " : ""
+        if score >= 0.5 { return draft + "Goal met · \(take.explanation ?? "")" }
+        return draft + "Goal not met · \(take.explanation ?? "")"
     }
 
     private func newGroup() {
@@ -191,6 +226,23 @@ struct TakeWorkbench: View {
         send("saveEvent", event: event)
     }
 
+    private func analyzeGoal(_ event: CatalogEvent) {
+        goalEventID = event.id
+        goalRequestedIDs = Set(event.fileIDs)
+        previousJobIDs = Set(engine.catalogJobs.map(\.id))
+        send("enqueueTimeline", fileIDs: event.fileIDs, timelineMode: "moments")
+    }
+
+    private func refreshGoalJob() {
+        guard let job = goalJob else { return }
+        if job.state == "completed", pendingID.isEmpty, let eventID = goalEventID {
+            goalJobID = nil
+            load(eventID)
+        } else if job.state == "failed" {
+            message = job.error ?? "Goal analysis failed. Existing reviewed scores are preserved."
+        }
+    }
+
     private func feedback(_ eventID: String, _ take: CatalogTake, outcome: Double?) {
         send("setTakeFeedback", feedback: CatalogTakeFeedback(eventID: eventID, fileID: take.fileID,
                                                             outcomeScore: outcome, preferred: take.preferred))
@@ -199,9 +251,9 @@ struct TakeWorkbench: View {
     private func load(_ eventID: String) { send("takeGroup", eventID: eventID) }
 
     private func send(_ action: String, query: String? = nil, fileID: Int64? = nil, fileIDs: [Int64]? = nil, event: CatalogEvent? = nil,
-                      eventID: String? = nil, feedback: CatalogTakeFeedback? = nil) {
+                      eventID: String? = nil, feedback: CatalogTakeFeedback? = nil, timelineMode: String? = nil, jobID: String? = nil) {
         let request = CatalogRequest(requestID: UUID().uuidString, action: action, query: query, fileID: fileID,
-                                     fileIDs: fileIDs, event: event, eventID: eventID, takeFeedback: feedback)
+                                     jobID: jobID, fileIDs: fileIDs, timelineMode: timelineMode, event: event, eventID: eventID, takeFeedback: feedback)
         pendingID = request.requestID
         pendingAction = action
         message = "Working…"
@@ -220,6 +272,10 @@ struct TakeWorkbench: View {
         }
         if action == "suggestTakeGroups" {
             suggestedGroups = response.suggestedTakeGroups ?? []
+        }
+        if action == "enqueueTimeline" {
+            goalJobID = response.jobs.first { $0.kind == "timelineSample" && Set($0.fileIDs) == goalRequestedIDs && !previousJobIDs.contains($0.id) }?.id
+            refreshGoalJob()
         }
         if let events = response.events {
             if action == "takeGroup" || action == "saveEvent" || action == "setTakeFeedback" || action == "undoTakeFeedback" {

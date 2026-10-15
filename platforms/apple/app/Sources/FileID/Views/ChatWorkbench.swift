@@ -5,10 +5,14 @@ import FileIDShared
 
 struct ChatWorkbench: View {
     @Bindable var engine: EngineClient
+    var onClose: (() -> Void)? = nil
+    @FocusState private var inputFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @AppStorage("chatConversationID") private var conversationID = ""
-    @State private var input = ""
+    @AppStorage("chatDraft") private var input = ""
     @State private var useModel = true
+    @AppStorage("chatModelKind") private var chatModelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
+    @State private var modelsPresented = false
     @State private var messages: [ChatMessage] = []
     @State private var hits: [CatalogHit] = []
     @State private var message = "Search your local catalog. File changes are available in File Tools."
@@ -19,58 +23,102 @@ struct ChatWorkbench: View {
     @State private var player: AVPlayer?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("FileID Chat").font(.title2.bold())
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Theme.gold)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ask FileID").font(.headline)
+                    Text("Your library assistant").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
-                Button("Delete conversation") { control("clear") }
-                Button("Done") { dismiss() }
-            }
-            HSplitView {
+                Menu {
+                    Button("Delete conversation", role: .destructive) { control("clear") }
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton).fixedSize().help("Conversation options")
+                Button { if let onClose { onClose() } else { dismiss() } } label: {
+                    Image(systemName: "xmark").font(.caption.weight(.semibold))
+                }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
+                    .help("Close chat").accessibilityLabel("Close chat")
+            }.padding(16)
+            Divider().overlay(Color.white.opacity(0.08))
+            ScrollViewReader { scroll in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        ForEach(messages) { entry in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(entry.role == "user" ? "You" : "FileID").font(.caption.bold()).foregroundStyle(entry.role == "user" ? Theme.gold : .secondary)
-                                Text(entry.text).textSelection(.enabled)
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }.padding(10)
-                }.frame(minWidth: 330)
-                List(Array(hits.enumerated()), id: \.offset) { index, hit in
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("[\(index + 1)] \(URL(fileURLWithPath: hit.path).lastPathComponent)").font(.headline).lineLimit(2)
-                        Text(hit.text.isEmpty ? hit.path : hit.text).font(.caption).lineLimit(4)
-                        if hit.kind == "sampledFrame" { Text("Unverified sampled frame").font(.caption).foregroundStyle(.secondary) }
-                        HStack {
-                            Button("Open") {
-                                let url = URL(fileURLWithPath: hit.path)
-                                if FileManager.default.fileExists(atPath: url.path) {
-                                    if let seconds = hit.startSeconds, ["mov", "mp4", "m4v", "mkv", "avi"].contains(url.pathExtension.lowercased()) {
-                                        let next = AVPlayer(url: url)
-                                        next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-                                        player?.pause(); player = next
-                                    } else { NSWorkspace.shared.open(url) }
+                    LazyVStack(alignment: .leading, spacing: 18) {
+                        if messages.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Find the moment.").font(.title3.weight(.semibold))
+                                Text("Ask about files, people, and moments in your local library.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                ForEach(["Find birthday gift opening", "Show videos with chapter markers"], id: \.self) { suggestion in
+                                    Button { input = suggestion; inputFocused = true } label: {
+                                        HStack { Text(suggestion); Spacer(); Image(systemName: "arrow.up.left") }
+                                            .font(.caption).padding(10)
+                                            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                                    }.buttonStyle(.plain)
                                 }
-                                else { message = "This catalog file is offline or unavailable." }
-                            }
-                            if let seconds = hit.startSeconds { Text("\(seconds, specifier: "%.1f") s").font(.caption) }
-                            if let page = hit.page { Text("Page \(page)").font(.caption) }
+                            }.padding(.vertical, 12)
                         }
-                    }
-                }.frame(minWidth: 330)
-            }.frame(minHeight: 360)
-            if let player { NativeVideoPlayer(player: player).frame(height: 180) }
-            Text(message).font(.callout).textSelection(.enabled)
-            HStack {
-                TextField("Find birthday gift opening…", text: $input).textFieldStyle(.roundedBorder).onSubmit(send)
-                Button("Send", action: send).disabled(busy || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
-                if busy { Button("Stop") { control("cancel") }; ProgressView().controlSize(.small) }
+                        ForEach(messages) { entry in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(entry.role == "user" ? "You" : "FileID")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(entry.role == "user" ? Theme.gold : Theme.ai)
+                                Text(entry.text).font(.callout).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }.id(entry.id)
+                        }
+                        if busy { HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Searching your library…").font(.caption).foregroundStyle(.secondary) } }
+                    }.padding(16)
+                }.onChange(of: messages.last?.id) { _, id in
+                    if let id { withAnimation(.easeOut(duration: 0.18)) { scroll.scrollTo(id, anchor: .bottom) } }
+                }
             }
-            Toggle("Summarize evidence with the loaded local model", isOn: $useModel).font(.caption)
-            Text("Keyword retrieval works without a model. Answers are suggestions grounded in catalog evidence; sparse analysis can miss events.").font(.caption).foregroundStyle(.secondary)
-        }.padding(20).frame(minWidth: 800, minHeight: 620).tint(Theme.gold)
+            if let player { NativeVideoPlayer(player: player).frame(height: 170).padding(.horizontal, 12) }
+            if !hits.isEmpty {
+                DisclosureGroup("Evidence (\(hits.count))") {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("[\(index + 1)] \(URL(fileURLWithPath: hit.path).lastPathComponent)")
+                                        .font(.caption.weight(.semibold)).lineLimit(2)
+                                    Text(hit.text).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                                    HStack {
+                                        Button("Open") { open(hit) }.buttonStyle(.borderless)
+                                        if let seconds = hit.startSeconds { Text("\(seconds, specifier: "%.1f") s").font(.caption2).monospacedDigit() }
+                                        if let page = hit.page { Text("Page \(page)").font(.caption2) }
+                                        if hit.kind == "sampledFrame" { Text("Unverified frame").font(.caption2).foregroundStyle(.secondary) }
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }.padding(.top, 8)
+                    }.frame(maxHeight: 180)
+                }.font(.caption.weight(.semibold)).padding(16)
+            }
+            Divider().overlay(Color.white.opacity(0.08))
+            VStack(alignment: .leading, spacing: 10) {
+                Text(message).font(.caption).foregroundStyle(.secondary).lineLimit(3).textSelection(.enabled)
+                HStack(alignment: .center, spacing: 8) {
+                    TextField("Ask about your files…", text: $input).textFieldStyle(.plain)
+                        .focused($inputFocused).onSubmit(send)
+                    if busy {
+                        Button { control("cancel") } label: { Image(systemName: "stop.circle.fill") }
+                            .buttonStyle(.plain).help("Stop response").accessibilityLabel("Stop response")
+                    } else {
+                        Button(action: send) { Image(systemName: "arrow.up.circle.fill").font(.title2).foregroundStyle(Theme.gold) }
+                            .buttonStyle(.plain).help("Send message").accessibilityLabel("Send message")
+                            .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
+                    }
+                }.padding(10).background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                Toggle("Summarize with local AI", isOn: $useModel).font(.caption)
+                Button { modelsPresented = true } label: {
+                    Label(AIModelKind(rawValue: chatModelKind)?.displayName ?? "Choose a model", systemImage: "cpu").font(.caption).lineLimit(1)
+                }.buttonStyle(.plain).foregroundStyle(Theme.ai).help("Choose, download and load a local chat model")
+                Text("Keyword search works without a model.").font(.caption2).foregroundStyle(.secondary)
+            }.padding(16)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).background(.ultraThinMaterial).tint(Theme.gold)
             .onAppear {
+                inputFocused = true
                 if conversationID.isEmpty { conversationID = UUID().uuidString }
                 if let response = engine.latestChatResponse, response.conversationID == conversationID,
                    ["retrieving", "queued", "streaming"].contains(response.status) {
@@ -82,26 +130,44 @@ struct ChatWorkbench: View {
             .onDisappear { player?.pause() }
             .onChange(of: engine.latestChatResponse) { _, response in
                 guard let response, response.conversationID == conversationID, !ignored.contains(response.requestID) else { return }
+                if response.requestID == historyRequest, busy { return }
                 messages = response.messages; message = response.message
                 if response.status != "completed" || !response.hits.isEmpty || activeRequest == response.requestID { hits = response.hits }
                 busy = ["retrieving", "queued", "streaming"].contains(response.status)
                 if busy, response.requestID != historyRequest { activeRequest = response.requestID }
             }
+        .sheet(isPresented: $modelsPresented) {
+            ModelCatalogBrowser(engine: engine, initialSelection: AIModelKind(rawValue: chatModelKind)) { chatModelKind = $0.rawValue }
+        }
+    }
+
+    private func open(_ hit: CatalogHit) {
+        let url = URL(fileURLWithPath: hit.path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            message = "This catalog file is offline or unavailable."
+            return
+        }
+        if let seconds = hit.startSeconds, ["mov", "mp4", "m4v", "mkv", "avi"].contains(url.pathExtension.lowercased()) {
+            let next = AVPlayer(url: url)
+            next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            player?.pause(); player = next
+        } else { NSWorkspace.shared.open(url) }
     }
 
     private func send() {
         guard !busy, !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, input.count <= 2000 else { return }
         activeRequest = UUID().uuidString
-        let request = ChatRequest(requestID: activeRequest, conversationID: conversationID, action: "send", text: input, useModel: useModel)
+        let request = ChatRequest(requestID: activeRequest, conversationID: conversationID, action: "send", text: input, useModel: useModel, modelKind: chatModelKind)
         if engine.send(.chatRequest(request: request)) { input = ""; busy = true }
         else { message = "The engine is unavailable." }
     }
 
     private func control(_ action: String) {
         if action != "history", !activeRequest.isEmpty { ignored.insert(activeRequest); activeRequest = ""; busy = false }
-        if action == "clear" { messages = []; hits = [] }
         let request = ChatRequest(requestID: UUID().uuidString, conversationID: conversationID, action: action)
         if action == "history" { historyRequest = request.requestID }
-        if !engine.send(.chatRequest(request: request)) { message = "The engine is unavailable." }
+        if engine.send(.chatRequest(request: request)) {
+            if action == "clear" { messages = []; hits = [] }
+        } else { message = "The engine is unavailable." }
     }
 }

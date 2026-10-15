@@ -107,7 +107,7 @@ struct WelcomeSheet: View {
                 cancel: { bge.cancel() }
             )
             Menu {
-                ForEach(AIModelKind.allCases, id: \.rawValue) { kind in
+                ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
                     Button {
                         selectedVLM = kind
                     } label: {

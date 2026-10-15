@@ -16,8 +16,9 @@ public struct ChatRequest: Codable, Sendable, Equatable {
     public let action: String
     public let text: String?
     public let useModel: Bool?
-    public init(requestID: String, conversationID: String, action: String, text: String? = nil, useModel: Bool? = nil) {
-        self.requestID = requestID; self.conversationID = conversationID; self.action = action; self.text = text; self.useModel = useModel
+    public let modelKind: String?
+    public init(requestID: String, conversationID: String, action: String, text: String? = nil, useModel: Bool? = nil, modelKind: String? = nil) {
+        self.requestID = requestID; self.conversationID = conversationID; self.action = action; self.text = text; self.useModel = useModel; self.modelKind = modelKind
     }
 }
 

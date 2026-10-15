@@ -9,7 +9,8 @@ public sealed record ChatRequest(
     string ConversationID,
     string Action,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Text = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? UseModel = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? UseModel = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ModelKind = null);
 public sealed record ChatResponse(
     string RequestID,
     string ConversationID,

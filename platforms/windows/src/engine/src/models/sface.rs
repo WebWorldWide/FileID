@@ -36,10 +36,7 @@ impl SFace {
             anyhow::bail!("SFace weights missing at {}", path.display());
         }
         let before = std::fs::metadata(path)?;
-        let size = before.len();
-        anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
-        let digest = crate::util::content_hash::exact_file_sha256(path, size)?;
-        let model_version = format!("sface128-sha256:{}", hex::encode(digest));
+        let model_version = Self::fingerprint(path)?;
         let probe = RuntimeProbe::shared();
         let chain = priority_chain(probe.vendor);
         let builder = Session::builder().context("ORT session builder")?;
@@ -74,6 +71,14 @@ impl SFace {
             "warmup complete"
         );
         Ok(model)
+    }
+
+    pub fn fingerprint(path: impl AsRef<Path>) -> Result<String> {
+        let path = path.as_ref();
+        let size = std::fs::metadata(path)?.len();
+        anyhow::ensure!(size > 0 && size <= 128 * 1024 * 1024, "SFace weight size outside supported bounds");
+        let digest = crate::util::content_hash::exact_file_sha256(path,size)?;
+        Ok(format!("sface128-sha256:{}",hex::encode(digest)))
     }
 
     pub fn model_version(&self) -> &str {
@@ -146,6 +151,21 @@ pub fn default_weights_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprint_is_content_scoped_and_bounded_without_loading_inference() {
+        let path = std::env::temp_dir().join(format!("fileid-sface-fingerprint-{}.onnx",uuid::Uuid::new_v4()));
+        std::fs::write(&path,b"fixture").unwrap();
+        assert_eq!(SFace::fingerprint(&path).unwrap(),"sface128-sha256:f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d");
+        assert_eq!(std::fs::read(&path).unwrap(),b"fixture");
+        std::fs::write(&path,b"changed").unwrap();
+        assert_ne!(SFace::fingerprint(&path).unwrap(),"sface128-sha256:f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d");
+        std::fs::write(&path,[]).unwrap();
+        assert!(SFace::fingerprint(&path).is_err());
+        std::fs::File::create(&path).unwrap().set_len(128*1024*1024+1).unwrap();
+        assert!(SFace::fingerprint(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn l2_normalize_gives_unit_norm() {

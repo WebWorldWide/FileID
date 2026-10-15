@@ -19,6 +19,15 @@ struct FileIDEngineMain {
     static let databaseOpenFailureMessage = "FileID could not open its local library database. Check available disk space and permissions, then relaunch."
 
     static func main() async {
+        if Array(CommandLine.arguments.dropFirst()) == ["--model-catalog-status"] {
+            let entries = ModelCatalog.entries
+            let vision = entries.filter { $0.role == .vision }.count
+            if let data = try? JSONSerialization.data(withJSONObject: ["catalogEntries":entries.count,"vision":vision,"text":entries.count - vision], options:[.sortedKeys]) {
+                print(String(decoding: data, as: UTF8.self))
+            }
+            exit(entries.count >= 200 ? 0 : 1)
+        }
+
         if CommandLine.arguments.dropFirst().first == "--sample-video" {
             exit(await VideoFrameWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }

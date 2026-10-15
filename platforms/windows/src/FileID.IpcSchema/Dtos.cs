@@ -177,7 +177,8 @@ public sealed record FaceClusteringResult(
     uint PersonCount,
     ulong FaceCount,
     ulong UnmatchedFaces,
-    double DurationSeconds);
+    double DurationSeconds,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ulong? DeferredFaces = null);
 
 public sealed record DeepAnalyzeStarting(
     string ModelKind,

@@ -22,6 +22,7 @@ pub(crate) async fn handle_start_scan(
     sink: Sink,
     db: Arc<Mutex<rusqlite::Connection>>,
     scan_state: Arc<Mutex<Option<ScanCoordinator>>>,
+    face_active: Arc<std::sync::atomic::AtomicBool>,
     payload: ipc::StartScanPayload,
 ) {
     tracing::info!(root_path = %platform::redact_path_for_log(&payload.root_path), "[SCAN] handle_start_scan entered");
@@ -37,7 +38,7 @@ pub(crate) async fn handle_start_scan(
     let coord = ScanCoordinator::new();
     let already_running = {
         let mut guard = scan_state.lock();
-        if guard.is_some() {
+        if guard.is_some() || face_active.load(std::sync::atomic::Ordering::Acquire) {
             true
         } else {
             *guard = Some(coord.clone());
@@ -47,7 +48,7 @@ pub(crate) async fn handle_start_scan(
     if already_running {
         sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
             kind: "scan_already_running".into(),
-            message: "A scan is already running. Cancel it before starting a new one.".into(),
+            message: "An AI operation is already running. Wait for it to finish or cancel it before starting a scan.".into(),
             path: None,
             model_kind: None,
         }))))

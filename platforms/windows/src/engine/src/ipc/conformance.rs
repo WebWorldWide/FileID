@@ -484,6 +484,7 @@ fn event_exemplars() -> Vec<EventPayload> {
             face_count: 40,
             unmatched_faces: 2,
             duration_seconds: 1.2,
+            deferred_faces: None,
         })),
         EventPayload::DeepAnalyzeStarting(Wrap::new(DeepAnalyzeStarting {
             model_kind: "qwen2_5_vl_7b".into(),
@@ -653,4 +654,18 @@ fn event_tag_set_matches_schema() {
     let rust_tags: BTreeSet<&str> = exemplars.iter().map(event_tag).collect();
     assert_eq!(rust_tags.len(), exemplars.len(), "duplicate event exemplar tags");
     assert_tag_sets_match(&root, "EventPayload", &rust_tags, SCHEMA_ONLY_EVENT_TAGS);
+}
+
+
+#[test]
+fn face_coverage_retains_legacy_omission_and_current_count() {
+    let legacy = serde_json::json!({"personCount":1,"faceCount":2,"unmatchedFaces":0,"durationSeconds":1.0});
+    let decoded: FaceClusteringResult = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(decoded.deferred_faces,None);
+    assert_eq!(serde_json::to_value(decoded).unwrap(),legacy);
+    let mut current = legacy;
+    current["deferredFaces"] = serde_json::json!(4);
+    let decoded: FaceClusteringResult = serde_json::from_value(current.clone()).unwrap();
+    assert_eq!(decoded.deferred_faces,Some(4));
+    assert_eq!(serde_json::to_value(decoded).unwrap(),current);
 }

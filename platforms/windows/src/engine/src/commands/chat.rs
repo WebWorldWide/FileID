@@ -80,7 +80,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::apply(&conn).unwrap();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'/offline/birthday.mov',1,100,0,'video','mov','Birthday gift opening')",[]).unwrap();
-        let mut request = ChatRequest { request_id:"r".into(),conversation_id:"c".into(),action:"send".into(),text:Some("Please find my birthday videos".into()),use_model:Some(true) };
+        let mut request = ChatRequest { request_id:"r".into(),conversation_id:"c".into(),action:"send".into(),text:Some("Please find my birthday videos".into()),use_model:Some(true),model_kind:None };
         let result = execute(&mut conn,&request).unwrap();
         assert_eq!(result.hits[0].file_id,1);
         assert_eq!(result.messages.len(),2);
@@ -107,7 +107,7 @@ mod tests {
         assert_eq!(super::super::catalog::search(&conn,"",&videos).unwrap().iter().map(|hit|hit.file_id).collect::<Vec<_>>(),vec![1]);
         assert_eq!(super::super::catalog::search(&conn,"home run",&videos).unwrap()[0].evidence_id.as_deref(),Some("v"));
         for text in ["find birthday","only videos"] {
-            let request = ChatRequest {request_id:uuid::Uuid::new_v4().to_string(),conversation_id:"c".into(),action:"send".into(),text:Some(text.into()),use_model:Some(false)};
+            let request = ChatRequest {request_id:uuid::Uuid::new_v4().to_string(),conversation_id:"c".into(),action:"send".into(),text:Some(text.into()),use_model:Some(false),model_kind:None};
             let result = execute(&mut conn,&request).unwrap();
             if text == "only videos" { assert_eq!(result.hits.iter().map(|hit|hit.file_id).collect::<Vec<_>>(),vec![1]); assert!(result.message.contains("birthday")); }
         }
@@ -118,7 +118,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::apply(&conn).unwrap();
         for text in [String::new(),"x".repeat(2001)] {
-            let request = ChatRequest {request_id:"r".into(),conversation_id:"c".into(),action:"send".into(),text:Some(text),use_model:None};
+            let request = ChatRequest {request_id:"r".into(),conversation_id:"c".into(),action:"send".into(),text:Some(text),use_model:None,model_kind:None};
             assert!(execute(&mut conn,&request).is_err());
         }
         assert_eq!(conn.query_row("SELECT COUNT(*) FROM catalog_chat",[],|r|r.get::<_,i64>(0)).unwrap(),0);

@@ -661,12 +661,14 @@ public struct FaceClusteringResult: Codable, Sendable {
     public let faceCount: Int
     public let unmatchedFaces: Int
     public let durationSeconds: Double
+    public let deferredFaces: Int?
 
-    public init(personCount: Int, faceCount: Int, unmatchedFaces: Int, durationSeconds: Double) {
+    public init(personCount: Int, faceCount: Int, unmatchedFaces: Int, durationSeconds: Double, deferredFaces: Int? = nil) {
         self.personCount = personCount
         self.faceCount = faceCount
         self.unmatchedFaces = unmatchedFaces
         self.durationSeconds = durationSeconds
+        self.deferredFaces = deferredFaces
     }
 }
 

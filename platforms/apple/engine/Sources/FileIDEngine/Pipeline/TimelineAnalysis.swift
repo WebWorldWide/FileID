@@ -191,6 +191,9 @@ actor TimelineAnalysis {
                                              duration: duration, signals: signals, model: job.model,
                                              modelVersion: job.version, fileIndex: index, totalFiles: job.ids.count,
                                              jobID: id, database: database, sink: sink)
+                    try await analyzeTakeGoals(fileID: fileID, sourceURL: url, sourceRevision: source.1, duration: duration,
+                                              signals: signals, model: job.model, modelVersion: job.version,
+                                              jobID: id, database: database)
                 }
                 try await transcribeSpeech(
                     fileID: fileID,
@@ -232,6 +235,72 @@ actor TimelineAnalysis {
         scheduled.remove(id)
         let queued = (try? await database.pool.read { db in try String.fetchOne(db, sql: "SELECT state FROM catalog_jobs WHERE id=?", arguments: [id]) }) == "queued"
         if queued { await schedule(id, database: database, sink: sink) }
+    }
+
+    private func analyzeTakeGoals(fileID: Int64, sourceURL: URL, sourceRevision: String, duration: Double,
+                                  signals: [TimelineSignalAnalysis.Signal], model: String, modelVersion: String,
+                                  jobID: String, database: Database) async throws {
+        let goals = try await database.pool.read { db in try CatalogTakeEvidence.goals(db, fileID: fileID) }
+        guard !goals.isEmpty else { return }
+        let windows = TimelineMomentAnalysis.windows(duration: duration, signals: signals)
+        guard !windows.isEmpty else { throw UnreadableVideo() }
+        for goal in goals {
+            let version = CatalogTakeEvidence.version(goal: goal, modelVersion: modelVersion)
+            _ = try await database.pool.write { db in
+                try CatalogTakeEvidence.publish(db, goal: goal, fileID: fileID, sourceRevision: sourceRevision,
+                                                modelVersion: version, windows: windows, jobID: jobID)
+            }
+        }
+        for window in windows {
+            try await requireRunning(jobID, database: database)
+            let pending = try await database.pool.read { db in
+                try goals.filter { goal in
+                    let version = CatalogTakeEvidence.version(goal: goal, modelVersion: modelVersion)
+                    let id = CatalogTakeEvidence.windowID(goal: goal, fileID: fileID, sourceRevision: sourceRevision,
+                                                          modelVersion: version, window: window)
+                    return try CatalogTakeEvidence.current(db, goal: goal, fileID: fileID, sourceRevision: sourceRevision, jobID: jobID)
+                        && !CatalogTakeEvidence.processed(db, id: id, sourceRevision: sourceRevision, modelVersion: version)
+                }
+            }
+            if pending.isEmpty { continue }
+            var frames: [VideoFrameWorker.Sample] = []
+            defer { for frame in frames { try? FileManager.default.removeItem(at: frame.url) } }
+            frames = try await sampleSequence(source: sourceURL, times: window.times)
+            guard frames.allSatisfy({ $0.metadata.revision == sourceRevision }) else { throw SourceChanged() }
+            let distinct = try TimelineMomentAnalysis.distinctFrameIndices(times: frames.map { $0.metadata.seconds }, window: window)
+            let urls = distinct.map { frames[$0].url }
+            let times = distinct.map { frames[$0].metadata.seconds }
+            for goal in pending {
+                try await requireRunning(jobID, database: database)
+                guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
+                      activeModel.rawValue == model else { throw ModelChanged() }
+                let version = CatalogTakeEvidence.version(goal: goal, modelVersion: modelVersion)
+                let began = try await database.pool.write { db in
+                    try CatalogTakeEvidence.begin(db, goal: goal, fileID: fileID, sourceRevision: sourceRevision,
+                                                  modelVersion: version, window: window, jobID: jobID)
+                }
+                if !began { continue }
+                let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    await DeepAnalyze.shared.analyzeTakeOutcomeSequence(imageURLs: urls, times: times, goal: goal.text)
+                }
+                try await requireRunning(jobID, database: database)
+                guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
+                      activeModel.rawValue == model else { throw ModelChanged() }
+                guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
+                let observation = try TakeOutcomeAnalysis.parse(result.description, frameCount: times.count)
+                let evidence = try TakeOutcomeAnalysis.evidence(observation, times: times, window: window)
+                let verified = try await sample(source: sourceURL, seconds: window.times.last!)
+                defer { try? FileManager.default.removeItem(at: verified.url) }
+                guard verified.metadata.revision == sourceRevision else { throw SourceChanged() }
+                _ = try await database.pool.write { db in
+                    guard try CatalogTakeEvidence.persist(db, evidence: evidence, goal: goal, fileID: fileID,
+                                                          sourceRevision: sourceRevision, modelVersion: version,
+                                                          window: window, jobID: jobID) else { return false }
+                    return try CatalogTakeEvidence.publish(db, goal: goal, fileID: fileID, sourceRevision: sourceRevision,
+                                                           modelVersion: version, windows: windows, jobID: jobID)
+                }
+            }
+        }
     }
 
     private func analyzeMoments(fileID: Int64, sourceURL: URL, sourceRevision: String, duration: Double,

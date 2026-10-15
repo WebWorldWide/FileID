@@ -9,6 +9,7 @@ struct CatalogWorkbench: View {
     @State private var query = ""
     @State private var hits: [CatalogHit] = []
     @State private var chapters: [CatalogChapter] = []
+    @State private var cast: [CatalogHit] = []
     @State private var selected: CatalogHit?
     @State private var pendingID = ""
     @State private var pendingAction = ""
@@ -45,6 +46,7 @@ struct CatalogWorkbench: View {
                         editingID = nil
                         title = ""
                         summary = ""
+                        cast = []
                         start = hit.startSeconds ?? 0
                         end = start
                         send(CatalogRequest(requestID: UUID().uuidString, action: "detail", fileID: hit.fileID))
@@ -66,6 +68,24 @@ struct CatalogWorkbench: View {
                         if let selected {
                             Text(URL(fileURLWithPath: selected.path).lastPathComponent).font(.headline)
                             if let player { NativeVideoPlayer(player: player).frame(height: 220) }
+                            if !cast.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("People in this file", systemImage: "person.2").font(.headline).foregroundStyle(Theme.ai)
+                                    ForEach(cast, id: \.evidenceID) { appearance in
+                                        Button {
+                                            if let time = appearance.startSeconds { player?.seek(to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
+                                        } label: {
+                                            HStack {
+                                                Text(appearance.text).font(.callout).lineLimit(2)
+                                                Spacer()
+                                                if let time = appearance.startSeconds { Text("\(time, specifier: "%.1f")s").font(.caption.monospacedDigit()) }
+                                            }
+                                        }.buttonStyle(.plain).disabled(appearance.startSeconds == nil || player == nil)
+                                    }
+                                    Text("Detected identities need review in People. Untimed appearances come from sampled images.")
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }.padding(.vertical, 8)
+                            }
                             HStack {
                                 Button("Open file") { NSWorkspace.shared.open(URL(fileURLWithPath: selected.path)) }
                 if isVideo(selected.path) {
@@ -193,6 +213,7 @@ struct CatalogWorkbench: View {
             if action == "jobs" { engine.applyCatalogJobsSnapshot(response.jobs) }
             if ["detail", "saveChapter", "undoChapterEdit"].contains(action) {
                 chapters = response.chapters
+                if action == "detail" { cast = response.hits.filter { $0.kind == "person" } }
                 if action != "detail" { editingID = nil; title = ""; summary = "" }
             }
             if action == "deleteChapter", let selected {

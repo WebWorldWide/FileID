@@ -728,6 +728,22 @@ pub fn file_ref(path: &Path) -> Option<u64> {
     std::fs::metadata(path).ok().map(|m| m.ino())
 }
 
+#[cfg(unix)]
+pub fn opened_file_ref(file: &std::fs::File) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().ok().map(|metadata| metadata.ino())
+}
+
+#[cfg(windows)]
+pub fn opened_file_ref(file: &std::fs::File) -> Option<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info).ok()?; }
+    Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
+}
+
 // ─── Battery / AC power detection ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,7 +3,22 @@
 // `rawValue` to MLX. Both sides must agree on rawValues used in IPC.
 import Foundation
 
-public enum AIModelKind: String, CaseIterable, Sendable, Codable {
+public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, Codable {
+    public let rawValue: String
+    private init(registeredValue: String) { rawValue = registeredValue }
+    public init?(rawValue: String) {
+        guard Self.favorites.contains(where: { $0.rawValue == rawValue }) || ModelCatalog.entry(forID: rawValue) != nil else { return nil }
+        self.rawValue = rawValue
+    }
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        guard let kind = Self(rawValue: value) else { throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unregistered model")) }
+        self = kind
+    }
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
     // Commercial-clean lineup (2026-05): the non-commercial Qwen2.5-VL-3B
     // (Qwen Research license) was dropped for the Apache-2.0 7B. Gemma /
     // PaliGemma stay (Gemma Terms permit commercial use); Mistral-Small-3.2
@@ -12,15 +27,21 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
     // must match the Windows engine (registry.rs ids / AppSettings
     // AllowedVlmKinds) byte-for-byte so a DB shared across platforms
     // round-trips the "analyzed" state (skipExisting matches, badge lights).
-    case qwen2VL7B       = "qwen2_5_vl_7b"
-    case qwen3VL4B       = "qwen3_vl_4b"
-    case qwen3VL8B       = "qwen3_vl_8b"
-    case qwen35_2B       = "qwen3_5_2b"
-    case gemma3_4B       = "gemma_3_4b"
-    case gemma3_12B      = "gemma_3_12b"
-    case mistralSmall32  = "mistral_small_3_2"
-    case paligemma3B     = "paligemma_3b"
+    public static let qwen2VL7B = Self(registeredValue: "qwen2_5_vl_7b")
+    public static let qwen3VL4B = Self(registeredValue: "qwen3_vl_4b")
+    public static let qwen3VL8B = Self(registeredValue: "qwen3_vl_8b")
+    public static let qwen35_2B = Self(registeredValue: "qwen3_5_2b")
+    public static let gemma3_4B = Self(registeredValue: "gemma_3_4b")
+    public static let gemma3_12B = Self(registeredValue: "gemma_3_12b")
+    public static let mistralSmall32 = Self(registeredValue: "mistral_small_3_2")
+    public static let paligemma3B = Self(registeredValue: "paligemma_3b")
 
+
+    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .paligemma3B]
+    public static var allCases: [Self] { favorites + ModelCatalog.entries.filter { entry in !favorites.contains { $0.sourceRepo == entry.repo } }.map { Self(registeredValue: $0.id) } }
+    public var catalogEntry: CatalogModel? { ModelCatalog.entry(forRepo: sourceRepo) }
+    public var supportsVision: Bool { ModelCatalog.entry(forID: rawValue)?.role != .text }
+    public static var visionModels: [Self] { allCases.filter(\.supportsVision) }
     public var displayName: String {
         switch self {
         case .qwen2VL7B:     return "Qwen2.5-VL 7B (4-bit)"
@@ -31,6 +52,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .gemma3_12B:    return "Gemma 3 12B (QAT 4-bit)"
         case .mistralSmall32: return "Mistral Small 3.2 24B (4-bit)"
         case .paligemma3B:   return "PaliGemma 3B (8-bit)"
+        default: return ModelCatalog.entry(forID: rawValue)?.displayName ?? rawValue
         }
     }
 
@@ -44,6 +66,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .gemma3_12B:    return "High quality. Heavy: ~9 GB resident, ~3× slower."
         case .mistralSmall32: return "Max quality. Apache-2.0; ~14 GB, slowest. 32 GB Macs."
         case .paligemma3B:   return "Strong on grounding, OCR, and visual question answering."
+        default: return ModelCatalog.entry(forID: rawValue)?.summary ?? "Registered model"
         }
     }
 
@@ -57,6 +80,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .gemma3_12B:    return "mlx-community/gemma-3-12b-it-qat-4bit"
         case .mistralSmall32: return "mlx-community/Mistral-Small-3.2-24B-Instruct-2506-4bit"
         case .paligemma3B:   return "mlx-community/paligemma-3b-mix-448-8bit"
+        default: return ModelCatalog.entry(forID: rawValue)!.repo
         }
     }
 
@@ -70,6 +94,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .gemma3_12B:    return 7_500_000_000
         case .mistralSmall32: return 13_500_000_000
         case .paligemma3B:   return 3_300_000_000
+        default: return ModelCatalog.entry(forID: rawValue)!.weightBytes
         }
     }
 
@@ -83,6 +108,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .gemma3_12B:    return 9.0
         case .mistralSmall32: return 16.0
         case .paligemma3B:   return 4.0
+        default: return Double(approxBytes) / 1_073_741_824 * 1.5 + 2
         }
     }
 
@@ -97,6 +123,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         case .gemma3_12B:    return 5.0
         case .mistralSmall32: return 6.0
         case .paligemma3B:   return 1.6
+        default: return 0
         }
     }
 
@@ -104,6 +131,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache-2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma"
+        default: return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][ModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
         }
     }
 
@@ -111,6 +139,7 @@ public enum AIModelKind: String, CaseIterable, Sendable, Codable {
         switch self {
         case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache License 2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma Terms of Use"
+        default: return licensePolicyKey
         }
     }
 

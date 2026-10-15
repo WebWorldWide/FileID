@@ -10,6 +10,7 @@ import FileIDShared
 struct DeepAnalyzeModelPickerCard: View {
     let engine: EngineClient
     @State private var settings = DeepAnalyzeSettings.shared
+    @State private var catalogPresented = false
 
     private var ramGB: Double {
         Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
@@ -22,7 +23,7 @@ struct DeepAnalyzeModelPickerCard: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("AI Models — accuracy tier (Deep Analyze)").font(.headline)
+                    Text("AI models · Deep Analyze").font(.headline)
                     Spacer()
                     Text("Recommended for this Mac (\(Int(ramGB)) GB RAM)")
                         .font(.caption.monospaced()).foregroundStyle(.secondary)
@@ -30,6 +31,11 @@ struct DeepAnalyzeModelPickerCard: View {
                 Text("Reads images and writes captions plus smart filenames.")
                     .font(.callout).foregroundStyle(.secondary)
                 Divider().opacity(0.3)
+                if !AIModelKind.favorites.contains(settings.activeKind) {
+                    Text("Selected model").font(.caption.weight(.semibold)).foregroundStyle(Theme.ai)
+                    modelOptionRow(settings.activeKind)
+                    Divider().opacity(0.3)
+                }
                 ForEach(top3, id: \.rawValue) { kind in
                     modelOptionRow(kind)
                 }
@@ -41,9 +47,12 @@ struct DeepAnalyzeModelPickerCard: View {
                     }
                 }
                 Divider().opacity(0.3)
-                DisclosureGroup("Show all available models") {
+                Button { catalogPresented = true } label: {
+                    Label("Browse \(ModelCatalog.entries.count) catalog models", systemImage: "magnifyingglass")
+                }.buttonStyle(.bordered)
+                DisclosureGroup("More favorites") {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(AIModelKind.allCases.filter { !top3.contains($0) }, id: \.rawValue) { kind in
+                        ForEach(AIModelKind.favorites.filter { !top3.contains($0) }, id: \.rawValue) { kind in
                             modelOptionRow(kind)
                         }
                     }
@@ -51,6 +60,9 @@ struct DeepAnalyzeModelPickerCard: View {
                 }
                 .font(.caption)
             }
+        }
+        .sheet(isPresented: $catalogPresented) {
+            ModelCatalogBrowser(engine: engine, visionOnly: true, initialSelection: settings.activeKind) { settings.activeKind = $0 }
         }
     }
 
@@ -79,7 +91,7 @@ private struct ModelOptionRow: View {
 
     var body: some View {
         Button {
-            guard fits else { return }   // would OOM-kill the engine
+            guard fits else { return }
             onPick()
         } label: {
             HStack(alignment: .top, spacing: 10) {
@@ -91,7 +103,7 @@ private struct ModelOptionRow: View {
                         .foregroundStyle(.secondary)
                     statsLine
                     if !fits {
-                        Text("Disabled — would OOM-kill the engine on a \(Int(ramGB)) GB Mac. Pick a smaller model.")
+                        Text("This model exceeds the memory budget of this Mac. Choose a smaller model.")
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
@@ -105,7 +117,7 @@ private struct ModelOptionRow: View {
         }
         .buttonStyle(.plain)
         .disabled(!fits)
-        .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. With your \(Int(ramGB)) GB Mac and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.")
+        .help(fits ? "" : "This model needs \(String(format: "%.1f", kind.ramBudgetGB)) GB resident RAM. Choose a smaller model for this \(Int(ramGB)) GB Mac. FileID checks remaining memory again before loading.")
     }
 
     @ViewBuilder
@@ -147,9 +159,9 @@ private struct ModelOptionRow: View {
 
     @ViewBuilder
     private var statsLine: some View {
-        Text("≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · \(String(format: "%.1f", kind.secondsPerImage)) s/image · \(kind.licenseName)")
+        Text(kind.secondsPerImage > 0 ? "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · \(String(format: "%.1f", kind.secondsPerImage)) s/image · \(kind.licenseName)" : "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · Speed not measured · \(kind.licenseName)")
             .font(.caption2.monospaced())
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.secondary)
     }
 
     @ViewBuilder

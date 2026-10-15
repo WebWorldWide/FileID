@@ -243,6 +243,7 @@ pub struct DetectedFace {
     pub landmarks: [[f32; 2]; 5],
     pub embedding: Vec<f32>,
     pub embedding_model: Option<String>,
+    pub processing_version: &'static str,
     pub roll: f32,
     pub yaw: f32,
     pub pitch: f32,
@@ -682,7 +683,7 @@ impl Tagger {
     /// Two-stage pipeline:
     ///   1. **Decoder pool**: M dedicated OS threads pull `DiscoveredFile`
     ///      from the discovery channel and run blocking image decode (the
-    ///      CPU-bound part). Decoded `(rgb, w, h)` bytes are pushed into
+    ///      CPU-bound part). Decoded upright RGB bytes are pushed into
     ///      the pre-decoded channel.
     ///   2. **Inference workers**: N async tokio tasks pull `PreDecoded`,
     ///      run face/CLIP/OCR under semaphore-bounded inference, and ship
@@ -889,15 +890,27 @@ impl Tagger {
     }
 }
 
+pub struct DecodedFrame {
+    rgb: Vec<u8>, width: u32, height: u32,
+    source_width: u32, source_height: u32, orientation: u8,
+    processing_version: &'static str,
+}
+
+impl DecodedFrame {
+    fn legacy(rgb: Vec<u8>, width: u32, height: u32) -> Self {
+        Self { rgb,width,height,source_width:width,source_height:height,orientation:1,processing_version:"rust-align112-v1" }
+    }
+}
+
 /// One unit of work between the decoder pool and the inference workers.
-/// `decoded` is `Ok((rgb, w, h))` on a successful image/video decode and
+/// `decoded` holds a decoded frame on a successful image/video decode and
 /// `Err(_)` when the file couldn't be opened or decoded (the worker emits
 /// a failed `TaggedFile` row so the DB still records the file). `None` is
 /// returned for non-image, non-video kinds where the existing pipeline
 /// doesn't attempt a decode.
 pub struct PreDecoded {
     pub file: DiscoveredFile,
-    pub decoded: Option<anyhow::Result<(Vec<u8>, u32, u32)>>,
+    pub decoded: Option<anyhow::Result<DecodedFrame>>,
     /// Phase 4 doc-kind text extraction (txt/md/docx/pptx/xlsx). `None` on
     /// non-doc kinds, online-only files, and extraction failures.
     pub doc_text: Option<String>,
@@ -1120,7 +1133,7 @@ fn run_decoder_thread(
             }
         };
         let frame_bytes = match &decoded {
-            Some(Ok((rgb, _, _))) => rgb.len(),
+            Some(Ok(frame)) => frame.rgb.len(),
             _ => 0,
         };
         let budget_guard = if frame_bytes > 0 {
@@ -1202,7 +1215,7 @@ fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// On Windows, falls back to the WinRT BitmapDecoder (HEIF Image
 /// Extensions) when image-rs fails on a .heic / .heif file. The
 /// fallback is silent on other extensions.
-fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<DecodedFrame> {
     let primary = decode_image_sync_imagecrate(path, bytes);
     if primary.is_ok() {
         return primary;
@@ -1217,7 +1230,7 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
             .unwrap_or_default();
         if ext == "heic" || ext == "heif" {
             match shell::heic::decode(path) {
-                Ok(out) => return Ok(out),
+                Ok((rgb,width,height)) => return Ok(DecodedFrame::legacy(rgb,width,height)),
                 Err(heic_err) => {
                     // Bubble up a user-facing instruction. The string is
                     // matched by the pipeline so the row's `error` field
@@ -1233,8 +1246,8 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
     primary
 }
 
-fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<(Vec<u8>, u32, u32)> {
+fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<DecodedFrame> {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<DecodedFrame> {
         use std::io::Cursor;
         let mmap;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
@@ -1249,26 +1262,23 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
             &mmap
         };
 
-        let peek = image::ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|e| anyhow::anyhow!("guess format (peek): {e}"))?;
-        let (pw, ph) = peek
-            .into_dimensions()
-            .map_err(|e| anyhow::anyhow!("dimensions: {e}"))?;
-        let pixels = pw as u64 * ph as u64;
-        if pixels > MAX_DECODED_PIXELS {
-            anyhow::bail!(
-                "image dimensions {}×{} ({} pixels) exceed cap of {} — refusing to decode",
-                pw, ph, pixels, MAX_DECODED_PIXELS
-            );
-        }
-        let reader = image::ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .map_err(|e| anyhow::anyhow!("guess format (decode): {e}"))?;
-        let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
-        let rgb = dyn_img.to_rgb8();
-        let (w, h) = rgb.dimensions();
-        Ok((rgb.into_raw(), w, h))
+        use image::ImageDecoder;
+        let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(512 * 1024 * 1024);
+        limits.max_image_width = Some(65536);
+        limits.max_image_height = Some(65536);
+        reader.limits(limits);
+        let mut decoder = reader.into_decoder()?;
+        let (source_width,source_height) = decoder.dimensions();
+        anyhow::ensure!(u64::from(source_width)*u64::from(source_height) <= MAX_DECODED_PIXELS,
+            "image dimensions exceed the decoded-pixel cap");
+        let orientation = decoder.orientation()?;
+        let mut image = image::DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
+        let rgb = image.into_rgb8();
+        Ok(DecodedFrame { width:rgb.width(),height:rgb.height(),rgb:rgb.into_raw(),source_width,source_height,
+            orientation:orientation.to_exif(),processing_version:crate::pipeline::face_analysis_cache::PROCESSING_VERSION })
     }));
     match result {
         Ok(r) => r,
@@ -1286,9 +1296,9 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
 }
 
 /// Sync video-keyframe decode. Used by the decoder pool.
-fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<DecodedFrame> {
     let frame = shell::video::keyframe_25pct(path)?;
-    Ok((frame.rgb, frame.width, frame.height))
+    Ok(DecodedFrame::legacy(frame.rgb,frame.width,frame.height))
 }
 
 /// Per-file ML body. Receives a pre-decoded image (or video keyframe)
@@ -1452,7 +1462,7 @@ async fn process_file_predecoded(
     // so the DB still records the file (resume cursor advances, the next
     // scan re-tries it).
     perf_trace("image_decode_start", &file.path, 0.0);
-    let image_source: Option<(Vec<u8>, u32, u32)> = match decoded {
+    let image_source: Option<DecodedFrame> = match decoded {
         Some(Ok(t)) => Some(t),
         Some(Err(err)) => {
             tracing::warn!(?err, path = %crate::platform::redact_path_for_log(&file.path), "image decode failed");
@@ -1464,9 +1474,10 @@ async fn process_file_predecoded(
     };
     perf_trace("image_decode_done", &file.path, started.elapsed().as_secs_f64() * 1000.0);
 
-    if let Some((rgb, w, h)) = image_source {
-        tagged.image_width = w;
-        tagged.image_height = h;
+    if let Some(frame) = image_source {
+        let DecodedFrame { rgb,width:w,height:h,source_width,source_height,orientation,processing_version } = frame;
+        tagged.image_width = source_width;
+        tagged.image_height = source_height;
         {
             let megapixels = (w as f64 * h as f64) / 1_000_000.0;
             let res_score = (megapixels / 50.0).min(1.0);
@@ -1548,11 +1559,14 @@ async fn process_file_predecoded(
                                                 } else {
                                                     0.0
                                                 };
+                                                let Some(source_bbox) = crate::face_bbox::NormalizedFaceBBox::source_pixels_from_upright(
+                                                    bbox_xywh,source_width,source_height,orientation) else { continue; };
                                                 tagged.faces.push(DetectedFace {
-                                                    bbox: bbox_xywh,
+                                                    bbox: source_bbox,
                                                     landmarks: det.landmarks,
                                                     embedding: emb,
                                                     embedding_model: Some(embedding_model),
+                                                    processing_version,
                                                     roll: pose.roll,
                                                     yaw: pose.yaw,
                                                     pitch: pose.pitch,
@@ -2297,6 +2311,7 @@ mod tests {
             landmarks: [[0.0; 2]; 5],
             embedding: vec![0.0; 512],
             embedding_model: None,
+            processing_version: "rust-align112-v1",
             roll: 0.0,
             yaw: 0.0,
             pitch: 0.0,
@@ -2566,5 +2581,53 @@ mod tests {
         let size_score: f64 = (5_000_000.0_f64 / (100.0 * 1024.0 * 1024.0)).min(1.0);
         let expected = size_score * 0.5 + res_score * 0.5;
         assert!(expected > 0.0 && expected < 1.0, "score should be in (0, 1)");
+    }
+}
+
+
+#[cfg(test)]
+mod upright_scan_tests {
+    use super::*;
+
+    #[test]
+    fn generated_jpegs_detect_upright_and_keep_raw_bbox_provenance() {
+        let mut raw = image::RgbImage::from_pixel(84,64,image::Rgb([0,0,0]));
+        for y in 8..24 { for x in 8..32 { raw.put_pixel(x,y,image::Rgb([255,0,0])); } }
+        let mut encoded = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded,100).encode_image(&raw).unwrap();
+        let expected = [[8.0,8.0,24.0,16.0],[52.0,8.0,24.0,16.0],[52.0,40.0,24.0,16.0],[8.0,40.0,24.0,16.0],
+            [8.0,8.0,16.0,24.0],[40.0,8.0,16.0,24.0],[40.0,52.0,16.0,24.0],[8.0,52.0,16.0,24.0]];
+        let path = std::env::temp_dir().join(format!("fileid-upright-scan-{}.jpg",uuid::Uuid::new_v4()));
+        for orientation in 1_u8..=8 {
+            let mut metadata = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+            metadata.extend_from_slice(&[orientation,0,0,0,0,0,0,0]);
+            let mut bytes = vec![0xff,0xd8,0xff,0xe1];
+            bytes.extend_from_slice(&u16::try_from(metadata.len()+2).unwrap().to_be_bytes());
+            bytes.extend_from_slice(&metadata); bytes.extend_from_slice(&encoded[2..]);
+            std::fs::write(&path,&bytes).unwrap();
+            let frame = decode_image_sync(&path,if orientation==1 { None } else { Some(&bytes) }).unwrap();
+            assert_eq!((frame.source_width,frame.source_height),(84,64));
+            assert_eq!((frame.width,frame.height),if orientation>=5 { (64,84) } else { (84,64) });
+            assert_eq!(frame.orientation,orientation);
+            assert_eq!(frame.processing_version,crate::pipeline::face_analysis_cache::PROCESSING_VERSION);
+            let bbox = expected[usize::from(orientation-1)];
+            let center = (bbox[0]+bbox[2]/2.0,bbox[1]+bbox[3]/2.0);
+            let offset = ((center.1 as usize)*frame.width as usize+center.0 as usize)*3;
+            assert!(frame.rgb[offset]>240 && frame.rgb[offset+1]<10 && frame.rgb[offset+2]<10);
+            let source = crate::face_bbox::NormalizedFaceBBox::source_pixels_from_upright(bbox,84,64,orientation).unwrap();
+            for (actual,expected) in source.into_iter().zip([8.0,8.0,24.0,16.0]) { assert!((actual-expected).abs()<0.0001); }
+            assert_eq!(std::fs::read(&path).unwrap(),bytes);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unverified_platform_decoders_keep_the_legacy_processing_space() {
+        let frame = DecodedFrame::legacy(vec![0;12],2,2);
+        assert_eq!(frame.processing_version,"rust-align112-v1");
+        assert_eq!((frame.source_width,frame.source_height,frame.orientation),(2,2,1));
+        assert!(crate::face_bbox::NormalizedFaceBBox::source_pixels_from_upright([0.0,0.0,1.0,1.0],0,64,6).is_none());
+        assert!(crate::face_bbox::NormalizedFaceBBox::source_pixels_from_upright([0.0,0.0,f32::NAN,1.0],84,64,1).is_none());
+        assert!(crate::face_bbox::NormalizedFaceBBox::source_pixels_from_upright([0.0,0.0,1.0,1.0],84,64,9).is_none());
     }
 }

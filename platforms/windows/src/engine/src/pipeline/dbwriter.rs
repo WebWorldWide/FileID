@@ -506,7 +506,7 @@ impl DbWriter {
                                 face.quality as f64,
                                 face.excluded as i64,
                                 model,
-                                model.map(|_| "rust-align112-v1"),
+                                model.map(|_| face.processing_version),
                                 model.map(|_| source_revision.as_str()),
                             ])
                             .with_context(|| format!("face insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
@@ -1832,6 +1832,7 @@ mod tests {
             landmarks: [[0.0; 2]; 5],
             embedding,
             embedding_model: Some("fixture-weight-hash".to_owned()),
+            processing_version: crate::pipeline::face_analysis_cache::PROCESSING_VERSION,
             roll: 0.0, yaw: 0.0, pitch: 0.0, quality: 0.9,
             excluded: false, crop_rgb_112: None,
         });
@@ -1840,7 +1841,7 @@ mod tests {
         writer.flush(&mut buffer, &mut 0, &mut 0, 0).unwrap();
         let db = conn.lock();
         let recorded: (String,String,String) = db.query_row("SELECT embedding_model,processing_version,source_revision FROM face_prints", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
-        assert_eq!(recorded, ("fixture-weight-hash".to_owned(),"rust-align112-v1".to_owned(),expected_revision));
+        assert_eq!(recorded, ("fixture-weight-hash".to_owned(),crate::pipeline::face_analysis_cache::PROCESSING_VERSION.to_owned(),expected_revision));
         let evidence: (i64,f64,i64) = db.query_row("SELECT e.dimension,o.confidence,o.stale FROM catalog_embeddings e JOIN catalog_observations o ON o.id=e.entity_id", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
         assert_eq!(evidence, (128,0.0,0));
         db.execute("UPDATE face_prints SET excluded=1", []).unwrap();

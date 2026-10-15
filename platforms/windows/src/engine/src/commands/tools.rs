@@ -56,6 +56,8 @@ fn supports(recipe: &ToolRecipe) -> bool {
     (1..=8192).contains(&recipe.max_dimension) &&
     (recipe.allow_upscale != Some(true) || recipe.kind=="photo") &&
     recipe.video_aspect_ratio.is_none() &&
+    recipe.video_framing.is_none() &&
+    recipe.video_stabilization.is_none() &&
     ((recipe.kind=="photo" && ["png","jpeg","tiff"].contains(&recipe.format.as_str())) ||
      (recipe.kind=="chapters" && ["json","vtt"].contains(&recipe.format.as_str())))
 }
@@ -284,7 +286,7 @@ mod tests {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?1,1,100,0,'image','png')",[source.to_str().unwrap()]).unwrap();
             Self{root,source,conn}
         }
- fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16,allow_upscale:None,video_aspect_ratio:None}),operation_id:None,destination_bookmark:None}}
+ fn request(&self,format:&str)->ToolRequest {ToolRequest{request_id:"p".into(),action:"preview".into(),file_ids:Some(vec![1]),destination:Some(self.root.to_string_lossy().into_owned()),recipe:Some(ToolRecipe{kind:"photo".into(),format:format.into(),max_dimension:16,allow_upscale:None,video_aspect_ratio:None,video_framing:None,video_stabilization:None}),operation_id:None,destination_bookmark:None}}
     }
     impl Drop for Fixture {fn drop(&mut self){let _=fs::remove_dir_all(&self.root);}}
  fn action(id:Option<String>,action:&str)->ToolRequest {ToolRequest{request_id:action.into(),action:action.into(),operation_id:id,file_ids:None,destination:None,recipe:None,destination_bookmark:None}}
@@ -317,15 +319,34 @@ mod tests {
         let recipe:ToolRecipe=serde_json::from_str(r#"{"kind":"photo","format":"png","maxDimension":64}"#).unwrap();
         assert_eq!(recipe.allow_upscale,None);
         assert_eq!(recipe.video_aspect_ratio,None);
+        assert_eq!(recipe.video_framing,None);
+        assert_eq!(recipe.video_stabilization,None);
         assert!(serde_json::to_value(&recipe).unwrap().get("allowUpscale").is_none());
         assert!(serde_json::to_value(&recipe).unwrap().get("videoAspectRatio").is_none());
+        assert!(serde_json::to_value(&recipe).unwrap().get("videoFraming").is_none());
+        assert!(serde_json::to_value(&recipe).unwrap().get("videoStabilization").is_none());
         assert!(serde_json::from_str::<ToolRecipe>(r#"{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":1}"#).is_err());
         for (kind,format,dimension) in [("chapters","json",64),("video","mp4",1920),("photo","png",8193)] {
-            assert!(!supports(&ToolRecipe{kind:kind.into(),format:format.into(),max_dimension:dimension,allow_upscale:Some(true),video_aspect_ratio:None}));
+            assert!(!supports(&ToolRecipe{kind:kind.into(),format:format.into(),max_dimension:dimension,allow_upscale:Some(true),video_aspect_ratio:None,video_framing:None,video_stabilization:None}));
         }
         let framed:ToolRecipe=serde_json::from_str(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":"9:16"}"#).unwrap();
         assert_eq!(framed.video_aspect_ratio.as_deref(),Some("9:16"));
         assert!(!supports(&framed));
+        let automatic:ToolRecipe=serde_json::from_str(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":"9:16","videoFraming":"auto"}"#).unwrap();
+        assert_eq!(automatic.video_framing.as_deref(),Some("auto"));
+        assert!(!supports(&automatic));
+        let unsupported_photo:ToolRecipe=serde_json::from_str(r#"{"kind":"photo","format":"png","maxDimension":64,"videoFraming":"fit"}"#).unwrap();
+        assert!(!supports(&unsupported_photo));
+        assert!(serde_json::from_str::<ToolRecipe>(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoFraming":1}"#).is_err());
+        for enabled in [false,true] {
+            let mut stabilized:ToolRecipe=serde_json::from_str(r#"{"kind":"video","format":"mp4","maxDimension":1920}"#).unwrap();
+            stabilized.video_stabilization=Some(enabled);
+            let wire=serde_json::to_value(&stabilized).unwrap();
+            assert_eq!(wire["videoStabilization"],enabled);
+            assert_eq!(serde_json::from_value::<ToolRecipe>(wire).unwrap().video_stabilization,Some(enabled));
+            assert!(!supports(&stabilized));
+        }
+        assert!(serde_json::from_str::<ToolRecipe>(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoStabilization":1}"#).is_err());
         assert!(serde_json::from_str::<ToolRecipe>(r#"{"kind":"video","format":"mp4","maxDimension":1920,"videoAspectRatio":1}"#).is_err());
     }
     #[test]
@@ -370,7 +391,7 @@ mod tests {
         let fixture=Fixture::new();let stage=fixture.root.join(format!(".FileIDExport-{}.part",uuid::Uuid::new_v4()));let unrelated=fixture.root.join(".FileIDExport-user.part");
         fs::write(&stage,b"Partial output").unwrap();fs::write(&unrelated,b"Unrelated").unwrap();let original=hash(&fixture.source).unwrap();
         let item=Item{output:ToolOutput{file_id:1,source_path:fixture.source.to_string_lossy().into_owned(),output_path:fixture.root.join("Export.png").to_string_lossy().into_owned(),state:"pending".into(),message:String::new()},source_hash:original.clone(),chapters:vec![]};
-        let plan=Plan{version:1,r#type:"export".into(),recipe:ToolRecipe{kind:"photo".into(),format:"png".into(),max_dimension:16,allow_upscale:None,video_aspect_ratio:None},items:vec![item],stage_paths:Some(vec![stage.to_string_lossy().into_owned(),unrelated.to_string_lossy().into_owned()])};
+        let plan=Plan{version:1,r#type:"export".into(),recipe:ToolRecipe{kind:"photo".into(),format:"png".into(),max_dimension:16,allow_upscale:None,video_aspect_ratio:None,video_framing:None,video_stabilization:None},items:vec![item],stage_paths:Some(vec![stage.to_string_lossy().into_owned(),unrelated.to_string_lossy().into_owned()])};
         fixture.conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES('interrupted',?1,'[]','running',0)",[serde_json::to_string(&plan).unwrap()]).unwrap();
         recover(&fixture.conn).unwrap();let deadline=std::time::Instant::now()+std::time::Duration::from_secs(6);
         while stage.exists() && std::time::Instant::now()<deadline {std::thread::sleep(std::time::Duration::from_millis(50));}

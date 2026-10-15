@@ -13,6 +13,7 @@
 pub mod commands;
 pub mod coordinator;
 pub mod db;
+pub mod face_bbox;
 pub mod downloader;
 pub mod ipc;
 pub mod job_queue;

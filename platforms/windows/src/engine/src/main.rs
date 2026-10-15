@@ -13,6 +13,7 @@
 
 mod commands;
 mod coordinator;
+mod face_bbox;
 mod db;
 mod downloader;
 mod ipc;
@@ -86,6 +87,9 @@ fn main() -> Result<()> {
                 | LOAD_LIBRARY_SEARCH_USER_DIRS,
         ));
     }
+
+    #[cfg(target_os = "macos")]
+    let _ = ort_runtime::pin_dylib_path();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -194,7 +198,10 @@ async fn async_main() -> Result<()> {
     // applyRestructure, scan_session) can share the single writer.
     let db_path = paths::db_path()?;
     let db_conn: Option<std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>> =
-        match db::open_writer(&db_path) {
+        match db::open_writer(&db_path).and_then(|conn| {
+            pipeline::face_crop_publication::recover(&conn,&paths::faces_dir()?)?;
+            Ok(conn)
+        }) {
             Ok(c) => Some(std::sync::Arc::new(parking_lot::Mutex::new(c))),
             Err(err) => {
                 tracing::error!(?err, ?db_path, "failed to open database");
@@ -342,6 +349,8 @@ async fn async_main() -> Result<()> {
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let dispatch_face_cluster_active = face_cluster_active.clone();
+    let face_cluster_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dispatch_face_cluster_cancel = face_cluster_cancel.clone();
     // Restructure-apply cancel flag (F-C6-013 wiring). CancelScan sets it; the
     // ApplyRestructure arm resets it to false before each apply so a stale
     // cancel can't pre-stop a fresh apply; the apply loop polls it per move.
@@ -415,6 +424,7 @@ async fn async_main() -> Result<()> {
                                 &dispatch_deep_cancel,
                                 &dispatch_deep_active,
                                 &dispatch_face_cluster_active,
+                            &dispatch_face_cluster_cancel,
                                 &dispatch_restructure_apply_cancel,
                                 &dispatch_jobs,
                                 &dispatch_http_client,
@@ -451,6 +461,7 @@ async fn async_main() -> Result<()> {
 
     // Wait for shutdown signal (from either source).
     main_shutdown.await;
+    face_cluster_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // Checkpoint before exit so the next opener doesn't need the .wal/.shm
     // sidecars. On failure, surface to the sink before teardown so the
@@ -664,7 +675,7 @@ impl Drop for FaceClusterActiveGuard {
 async fn emit_face_clustering_busy(sink: &Sink) {
     sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
         kind: "face_clustering_busy".into(),
-        message: "Face clustering is already running.".into(),
+        message: "An AI operation is already running. Wait for it to finish or cancel it before grouping People.".into(),
         path: None,
         model_kind: None,
     }))))
@@ -691,6 +702,7 @@ async fn handle_line(
     deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
     deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
     face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
+    face_cluster_cancel: &Arc<std::sync::atomic::AtomicBool>,
     restructure_apply_cancel: &Arc<std::sync::atomic::AtomicBool>,
     jobs: &job_queue::JobQueue,
     http_client: &Arc<reqwest::Client>,
@@ -762,6 +774,7 @@ async fn handle_line(
             commands::hardware::handle_verify_cuda_pack(sink).await;
         }
         CommandPayload::Shutdown(_) => {
+            face_cluster_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("shutdown command received");
             shutdown.notify_waiters();
         }
@@ -837,9 +850,10 @@ async fn handle_line(
             let sink_c = sink.clone();
             let db_c = db.clone();
             let state_c = scan_state.clone();
+            let faces_c = face_cluster_active.clone();
             tokio::spawn(async move {
                 let _track = track;
-                commands::scan::handle_start_scan(sink_c, db_c, state_c, payload).await;
+                commands::scan::handle_start_scan(sink_c, db_c, state_c, faces_c, payload).await;
             });
         }
         CommandPayload::PauseScan(_) => {
@@ -855,6 +869,7 @@ async fn handle_line(
             }
         }
         CommandPayload::CancelScan(_) => {
+            face_cluster_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(coord) = scan_state.lock().as_ref() {
                 coord.request_cancel();
                 tracing::info!("scan cancel requested");
@@ -976,6 +991,10 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeFile").await;
                 return;
             };
+            if face_cluster_active.load(std::sync::atomic::Ordering::Acquire) {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
             if deep_analyze_active
                 .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
                 .is_err()
@@ -1000,6 +1019,10 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeFolder").await;
                 return;
             };
+            if face_cluster_active.load(std::sync::atomic::Ordering::Acquire) {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
             if deep_analyze_active
                 .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
                 .is_err()
@@ -1024,6 +1047,10 @@ async fn handle_line(
                 emit_db_unavailable(sink, "deepAnalyzeAll").await;
                 return;
             };
+            if face_cluster_active.load(std::sync::atomic::Ordering::Acquire) {
+                emit_deep_analyze_busy(sink).await;
+                return;
+            }
             if deep_analyze_active
                 .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
                 .is_err()
@@ -1077,26 +1104,26 @@ async fn handle_line(
             // Single-flight: the handler now drops the writer lock during
             // cluster()+consolidate(), so two overlapping runs could race the
             // persist transaction. Bounce a second request rather than spawn it.
-            if face_cluster_active
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::Acquire,
-                    std::sync::atomic::Ordering::Relaxed,
-                )
-                .is_err()
-            {
+            let busy = {
+                let scan = scan_state.lock();
+                scan.is_some() || deep_analyze_active.load(std::sync::atomic::Ordering::Acquire)
+                    || face_cluster_active.compare_exchange(false, true, std::sync::atomic::Ordering::Acquire,
+                        std::sync::atomic::Ordering::Relaxed).is_err()
+            };
+            if busy {
                 emit_face_clustering_busy(sink).await;
                 return;
             }
+            face_cluster_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
             let guard = FaceClusterActiveGuard(face_cluster_active.clone());
+            let cancel = face_cluster_cancel.clone();
             let track = JobTrackGuard::start(jobs, JobCategory::FaceCluster, "Cluster faces");
             let sink_c = sink.clone();
             let db_c = db.clone();
             tokio::spawn(async move {
                 let _guard = guard;
                 let _track = track;
-                commands::face_clustering::handle_run_face_clustering(sink_c, db_c).await;
+                commands::face_clustering::handle_run_face_clustering(sink_c, db_c, cancel).await;
             });
         }
         CommandPayload::WipeLibrary(_) => {

@@ -54,6 +54,23 @@ struct LocalVLMDownloaderTests {
                 useLatest: false, progressHandler: { _ in })
         }
     }
+    @Test("Offline catalog attestations require audited weight hashes")
+    func catalogAttestationRejectsSubstitutedWeights() throws {
+        let entry = try #require(ModelCatalog.entries.first { entry in !ModelManifest.vlmRepos.contains { $0.repo == entry.repo } })
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fileid-attestation-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let manifest = VLMDownloader.VerifiedSentinel(version:1, revision:entry.revision, files:entry.files.map {
+            VLMDownloader.VerifiedSentinel.File(path:$0.path,size:$0.size,sha256:$0.sha256)
+        })
+        try JSONEncoder().encode(manifest).write(to:url)
+        #expect(VLMDownloader.catalogSentinelIsValid(url,repo:entry.repo))
+        let altered = VLMDownloader.VerifiedSentinel(version:1,revision:entry.revision,files:entry.files.map {
+            VLMDownloader.VerifiedSentinel.File(path:$0.path,size:$0.size,sha256:String(repeating:"0",count:64))
+        })
+        try JSONEncoder().encode(altered).write(to:url)
+        #expect(!VLMDownloader.catalogSentinelIsValid(url,repo:entry.repo))
+    }
+
 }
 
 @Suite("Deep Analyze pure-logic fixes (C3-DA)")

@@ -8,9 +8,16 @@ enum FaceAnalysisCache {
         return normalized(data)
     }
 
-    static var processingVersion: String { FaceAlign.enabled ? "macos-landmark-overlap-v3-orientation" : "macos-bbox-crop-v3-orientation" }
+    private static let sourceRevision = DatabaseFunction("fileid_face_source_revision", argumentCount: 2, pure: true) { arguments in
+        guard let size = Int64.fromDatabaseValue(arguments[0]),
+              let modified = Double.fromDatabaseValue(arguments[1]), modified.isFinite
+        else { return nil as String? }
+        return FaceCacheProvenance.sourceRevision(size: size, modified: modified)
+    }
 
-    struct Input: Sendable {
+    static var processingVersion: String { FaceCacheProvenance.processingVersion }
+
+    struct Input: Equatable, Sendable {
         let id: Int64
         let fileID: Int64
         let bbox: String
@@ -18,7 +25,7 @@ enum FaceAnalysisCache {
         let size: Int64
         let modified: Double?
         let previousProcessingVersion: String?
-        var revision: String { "\(size):\(modified.map { String($0.bitPattern) } ?? "unknown")" }
+        var revision: String { FaceCacheProvenance.sourceRevision(size: size, modified: modified) }
 
         func currentIdentity() -> ExactFileDigest.CacheKey? {
             let url = URL(fileURLWithPath: path)
@@ -31,13 +38,17 @@ enum FaceAnalysisCache {
 
     static func pending(_ db: GRDB.Database, modelVersion: String, limit: Int, afterFaceID: Int64 = 0, now: Double = Date().timeIntervalSince1970) throws -> [Input] {
         db.add(function: vectorValid)
+        db.add(function: sourceRevision)
         return try Row.fetchAll(db, sql: """
             SELECT fp.id,fp.file_id,fp.bbox,f.path_text,f.size_bytes,f.modified_at,fp.processing_version
             FROM face_prints fp JOIN files f ON f.id=fp.file_id
             LEFT JOIN catalog_revisions r ON r.file_id=f.id
             WHERE f.failed=0 AND fp.excluded=0 AND fp.id>? AND (LENGTH(COALESCE(fp.arcface_embedding,X''))!=512 OR fp.embedding_model IS NULL OR fp.embedding_model!=?
                OR fp.processing_version IS NULL OR fp.processing_version!=?
-               OR fp.source_revision IS NULL OR r.revision IS NULL OR fp.source_revision!=r.revision OR fileid_face_vector_valid(fp.arcface_embedding)=0)
+               OR fp.source_revision IS NULL OR r.revision IS NULL OR fp.source_revision!=r.revision
+              OR fileid_face_source_revision(f.size_bytes,f.modified_at) IS NULL
+              OR fp.source_revision!=fileid_face_source_revision(f.size_bytes,f.modified_at)
+              OR fileid_face_vector_valid(fp.arcface_embedding)=0)
             AND NOT EXISTS (
                 SELECT 1 FROM face_refresh_failures q WHERE q.face_id=fp.id
                 AND q.embedding_model=? AND q.processing_version=? AND q.source_path=f.path_text
@@ -98,14 +109,6 @@ enum FaceAnalysisCache {
     }
 
     static func normalized(_ data: Data) -> Bool {
-        guard data.count == 128 * 4 else { return false }
-        var sum = 0.0
-        for offset in stride(from: 0, to: data.count, by: 4) {
-            let bits = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self).littleEndian }
-            let value = Float(bitPattern: bits)
-            guard value.isFinite else { return false }
-            sum += Double(value) * Double(value)
-        }
-        return (0.95...1.05).contains(sum)
+        FaceCacheProvenance.normalizedEmbedding(data)
     }
 }

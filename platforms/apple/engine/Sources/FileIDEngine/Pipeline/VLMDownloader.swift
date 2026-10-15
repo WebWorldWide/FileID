@@ -56,7 +56,10 @@ public actor VLMDownloader {
         documentsHF: URL,
         progress: @escaping @Sendable (Double, Int64, Int64) -> Void
     ) async throws {
-        let revision = ModelManifest.vlmPin(forRepo: repo)?.revision ?? "main"
+        guard let pin = ModelManifest.vlmPin(forRepo: repo) else {
+            throw NSError(domain: "FileID.ModelCatalog", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unregistered model repository."])
+        }
+        let revision = pin.revision
         let modelDir = documentsHF
             .appending(component: "models")
             .appending(component: repo)
@@ -75,7 +78,8 @@ public actor VLMDownloader {
         // offline — no HF tree round-trip. Revalidating the manifest catches
         // missing and same-size-corrupt files before the offline model load.
         if sentinelValid,
-           await Self.verifiedSentinelIsValid(verifiedSentinel, modelDir: modelDir, revision: revision) {
+           await Self.verifiedSentinelIsValid(verifiedSentinel, modelDir: modelDir, revision: revision),
+           Self.catalogSentinelIsValid(verifiedSentinel, repo: repo) {
             progress(1.0, 0, 0)
             return
         }
@@ -89,6 +93,12 @@ public actor VLMDownloader {
         }
 
         let files = try await listRepoFiles(repo: repo, revision: revision)
+        if let entry = ModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) {
+            let weights = files.filter { $0.path.hasSuffix(".safetensors") }
+            guard weights.count == entry.files.count, entry.files.allSatisfy({ expected in
+                weights.contains { $0.path == expected.path && $0.sha256 == expected.sha256 && $0.size == expected.size }
+            }) else { throw NSError(domain: "FileID.ModelCatalog", code: 2, userInfo: [NSLocalizedDescriptionKey: "Model weights do not match the audited catalog."]) }
+        }
         let downloadable = files.filter { Self.shouldDownload($0) }
         guard !downloadable.isEmpty else { throw VLMDownloaderError.noFilesListed }
 
@@ -233,6 +243,17 @@ public actor VLMDownloader {
         let version: Int
         let revision: String
         let files: [File]
+    }
+
+    static func catalogSentinelIsValid(_ url: URL, repo: String) -> Bool {
+        guard let entry = ModelCatalog.entry(forRepo: repo), !ModelManifest.vlmRepos.contains(where: { $0.repo == repo }) else { return true }
+        guard url.isFileURL, let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let data = try? handle.readToEnd(), let manifest = try? JSONDecoder().decode(VerifiedSentinel.self, from: data), manifest.revision == entry.revision else { return false }
+        let weights = manifest.files.filter { $0.path.hasSuffix(".safetensors") }
+        return weights.count == entry.files.count && entry.files.allSatisfy { expected in
+            weights.contains { $0.path == expected.path && $0.sha256 == expected.sha256 && $0.size == expected.size }
+        }
     }
 
     static func writeVerifiedSentinel(

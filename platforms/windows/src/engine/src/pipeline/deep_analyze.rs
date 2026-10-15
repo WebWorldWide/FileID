@@ -1,3 +1,4 @@
+use crate::pipeline::naming_context::NamingContext;
 // Deep Analyze — VLM-powered captioning + smart-rename.
 //
 // Pipeline:
@@ -66,12 +67,21 @@ pub async fn analyze_file(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    face_names: &[String],
+    naming_context: Option<&NamingContext>,
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm::{self, CaptionRequest};
 
     let started = std::time::Instant::now();
+    let context = naming_context.ok_or_else(|| anyhow::anyhow!("Naming context unavailable"))?;
+    anyhow::ensure!(context.file_id == file_id, "Naming context belongs to another file");
+    let face_names = &context.subjects;
+    if mode == AnalyzeMode::RenameOnly && context.label.is_some() {
+        anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "cancelled");
+        let proposed_name = context.proposed_name();
+        persist_vlm_results(&db.lock(), file_id, model_kind, mode, None, proposed_name.as_deref(), &[], context)?;
+        return Ok(AnalyzeOutcome { file_id, description: None, proposed_name, model: model_kind.to_string(), elapsed_ms: started.elapsed().as_millis() as u64 });
+    }
 
     // Resolve weights for this model_kind.
     let (gguf, mmproj) = vlm::find_weights(model_kind)
@@ -122,7 +132,9 @@ pub async fn analyze_file(
         let result = vlm::caption(runner, &req, cancel.clone(), |_| {}).await?;
         tags = parse_vlm_tags(&result.text);
     }
-    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) && context.label.is_some() {
+        proposed_name = context.proposed_name();
+    } else if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -150,6 +162,7 @@ pub async fn analyze_file(
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
+            context,
         )?;
     }
 
@@ -267,6 +280,7 @@ fn persist_vlm_results(
     description: Option<&str>,
     proposed_name: Option<&str>,
     tags: &[String],
+    context: &NamingContext,
 ) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -277,12 +291,14 @@ fn persist_vlm_results(
     // the INSERT loop must not drop a file's VLM tags (#23). `unchecked_`
     // because the callers hold `conn` behind a parking_lot::Mutex and pass &ref.
     let tx = conn.unchecked_transaction()?;
+    context.require_current(&tx)?;
+    let replace_name = matches!(mode, AnalyzeMode::Both | AnalyzeMode::RenameOnly) && context.label.is_some();
     if mode.establishes_completion() {
         tx.execute(
             "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
-                              vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
+                              vlm_proposed_name=CASE WHEN ?6 THEN ?3 ELSE COALESCE(?3, vlm_proposed_name) END, \
                               vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4 WHERE id=?5",
-            rusqlite::params![model_kind, description, proposed_name, now, file_id],
+            rusqlite::params![model_kind, description, proposed_name, now, file_id, replace_name],
         )?;
     } else {
         let completed_with_model = tx.query_row(
@@ -293,17 +309,17 @@ fn persist_vlm_results(
         if completed_with_model {
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name) \
+                                  vlm_proposed_name=CASE WHEN ?4 THEN ?2 ELSE COALESCE(?2, vlm_proposed_name) END \
                  WHERE id=?3",
-                rusqlite::params![description, proposed_name, file_id],
+                rusqlite::params![description, proposed_name, file_id, replace_name],
             )?;
         } else {
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
+                                  vlm_proposed_name=CASE WHEN ?4 THEN ?2 ELSE COALESCE(?2, vlm_proposed_name) END, \
                                   vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL \
                  WHERE id=?3",
-                rusqlite::params![description, proposed_name, file_id],
+                rusqlite::params![description, proposed_name, file_id, replace_name],
             )?;
         }
     }
@@ -391,11 +407,20 @@ pub(crate) async fn analyze_file_via_server(
     model_kind: &str,
     mode: AnalyzeMode,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    face_names: &[String],
+    naming_context: Option<&NamingContext>,
     mut on_token: impl FnMut(&str),
 ) -> anyhow::Result<AnalyzeOutcome> {
     use crate::models::vlm;
     let started = std::time::Instant::now();
+    let context = naming_context.ok_or_else(|| anyhow::anyhow!("Naming context unavailable"))?;
+    anyhow::ensure!(context.file_id == file_id, "Naming context belongs to another file");
+    let face_names = &context.subjects;
+    if mode == AnalyzeMode::RenameOnly && context.label.is_some() {
+        anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "cancelled");
+        let proposed_name = context.proposed_name();
+        persist_vlm_results(&db.lock(), file_id, model_kind, mode, None, proposed_name.as_deref(), &[], context)?;
+        return Ok(AnalyzeOutcome { file_id, description: None, proposed_name, model: model_kind.to_string(), elapsed_ms: started.elapsed().as_millis() as u64 });
+    }
     let (rasterized, temp_to_clean) = rasterize_for_vlm(&db, file_id).await?;
     // Guard cleans the temp frame on any exit, including the cancel-bail/`?`
     // paths below that previously leaked it (#24).
@@ -428,7 +453,9 @@ pub(crate) async fn analyze_file_via_server(
         }
     }
 
-    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
+    if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) && context.label.is_some() {
+        proposed_name = context.proposed_name();
+    } else if matches!(mode, AnalyzeMode::RenameOnly | AnalyzeMode::Both) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             anyhow::bail!("cancelled");
         }
@@ -452,6 +479,7 @@ pub(crate) async fn analyze_file_via_server(
             description.as_deref(),
             proposed_name.as_deref(),
             &tags,
+            context,
         )?;
     }
     // (temp frame removed by `_temp_guard` on drop — #24)

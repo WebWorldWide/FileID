@@ -331,7 +331,17 @@ public enum DeepAnalyzeRunner {
             // Audio uses on-device metadata/speech/sound analysis. Other supported files
             // use a bounded raster and, for documents, bounded extracted text.
             let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
-            var faceNames: [String] = []
+            let namingContext = try? await database.pool.read { db in
+                try CatalogNamingContext.load(db, fileID: target.id, faceModel: ArcFaceService.shared.modelVersion)
+            }
+            if namingContext == nil {
+                failed += 1
+                await sink.emit(.error(EngineError(kind: "deep_source_changed",
+                    message: "A source file changed or is unavailable. Refresh the library before analyzing it.")))
+                continue
+            }
+            let contextNameAvailable = namingContext?.label != nil
+            let faceNames = namingContext?.subjects ?? []
             var result: DeepAnalyze.AnalysisResult
             var requiresGeneratedFilenameMinimum = false
             if kind == .audio {
@@ -355,7 +365,6 @@ public enum DeepAnalyzeRunner {
                     documentText = nil
                 }
                 // Pull face cluster names (if any) to inject into the prompt.
-                faceNames = (try? await fetchFaceNames(database: database, fileID: target.id)) ?? []
                 let modelFaceNames = faceNames
                 result = await DeepAnalyze.shared.runCancellableAnalysis {
                     await DeepAnalyze.shared.analyze(
@@ -363,6 +372,7 @@ public enum DeepAnalyzeRunner {
                         mediaKind: kind,
                         documentText: documentText,
                         faceNames: modelFaceNames,
+                        proposeFilename: !contextNameAvailable,
                         onToken: onToken
                     )
                 }
@@ -396,7 +406,9 @@ public enum DeepAnalyzeRunner {
                         || DeepAnalyze.hasMinimumGeneratedFilenameWords(groundedName)
                     let originalStem = URL(fileURLWithPath: target.path).deletingPathExtension().lastPathComponent
                     let acceptedName: String?
-                    if requiresGeneratedFilenameMinimum {
+                    if contextNameAvailable {
+                        acceptedName = namingContext?.proposedName
+                    } else if requiresGeneratedFilenameMinimum {
                         acceptedName = meetsMinimum ? groundedName.flatMap { SmartFileName.stem($0, confirmedSubjects: faceNames, originalStem: originalStem) } : nil
                     } else {
                         acceptedName = groundedName.map { FilesystemNameSafe.componentSafe($0, maxLength: 60) }
@@ -422,7 +434,8 @@ public enum DeepAnalyzeRunner {
                                       modelKey: modelKey,
                                       updatesDescription: !tagsOnly,
                                       updatesProposedName: proposeRenames && !tagsOnly,
-                                      completesFullPass: completesFullPass)
+                                      completesFullPass: completesFullPass,
+                                      namingContext: namingContext)
                     processed += 1
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
                         fileID: target.id,
@@ -564,7 +577,8 @@ public enum DeepAnalyzeRunner {
         modelKey: String,
         updatesDescription: Bool = true,
         updatesProposedName: Bool = true,
-        completesFullPass: Bool = true
+        completesFullPass: Bool = true,
+        namingContext: CatalogNamingContext? = nil
     ) async throws {
         let safeDesc = (description?.isEmpty == true) ? nil : description
         let safeName = (proposedName?.isEmpty == true) ? nil : proposedName
@@ -572,6 +586,10 @@ public enum DeepAnalyzeRunner {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         try await database.pool.write { db in
+            if let namingContext,
+               try CatalogNamingContext.load(db, fileID: fileID, faceModel: namingContext.faceModel) != namingContext {
+                throw NamingEvidenceChanged()
+            }
             if completesFullPass {
                 try db.execute(sql: """
                     UPDATE files
@@ -634,28 +652,6 @@ public enum DeepAnalyzeRunner {
     /// reference Deep Analyze prompts use. Falls back to first name only,
     /// or to the legacy single-field `name`. Skips clusters flagged as
     /// `is_unknown` — those are explicitly opted out by the user.
-    private static func fetchFaceNames(database: Database, fileID: Int64) async throws -> [String] {
-        try await database.pool.read { db in
-            let rows = try GRDB.Row.fetchAll(db, sql: """
-                SELECT DISTINCT
-                  persons.title, persons.first_name, persons.name
-                FROM persons
-                INNER JOIN face_prints ON face_prints.person_id = persons.id
-                WHERE face_prints.file_id = ?
-                  AND IFNULL(persons.is_unknown, 0) = 0
-                """, arguments: [fileID])
-            var names: [String] = []
-            for r in rows {
-                let title: String? = r["title"]
-                let first: String? = r["first_name"]
-                let legacy: String? = r["name"]
-                let formatted = formatPersonRef(title: title, first: first, legacy: legacy)
-                if !formatted.isEmpty { names.append(formatted) }
-            }
-            return names
-        }
-    }
-
     private static func fetchDocumentText(database: Database, fileID: Int64) async throws -> String? {
         try await database.pool.read { db in
             try String.fetchOne(
@@ -666,14 +662,8 @@ public enum DeepAnalyzeRunner {
         }
     }
 
-    private static func formatPersonRef(title: String?, first: String?, legacy: String?) -> String {
-        let t = title?.trimmingCharacters(in: .whitespaces) ?? ""
-        let f = first?.trimmingCharacters(in: .whitespaces) ?? ""
-        if !t.isEmpty && !f.isEmpty { return "\(t) \(f)" }
-        if !f.isEmpty { return f }
-        if !t.isEmpty { return t }
-        return (legacy ?? "").trimmingCharacters(in: .whitespaces)
-    }
+    struct NamingEvidenceChanged: Error {}
+
 }
 
 /// V14.9-L1: actor-isolated state for the per-token caption accumulator

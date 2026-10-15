@@ -1,5 +1,34 @@
 # NEXT — resume here
 
+## 2026-10-10 — Stop after the Mac pass
+
+The latest human instruction is Mac-first completion followed by a stop and a Windows/Linux work log. That pass is recorded in STATE.md and [MAC_FINISH.md](MAC_FINISH.md), including the precise implemented capabilities, current limits and native port acceptance matrix. **Do not resume historical all-platform work automatically.** Preserve the existing local changes. Commit/push/release only when explicitly requested.
+
+When further work is requested, use MAC_FINISH.md as the handoff. Real-model best-take/moment/identity calibration still requires suitable internal footage and sufficient on-device memory; the approved compact model download succeeded, while its sequence inference was refused by the unchanged memory guard. Keep registry compatibility separate from measured quality. Neural super-resolution, additional format adapters and dense automatic cast timing are future extensions. Complete platform artifacts/native UI/hardware/packaging gates before claiming portable parity or a production release.
+
+Older entries below are historical context and their all-platform continuation instructions are superseded by this scope.
+
+
+## Resume after saved-goal/reframing/face-partition checkpoint (2026-10-09)
+
+Keep the full all-platform goal active. The local branch now includes Mac saved-goal video scoring and native Follow people exports, plus portable upright image scans, safe selected-space face grouping and deferred coverage. Generated media/native UI and broad local suites verify mechanics, not real model calibration or native Windows/Linux runtime.
+
+Next coherent naming slice: mirror current, reviewed event/action/person context into short filename planning before inference. Current rename prompts omit event/chapter/outcome evidence, and both face-name selectors omit ignored/stale-cache guards; fix those first. A desired goal is not an observed action and must never become a filename claim. Verify exact Mac/Rust output and abstention for draft/stale/conflicting/source-mismatched evidence. Then add saved naming preferences and a separately previewed companion-family apply/Undo operation; existing derivative roles do not cover Live Photo/RAW+JPEG/XMP families.
+
+Face follow-up: preserve identity/correction history on actual existing-library rescans (DBWriter still replaces face IDs), mirror compatible partition/coverage semantics to native Mac, add HEIC/video adapters, durable retry/backlog controls and abrupt cache-publication recovery, then calibrate against rights-cleared identity fixtures on native hardware. Best-take follow-up: real-model multi-event evaluation, per-window goal progress, portable generation/native review and durable whole-library discovery. Conversion follow-up: real-person/fast-motion/scene-cut evidence, editable/object tracking, stabilization, neural enhancement, portable workers and native UI parity. Complete exact-slice CI/landing only when publishing is authorized.
+
+## Resume after portable durable face refresh (2026-10-09)
+
+Portable People grouping now runs bounded, source-checked cache refresh with durable retry state and cancellation before namespace-compatible clustering. Complete actual registered ONNX inference and native Windows/Linux UI/hardware verification, then preserve source-coordinate provenance when converting new Rust scans to upright inference; use an explicit scan processing namespace rather than relabeling old vectors. Refresh cannot discover faces missed by the existing raw scan. HEIC/video decoding, coverage/backlog/retry controls, same-stat replacement detection, incremental compatible assignment and held-out identity calibration remain required. Continue the broader best-take, chapter/cast, naming, stabilization/enhancement and tracked conversion milestones. Keep the goal active and verify exact-slice CI/landing only when publishing is authorized.
+
+## Resume after portable People display extension (2026-10-09)
+
+The same local `codex/people-oriented-thumbnails` slice now includes GTK imported/native crop geometry and provenance invalidation, plus Windows saved-crop invalidation and actual-query ignored-face/representative checks. Rust strict Clippy and all-target tests, 39 GTK tests, and five extracted actual C# production regressions pass. Verify native Windows/Linux People rendering and refreshed image visibility, then exact-slice CI/landing when authorized. Keep the all-platform goal active. Before changing Rust scan orientation, design/test a provenance-preserving upright decode and explicit processing namespace together with durable refresh; do not relabel v1 vectors or silently rotate established bbox coordinates. Portable refresh/coverage/retry and held-out identity calibration remain required. Continue the broader best-take, chapter/cast, naming, and conversion/reframing milestones rather than treating UI crop correctness as full completion.
+
+## Resume after People display correction (2026-10-09)
+
+The local `codex/people-oriented-thumbnails` slice fixes imported EXIF crop geometry in Mac People cards and invalidates thumbnails on representative/cache provenance changes. App/engine build and all 535 serial Swift tests pass; generated images verify geometry, not identity accuracy. Complete a native isolated People UI smoke test and exact-slice CI/landing when authorized. Keep the full five-feature goal active. Next face work: mirror source-coordinate provenance in portable upright decoding/display, implement portable durable refresh, and surface backlog/coverage/retry before calibrating identity performance on rights-cleared positive/negative fixtures. Continue tracked editable social crop paths and portable video adapters; fit-and-pad remains only the completed video framing slice. Preserve the pending separately scoped model/runtime dependency decisions and internal-drive fixture boundary.
+
 ## After PR #232 merged — verify exact-main, then continue
 
 `main` reached `3df088db5ef1c73a4cc51c32a8e61ce5b07680e7` with Mac social-frame fit-and-pad export; 19 exact-PR-head checks passed, and eight merge-commit workflows are running. Confirm all eight exact-main results including Adlon Windows/Linux runner jobs before recording a green merge. The next feature is editable subject-tracked crop paths with safe-area and subject-loss preview, then portable video export parity. Fit-and-pad is already available but must not be described as tracked auto-reframing. Broader best-take outcome detection, video stabilization, AI upscaling, broad conversion formats, calibrated faces, and production acceptance remain open. Adlon is example data only and never a write target. Keep the unrelated `codex/store-msix` worktree for separate review.

@@ -3,46 +3,30 @@ use crate::pipeline::stable_person_assignments::{self, Cluster, Prior};
 use rusqlite::OptionalExtension;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-fn different_pairs(conn: &rusqlite::Connection) -> anyhow::Result<Vec<(i64, i64)>> {
-    let resolve = |legacy: Option<i64>,
-                   file: Option<i64>,
-                   bbox: Option<String>|
-     -> anyhow::Result<Option<i64>> {
+fn face_verdicts(conn: &rusqlite::Connection, pool: &HashSet<i64>) -> anyhow::Result<Vec<(i64,i64,bool)>> {
+    let eligible = serde_json::to_string(pool)?;
+    let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> anyhow::Result<Option<i64>> {
         if let (Some(file), Some(bbox)) = (file, bbox) {
-            let mut query = conn.prepare(
-                "SELECT id FROM face_prints WHERE file_id=?1 AND bbox=?2 ORDER BY id LIMIT 2",
-            )?;
-            let ids = query
-                .query_map(rusqlite::params![file, bbox], |r| r.get::<_, i64>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            if ids.len() == 1 {
-                return Ok(ids.first().copied());
+            let mut query = conn.prepare("SELECT id FROM face_prints WHERE file_id=?1 AND bbox=?2 ORDER BY id LIMIT 2")?;
+            let ids = query.query_map(rusqlite::params![file,bbox],|row| row.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            if ids.len() == 1 { return Ok(ids.first().copied()); }
+            if ids.len() > 1 {
+                let relevant: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM face_prints WHERE file_id=?1 AND bbox=?2 AND id IN(SELECT value FROM json_each(?3)))",rusqlite::params![file,bbox,eligible],|row| row.get(0))?;
+                anyhow::ensure!(!relevant, "Ambiguous participant correction; existing People preserved.");
+                return Ok(None);
             }
-            anyhow::ensure!(
-                ids.len() < 2,
-                "Ambiguous face correction; existing People were preserved."
-            );
         }
-        let Some(id) = legacy else {
-            return Ok(None);
-        };
-        Ok(conn
-            .query_row("SELECT id FROM face_prints WHERE id=?1", [id], |r| r.get(0))
-            .optional()?)
+        let Some(id) = legacy else { return Ok(None); };
+        Ok(conn.query_row("SELECT id FROM face_prints WHERE id=?1",[id],|row| row.get(0)).optional()?)
     };
     let mut pairs = Vec::new();
-    let mut stmt = conn.prepare("SELECT face_a,face_b,file_a,bbox_a,file_b,bbox_b FROM face_verifications WHERE same_person=0")?;
+    let mut stmt = conn.prepare("SELECT face_a,face_b,file_a,bbox_a,file_b,bbox_b,same_person FROM face_verifications")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
-        if let (Some(a), Some(b)) = (
-            resolve(row.get(0)?, row.get(2)?, row.get(3)?)?,
-            resolve(row.get(1)?, row.get(4)?, row.get(5)?)?,
-        ) {
-            anyhow::ensure!(
-                a != b,
-                "Contradictory face correction; existing People were preserved."
-            );
-            pairs.push((a, b));
+        if let (Some(a),Some(b)) = (resolve(row.get(0)?,row.get(2)?,row.get(3)?)?,resolve(row.get(1)?,row.get(4)?,row.get(5)?)?) {
+            let same = row.get::<_,i64>(6)? != 0;
+            anyhow::ensure!(same || a != b || !pool.contains(&a), "Contradictory participant correction; existing People preserved.");
+            pairs.push((a,b,same));
         }
     }
     Ok(pairs)
@@ -54,6 +38,9 @@ pub(super) fn persist(
     assignments: Vec<ClusterAssignment>,
     anchors: Vec<ClusterAnchor>,
 ) -> anyhow::Result<u32> {
+    let pool: HashSet<_> = faces.iter().map(|face| face.face_id).collect();
+    let assigned: HashSet<_> = assignments.iter().map(|assignment| assignment.face_id).collect();
+    anyhow::ensure!(pool.len() == faces.len() && assigned == pool && assigned.len() == assignments.len(), "Invalid participant assignment");
     let mut priors = BTreeMap::new();
     let mut protected = HashSet::new();
     let mut preserved = HashSet::new();
@@ -86,12 +73,15 @@ pub(super) fn persist(
         while let Some(row) = rows.next()? {
             let (face, person) = (row.get::<_, i64>(0)?, row.get::<_, i64>(1)?);
             if let Some(prior) = priors.get_mut(&person) {
-                prior.face_ids.push(face);
+                if pool.contains(&face) { prior.face_ids.push(face); }
+                else { protected.insert(person); }
                 owner.insert(face, person);
             }
         }
     }
-    let mut different = different_pairs(tx)?;
+    let verdicts = face_verdicts(tx, &pool)?;
+    protected.extend(verdicts.iter().flat_map(|&(a,b,_)| [a,b]).filter_map(|face| owner.get(&face).copied()));
+    let mut different = verdicts.iter().filter(|(_,_,same)| !same).map(|&(a,b,_)| (a,b)).collect::<Vec<_>>();
     let mut first_by_file = HashMap::new();
     for face in faces {
         if let Some(&first) = first_by_file.get(&face.file_id) {
@@ -178,19 +168,27 @@ pub(super) fn persist(
             }
         })
         .collect();
-    let mut fixed = vec![None; clusters.len()];
-    let mut claims = BTreeMap::<i64, (usize, usize)>::new();
-    for (index, c) in clusters.iter().enumerate() {
-        if let Some(&person) = protected_owner.get(&c.representative) {
-            let entry = claims.entry(person).or_insert((index, c.face_ids.len()));
-            if c.face_ids.len() > entry.1 {
-                *entry = (index, c.face_ids.len());
+    let mut deferred_links = HashSet::new();
+    for &(a,b,same) in &verdicts {
+        if !same { continue; }
+        for (participant,deferred) in [(a,b),(b,a)] {
+            if pool.contains(&participant) && !pool.contains(&deferred)
+                && owner.contains_key(&participant) && owner.get(&participant) == owner.get(&deferred) {
+                deferred_links.insert(participant);
             }
         }
     }
-    for (person, (index, _)) in claims {
-        fixed[index] = Some(person);
+    let mut fixed = vec![None; clusters.len()];
+    let mut claims = BTreeMap::<i64,(usize,(usize,usize))>::new();
+    for (index,c) in clusters.iter().enumerate() {
+        if let Some(&person) = protected_owner.get(&c.representative) {
+            let score = (c.face_ids.iter().filter(|face| deferred_links.contains(face)).count(),c.face_ids.len());
+            let entry = claims.entry(person).or_insert((index,score));
+            anyhow::ensure!(score.0 == 0 || entry.1.0 == 0 || entry.0 == index, "Contradictory deferred identity correction; existing People preserved.");
+            if score > entry.1 { *entry = (index,score); }
+        }
     }
+    for (person,(index,_)) in claims { fixed[index]=Some(person); }
     let ids = stable_person_assignments::resolve(
         &priors.into_values().collect::<Vec<_>>(),
         &clusters,
@@ -202,7 +200,7 @@ pub(super) fn persist(
         existing + ids.iter().filter(|id| id.is_none()).count() <= 8000,
         "Person limit reached; existing People were preserved."
     );
-    let pool: HashSet<_> = faces.iter().map(|f| f.face_id).collect();
+
     tx.execute("UPDATE face_prints SET person_id=NULL WHERE id IN(SELECT value FROM json_each(?1)) AND COALESCE(excluded,0)=0 AND (person_id IS NULL OR person_id NOT IN(SELECT value FROM json_each(?2)))",rusqlite::params![serde_json::to_string(&pool)?,serde_json::to_string(&preserved)?])?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?

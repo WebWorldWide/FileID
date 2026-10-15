@@ -155,6 +155,10 @@ for lib in "$SIGN_TMP/$APP/Contents/MacOS/"*.metallib; do
     [ -f "$lib" ] || continue
     codesign --force $TIMESTAMP_FLAG --sign "$IDENTITY" "$lib"
 done
+for lib in "$SIGN_TMP/$APP/Contents/Frameworks/"*.dylib; do
+    [ -f "$lib" ] || continue
+    codesign --force --options runtime $TIMESTAMP_FLAG --sign "$IDENTITY" "$lib"
+done
 # Then the executables, each with its own entitlements; the bundle
 # signature then covers the main executable + seals resources. The engine
 # MUST carry the same identity as the app — EngineClient's integrity gate

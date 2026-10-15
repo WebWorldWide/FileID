@@ -16,6 +16,7 @@ import SwiftUI
 import AppKit
 import CryptoKit
 import QuickLookThumbnailing
+import ImageIO
 import FileIDShared
 
 /// Async permit gate (counting semaphore) limiting concurrent QL decodes.
@@ -38,8 +39,8 @@ public final class ThumbnailService {
 
     private init() {}
 
-    public func thumbnail(for url: URL, size: CGFloat = 192) async -> NSImage? {
-        let key = "\(url.path)|\(Int(size))" as NSString
+    public func thumbnail(for url: URL, size: CGFloat = 192, revision: String? = nil) async -> NSImage? {
+        let key = ("\(url.path)|\(Int(size))" + (revision.map { "|" + $0 } ?? "")) as NSString
         if let hit = cache.object(forKey: key) { return hit }
         if let task = inflight[key as String] {
             if let data = await task.value {
@@ -65,6 +66,36 @@ public final class ThumbnailService {
             return image
         }
         return nil
+    }
+
+    nonisolated static func sourceOrientation(for url: URL) async -> Int? {
+        await thumbDecodeGate.acquire()
+        defer { Task { await thumbDecodeGate.release() } }
+        guard !Task.isCancelled else { return nil }
+        return await Task.detached(priority: .utility) { () -> Int? in
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            else { return nil }
+            let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+            return (1...8).contains(orientation) ? orientation : nil
+        }.value
+    }
+
+    static func cropFace(in image: NSImage, bbox: String, sourceOrientation: Int = 1) -> NSImage? {
+        guard let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let bounds = FaceBBox.parseNormalized(bbox, imageWidth: pixels.width,
+                  imageHeight: pixels.height, sourceOrientation: sourceOrientation)
+        else { return nil }
+        let pad = 0.20
+        let x = max(0, bounds.x - bounds.w * pad)
+        let y = max(0, bounds.y - bounds.h * pad)
+        let w = min(1 - x, bounds.w * (1 + 2 * pad))
+        let h = min(1 - y, bounds.h * (1 + 2 * pad))
+        let rect = CGRect(x: x * Double(pixels.width), y: (1 - y - h) * Double(pixels.height),
+            width: w * Double(pixels.width), height: h * Double(pixels.height)).integral
+            .intersection(CGRect(x: 0, y: 0, width: pixels.width, height: pixels.height))
+        guard rect.width > 4, rect.height > 4, let cropped = pixels.cropping(to: rect) else { return nil }
+        return NSImage(cgImage: cropped, size: rect.size)
     }
 
     /// Off-main thumbnail production: on-disk cache first (fast, local),

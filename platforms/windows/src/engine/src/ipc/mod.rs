@@ -893,6 +893,8 @@ pub struct FaceClusteringResult {
     pub face_count: u64,
     pub unmatched_faces: u64,
     pub duration_seconds: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_faces: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
