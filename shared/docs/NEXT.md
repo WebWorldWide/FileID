@@ -31,7 +31,7 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [ ] Hash only once per image (content hash currently reads the file a second time after decode).
 - [x] Compress AI memory: MLX buffer cache capped (Qwen3-VL 4B peak 4.33 → 3.92 GB, no speed loss); benchmark now reports real process footprint. KV quantization measured as negligible at current prompt sizes (see DECISIONS.md).
 - [ ] Compress AI memory further: free vision-encoder activations between passes; route tag/rename passes to a small model (Qwen3.5 0.8B peaks at 1.1 GB) when quality holds.
-- [ ] Unload idle models after a timeout; share one resident model between Deep Analyze, Chat and Moments.
+- [x] Idle models are parked after 5 min (weights freed, model stays selected, reloads on next use): 3.1 GB → ~107 MB while idle, verified on Adlon files with Qwen3-VL 4B.
 - [ ] Chat: stream first token faster (prompt cache reuse across turns, smaller retrieval context).
 - [x] Video moments: next window's frames extract while the model runs; revision check in-process (one helper spawn and one frame decode fewer per window).
 - [ ] Video analysis: keep one long-lived frame helper per job instead of a process per window; batch frames per model call; measure on Adlon clips.
@@ -41,6 +41,8 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [x] Run `benchmarkModel` on Qwen3-VL 4B and Qwen3.5 0.8B (results in STATE.md and MODELS.md).
 - [x] Qwen3-VL adapter forwards per-token generation (every Qwen3-VL generation aborted the engine before).
 - [x] Free-memory admission uses the kernel availability level (refused a 0.8B model with 50% free).
+
+- [ ] Test isolation: `queuedCancelHonoredWithTerminalComplete` shares the `DeepAnalyze.shared` cancel flag and failed once in three local parallel runs (CI runs `--no-parallel`); give the runner an injectable analyzer.
 
 UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against Apple's Human Interface Guidelines):
 - [x] Rounded geometry, Archivo text, simplified sidebar, compact scan card.
