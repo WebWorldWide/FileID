@@ -120,10 +120,13 @@ struct VideoStabilizationTests {
         for row in 0..<image.height {
             for column in 0..<image.width {
                 let offset = (row * image.width + column) * 4
-                if bytes[offset] > 180 && bytes[offset + 1] < 65 && bytes[offset + 2] < 65 {
+                // Dominance rather than absolute floors: software H.264 encoders
+                // (hosted CI VMs) lift the minor channels of saturated markers.
+                let r = Int(bytes[offset]), g = Int(bytes[offset + 1]), b = Int(bytes[offset + 2])
+                if r > 160 && r - g > 100 && r - b > 100 {
                     redX += Double(column); redY += Double(row); redCount += 1
                 }
-                if bytes[offset + 1] > 180 && bytes[offset] < 65 && bytes[offset + 2] < 65 {
+                if g > 160 && g - r > 90 && g - b > 90 {
                     greenX += Double(column); greenY += Double(row); greenCount += 1
                 }
             }
