@@ -25,7 +25,7 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [x] Forced 448 px image size skipped for fixed-tile architectures (Idefics3, SmolVLM).
 - [x] Measure end-to-end scan files/s on Adlon: 4.1 → 40–42 files/s on 105 RAWs (decode preview + GPU CLIP), memory 1,090 → ~660 MB.
 - [x] CLIP on the GPU via MLX, weights read from the installed ONNX, batched (190 ms → 3.2 ms per image).
-- [ ] Reach ≥140 files/s: remaining per-file cost is decode ~40 ms, Vision ~40 ms, OCR ~35 ms (only text-like images); try Vision on a smaller working image for classify, overlap OCR, and batch the DB writer.
+- [ ] Reach ≥140 files/s. Measured now: 40–42 files/s warm (105 RAWs), 27.8 files/s on 382 uncached RAWs, ~94 ms engine CPU per file, peak 372–660 MB. A CPU sample shows most worker threads waiting (I/O, ANE/IOKit, semaphores); real CPU hot spots are CoreGraphics resampling for model inputs (CLIP/RAM++/dHash each rescale the 1536 px image separately) and JPEG decode. Next: resample once to a shared 224/384 px buffer with vImage, read ahead on USB/NAS, and measure Vision on a smaller image for classify while keeping 1536 px for faces.
 - [ ] Hash only once per image (content hash currently reads the file a second time after decode).
 - [x] Compress AI memory: MLX buffer cache capped (Qwen3-VL 4B peak 4.33 → 3.92 GB, no speed loss); benchmark now reports real process footprint. KV quantization measured as negligible at current prompt sizes (see DECISIONS.md).
 - [ ] Compress AI memory further: free vision-encoder activations between passes; route tag/rename passes to a small model (Qwen3.5 0.8B peaks at 1.1 GB) when quality holds.
