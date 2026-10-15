@@ -3912,3 +3912,15 @@ The branch also carried an unlanded Rust slice (portable face refresh, crop publ
 ## 2026-10-15 — IPC 1.16.0 is the union, not a renumbering
 
 Both sides had minted "1.15.0" for different additions. Rather than pick one, the merged schema is 1.16.0 and contains every optional field from both lineages; all additions are optional with `skip_serializing_if`, so 1.12–1.15 peers still parse.
+
+## 2026-10-15 — Brand fonts are bundled, not downloaded
+
+Instrument Serif and Archivo are the Prototype v3 faces. Both are SIL OFL, so the TTFs ship inside each app (macOS `Resources/Fonts`, WinUI `Assets/Fonts`, the website `assets/fonts`) with their licenses beside them, and macOS registers them per-process with CoreText at launch. No runtime font fetch exists; if registration fails the type scale falls back to the system serif/sans. The mono face stays the platform mono (SF Mono, Cascadia Mono, GNOME monospace) rather than bundling JetBrains Mono.
+
+## 2026-10-15 — The design contract lives in the repo, not only in claude.ai/design
+
+`shared/docs/DESIGN_V3.md` restates the prototype as tokens, geometry, shell structure, components and per-page contracts so Windows and Linux can port from a stable text source. Tokens went into GTK CSS and WinUI resources first (compiles in CI without the hosts), the shell and pages follow per platform.
+
+## 2026-10-15 — Square everything, including legacy views
+
+Rather than restyle 12,000 lines of SwiftUI view-by-view, the shared primitives (`GlassCard`, `BadgePill`, `ThemedSegmentedControl`, `GoldButton`, text fields, bordered buttons) were redefined in the v3 geometry and every remaining `RoundedRectangle`/`Capsule`/`cornerRadius` in `app/Sources/FileID/Views` was replaced mechanically. Pages inherit the look immediately; their v3 layouts are finished one by one.
