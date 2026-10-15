@@ -49,7 +49,7 @@ struct DeepAnalyzeModelPickerCard: View {
                 Divider().opacity(0.3)
                 Button { catalogPresented = true } label: {
                     Label("Browse \(MLXModelCatalog.entries.count) catalog models", systemImage: "magnifyingglass")
-                }.buttonStyle(.bordered)
+                }.buttonStyle(.dsSecondary)
                 DisclosureGroup("More favorites") {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(AIModelKind.favorites.filter { !top3.contains($0) }, id: \.rawValue) { kind in
@@ -644,7 +644,7 @@ struct DeepAnalyzeView: View {
                         Button("Cancel", role: .destructive) {
                             engine.deepAnalyzeCancel()
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                     }
                     Spacer()
                     Text("Runs serially on the GPU. Safe to leave overnight — system stays awake.")
@@ -756,7 +756,7 @@ struct DeepAnalyzeView: View {
                     Button("Cancel", role: .destructive) {
                         engine.deepAnalyzeCancel()
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
                 }
                 ShimmerView(cornerRadius: 3)
                     .frame(height: 4)

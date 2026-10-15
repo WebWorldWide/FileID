@@ -59,8 +59,8 @@ struct WelcomeSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
             modelRow(
-                title: "Semantic search (CLIP ViT-B/32)",
-                detail: "Type queries like \"sunset at the beach\" — FileID ranks every photo by visual relevance.",
+                title: "CLIP ViT-B/32",
+                detail: "Search by description · Required",
                 size: "~\(CLIPModelInstaller.approxDownloadBytes / 1_048_576) MB",
                 installed: clipInstalled,
                 inProgress: clipInProgress,
@@ -71,8 +71,8 @@ struct WelcomeSheet: View {
                 cancel: { clip.cancel() }
             )
             modelRow(
-                title: "Auto-tagging (RAM++)",
-                detail: "Recognizes 4,585 objects, scenes & attributes for richer tags and search. Without it, tagging uses the lighter built-in classifier.",
+                title: "RAM++",
+                detail: "Tags images (4,585 labels) · Required",
                 size: "~926 MB",
                 installed: ramplusInstalled,
                 inProgress: ramplusInProgress,
@@ -83,8 +83,8 @@ struct WelcomeSheet: View {
                 cancel: { ramplus.cancel() }
             )
             modelRow(
-                title: "Face recognition (\(recommendedFace.displayName))",
-                detail: recommendedFace.subtitle,
+                title: recommendedFace.displayName,
+                detail: "Finds and groups faces · Required",
                 size: "~\(recommendedFace.approxBytes / 1_048_576) MB",
                 installed: arcfaceInstalled,
                 inProgress: arcfaceInProgress,
@@ -95,8 +95,8 @@ struct WelcomeSheet: View {
                 cancel: { arcface.cancel(recommendedFace) }
             )
             modelRow(
-                title: "Document understanding (BGE-small)",
-                detail: "Reads document content so semantic search and Restructure group files by what they say, not only by filename.",
+                title: "BGE-small",
+                detail: "Reads documents for search and Restructure · Required",
                 size: "~129 MB",
                 installed: bgeInstalled,
                 inProgress: bgeInProgress,
@@ -142,8 +142,8 @@ struct WelcomeSheet: View {
                 .foregroundStyle(Theme.text3)
                 .padding(.horizontal, 22).padding(.bottom, 4)
             modelRow(
-                title: "Deep Analyze (\(selectedVLM.displayName))",
-                detail: "On-device vision model that captions photos, PDFs, video keyframes, and writes smart filenames.",
+                title: selectedVLM.displayName,
+                detail: "Deep Analyze, Chat, Moments · Optional",
                 size: vlmSizeLabel,
                 installed: vlmInstalled,
                 inProgress: vlmInProgress,

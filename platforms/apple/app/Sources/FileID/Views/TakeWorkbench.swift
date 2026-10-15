@@ -176,7 +176,7 @@ struct TakeWorkbench: View {
                                             send("setTakeFeedback", feedback: CatalogTakeFeedback(eventID: event.id, fileID: take.fileID, outcomeScore: take.outcomeScore, preferred: !take.preferred))
                                         }
                                         Button("Undo") { send("undoTakeFeedback", fileID: take.fileID, eventID: event.id) }
-                                    }.buttonStyle(.bordered)
+                                    }.buttonStyle(.dsSecondary)
                                 }
                                 if selectedTakeID == take.fileID, let player {
                                     NativeVideoPlayer(player: player).frame(height: 180)

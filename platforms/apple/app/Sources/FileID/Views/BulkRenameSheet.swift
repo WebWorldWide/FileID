@@ -80,9 +80,9 @@ struct BulkRenameSheet: View {
                 .font(.caption.monospaced())
             Spacer()
             Button("Select all") { selectedIDs = Set(files.map(\.id)) }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
             Button("Clear") { selectedIDs.removeAll() }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
             Button {
                 attemptApply()
             } label: {

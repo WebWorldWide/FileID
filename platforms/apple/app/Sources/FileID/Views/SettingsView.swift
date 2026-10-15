@@ -86,11 +86,11 @@ struct SettingsTab: View {
                                 }
                                 HStack(spacing: 8) {
                                     Button("Restart Engine") { engine.start() }
-                                        .buttonStyle(.bordered)
+                                        .buttonStyle(.dsSecondary)
                                         .help("Spawn a fresh engine process. Cancels any in-flight scan.")
                                     if case .ready = engine.state {
                                         Button("Stop Engine") { engine.shutdown() }
-                                            .buttonStyle(.bordered)
+                                            .buttonStyle(.dsSecondary)
                                             .help("Cleanly shut down the engine process.")
                                     }
                                 }
@@ -109,7 +109,7 @@ struct SettingsTab: View {
                                 Button("Show database in Finder") {
                                     NSWorkspace.shared.activateFileViewerSelecting([ReadStore.defaultDBURL])
                                 }
-                                .buttonStyle(.bordered)
+                                .buttonStyle(.dsSecondary)
                             }
 
                             Divider().opacity(0.3)
@@ -138,15 +138,15 @@ struct SettingsTab: View {
                                     Button("Open scan log") {
                                         NSWorkspace.shared.open(SettingsTab.scanLogURL)
                                     }
-                                    .buttonStyle(.bordered)
+                                    .buttonStyle(.dsSecondary)
                                     Button("Open app log") {
                                         NSWorkspace.shared.open(SettingsTab.appLogURL)
                                     }
-                                    .buttonStyle(.bordered)
+                                    .buttonStyle(.dsSecondary)
                                     Button("Show logs in Finder") {
                                         NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.scanLogURL])
                                     }
-                                    .buttonStyle(.bordered)
+                                    .buttonStyle(.dsSecondary)
                                 }
                             }
 
@@ -162,7 +162,7 @@ struct SettingsTab: View {
                                 } label: {
                                     Text("Factory Reset & Quit")
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.dsPrimary)
                                 .tint(.red)
                                 .confirmationDialog(
                                     "Are you sure you want to completely erase FileID?",
@@ -307,7 +307,7 @@ struct DeepAnalyzeExclusionsCard: View {
                 }
 
                 Button("Add folder…") { pickExcludedFolder() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
             }
         }
     }
@@ -421,11 +421,11 @@ struct CLIPSemanticSearchCard: View {
                 } label: {
                     Label("Download", systemImage: "arrow.down.circle.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
 
                 Button("Install from local zip…") { pickLocalZip() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
 
                 Button("Open Models folder") {
                     NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
@@ -501,9 +501,9 @@ struct CLIPSemanticSearchCard: View {
                 }
                 HStack(spacing: 8) {
                     Button("Retry") { installer.install() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                     Button("Install from local zip…") { pickLocalZip() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                     Button("Open Models folder") {
                         NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
                     }
@@ -611,7 +611,7 @@ struct RamPlusTaggerCard: View {
             Button { installer.install() } label: {
                 Label("Install (~450 MB)", systemImage: "arrow.down.circle.fill")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.dsPrimary)
         case .downloading(let fraction, let message, _, _):
             VStack(alignment: .leading, spacing: 4) {
                 ProgressView(value: fraction).frame(maxWidth: 280)
@@ -630,7 +630,7 @@ struct RamPlusTaggerCard: View {
         case .installFailed(let msg):
             VStack(alignment: .leading, spacing: 4) {
                 Text(msg).font(.caption).foregroundStyle(.red)
-                Button("Retry") { installer.install() }.buttonStyle(.bordered)
+                Button("Retry") { installer.install() }.buttonStyle(.dsSecondary)
             }
         }
     }
@@ -697,7 +697,7 @@ struct BGEDocCard: View {
             Button { installer.install() } label: {
                 Label("Install (~135 MB)", systemImage: "arrow.down.circle.fill")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.dsPrimary)
         case .downloading(let fraction, let message, _, _):
             VStack(alignment: .leading, spacing: 4) {
                 ProgressView(value: fraction).frame(maxWidth: 280)
@@ -716,7 +716,7 @@ struct BGEDocCard: View {
         case .installFailed(let msg):
             VStack(alignment: .leading, spacing: 4) {
                 Text(msg).font(.caption).foregroundStyle(.red)
-                Button("Retry") { installer.install() }.buttonStyle(.bordered)
+                Button("Retry") { installer.install() }.buttonStyle(.dsSecondary)
             }
         }
     }
@@ -817,7 +817,7 @@ struct FaceEmbedderCard: View {
                     Label("Install (~\(kind.approxBytes / 1_048_576) MB)",
                           systemImage: "arrow.down.circle.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .controlSize(.small)
                 Spacer()
@@ -867,7 +867,7 @@ struct FaceEmbedderCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button("Retry") { installer.install(kind) }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .controlSize(.small)
                     Spacer()
                 }

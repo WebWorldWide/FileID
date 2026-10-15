@@ -299,7 +299,7 @@ struct RestructureView: View {
                                 statusIsError = true
                             }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .disabled(applying)
                     }

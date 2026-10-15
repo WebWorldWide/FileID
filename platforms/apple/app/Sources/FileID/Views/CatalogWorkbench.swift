@@ -36,7 +36,7 @@ struct CatalogWorkbench: View {
             }
             HStack {
                 TextField("Search names, descriptions, chapters, or sampled video frames", text: $query)
-                    .textFieldStyle(.roundedBorder).onSubmit { search() }
+                    .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
                 Button("Search", action: search).disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Best Takes") { showingTakes = true }
                 Button("Refresh jobs") { send(CatalogRequest(requestID: UUID().uuidString, action: "jobs")) }
@@ -134,11 +134,11 @@ struct CatalogWorkbench: View {
                                     } label: { Image(systemName: "minus.circle") }
                                 }
                             }
-                            TextField("Chapter title", text: $title).textFieldStyle(.roundedBorder)
-                            TextField("Description", text: $summary).textFieldStyle(.roundedBorder)
+                            TextField("Chapter title", text: $title).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                            TextField("Description", text: $summary).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
                             HStack {
-                                TextField("Start seconds", value: $start, format: .number).textFieldStyle(.roundedBorder)
-                                TextField("End seconds", value: $end, format: .number).textFieldStyle(.roundedBorder)
+                                TextField("Start seconds", value: $start, format: .number).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
+                                TextField("End seconds", value: $end, format: .number).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
                             }
                             HStack {
                                 Button(editingID == nil ? "Add chapter" : "Save chapter") {

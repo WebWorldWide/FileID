@@ -232,7 +232,7 @@ struct PeopleView: View {
                 mergeMode = false; unknownMode = false
                 mergeChecked.removeAll(); unknownChecked.removeAll()
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.dsSecondary)
         } else if persons.count >= 2 {
             Button {
                 suggestionsLoading = true
@@ -255,7 +255,7 @@ struct PeopleView: View {
                 Label(suggestionsLoading ? "Scanning…" : "Suggest merges",
                       systemImage: suggestionsLoading ? "hourglass" : "sparkle.magnifyingglass")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.dsPrimary)
             .tint(Theme.gold)
             .disabled(suggestionsLoading)
 
@@ -264,7 +264,7 @@ struct PeopleView: View {
             } label: {
                 Label("Merge people", systemImage: "arrow.triangle.merge")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.dsSecondary)
             .help("Pick two or more people to combine into one. Use this when face clustering split the same person into multiple cards.")
 
             Button {
@@ -272,7 +272,7 @@ struct PeopleView: View {
             } label: {
                 Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.dsSecondary)
             .help("Mark people you don't want to identify (strangers, crowd extras). They're hidden from the People tab and won't be merged into named clusters on the next run.")
         }
     }
@@ -290,7 +290,7 @@ struct PeopleView: View {
                 } label: {
                     Label("Merge \(mergeChecked.count) selected", systemImage: "arrow.triangle.merge")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .disabled(mergeChecked.count < 2)
             } else if unknownMode {
@@ -303,7 +303,7 @@ struct PeopleView: View {
                 } label: {
                     Label("Mark \(unknownChecked.count) as unknown", systemImage: "person.crop.circle.badge.questionmark")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(.gray)
                 .disabled(unknownChecked.isEmpty)
             }
@@ -853,14 +853,14 @@ private struct PersonDetailSheet: View {
                           systemImage: "arrow.right.circle.fill")
                         .font(.caption.bold())
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .disabled(checked.isEmpty)
                 Button("Cancel") {
                     selectMode = false
                     checked.removeAll()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .keyboardShortcut(.escape, modifiers: [])
             } else if files.count >= 2 {
                 Spacer()
@@ -872,7 +872,7 @@ private struct PersonDetailSheet: View {
                     Label("Select photos", systemImage: "checkmark.square")
                         .font(.caption)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .help("Move individual photos to another person's group when face clustering put them in the wrong place.")
             } else {
                 Spacer()
@@ -1000,7 +1000,7 @@ private struct PersonDetailSheet: View {
                           : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with \"\(tagName)\"",
                           systemImage: "tag.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .disabled(tagBatchInFlight || tagName.isEmpty)
                 .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
@@ -1015,7 +1015,7 @@ private struct PersonDetailSheet: View {
                         Label("Replace \"\(oldTag)\" with \"\(tagName)\"",
                               systemImage: "arrow.triangle.2.circlepath")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
                     .disabled(tagBatchInFlight)
                     .help("Photos were tagged \"\(oldTag)\" earlier. Removes the old tag and adds the new one.")
                 }
@@ -1109,7 +1109,7 @@ private struct PersonDetailSheet: View {
                 .font(.caption.bold())
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: text)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
                 .frame(minWidth: 140)
         }
     }
@@ -1387,7 +1387,7 @@ private struct SuggestedMergesSheet: View {
                         .font(.caption.bold())
                         .foregroundStyle(similarityColor(cand.similarity))
                     Button("Merge") { onAccept(cand) }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .disabled(inFlight)
                 }

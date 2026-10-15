@@ -45,7 +45,7 @@ struct ToolsWorkbench: View {
         VStack(alignment: .leading, spacing: 14) {
             if !inline { HStack { Text("File Tools").font(Theme.Font.display(24)); Spacer(); Button("Done") { dismiss() }.buttonStyle(.dsSecondary) } }
             HStack {
-                TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.roundedBorder).onSubmit { search() }
+                TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)).onSubmit { search() }
                 Button("Find", action: search).disabled(!session.pending.isEmpty || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.disabled(!session.pending.isEmpty)
             List(session.hits, id: \.fileID) { hit in

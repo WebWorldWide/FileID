@@ -112,7 +112,7 @@ struct ModelCatalogBrowser: View {
                 }.disabled(selected == nil || selected?.fits(ramGB: ramGB) != true || engine.modelDownloadProgress != nil)
                 Button("Use selection") {
                     if let selected { onSelect(selected); dismiss() }
-                }.buttonStyle(.borderedProminent).tint(Theme.gold).disabled(selected == nil || selected?.fits(ramGB: ramGB) != true)
+                }.buttonStyle(.dsPrimary).tint(Theme.gold).disabled(selected == nil || selected?.fits(ramGB: ramGB) != true)
             }
         }.padding(24).frame(minWidth: 600, idealWidth: 760, minHeight: 520, idealHeight: 650)
             .onAppear { selection = initialSelection?.rawValue }

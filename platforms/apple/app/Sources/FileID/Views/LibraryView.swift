@@ -281,7 +281,7 @@ struct LibraryView: View {
             }
             Spacer()
             Button("Clear") { similarSeed = nil }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
         }
         .padding(10)
         .background(Rectangle().fill(Theme.ai.opacity(0.10)))
@@ -1116,13 +1116,13 @@ private struct FilePreviewSheet: View {
                         Button { step(-1) } label: {
                             Image(systemName: "chevron.left")
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .disabled(idx <= 0)
                         .help("Previous file")
                         Button { step(1) } label: {
                             Image(systemName: "chevron.right")
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .disabled(idx >= siblings.count - 1)
                         .help("Next file")
                     }
@@ -1136,7 +1136,7 @@ private struct FilePreviewSheet: View {
                     Label("Open", systemImage: "arrow.up.right.square")
                         .font(.system(size: 12))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .help("Open in the default app (Preview, QuickTime, etc.)")
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -1144,7 +1144,7 @@ private struct FilePreviewSheet: View {
                     Label("Show in Finder", systemImage: "folder")
                         .font(.system(size: 12))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .help("Reveal this file in Finder")
                 Button {
                     dismiss()
@@ -1274,7 +1274,7 @@ private struct FilePreviewSheet: View {
                                                 }
                                                 dismiss()
                                             }
-                                            .buttonStyle(.bordered)
+                                            .buttonStyle(.dsSecondary)
                                             .help("Renames the file on disk and updates the library row. Undo from the Library header if you change your mind.")
                                         }
                                     }
@@ -1418,11 +1418,11 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3)).overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
                         .font(.caption)
                         .focused(isFocused)
                     Button("Apply tag", systemImage: "checkmark", action: addDraft)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .foregroundStyle(.black)
                         .keyboardShortcut(.defaultAction)

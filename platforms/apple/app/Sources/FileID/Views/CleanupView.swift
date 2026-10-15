@@ -135,11 +135,11 @@ struct CleanupView: View {
                     // be unsafe — the user must pick copies deliberately per group.
                     if !isSimilar {
                         Button("Select all non-keepers") { selectAllNonKeepers() }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.dsSecondary)
                             .help("Select every duplicate except the keeper in each group.")
                     }
                     Button("Clear selection") { selection.removeAll() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .disabled(totalSelected == 0)
                 }
                 Button {
@@ -220,7 +220,7 @@ struct CleanupView: View {
                     message: "You've hidden every group from this view. Want to revisit them?"
                 )
                 Button("Show skipped groups again") { skippedGroups.removeAll() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
             }
         } else if !isSimilar && exactPreviewPartial {
             EmptyStateView(
@@ -307,7 +307,7 @@ struct CleanupView: View {
                                     .appendingPathComponent(".Trash")
                             )
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         Button("Dismiss") {
                             status = nil
                             statusWarning = false
