@@ -87,6 +87,7 @@ let package = Package(
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
             path: "app/Sources/FileID",
+            resources: [.copy("Resources/Fonts")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 

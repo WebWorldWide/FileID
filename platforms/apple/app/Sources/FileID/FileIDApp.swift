@@ -10,6 +10,8 @@ struct FileIDApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var engine = EngineClient()
     @State private var toolsSession = ToolsSession()
+
+    init() { BrandFonts.register() }
     @State private var engineStarted = false
     @State private var showWelcome = false
     @AppStorage("welcomeSheetSeen") private var welcomeSheetSeen: Bool = false

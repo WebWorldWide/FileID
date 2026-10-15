@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import CoreText
 
 // MARK: - Theme (Prototype v3)
 // Square corners, 1 px hairlines, mono section labels, serif page titles.
@@ -69,9 +71,12 @@ enum Theme {
     }
 
     enum Font {
-        static func display(_ size: CGFloat) -> SwiftUI.Font { .system(size: size, weight: .regular, design: .serif) }
+        /// Instrument Serif and Archivo ship in Resources/Fonts (SIL OFL) and are
+        /// registered at launch by `BrandFonts`; SwiftUI falls back to the system
+        /// faces if registration fails.
+        static func display(_ size: CGFloat) -> SwiftUI.Font { BrandFonts.registered ? .custom("Instrument Serif", size: size) : .system(size: size, weight: .regular, design: .serif) }
         static func mono(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { .system(size: size, weight: weight, design: .monospaced) }
-        static func body(_ size: CGFloat = 14, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { .system(size: size, weight: weight) }
+        static func body(_ size: CGFloat = 14, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { BrandFonts.registered ? .custom("Archivo", size: size).weight(weight) : .system(size: size, weight: weight) }
         static let sectionLabel = mono(11, .semibold)
         static let meta = mono(11)
         static let metaStrong = mono(11.5, .semibold)
@@ -80,6 +85,30 @@ enum Theme {
     }
 
     static let spring = Animation.spring(response: 0.35, dampingFraction: 0.8)
+}
+
+/// Registers the bundled brand fonts once per process. The resource bundle
+/// sits beside the executable in assembled apps and under the build products
+/// in `swift build` runs, so both locations are tried before `Bundle.module`.
+enum BrandFonts {
+    nonisolated(unsafe) private(set) static var registered = false
+
+    static func register() {
+        guard !registered else { return }
+        let bundleName = "FileID_FileID.bundle"
+        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let candidates = [Bundle.main.resourceURL?.appendingPathComponent(bundleName),
+                          Bundle.main.bundleURL.appendingPathComponent(bundleName),
+                          executableDirectory.appendingPathComponent(bundleName)]
+        let bundle = candidates.compactMap { $0.flatMap(Bundle.init(url:)) }.first ?? Bundle.module
+        guard let urls = bundle.urls(forResourcesWithExtension: "ttf", subdirectory: "Fonts"), !urls.isEmpty else { return }
+        var ok = false
+        for url in urls {
+            if CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil) { ok = true }
+            else if let font = CGFont(CGDataProvider(url: url as CFURL)!), CTFontManagerRegisterGraphicsFont(font, nil) { ok = true }
+        }
+        registered = ok
+    }
 }
 
 extension Color {
