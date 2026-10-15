@@ -149,11 +149,13 @@ struct ChatWorkbench: View {
             message = "This catalog file is offline or unavailable."
             return
         }
-        if let seconds = hit.startSeconds, ["mov", "mp4", "m4v", "mkv", "avi"].contains(url.pathExtension.lowercased()) {
+        if ["mov", "mp4", "m4v", "mkv", "avi", "mp3", "m4a", "wav", "aiff", "aac"].contains(url.pathExtension.lowercased()) {
             let next = AVPlayer(url: url)
-            next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            if let seconds = hit.startSeconds {
+                next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            }
             player?.pause(); player = next
-        } else { NSWorkspace.shared.open(url) }
+        } else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     }
 
     private func send() {

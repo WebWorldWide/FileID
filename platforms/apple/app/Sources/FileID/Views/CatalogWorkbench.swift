@@ -90,7 +90,11 @@ struct CatalogWorkbench: View {
                                 }.padding(.vertical, 8)
                             }
                             HStack {
-                                Button("Open file") { NSWorkspace.shared.open(URL(fileURLWithPath: selected.path)) }
+                                Button(isVideo(selected.path) ? "Play from start" : "Show in Finder") {
+                                    let url = URL(fileURLWithPath: selected.path)
+                                    if isVideo(selected.path) { player?.pause(); player = AVPlayer(url: url) }
+                                    else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                                }
                 if isVideo(selected.path) {
                     SegmentedBar(selection: $timelineMode, options: [("sampled", "Quick samples"), ("moments", "Full moments")], height: 26)
                                     Button("Analyze") {

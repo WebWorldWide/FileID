@@ -1,6 +1,7 @@
 // Library: DB-backed thumbnail grid. FTS5 search (OCR + filename) +
 // kind filter; re-queries on each batchSummary event for live fill-in.
 import SwiftUI
+import AVKit
 import AppKit
 import PDFKit
 import FileIDShared
@@ -1248,74 +1249,61 @@ private struct FinderTagsEditor: View {
 /// eager sheet-branch metadata init.
 private struct VideoPreview: View {
     let url: URL
-    @State private var poster: NSImage?
+    var body: some View { InlineMediaPlayer(url: url, isAudio: false) }
+}
 
+/// Audio plays in the sheet with the same native transport controls.
+private struct AudioPreview: View {
+    let url: URL
     var body: some View {
-        ZStack {
-            Color.black
-            if let poster {
-                Image(nsImage: poster)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(20)
-            }
-            VStack(spacing: 12) {
-                Button {
-                    NSWorkspace.shared.open(url)
-                } label: {
-                    ZStack {
-                        Circle().fill(.black.opacity(0.55))
-                            .frame(width: 96, height: 96)
-                        Circle().stroke(Theme.gold, lineWidth: 3)
-                            .frame(width: 96, height: 96)
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 44))
-                            .foregroundStyle(Theme.gold)
-                            .offset(x: 4)
-                    }
-                }
-                .buttonStyle(.plain)
-                .help("Play in QuickTime / default video app")
-                Text("Click to play")
-                    .font(Theme.Font.body(12, .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.black.opacity(0.55)))
-            }
+        VStack(spacing: 20) {
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 88, weight: .light))
+                .foregroundStyle(Theme.gold)
+            Text(url.lastPathComponent)
+                .font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                .lineLimit(1).truncationMode(.middle)
+            InlineMediaPlayer(url: url, isAudio: true)
+                .frame(maxWidth: 520, maxHeight: 64)
         }
-        .task(id: url) {
-            poster = await ThumbnailService.shared.thumbnail(for: url, size: 1024)
-        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-/// Audio: poster + Play button. Same NSViewRepresentable workaround as VideoPreview.
-private struct AudioPreview: View {
+/// Plays a file inside FileID with AVKit: starts paused on the first frame
+/// and stops when the sheet moves on.
+private struct InlineMediaPlayer: View {
     let url: URL
+    let isAudio: Bool
+    @State private var player: AVPlayer?
+    @State private var failed = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 96, weight: .light))
-                .foregroundStyle(Theme.gold)
-            Text(url.lastPathComponent)
-                .font(Theme.Font.body(14, .semibold))
-                .lineLimit(1).truncationMode(.middle)
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
-                Label("Play in default app", systemImage: "play.fill")
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
-                    .foregroundStyle(.black)
-                    .font(Theme.Font.body(13.5, .semibold))
+        ZStack {
+            if let player {
+                NativeVideoPlayer(player: player)
+                    .clipShape(RoundedRectangle(cornerRadius: isAudio ? Theme.Radius.m : 0, style: .continuous))
+            } else if failed {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle").font(.system(size: 28)).foregroundStyle(Theme.warning)
+                    Text("This file can't be played on this Mac.").font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                }
+            } else {
+                ProgressView().controlSize(.small)
             }
-            .buttonStyle(.plain)
-            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.4), ignoresSafeAreaEdges: [])
+        .task(id: url) {
+            player?.pause()
+            player = nil
+            failed = false
+            let asset = AVURLAsset(url: url)
+            let playable = (try? await asset.load(.isPlayable)) ?? false
+            guard !Task.isCancelled else { return }
+            if playable { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) } else { failed = true }
+        }
+        .onDisappear { player?.pause() }
     }
 }
 

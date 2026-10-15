@@ -44,6 +44,9 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 
 - [ ] Test isolation: `queuedCancelHonoredWithTerminalComplete` shares the `DeepAnalyze.shared` cancel flag and failed once in three local parallel runs (CI runs `--no-parallel`); give the runner an injectable analyzer.
 
+- [x] In-app playback (macOS): videos and audio play inside the preview sheet with AVKit controls; Chat results, Moments and Best Takes play in their own players instead of opening QuickTime.
+- [ ] In-app playback on Windows (MediaPlayerElement) and Linux (GtkVideo/GStreamer) to match.
+
 UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against Apple's Human Interface Guidelines):
 - [x] Rounded geometry, Archivo text, simplified sidebar, compact scan card.
 - [x] Library Selected pane (single click), full preview on double-click, accessibility actions on tiles.
