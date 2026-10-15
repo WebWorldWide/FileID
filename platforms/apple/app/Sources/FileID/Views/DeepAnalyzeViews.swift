@@ -166,7 +166,7 @@ private struct ModelOptionRow: View {
 
     @ViewBuilder
     private var rowBackground: some View {
-        RoundedRectangle(cornerRadius: 8)
+        Rectangle()
             .fill(isActive ? Theme.gold.opacity(0.10) : Color.clear)
     }
 
@@ -176,7 +176,7 @@ private struct ModelOptionRow: View {
             if isActive { return Theme.gold.opacity(0.6) }
             return fits ? Color.white.opacity(0.08) : Color.orange.opacity(0.4)
         }()
-        RoundedRectangle(cornerRadius: 8)
+        Rectangle()
             .stroke(color, lineWidth: 1)
     }
 }
@@ -418,7 +418,7 @@ struct DeepAnalyzeView: View {
                         .font(.callout.bold())
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 9)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                        .background(Rectangle().fill(Theme.gold))
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.plain)
@@ -449,7 +449,7 @@ struct DeepAnalyzeView: View {
                 .font(.caption.bold())
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 8).stroke(Theme.gold.opacity(0.6), lineWidth: 1))
+                .background(Rectangle().stroke(Theme.gold.opacity(0.6), lineWidth: 1))
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -532,7 +532,7 @@ struct DeepAnalyzeView: View {
                     Label("Review and apply…", systemImage: "wand.and.rays")
                         .font(.callout.bold())
                         .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                        .background(Rectangle().fill(Theme.gold))
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.plain)
@@ -630,7 +630,7 @@ struct DeepAnalyzeView: View {
                     } label: {
                         Label("Analyze entire library", systemImage: "wand.and.stars")
                             .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(canRun ? Theme.gold : Color.gray))
+                            .background(Rectangle().fill(canRun ? Theme.gold : Color.gray))
                             .foregroundStyle(.black)
                             .font(.callout.bold())
                     }
@@ -691,7 +691,7 @@ struct DeepAnalyzeView: View {
                         Label("Go to People", systemImage: "arrow.right.circle.fill")
                             .font(.caption.bold())
                             .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(Capsule().fill(Theme.gold))
+                            .background(Rectangle().fill(Theme.gold))
                             .foregroundStyle(.black)
                     }
                     .buttonStyle(.plain)
@@ -709,7 +709,7 @@ struct DeepAnalyzeView: View {
                         Label("Skip — run without names", systemImage: "forward.fill")
                             .font(.caption.bold())
                             .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(Capsule().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
+                            .background(Rectangle().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -723,8 +723,8 @@ struct DeepAnalyzeView: View {
             Spacer()
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.4), lineWidth: 1))
+        .background(Rectangle().fill(Color.orange.opacity(0.12)))
+        .overlay(Rectangle().stroke(Color.orange.opacity(0.4), lineWidth: 1))
     }
 
     /// Shown the moment Deep Analyze is kicked off but before the
@@ -880,7 +880,7 @@ struct DeepAnalyzeButton: View {
             )
             .font(.system(size: 12, weight: .semibold))
             .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(RoundedRectangle(cornerRadius: 6).fill(
+            .background(Rectangle().fill(
                 fits ? Theme.gold.opacity(alreadyDone ? 0.18 : 0.85) : Color.gray.opacity(0.4)
             ))
             .foregroundStyle(alreadyDone ? Theme.gold : .black)

@@ -191,7 +191,7 @@ struct ThemedSegmentedControl: View {
                     Text(opt.label)
                         .font(Theme.Font.mono(11.5, selected ? .semibold : .medium))
                         .foregroundStyle(selected ? Theme.onGold : Theme.text2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)
                         .frame(height: Theme.Metrics.control)
                         .background(selected ? Theme.gold : Color.clear)

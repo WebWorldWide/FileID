@@ -215,8 +215,8 @@ struct LibraryView: View {
             ProgressView().controlSize(.small).tint(Theme.ai)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .background(Rectangle().fill(Theme.ai.opacity(0.08)))
+        .overlay(Rectangle().stroke(Theme.ai.opacity(0.30), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -260,8 +260,8 @@ struct LibraryView: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .background(Rectangle().fill(Theme.ai.opacity(0.08)))
+        .overlay(Rectangle().stroke(Theme.ai.opacity(0.30), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -284,8 +284,8 @@ struct LibraryView: View {
                 .buttonStyle(.bordered)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
+        .background(Rectangle().fill(Theme.ai.opacity(0.10)))
+        .overlay(Rectangle().stroke(Theme.ai.opacity(0.4), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -340,10 +340,10 @@ struct LibraryView: View {
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            Rectangle()
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    Rectangle()
                         .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
                 )
         )
@@ -430,10 +430,10 @@ struct LibraryView: View {
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            Rectangle()
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    Rectangle()
                         .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
                 )
         )
@@ -588,7 +588,7 @@ struct LibraryView: View {
             ("PDFs",     "pdf"),
             ("Audio",    "audio")
         ]
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
                 Button {
@@ -597,15 +597,19 @@ struct LibraryView: View {
                     }
                 } label: {
                     Text(k.label)
-                        .font(.system(size: 11, weight: active ? .bold : .medium))
-                        .foregroundStyle(active ? Color.black : Color.primary.opacity(0.7))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(active ? Theme.gold : Color.white.opacity(0.06)))
+                        .font(Theme.Font.mono(11.5, active ? .semibold : .medium))
+                        .foregroundStyle(active ? Theme.onGold : Theme.text2)
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 12)
+                        .frame(height: Theme.Metrics.control)
+                        .background(active ? Theme.gold : Color.clear)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
+        .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
     // MARK: - Grid
@@ -644,7 +648,7 @@ struct LibraryView: View {
                             }
                         }
                         .background(
-                            RoundedRectangle(cornerRadius: Theme.Radius.m)
+                            Rectangle()
                                 .stroke(previewSelectedID == row.id && !selectMode
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
@@ -848,17 +852,14 @@ struct FileTile: View {
             // sources stay aligned. Thumbs crossfade instead of
             // popping; hover lifts via elevation.
             Color.white.opacity(0.04)
-                .aspectRatio(1, contentMode: .fit)
+                .aspectRatio(4 / 3, contentMode: .fit)
                 .overlay(thumbContent)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(hovering ? 0.18 : 0.08),
-                                lineWidth: 1)
+                    LinearGradient(stops: [.init(color: .white.opacity(0.07), location: 0), .init(color: .clear, location: 0.4), .init(color: .black.opacity(0.38), location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
                 )
-                .shadow(color: .black.opacity(hovering ? 0.45 : 0.18),
-                        radius: hovering ? 14 : 5, x: 0, y: hovering ? 6 : 3)
-                .scaleEffect(hovering ? 1.012 : 1.0)
+                .clipShape(Rectangle())
+                .overlay(Rectangle().stroke(Color.white.opacity(hovering ? 0.28 : 0.08), lineWidth: 1))
                 .animation(.easeOut(duration: 0.18), value: hovering)
                 .animation(.easeOut(duration: 0.40), value: thumb != nil)
                 .onHover { hovering = $0 }
@@ -894,8 +895,8 @@ struct FileTile: View {
                 .help("Click to apply the smart name. Original name shown crossed out.")
             } else {
                 Text(row.url.lastPathComponent)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.primary)
+                    .font(Theme.Font.body(13, .medium))
+                    .foregroundStyle(Theme.text1)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -912,14 +913,10 @@ struct FileTile: View {
             }
             .frame(height: 18)
             HStack(spacing: 4) {
-                Text(formatBytes(row.sizeBytes))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                MetaText(formatBytes(row.sizeBytes), size: 11)
                 Spacer()
                 if let date = row.displayDate {
-                    Text(date.formatted(date: .numeric, time: .omitted))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                    MetaText(date.formatted(date: .numeric, time: .omitted), size: 11)
                 }
             }
         }
@@ -952,18 +949,9 @@ struct FileTile: View {
         if selectMode {
             ZStack(alignment: .topLeading) {
                 if isChecked {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Theme.gold.opacity(0.18))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Theme.gold, lineWidth: 3)
-                        )
+                    Rectangle().fill(Theme.gold.opacity(0.14)).overlay(Rectangle().stroke(Theme.gold, lineWidth: 2))
                 }
-                Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
-                    .foregroundStyle(isChecked ? Theme.gold : Color.white.opacity(0.85))
-                    .background(Circle().fill(.black.opacity(0.45)))
-                    .padding(8)
+                DSCheck(on: isChecked).padding(8)
             }
         }
     }
@@ -996,7 +984,7 @@ struct FileTile: View {
             // Show a shimmer while the thumbnail loads — feels more
             // alive than a static placeholder, signals "something is
             // arriving".
-            ShimmerView(cornerRadius: 10)
+            ShimmerView(cornerRadius: 0)
         } else {
             // Non-image kinds get the icon placeholder (no thumb pending).
             VStack(spacing: 4) {
@@ -1014,12 +1002,7 @@ struct FileTile: View {
     private var badgeOverlay: some View {
         ZStack(alignment: .topLeading) {
             // Kind badge top-left.
-            Text(row.kind.uppercased())
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .foregroundStyle(.black)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(kindColor.opacity(0.95)))
+            KindBadge(text: row.kind)
                 .padding(6)
 
             // OCR-text / Finder-tag indicators top-right. (The "Faces"
@@ -1530,8 +1513,8 @@ private struct FinderTagsEditor: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(Capsule().fill(Theme.gold.opacity(0.15)))
-        .overlay(Capsule().stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .background(Rectangle().fill(Theme.gold.opacity(0.15)))
+        .overlay(Rectangle().stroke(Theme.gold.opacity(0.3), lineWidth: 1))
         .foregroundStyle(Theme.gold)
     }
 }
@@ -1573,7 +1556,7 @@ private struct VideoPreview: View {
                     .font(.caption.bold())
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Capsule().fill(.black.opacity(0.55)))
+                    .background(Rectangle().fill(.black.opacity(0.55)))
             }
         }
         .task(id: url) {
@@ -1600,7 +1583,7 @@ private struct AudioPreview: View {
             } label: {
                 Label("Play in default app", systemImage: "play.fill")
                     .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                    .background(Rectangle().fill(Theme.gold))
                     .foregroundStyle(.black)
                     .font(.callout.bold())
             }

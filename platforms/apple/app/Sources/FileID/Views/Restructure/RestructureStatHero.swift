@@ -65,9 +65,9 @@ private struct StatTile: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial))
+        .background(Rectangle().fill(.ultraThinMaterial))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            Rectangle()
                 .stroke(
                     isActive ? outcome.tint.opacity(0.7) : Color.white.opacity(0.06),
                     lineWidth: isActive ? 1.5 : 1
@@ -79,7 +79,7 @@ private struct StatTile: View {
             y: isActive ? 5 : 2
         )
         .scaleEffect(isActive ? 1.012 : 1.0)
-        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .contentShape(Rectangle())
         .onHover { hovering in
             // Edge-only forwarding to the bus — AppKit can fire
             // duplicate hover events during resize / focus change.

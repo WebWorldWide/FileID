@@ -436,7 +436,7 @@ struct RestructureView: View {
     private var missingContentModelsBanner: some View {
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
+                Rectangle()
                     .fill(Color.orange.opacity(0.18))
                     .frame(width: 38, height: 38)
                 Image(systemName: "wand.and.stars.inverse")
@@ -458,16 +458,16 @@ struct RestructureView: View {
                 Label("Open Settings", systemImage: "gearshape")
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Capsule().fill(Color.orange.opacity(0.85)))
+                    .background(Rectangle().fill(Color.orange.opacity(0.85)))
                     .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.m)
+            Rectangle()
                 .fill(Color.orange.opacity(0.08))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m)
+                .overlay(Rectangle()
                     .stroke(Color.orange.opacity(0.25), lineWidth: 1))
         )
     }
@@ -478,7 +478,7 @@ struct RestructureView: View {
         let pct = Int((captionedFraction * 100).rounded())
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
+                Rectangle()
                     .fill(Theme.ai.opacity(0.18))
                     .frame(width: 38, height: 38)
                 Image(systemName: "sparkles")
@@ -505,7 +505,7 @@ struct RestructureView: View {
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(
-                            Capsule().fill(Theme.ai.opacity(0.85))
+                            Rectangle().fill(Theme.ai.opacity(0.85))
                         )
                         .foregroundStyle(.black)
                 }
@@ -520,10 +520,10 @@ struct RestructureView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 14)
+            Rectangle()
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14)
+                    Rectangle()
                         .stroke(Theme.ai.opacity(0.30), lineWidth: 1)
                 )
         )
@@ -539,10 +539,10 @@ struct RestructureView: View {
         // Background lives on its own subtree so the cached blur +
         // shadow don't re-rasterize when interactive children update.
         .background(
-            RoundedRectangle(cornerRadius: 18)
+            Rectangle()
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 18)
+                    Rectangle()
                         .stroke(Color.white.opacity(0.07), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.28), radius: 22, y: 8)
@@ -689,11 +689,11 @@ struct RestructureView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            Rectangle()
                 .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            Rectangle()
                 .stroke(Theme.gold.opacity(0.25), lineWidth: 1)
         )
     }
@@ -797,7 +797,7 @@ struct RestructureView: View {
             }
             .padding(.horizontal, 6).padding(.vertical, 3)
             .background(
-                RoundedRectangle(cornerRadius: 4)
+                Rectangle()
                     .fill(Color.green.opacity(isHovered ? 0.10 : 0))
             )
             .contentShape(Rectangle())
@@ -867,7 +867,7 @@ struct RestructureView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 240)
             .overlay(
-                RoundedRectangle(cornerRadius: 14)
+                Rectangle()
                     .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
             )
         } else {
@@ -1321,7 +1321,7 @@ struct RestructureView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(
-                Capsule().fill(active ? Theme.gold : Color.clear)
+                Rectangle().fill(active ? Theme.gold : Color.clear)
             )
             .foregroundStyle(active ? .black : Color.primary.opacity(0.7))
         }

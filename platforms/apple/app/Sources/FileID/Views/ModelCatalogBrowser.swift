@@ -40,7 +40,7 @@ struct ModelCatalogBrowser: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search model, publisher or license", text: $query).textFieldStyle(.plain)
                     .accessibilityLabel("Search models")
-            }.padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+            }.padding(10).background(.white.opacity(0.06), in: Rectangle())
             HStack {
                 if !visionOnly {
                     Picker("Capability", selection: $role) {

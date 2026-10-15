@@ -87,7 +87,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
     @ViewBuilder
     private var iconBadge: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10)
+            Rectangle()
                 .fill(outcome.tint.opacity(0.18))
                 .frame(width: 38, height: 38)
             Image(systemName: outcome.icon)
@@ -128,7 +128,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
             .background(
-                Capsule().stroke(
+                Rectangle().stroke(
                     isExpanded ? outcome.tint.opacity(0.7) : Color.secondary.opacity(0.5),
                     lineWidth: 1
                 )
@@ -153,7 +153,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
                 Text(label).font(.caption.weight(.semibold))
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(Capsule().fill(bgFill))
+            .background(Rectangle().fill(bgFill))
             .foregroundStyle(fg)
         }
         .buttonStyle(.plain)

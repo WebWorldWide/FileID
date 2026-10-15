@@ -40,7 +40,7 @@ struct BulkTagSheet: View {
                     Label(inFlight ? "Tagging…" : "Apply",
                           systemImage: "tag.fill")
                         .padding(.horizontal, 16).padding(.vertical, 6)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                        .background(Rectangle().fill(Theme.gold))
                         .foregroundStyle(.black)
                         .font(.callout.bold())
                 }

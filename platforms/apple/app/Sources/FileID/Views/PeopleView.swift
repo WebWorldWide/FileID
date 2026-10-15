@@ -378,7 +378,7 @@ struct PeopleView: View {
                       systemImage: "forward.fill")
                     .font(.caption.bold())
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Capsule().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
+                    .background(Rectangle().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -387,8 +387,8 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
+        .background(Rectangle().fill(Color.secondary.opacity(0.08)))
+        .overlay(Rectangle().stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
     }
 
     /// Item 2: positive "keep moving" affordance — once at least one person is
@@ -412,7 +412,7 @@ struct PeopleView: View {
                 Label("Continue to Deep Analyze", systemImage: "arrow.forward.circle.fill")
                     .font(.caption.bold())
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Capsule().fill(Theme.gold))
+                    .background(Rectangle().fill(Theme.gold))
                     .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
@@ -421,8 +421,8 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
+        .background(Rectangle().fill(Theme.gold.opacity(0.10)))
+        .overlay(Rectangle().stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
     }
 
     private var headerSubtitle: String {
@@ -475,7 +475,7 @@ struct PeopleView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            Rectangle()
                 .fill(done ? Color.green.opacity(0.10) : Color.white.opacity(0.04))
         )
     }
@@ -709,7 +709,7 @@ private struct PersonCard: View {
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(faceCrop)
                 .overlay(selectionOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(Rectangle())
             VStack(alignment: .leading, spacing: 2) {
                 Text(displayName)
                     .font(.callout.bold())
@@ -724,11 +724,11 @@ private struct PersonCard: View {
         }
         .padding(8)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            Rectangle()
                 .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            Rectangle()
                 .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
         )
         .task(id: thumbnailIdentity) {
@@ -771,11 +771,11 @@ private struct PersonCard: View {
     private var selectionOverlay: some View {
         if selectionMode {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
+                Rectangle()
                     .stroke(isChecked ? selectionTint : Color.white.opacity(0.25),
                             lineWidth: isChecked ? 3 : 1.5)
                 if isChecked {
-                    RoundedRectangle(cornerRadius: 10)
+                    Rectangle()
                         .fill(selectionTint.opacity(0.18))
                 }
                 VStack {
@@ -1158,9 +1158,9 @@ private struct PersonFileTile: View {
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(tile)
                 .overlay(selectionOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(Rectangle())
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    Rectangle()
                         .stroke(isChecked ? Theme.gold : Color.clear,
                                 lineWidth: isChecked ? 2 : 0)
                 )
@@ -1326,7 +1326,7 @@ private struct SuggestedMergesSheet: View {
                           systemImage: "checkmark.circle.fill")
                         .font(.callout.bold())
                         .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.18)))
+                        .background(Rectangle().fill(Color.green.opacity(0.18)))
                         .foregroundStyle(.green)
                 }
                 .buttonStyle(.plain)
@@ -1339,7 +1339,7 @@ private struct SuggestedMergesSheet: View {
                           systemImage: "rectangle.stack.fill")
                         .font(.callout.bold())
                         .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary, lineWidth: 1))
+                        .background(Rectangle().stroke(Color.secondary, lineWidth: 1))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -1406,7 +1406,7 @@ private struct SuggestedMergesSheet: View {
             }
             .padding(10)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                Rectangle()
                     .fill(.ultraThinMaterial)
             )
         }
@@ -1495,11 +1495,11 @@ private struct MergeTargetPickerSheet: View {
                             }
                             .padding(10)
                             .background(
-                                RoundedRectangle(cornerRadius: 8)
+                                Rectangle()
                                     .fill(.ultraThinMaterial)
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 8)
+                                Rectangle()
                                     .stroke(person.hasAnyName
                                               ? Theme.gold.opacity(0.6)
                                               : Color.white.opacity(0.10),

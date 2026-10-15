@@ -307,7 +307,7 @@ struct SankeyFlowView: View {
         let isRollup = node.id == Self.otherSourceID || node.id == Self.otherDestID
         HStack(spacing: 8) {
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
+                Rectangle()
                     .fill(node.tint.opacity(isFocused ? 0.32 : 0.18))
                     .frame(width: 24, height: 24)
                 Image(systemName: node.icon)
@@ -328,7 +328,7 @@ struct SankeyFlowView: View {
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(
-            RoundedRectangle(cornerRadius: 9)
+            Rectangle()
                 // Rollup nodes get a lighter, less assertive
                 // background so they read clearly as
                 // "everything else" rather than competing with the
@@ -337,7 +337,7 @@ struct SankeyFlowView: View {
                                  : AnyShapeStyle(.ultraThinMaterial))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 9)
+            Rectangle()
                 .stroke(
                     node.tint.opacity(isFocused ? 0.95 : (isRollup ? 0.18 : 0.30)),
                     lineWidth: isFocused ? 1.5 : 1
@@ -355,7 +355,7 @@ struct SankeyFlowView: View {
             y: isFocused ? 4 : 1
         )
         .frame(height: slot.height)
-        .contentShape(RoundedRectangle(cornerRadius: 9))
+        .contentShape(Rectangle())
         .help("\(node.count) file\(node.count == 1 ? "" : "s") · tap to see them")
         .animation(.easeOut(duration: 0.18), value: isFocused)
     }
@@ -503,10 +503,10 @@ struct SankeyFlowView: View {
             .padding(.horizontal, 10).padding(.vertical, 7)
             .frame(width: tooltipW, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                Rectangle()
                     .fill(.regularMaterial)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
+                        Rectangle()
                             .stroke(Theme.gold.opacity(0.45), lineWidth: 1)
                     )
             )

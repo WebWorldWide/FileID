@@ -256,6 +256,7 @@ struct SegmentedBar<T: Hashable>: View {
                     Text(option.1)
                         .font(Theme.Font.mono(11.5, on ? .semibold : .medium))
                         .foregroundStyle(on ? Theme.onGold : Theme.text2)
+                        .lineLimit(1).fixedSize()
                         .padding(.horizontal, 10)
                         .frame(height: height)
                         .background(on ? Theme.gold : Color.clear)
@@ -295,7 +296,7 @@ struct GrainProgressBar: View {
                 LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing)
                     .frame(width: geo.size.width)
                     .mask(alignment: .leading) { Rectangle().frame(width: geo.size.width * p) }
-                GrainOverlay().opacity(0.55).blendMode(.overlay)
+                GrainOverlay().opacity(0.4).blendMode(.overlay)
             }
         }
         .frame(height: height)
@@ -317,17 +318,41 @@ struct GrainOverlay: View {
 }
 
 enum GrainTexture {
+    /// 140 pt tile backed by a 2× bitmap so the grain stays sub-point on
+    /// Retina. Three octaves of smoothed noise summed around mid-grey give the
+    /// soft film look of the prototype's fractalNoise filter instead of
+    /// harsh per-pixel static.
     static let shared: NSImage = {
-        let size = 140
-        var pixels = [UInt8](repeating: 0, count: size * size)
-        var generator = SystemRandomNumberGenerator()
-        for i in pixels.indices { pixels[i] = UInt8.random(in: 0...255, using: &generator) }
-        let data = Data(pixels)
-        let provider = CGDataProvider(data: data as CFData)!
+        let points = 140, scale = 2, size = points * scale
+        var rng = SystemRandomNumberGenerator()
+        func layer(cells: Int) -> [Float] {
+            var grid = [Float](repeating: 0, count: (cells + 1) * (cells + 1))
+            for i in grid.indices { grid[i] = Float.random(in: -1...1, using: &rng) }
+            var out = [Float](repeating: 0, count: size * size)
+            let step = Float(size) / Float(cells)
+            for y in 0..<size {
+                let fy = Float(y) / step, y0 = Int(fy), ty = fy - Float(y0)
+                for x in 0..<size {
+                    let fx = Float(x) / step, x0 = Int(fx), tx = fx - Float(x0)
+                    let a = grid[y0 * (cells + 1) + x0], b = grid[y0 * (cells + 1) + min(x0 + 1, cells)]
+                    let c = grid[min(y0 + 1, cells) * (cells + 1) + x0], d = grid[min(y0 + 1, cells) * (cells + 1) + min(x0 + 1, cells)]
+                    let sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty)
+                    out[y * size + x] = (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy
+                }
+            }
+            return out
+        }
+        let fine = layer(cells: size), mid = layer(cells: size / 2), coarse = layer(cells: size / 5)
+        var pixels = [UInt8](repeating: 128, count: size * size)
+        for i in pixels.indices {
+            let n = fine[i] * 0.55 + mid[i] * 0.3 + coarse[i] * 0.15
+            pixels[i] = UInt8(max(0, min(255, 128 + n * 70)))
+        }
+        let provider = CGDataProvider(data: Data(pixels) as CFData)!
         let cg = CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: size,
                          space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
-        return NSImage(cgImage: cg, size: NSSize(width: size, height: size))
+                         provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)!
+        return NSImage(cgImage: cg, size: NSSize(width: points, height: points))
     }()
 }
 

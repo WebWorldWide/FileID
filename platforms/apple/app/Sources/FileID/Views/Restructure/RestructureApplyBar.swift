@@ -38,10 +38,10 @@ struct RestructureApplyBar: View {
         }
         .padding(.horizontal, 18).padding(.vertical, 14)
         .background(
-            RoundedRectangle(cornerRadius: 16)
+            Rectangle()
                 .fill(.regularMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16)
+                    Rectangle()
                         .stroke(Color.white.opacity(0.10), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.45), radius: 22, y: 10)
@@ -94,7 +94,7 @@ struct RestructureApplyBar: View {
             }
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(
-                RoundedRectangle(cornerRadius: 10)
+                Rectangle()
                     .stroke(Color.red.opacity(0.55), lineWidth: 1)
             )
             .foregroundStyle(.red)
@@ -117,7 +117,7 @@ struct RestructureApplyBar: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 9)
             .background(
-                RoundedRectangle(cornerRadius: 10).fill(
+                Rectangle().fill(
                     LinearGradient(
                         colors: [Theme.gold, Theme.goldDim],
                         startPoint: .top, endPoint: .bottom

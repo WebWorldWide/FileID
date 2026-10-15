@@ -155,10 +155,10 @@ struct CleanupView: View {
                     .padding(.vertical, 8)
                     .background(Color.red.opacity(0.12))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
+                        Rectangle()
                             .stroke(Color.red.opacity(0.5), lineWidth: 1)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
@@ -259,8 +259,8 @@ struct CleanupView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.10)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                    .background(Rectangle().fill(Color.orange.opacity(0.10)))
+                    .overlay(Rectangle().stroke(Color.orange.opacity(0.35), lineWidth: 1))
                     .padding(.bottom, 4)
                 } else {
                     HStack(spacing: 8) {
@@ -274,9 +274,9 @@ struct CleanupView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(
+                    .background(Rectangle().fill(
                         (exactPreviewPartial ? Color.orange : Color.green).opacity(0.08)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(
+                    .overlay(Rectangle().stroke(
                         (exactPreviewPartial ? Color.orange : Color.green).opacity(0.3),
                         lineWidth: 1))
                     .padding(.bottom, 4)
@@ -315,9 +315,9 @@ struct CleanupView: View {
                             .buttonStyle(.borderless)
                     }
                     .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(
+                    .background(Rectangle().fill(
                         (statusWarning ? Color.orange : Color.green).opacity(0.10)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(
+                    .overlay(Rectangle().stroke(
                         (statusWarning ? Color.orange : Color.green).opacity(0.4),
                         lineWidth: 1))
                     .help("Files moved to Trash can be restored in Finder: open Trash, right-click a file, and choose Put Back.")
@@ -714,9 +714,9 @@ private struct CopyTile: View {
             Color.white.opacity(0.04)
                 .frame(width: 132, height: 132)
                 .overlay(thumbContent)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(Rectangle())
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    Rectangle()
                         .stroke(borderColor, lineWidth: borderWidth)
                 )
                 .overlay(badgeOverlay)

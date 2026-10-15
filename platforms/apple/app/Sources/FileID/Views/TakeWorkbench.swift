@@ -183,7 +183,7 @@ struct TakeWorkbench: View {
                                 }
                             }
                             .padding(10)
-                            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+                            .background(.quaternary.opacity(0.25), in: Rectangle())
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -319,6 +319,6 @@ private struct RelatedTakeSuggestionRow: View {
             Button("Review group", action: onReview)
         }
         .padding(8)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 10))
+        .background(.quaternary.opacity(0.25), in: Rectangle())
     }
 }

@@ -102,7 +102,7 @@ struct LavaLampBackground: View {
                 .init(color: .clear, location: 0.8)
             ], startPoint: .top, endPoint: .bottom)
 
-            GrainOverlay().opacity(0.22).blendMode(.overlay)
+            GrainOverlay().opacity(0.14).blendMode(.overlay)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)

@@ -91,7 +91,7 @@ struct BulkRenameSheet: View {
                       : "Rename \(selectedIDs.count) file\(selectedIDs.count == 1 ? "" : "s")",
                       systemImage: "wand.and.rays")
                     .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                    .background(Rectangle().fill(Theme.gold))
                     .foregroundStyle(.black)
                     .font(.callout.bold())
             }
@@ -275,7 +275,7 @@ private struct BulkRenameRow: View {
             // Thumbnail — reuses ThumbnailService (QuickLookThumbnailing
             // backed). Works for images, videos, PDFs, and Office docs.
             ZStack {
-                RoundedRectangle(cornerRadius: 6)
+                Rectangle()
                     .fill(Color.secondary.opacity(0.10))
                     .frame(width: 64, height: 64)
                 if let thumb {
@@ -283,7 +283,7 @@ private struct BulkRenameRow: View {
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 64, height: 64)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .clipShape(Rectangle())
                         .transition(.opacity)
                 } else {
                     Image(systemName: kindFallbackIcon(file.kind))
@@ -292,7 +292,7 @@ private struct BulkRenameRow: View {
                 }
             }
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
+                Rectangle()
                     .stroke(Color.secondary.opacity(0.20), lineWidth: 1)
             )
 
@@ -319,7 +319,7 @@ private struct BulkRenameRow: View {
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
         .background(
-            RoundedRectangle(cornerRadius: 6)
+            Rectangle()
                 .fill(isSelected ? Theme.gold.opacity(0.05) : Color.clear)
         )
         .task(id: file.id) {
