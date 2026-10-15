@@ -49,7 +49,7 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] HIG: icon-only buttons have spoken names (VoiceOver read "Gear Shape", "Split View Horizontally Left", "Conversation"); text and hairlines strengthen under Increase Contrast; the animated background becomes solid under Reduce Transparency; Reduce Motion already honored.
 - [ ] HIG: keyboard focus order and visible focus rings on every page with Full Keyboard Access; text-size setting for the content area.
 - [ ] Moments tracks, Takes/Tools/Chat panels, Restructure step cells in v3 layout.
-- [ ] Model browser "Speed on this Mac" panel checked on screen (results now exist for two models).
+- [x] Model browser "Speed on this Mac" checked on screen with a real in-app run (Qwen3-VL 4B: 4.3 s load, 165/26 tok/s, 5.1 s per image, 3.8 GB); metrics use the full width, the selected row stays in view, measured memory replaces the estimate.
 - [ ] Title bar: rounded controls, consistent heights, toolbar spacing per HIG.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
