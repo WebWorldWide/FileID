@@ -703,11 +703,7 @@ struct RestructureView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "rectangle.3.offgrid")
-                    .font(.system(size: 32))
-                    .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Restructure").font(.largeTitle.bold())
                     Text("FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply.")
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -855,14 +851,12 @@ struct RestructureView: View {
             // the app — the only "loading" UI in the tree that earns
             // its motion budget.
             ZStack {
-                LavaLampBackground()
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                Theme.panel
+                Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1)
                 VStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.large)
-                        .tint(Theme.gold)
+                    GrainProgressBar(progress: 1, tone: .gold).frame(width: 220)
                     Text("Computing proposals…")
-                        .font(.callout.bold())
+                        .font(Theme.Font.display(24))
                     Text("Looking at every folder, classifying it, and picking a tidy home for every file.")
                         .font(.caption)
                         .foregroundStyle(.secondary)

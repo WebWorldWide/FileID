@@ -562,17 +562,7 @@ struct DeepAnalyzeView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "text.below.photo")
-                .font(.system(size: 30))
-                .foregroundStyle(Theme.gold)
-                .frame(width: 36, alignment: .center)
-                .padding(.top, 4)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Deep Analyze").font(.largeTitle.bold())
-                Text("Analyzes supported files and suggests descriptions and short filenames.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+            MetaText("Captions supported files and proposes short, specific file names. Nothing is renamed until you accept.", color: Theme.text2)
             Spacer(minLength: 0)
         }
     }

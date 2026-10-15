@@ -39,10 +39,11 @@ struct ToolsWorkbench: View {
     @Bindable var engine: EngineClient
     @Environment(\.dismiss) private var dismiss
     @Bindable var session: ToolsSession
+    var inline = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("File Tools").font(.title2.bold()); Spacer(); Button("Done") { dismiss() } }
+            if !inline { HStack { Text("File Tools").font(Theme.Font.display(24)); Spacer(); Button("Done") { dismiss() }.buttonStyle(.dsSecondary) } }
             HStack {
                 TextField("Find catalog files by name or description", text: $session.query).textFieldStyle(.roundedBorder).onSubmit { search() }
                 Button("Find", action: search).disabled(!session.pending.isEmpty || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

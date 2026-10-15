@@ -18,6 +18,8 @@ public final class MobileCLIPService: @unchecked Sendable {
 
     private let lock = NSLock()
     private let imageLoadLock = NSLock()
+    /// Guarded by imageLoadLock; one warning per missing weight path instead of one per batch.
+    private var missingWarnedPaths: Set<String> = []
     private var env: ORTEnv?
     private var session: ORTSession?
     private var inputName: String?
@@ -70,8 +72,10 @@ public final class MobileCLIPService: @unchecked Sendable {
         let modelURL = url ?? Self.defaultImageModelURL
         let safe = redactPathForLog(modelURL.path)
         guard CLIPEmbeddingSpace.verifyArtifact(at: modelURL, id: "clip_vitb32_image") else {
-            JSONLog.shared.warn(ev: "clip_model_missing", path: safe,
-                                error: "CLIP image weights are missing or fail artifact verification; embeddings disabled")
+            if missingWarnedPaths.insert(modelURL.path).inserted {
+                JSONLog.shared.warn(ev: "clip_model_missing", path: safe,
+                                    error: "CLIP image weights are missing or fail artifact verification; embeddings disabled")
+            }
             return false
         }
         do {

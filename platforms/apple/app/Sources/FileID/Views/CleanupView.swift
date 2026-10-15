@@ -121,12 +121,7 @@ struct CleanupView: View {
     @ViewBuilder
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Cleanup").font(.largeTitle.bold())
-                Text(headerSubtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+            MetaText(headerSubtitle, color: Theme.text2)
             ThemedSegmentedControl(
                 selection: $mode,
                 options: [(tag: "exact", label: "Exact"), (tag: "similar", label: "Similar")]

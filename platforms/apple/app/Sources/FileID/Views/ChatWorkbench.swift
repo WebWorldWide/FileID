@@ -35,10 +35,12 @@ struct ChatWorkbench: View {
                     Button("Delete conversation", role: .destructive) { control("clear") }
                 } label: { Image(systemName: "ellipsis") }
                     .menuStyle(.borderlessButton).fixedSize().help("Conversation options")
-                Button { if let onClose { onClose() } else { dismiss() } } label: {
-                    Image(systemName: "xmark").font(.caption.weight(.semibold))
-                }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
-                    .help("Close chat").accessibilityLabel("Close chat")
+                if let onClose {
+                    Button { onClose() } label: {
+                        Image(systemName: "xmark").font(.caption.weight(.semibold))
+                    }.buttonStyle(.plain).keyboardShortcut(.cancelAction)
+                        .help("Close chat").accessibilityLabel("Close chat")
+                }
             }.padding(16)
             Divider().overlay(Color.white.opacity(0.08))
             ScrollViewReader { scroll in

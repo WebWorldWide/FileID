@@ -1,35 +1,45 @@
 import SwiftUI
 
-// MARK: - Theme
+// MARK: - Theme (Prototype v3)
+// Square corners, 1 px hairlines, mono section labels, serif page titles.
+// Gold is the only action/selection accent; lavender means a model is
+// running, cyan is information, pink is "done".
 
 enum Theme {
-    // Primary accent — pulled from the FileID logo's caution-yellow
-    // triangle. Reserved for primary actions (Apply, Start Scan, Pick a
-    // folder), value-prop moments (Smart name results), tab selection.
-    static let gold    = Color(red: 1.0, green: 0.8, blue: 0.0)
+    static let gold    = Color(red: 1.0, green: 0.8, blue: 0.0)          // #FFCC00
     static let goldDim = Color(red: 0.8, green: 0.64, blue: 0.0)
+    static let goldHover = Color(hex: 0xFFD84D)
+    static let onGold  = Color(hex: 0x141414)
 
-    // Iridescent palette — pulled from the rainbow gradient backing
-    // the logo. Each color has a *meaning*:
-    //
-    //   ai      → an on-device AI is doing work right now (Deep Analyze,
-    //             face clustering, ArcFace embedding, Verify with AI).
-    //             Lavender / iridescent purple.
-    //   info    → secondary status / information (selected count,
-    //             "what just happened" banners). Soft cyan.
-    //   delight → success / completion / "nice job" moments (renamed,
-    //             grouped, moved). Soft pink — used briefly, never as
-    //             a permanent fixture.
-    //
-    // Apply sparingly — gold remains the primary CTA color. These are
-    // for *moments* not surfaces.
-    static let ai      = Color(red: 0.69, green: 0.61, blue: 0.81)  // #B19BCE
-    static let info    = Color(red: 0.63, green: 0.89, blue: 0.92)  // #A0E2EA
-    static let delight = Color(red: 0.95, green: 0.65, blue: 0.75)  // #F2A6C0
+    static let ai      = Color(hex: 0xB19BCE)
+    static let info    = Color(hex: 0xA0E2EA)
+    static let delight = Color(hex: 0xF2A6C0)
+    static let danger  = Color(hex: 0xFF6A5E)
+    static let warning = Color(hex: 0xE0A340)
+    static let paused  = Color(red: 185/255, green: 190/255, blue: 196/255).opacity(0.5)
+
+    static let bg0 = Color(hex: 0x070708)
+    static let bg1 = Color(hex: 0x0B0B0C)
+    static let text1 = Color(hex: 0xF0F1F2)
+    static let text2 = Color(hex: 0xCFD3D8)
+    static let text3 = Color(hex: 0xA6ACB3)
+    static let label = Color(hex: 0xAEB4BB)
+    static let textOnPanel = Color(hex: 0xE2E5E8)
+
+    static let panel          = Color(red: 24/255, green: 24/255, blue: 27/255).opacity(0.78)
+    static let panelHeader    = Color.white.opacity(0.02)
+    static let pane           = Color.white.opacity(0.015)
+    static let well           = Color.black.opacity(0.3)
+    static let hairline       = Color.white.opacity(0.08)
+    static let hairlineSoft   = Color.white.opacity(0.06)
+    static let hairlineStrong = Color.white.opacity(0.14)
+    static let controlBorder  = Color.white.opacity(0.18)
+    static let hover          = Color.white.opacity(0.05)
+    static let goldWash       = gold.opacity(0.07)
 
     static let surfaceBase     = Color.black.opacity(0.3)
-    static let surfaceCard     = Color.white.opacity(0.06)
-    static let surfaceBorder   = Color.white.opacity(0.08)
+    static let surfaceCard     = panel
+    static let surfaceBorder   = hairline
 
     enum Space {
         static let xs: CGFloat = 4
@@ -39,14 +49,47 @@ enum Theme {
         static let xl: CGFloat = 40
     }
 
+    /// Prototype v3 is square everywhere; kept so call sites compile.
     enum Radius {
-        static let s:  CGFloat = 8
-        static let m:  CGFloat = 12
-        static let l:  CGFloat = 16
+        static let s:  CGFloat = 0
+        static let m:  CGFloat = 0
+        static let l:  CGFloat = 0
+    }
+
+    enum Metrics {
+        static let titleBar: CGFloat = 48
+        static let sidebar: CGFloat = 232
+        static let navRow: CGFloat = 50
+        static let control: CGFloat = 28
+        static let controlSmall: CGFloat = 24
+        static let controlLarge: CGFloat = 30
+        static let pageInsetX: CGFloat = 26
+        static let pageInsetY: CGFloat = 20
+        static let sidePane: CGFloat = 300
+    }
+
+    enum Font {
+        static func display(_ size: CGFloat) -> SwiftUI.Font { .system(size: size, weight: .regular, design: .serif) }
+        static func mono(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { .system(size: size, weight: weight, design: .monospaced) }
+        static func body(_ size: CGFloat = 14, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { .system(size: size, weight: weight) }
+        static let sectionLabel = mono(11, .semibold)
+        static let meta = mono(11)
+        static let metaStrong = mono(11.5, .semibold)
+        static let control = mono(11.5)
+        static let pageTitle = display(34)
+    }
+
+    static let spring = Animation.spring(response: 0.35, dampingFraction: 0.8)
+}
+
+extension Color {
+    init(hex: UInt32, opacity: Double = 1) {
+        self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
+                  blue: Double(hex & 0xFF) / 255, opacity: opacity)
     }
 }
 
-// MARK: - GlassCard
+// MARK: - GlassCard → square hairline panel
 
 struct GlassCard<Content: View>: View {
     @ViewBuilder var content: Content
@@ -55,18 +98,12 @@ struct GlassCard<Content: View>: View {
     var body: some View {
         content
             .padding(padding)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.m)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Theme.Radius.m)
-                            .stroke(Theme.surfaceBorder, lineWidth: 1)
-                    )
-            )
+            .background(Theme.panel)
+            .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
     }
 }
 
-// MARK: - BadgePill
+// MARK: - BadgePill → square mono chip
 
 struct BadgePill: View {
     let label:  String
@@ -74,17 +111,18 @@ struct BadgePill: View {
 
     var body: some View {
         Text(label)
-            .font(.caption.weight(.semibold))
+            .font(Theme.Font.mono(10.5, .semibold))
+            .tracking(0.8)
+            .textCase(.uppercase)
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(color.opacity(0.15)))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .overlay(Rectangle().stroke(color.opacity(0.5), lineWidth: 1))
     }
 }
 
 // MARK: - SettingToggleRow
-// Gold, right-aligned toggle. Used everywhere to keep switches consistent.
 
 struct SettingToggleRow: View {
     let title: String
@@ -101,22 +139,21 @@ struct SettingToggleRow: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(13.5))
                     .fixedSize(horizontal: false, vertical: true)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Font.meta)
+                        .foregroundStyle(Theme.text3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .accessibilityHidden(true)
             Spacer(minLength: 12)
             Toggle(title, isOn: $isOn)
-                .toggleStyle(.switch)
+                .toggleStyle(DSToggleStyle())
                 .labelsHidden()
                 .accessibilityHint(Text(subtitle ?? ""))
-                .tint(Theme.gold)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -132,16 +169,12 @@ struct GoldButton: View {
     var body: some View {
         Button(action: action) {
             Label(title, systemImage: icon)
-                .fontWeight(.semibold)
-                .foregroundStyle(Color.black)
         }
-        .buttonStyle(.borderedProminent)
-        .tint(Theme.gold)
+        .buttonStyle(DSPrimaryButtonStyle())
     }
 }
 
-// MARK: - ThemedSegmentedControl
-// .pickerStyle(.segmented) renders light and clashes with gold-on-dark.
+// MARK: - ThemedSegmentedControl → square segmented bar
 
 struct ThemedSegmentedControl: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -149,49 +182,27 @@ struct ThemedSegmentedControl: View {
     let options: [(tag: String, label: String)]
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(options, id: \.tag) { opt in
                 let selected = selection == opt.tag
                 Button {
                     selection = opt.tag
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark")
-                            .opacity(selected ? 1 : 0)
-                            .accessibilityHidden(true)
-                        Text(opt.label)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .font(.system(size: 12, weight: selected ? .bold : .medium))
-                    .foregroundStyle(selected ? Color.black : Color.primary.opacity(0.7))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        Capsule()
-                            .fill(selected ? Theme.gold : Color.white.opacity(0.08))
-                    )
-                    .contentShape(Capsule())
+                    Text(opt.label)
+                        .font(Theme.Font.mono(11.5, selected ? .semibold : .medium))
+                        .foregroundStyle(selected ? Theme.onGold : Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 12)
+                        .frame(height: Theme.Metrics.control)
+                        .background(selected ? Theme.gold : Color.clear)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(Text(opt.label))
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
-        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: selection)
-        .transaction { transaction in
-            if reduceMotion {
-                transaction.animation = nil
-                transaction.disablesAnimations = true
-            }
-        }
-        .padding(3)
-        .background(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color.white.opacity(0.05))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                )
-        )
+        .animation(reduceMotion ? nil : Theme.spring, value: selection)
+        .overlay(Rectangle().stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 }

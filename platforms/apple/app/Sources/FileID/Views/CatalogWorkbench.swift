@@ -23,13 +23,16 @@ struct CatalogWorkbench: View {
     @State private var refreshedTimelineJobs: Set<String> = []
     @State private var timelineMode = "sampled"
     @State private var showingTakes = false
+    var inline = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Search & Moments").font(.title2.bold())
-                Spacer()
-                Button("Done") { dismiss() }
+            if !inline {
+                HStack {
+                    Text("Search & Moments").font(Theme.Font.display(24))
+                    Spacer()
+                    Button("Done") { dismiss() }.buttonStyle(.dsSecondary)
+                }
             }
             HStack {
                 TextField("Search names, descriptions, chapters, or sampled video frames", text: $query)

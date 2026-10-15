@@ -190,11 +190,7 @@ struct PeopleView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("People")
-                    .font(.largeTitle.bold())
-                Text(headerCountLine)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                MetaText(headerCountLine, color: Theme.text2)
                 Spacer()
                 headerActions
             }
@@ -319,7 +315,7 @@ struct PeopleView: View {
         let p = persons.count
         let unnamed = persons.filter { !$0.hasAnyName }.count
         if p == 0 && totalFacePrints == 0 { return "" }
-        if p == 0 { return "\(totalFacePrints) faces · clustering…" }
+        if p == 0 { return engine.faceClusteringInFlight ? "\(totalFacePrints.formatted()) faces · grouping…" : "\(totalFacePrints.formatted()) faces detected · not grouped yet" }
         if unnamed > 0 { return "\(p) people · \(unnamed) still unnamed" }
         return "\(p) people · all named"
     }

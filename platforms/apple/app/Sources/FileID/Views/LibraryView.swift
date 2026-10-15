@@ -446,76 +446,50 @@ struct LibraryView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Title row — matches the rhythm of every other primary tab.
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("Library").font(.largeTitle.bold())
-                Text("\(rows.count) of \(store.totalFiles)")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            // Action row — search, filter, bulk actions.
-            HStack(alignment: .center, spacing: 12) {
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search filenames, captions, tags, people, text in photos…",
-                               text: $searchText)
+            HStack(alignment: .center, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
+                    TextField("Filter by name, tag, caption or person", text: $searchText)
                         .textFieldStyle(.plain)
-                        .frame(minWidth: 220)
+                        .font(Theme.Font.body(13.5))
                         .focused($searchFocused)
                     if !searchText.isEmpty {
-                        Button { searchText = "" } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear search")
+                        Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
+                            .buttonStyle(.plain)
+                            .help("Clear search")
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: 360)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-
-                Spacer(minLength: 8)
+                .padding(.horizontal, 10)
+                .frame(height: Theme.Metrics.controlLarge)
+                .frame(maxWidth: 320)
+                .background(Color.black.opacity(0.3))
+                .overlay(Rectangle().stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
                 kindPicker
+
+                MetaText("\(rows.count.formatted()) of \(store.totalFiles.formatted()) shown", size: 11)
+
+                Spacer(minLength: 8)
 
             // multi-select mode toggle. Tiles render with check-
             // boxes; "Tag selected" + "Done" appear in place of the
             // normal action set.
             if selectMode {
-                Text("\(checkedFiles.count) selected")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                MetaText("\(checkedFiles.count) selected", size: 11)
                 Button {
                     if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
-                } label: {
-                    Label("Tag selected", systemImage: "tag.fill")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().fill(Theme.gold))
-                        .foregroundStyle(.black)
-                }
-                .buttonStyle(.plain)
+                } label: { Label("Tag selected", systemImage: "tag.fill") }
+                .buttonStyle(DSPrimaryButtonStyle(height: 28))
                 .disabled(checkedFiles.isEmpty)
                 Button("Done") {
                     selectMode = false
                     checkedFiles.removeAll()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(DSSecondaryButtonStyle(height: 28))
                 .keyboardShortcut(.escape, modifiers: [])
             } else {
-                Button {
-                    selectMode = true
-                } label: {
-                    Label("Select", systemImage: "checkmark.square")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().stroke(.secondary.opacity(0.5), lineWidth: 1))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+                Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square") }
+                .buttonStyle(DSSecondaryButtonStyle(height: 28))
                 .help("Enter multi-select mode to apply tags to many files at once")
             }
 
@@ -523,32 +497,26 @@ struct LibraryView: View {
             // that's where smart names come from in the workflow. Keep
             // only the per-row "Undo last rename" affordance here.
             if lastBatchAvailable {
-                Button(action: undoLastBatch) {
-                    Label("Undo last rename", systemImage: "arrow.uturn.backward")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().stroke(Theme.gold, lineWidth: 1))
-                        .foregroundStyle(Theme.gold)
-                }
-                .buttonStyle(.plain)
+                Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
+                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
                 .help("Reverse the most recent rename batch")
             }
 
             if lastTagBatchAvailable {
-                Button(action: undoLastTagBatch) {
-                    Label("Undo last tags", systemImage: "arrow.uturn.backward")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().stroke(Theme.gold, lineWidth: 1))
-                        .foregroundStyle(Theme.gold)
-                }
-                .buttonStyle(.plain)
+                Button(action: undoLastTagBatch) { Label("Undo last tags", systemImage: "arrow.uturn.backward") }
+                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
                 .help("Remove only the tags FileID added in the most recent bulk tag batch")
             }
 
             }
         }
-        .padding(20)
+        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 12)
+        .onAppear {
+            if let handoff = UserDefaults.standard.string(forKey: "libraryQueryHandoff"), !handoff.isEmpty {
+                searchText = handoff
+                UserDefaults.standard.removeObject(forKey: "libraryQueryHandoff")
+            }
+        }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshBulkState) {
             BulkRenameSheet(store: store)
         }
@@ -802,7 +770,7 @@ struct LibraryView: View {
             // N+1 across the grid before. Off-main too (same read-store scan).
             let ids = newRows.map { $0.id }
             let tags = await Task.detached(priority: .userInitiated) { [store] in
-                store.topVisionTagsBulk(forFileIDs: ids, limit: 2)
+                store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
             guard !Task.isCancelled else { return }
             rows = newRows
@@ -835,6 +803,13 @@ struct FileTile: View {
     /// → "Aquatic", "Year_2024" → "2024"). Last underscore segment wins,
     /// with first letter capitalized. Multi-word labels added by `extraTags`
     /// like "Has Faces" pass through unchanged.
+    /// Hierarchical labels collapse to the same chip ("blue_sky" and "sky"
+    /// are both "Sky"), so dedupe after formatting.
+    private var displayTags: [String] {
+        var seen = Set<String>()
+        return Array(topTags.map(Self.formatTag).filter { seen.insert($0.lowercased()).inserted }.prefix(2))
+    }
+
     private static func formatTag(_ raw: String) -> String {
         if raw.contains(" ") { return raw }   // pre-formatted (Has Faces, etc.)
         let last = raw.split(separator: "_").last.map(String.init) ?? raw
@@ -928,17 +903,9 @@ struct FileTile: View {
             // Vision tag chips — at-a-glance content cues. Reserved 18pt height
             // eliminates vertical grid popping when tags land asynchronously.
             HStack(spacing: 3) {
-                if !topTags.isEmpty {
-                    ForEach(topTags.prefix(2), id: \.self) { tag in
-                        Text(Self.formatTag(tag))
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.secondary.opacity(0.10))
-                            )
-                            .lineLimit(1)
+                if !displayTags.isEmpty {
+                    ForEach(displayTags, id: \.self) { label in
+                        TagChip(text: label)
                     }
                 }
                 Spacer(minLength: 0)

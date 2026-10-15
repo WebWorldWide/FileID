@@ -6,6 +6,7 @@ import SwiftUI
 struct TakeWorkbench: View {
     @Bindable var engine: EngineClient
     let candidates: [CatalogHit]
+    var inline = false
 
     @Environment(\.dismiss) private var dismiss
     @State private var events: [CatalogEvent] = []
@@ -48,7 +49,7 @@ struct TakeWorkbench: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Best Takes").font(.title2.bold())
+                MetaText("Group related attempts, state the goal, and let the evidence pick the best take.", color: Theme.text2)
                 Spacer()
                 Button("Find related takes") {
                     send("suggestTakeGroups", fileIDs: uniqueCandidates.map(\.fileID))
@@ -58,7 +59,7 @@ struct TakeWorkbench: View {
                 if let lastDeletedEventID {
                     Button("Undo delete") { send("undoEventEdit", eventID: lastDeletedEventID) }
                 }
-                Button("Done") { dismiss() }
+                if !inline { Button("Done") { dismiss() } }
             }
             Text("Group related clips, describe the result you want, and review each outcome. FileID only recommends a winner when the evidence supports it.")
                 .font(.subheadline).foregroundStyle(.secondary)
