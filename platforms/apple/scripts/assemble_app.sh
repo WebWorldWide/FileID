@@ -31,12 +31,37 @@ METALLIB_CACHE="${FILEID_METALLIB_CACHE:-$PROJECT_DIR/.build/cache/mlx.metallib}
 [ -x "$BUILD_DIR/FileID" ]       || { echo "❌ $BUILD_DIR/FileID missing — build first"; exit 1; }
 [ -x "$BUILD_DIR/FileIDEngine" ] || { echo "❌ $BUILD_DIR/FileIDEngine missing — build first"; exit 1; }
 
+if [ ! -f "$BUILD_DIR/FileID_FileIDShared.bundle/model-catalog.json" ] && [ ! -f "$BUILD_DIR/FileID_FileIDShared.bundle/Contents/Resources/model-catalog.json" ]; then
+    echo "❌ Shared model catalog resources missing — rebuild FileID first."
+    exit 1
+fi
+
 rm -rf "$APP_BUNDLE"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
 cp "$BUILD_DIR/FileID"       "$CONTENTS/MacOS/FileID"
 cp "$BUILD_DIR/FileIDEngine" "$CONTENTS/MacOS/FileIDEngine"
 chmod +x "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"
+
+
+shopt -s nullglob
+for resource_bundle in "$BUILD_DIR/"*.bundle; do
+    cp -R "$resource_bundle" "$CONTENTS/Resources/"
+done
+shopt -u nullglob
+
+mkdir -p "$CONTENTS/Frameworks"
+xcrun swift-stdlib-tool --copy --platform macosx \
+    --scan-executable "$CONTENTS/MacOS/FileID" \
+    --scan-executable "$CONTENTS/MacOS/FileIDEngine" \
+    --destination "$CONTENTS/Frameworks"
+for executable in "$CONTENTS/MacOS/FileID" "$CONTENTS/MacOS/FileIDEngine"; do
+    if ! otool -l "$executable" | grep -F 'path @executable_path/../Frameworks' >/dev/null; then
+        install_name_tool -add_rpath '@executable_path/../Frameworks' "$executable"
+    fi
+done
+
+
 
 # MLX first loads a colocated mlx.metallib beside the engine binary.
 if [ -f "$METALLIB_CACHE" ]; then

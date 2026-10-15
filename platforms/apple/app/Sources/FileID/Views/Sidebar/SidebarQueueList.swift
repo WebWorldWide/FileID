@@ -10,11 +10,11 @@ struct QueueListView: View {
                 Image(systemName: "list.bullet.rectangle")
                     .foregroundStyle(Theme.gold)
                 Text("\(state.pending.count) waiting")
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(12, .semibold))
                 Spacer()
                 if let eta = state.totalEtaSeconds, eta > 0 {
                     Text(formatETA(eta))
-                        .font(.caption2.monospacedDigit())
+                        .font(Theme.Font.body(11).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                 }
             }
@@ -26,12 +26,12 @@ struct QueueListView: View {
                         .frame(width: 14)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(job.title)
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .lineLimit(1)
                             .truncationMode(.middle)
                         if let eta = job.etaSeconds, eta > 0 {
                             Text("ETA \(formatETA(eta))")
-                                .font(.caption2.monospacedDigit())
+                                .font(Theme.Font.body(11).monospacedDigit())
                                 .foregroundStyle(.tertiary)
                         }
                     }

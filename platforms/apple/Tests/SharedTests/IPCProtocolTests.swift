@@ -68,6 +68,36 @@ struct IPCProtocolTests {
         }
     }
 
+    @Test func videoFramingModesRoundTripAndRemainOptional() throws {
+        let legacy = try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"video","format":"mp4","maxDimension":1920}"#.utf8))
+        #expect(legacy.videoFraming == nil)
+        let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        #expect(json["videoFraming"] == nil)
+        for mode in ["fit", "auto"] {
+            let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoAspectRatio: "9:16", videoFraming: mode)
+            #expect(try JSONDecoder().decode(ToolRecipe.self, from: JSONEncoder().encode(recipe)) == recipe)
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"video","format":"mp4","maxDimension":1920,"videoFraming":1}"#.utf8))
+        }
+    }
+
+    @Test func videoStabilizationRecipesPreserveOptionalFlags() throws {
+        let legacy = try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"video","format":"mp4","maxDimension":1920}"#.utf8))
+        #expect(legacy.videoStabilization == nil)
+        let omitted = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        #expect(omitted["videoStabilization"] == nil)
+        for enabled in [false, true] {
+            let recipe = ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoStabilization: enabled)
+            #expect(try JSONDecoder().decode(ToolRecipe.self, from: JSONEncoder().encode(recipe)) == recipe)
+            let json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(recipe)) as? [String: Any])
+            #expect(json["videoStabilization"] as? Bool == enabled)
+        }
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ToolRecipe.self, from: Data(#"{"kind":"video","format":"mp4","maxDimension":1920,"videoStabilization":1}"#.utf8))
+        }
+    }
+
     @Test("Health correlation nonce is bounded ASCII")
     func healthRequestIDValidation() {
         for nonce in ["probe-1", "GEN_4-probe_2", String(repeating: "a", count: 128)] {

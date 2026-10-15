@@ -52,16 +52,16 @@ struct WelcomeSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 0) {
             header
-            Divider().opacity(0.3)
+            SectionLabel("1 · Install models").padding(.horizontal, 22).padding(.top, 12).padding(.bottom, 4)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 0) {
             modelRow(
-                title: "Semantic search (CLIP ViT-B/32)",
-                detail: "Type queries like \"sunset at the beach\" — FileID ranks every photo by visual relevance.",
-                size: "~\(CLIPModelInstaller.approxDownloadBytes / 1_048_576) MB",
+                title: "CLIP ViT-B/32",
+                detail: "Search by description · Required",
+                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
                 installed: clipInstalled,
                 inProgress: clipInProgress,
                 progressLabel: clipProgressLabel,
@@ -71,8 +71,8 @@ struct WelcomeSheet: View {
                 cancel: { clip.cancel() }
             )
             modelRow(
-                title: "Auto-tagging (RAM++)",
-                detail: "Recognizes 4,585 objects, scenes & attributes for richer tags and search. Without it, tagging uses the lighter built-in classifier.",
+                title: "RAM++",
+                detail: "Tags images (4,585 labels) · Required",
                 size: "~926 MB",
                 installed: ramplusInstalled,
                 inProgress: ramplusInProgress,
@@ -83,9 +83,9 @@ struct WelcomeSheet: View {
                 cancel: { ramplus.cancel() }
             )
             modelRow(
-                title: "Face recognition (\(recommendedFace.displayName))",
-                detail: recommendedFace.subtitle,
-                size: "~\(recommendedFace.approxBytes / 1_048_576) MB",
+                title: recommendedFace.displayName,
+                detail: "Finds and groups faces · Required",
+                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
                 installed: arcfaceInstalled,
                 inProgress: arcfaceInProgress,
                 progressLabel: arcfaceProgressLabel,
@@ -95,8 +95,8 @@ struct WelcomeSheet: View {
                 cancel: { arcface.cancel(recommendedFace) }
             )
             modelRow(
-                title: "Document understanding (BGE-small)",
-                detail: "Reads document content so semantic search and Restructure group files by what they say, not only by filename.",
+                title: "BGE-small",
+                detail: "Reads documents for search and Restructure · Required",
                 size: "~129 MB",
                 installed: bgeInstalled,
                 inProgress: bgeInProgress,
@@ -107,7 +107,7 @@ struct WelcomeSheet: View {
                 cancel: { bge.cancel() }
             )
             Menu {
-                ForEach(AIModelKind.allCases, id: \.rawValue) { kind in
+                ForEach(AIModelKind.favorites, id: \.rawValue) { kind in
                     Button {
                         selectedVLM = kind
                     } label: {
@@ -130,16 +130,20 @@ struct WelcomeSheet: View {
                 }
             }
             .disabled(vlmInProgress)
+            .menuStyle(.borderlessButton)
+            .font(Theme.Font.body(13.5))
+            .padding(.horizontal, 22).padding(.top, 12)
             .accessibilityLabel("Deep Analyze model")
             .accessibilityValue(selectedVLM.displayName)
             Text(selectedVLM == hardwareRecommendedVLM
                  ? "Recommended for this Mac's \(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB unified memory."
                  : "Custom model choice. FileID will keep this selection for Deep Analyze.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(Theme.Font.meta)
+                .foregroundStyle(Theme.text3)
+                .padding(.horizontal, 22).padding(.bottom, 4)
             modelRow(
-                title: "Deep Analyze (\(selectedVLM.displayName))",
-                detail: "On-device vision model that captions photos, PDFs, video keyframes, and writes smart filenames.",
+                title: selectedVLM.displayName,
+                detail: "Deep Analyze, Chat, Moments · Optional",
                 size: vlmSizeLabel,
                 installed: vlmInstalled,
                 inProgress: vlmInProgress,
@@ -163,18 +167,18 @@ struct WelcomeSheet: View {
             )
             .disabled(!vlmInstalled && !vlmInProgress && !selectedVLMCanInstall)
             if let selectedVLMInstallBlocker {
-                Text(selectedVLMInstallBlocker)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
+                MetaText(selectedVLMInstallBlocker, color: Theme.danger, size: 11).padding(.horizontal, 22).padding(.vertical, 6)
             }
                 }
             }
-            .frame(maxHeight: 560)
+            .frame(maxHeight: 520)
 
             footer
         }
-        .padding(28)
         .frame(width: 600)
+        .background(Color(red: 22/255, green: 22/255, blue: 24/255).opacity(0.94), ignoresSafeAreaEdges: [])
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+        .preferredColorScheme(.dark)
         .onAppear {
             clip.refreshStatus()
             ramplus.refreshStatus()
@@ -238,20 +242,27 @@ struct WelcomeSheet: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Welcome to FileID").font(.largeTitle.bold())
-            Text("FileID runs entirely on your Mac. Install the on-device models below to enable semantic search, face clustering, and Deep Analyze. Every model downloads from its canonical upstream repository on HuggingFace — FileID never redistributes weights.")
-                .font(.callout).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        HStack(spacing: 16) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Welcome to FileID").font(Theme.Font.display(34)).foregroundStyle(Theme.text1)
+                MetaText("Models run on this Mac. Files never leave it. Every model downloads from its upstream repository on Hugging Face; FileID never redistributes weights.", color: Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+        .padding(.horizontal, 22).padding(.top, 22).padding(.bottom, 18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .bottom) { Hairline() }
     }
 
     private var footer: some View {
-        HStack {
-            Text("Skip and install later from Settings → AI Models.")
-                .font(.caption2).foregroundStyle(.tertiary)
+        HStack(spacing: 8) {
+            MetaText("Skip and install later from Settings → Models.")
             Spacer()
-            Button("Install all") {
+            Button(allInstalled ? "Done" : "Later") { dismiss() }
+                .buttonStyle(DSSecondaryButtonStyle(height: 32))
+                .keyboardShortcut(.cancelAction)
+            Button(installAllRequested && !allInstalled ? "Installing…" : "Install all") {
                 installAllRequested = true
                 if !clipInstalled, !clipInProgress { clip.install() }
                 if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
@@ -259,15 +270,13 @@ struct WelcomeSheet: View {
                 if !bgeInstalled, !bgeInProgress { bge.install() }
                 if !vlmInstalled, !vlmInProgress { triggerVLMInstall() }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Theme.gold)
+            .buttonStyle(DSPrimaryButtonStyle(height: 32))
+            .keyboardShortcut(.defaultAction)
             .disabled(allInstalled || installAllRequested
                       || (!vlmInstalled && !selectedVLMCanInstall))
-
-            Button(allInstalled ? "Done" : "Skip for now") { dismiss() }
-                .buttonStyle(.bordered)
-                .keyboardShortcut(.defaultAction)
         }
+        .padding(.horizontal, 22).padding(.vertical, 16)
+        .overlay(alignment: .top) { Hairline() }
     }
 
     @ViewBuilder
@@ -277,52 +286,29 @@ struct WelcomeSheet: View {
                           rateETA: String?,
                           action: @escaping () -> Void,
                           cancel: @escaping () -> Void) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: installed
-                  ? "checkmark.seal.fill"
-                  : (inProgress ? "arrow.down.circle.fill" : "square.and.arrow.down.on.square"))
-                .font(.title2)
-                .foregroundStyle(installed ? .green : Theme.gold)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(title).font(.callout.bold())
-                    Spacer()
-                    Text(size).font(.caption2).foregroundStyle(.secondary)
-                }
-                Text(detail).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if inProgress {
-                    if let frac = progressFrac, frac > 0 {
-                        ProgressView(value: frac).tint(Theme.gold)
-                    } else {
-                        ProgressView().controlSize(.small)
-                    }
-                    if let label = progressLabel {
-                        Text(label).font(.caption2.monospaced())
-                            .foregroundStyle(.tertiary)
-                    }
-                    if let rateETA, !rateETA.isEmpty {
-                        Text(rateETA).font(.caption2.monospaced())
-                            .foregroundStyle(.tertiary)
-                    }
-                } else if let label = progressLabel {
-                    Text(label).font(.caption2.monospaced()).foregroundStyle(.red)
+        let frac = installed ? 1.0 : (progressFrac ?? 0)
+        let failed = !inProgress && !installed && progressLabel != nil
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(title).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
+                Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if installed {
+                    MetaText("Installed", color: Theme.delight, size: 11)
+                } else if inProgress {
+                    MetaText(progressLabel ?? "\(Int(frac * 100))%", color: Theme.gold, size: 11).lineLimit(1)
+                    Button("Cancel", action: cancel).buttonStyle(.dsGhost)
+                } else {
+                    MetaText(size, size: 11)
+                    Button("Install", action: action).buttonStyle(DSSecondaryButtonStyle(height: 24))
                 }
             }
-            if installed {
-                Text("Installed").font(.caption).foregroundStyle(.green)
-            } else if inProgress {
-                Button("Cancel", action: cancel)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            } else {
-                Button("Install", action: action)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
+            GrainProgressBar(progress: inProgress && frac == 0 ? 0.03 : frac, tone: installed ? .done : .gold)
+            if inProgress, let rateETA, !rateETA.isEmpty { MetaText(rateETA, size: 11) }
+            if failed, let progressLabel { MetaText(progressLabel, color: Theme.danger, size: 11) }
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 22).padding(.vertical, 10)
+        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 
     private func triggerVLMInstall() {

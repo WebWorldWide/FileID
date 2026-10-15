@@ -521,7 +521,7 @@ mod tests {
         let source = Probe { duration: 2.0, width: 640, height: 360, video_start: 0.0,
             audio_start: None, audio_duration: None, audio_count: 0, video_codec: "h264".into(), audio_codec: None };
         let mut recipe = ToolRecipe { kind: "video".into(), format: "mp4".into(), max_dimension: 1280,
-            allow_upscale: None, video_aspect_ratio: None };
+            allow_upscale: None, video_aspect_ratio: None, video_framing: None, video_stabilization: None };
         assert_eq!(dimensions(&recipe, &source).unwrap(), (1280, 720));
         recipe.video_aspect_ratio = Some("9:16".into());
         assert_eq!(dimensions(&recipe, &source).unwrap(), (720, 1280));
@@ -632,7 +632,7 @@ mod tests {
         let stage_path = directory.join("export.part");
         let stage = File::create(&stage_path).unwrap();
         let recipe = ToolRecipe { kind: "video".into(), format: "mp4".into(), max_dimension: 1280,
-            allow_upscale: None, video_aspect_ratio: Some("16:9".into()) };
+            allow_upscale: None, video_aspect_ratio: Some("16:9".into()), video_framing: None, video_stabilization: None };
         export(&source, &stage, &recipe, &before, &AtomicBool::new(false)).unwrap();
         let after = probe_stage(&stage_path).unwrap();
         verify(&before, &after, &recipe).unwrap();

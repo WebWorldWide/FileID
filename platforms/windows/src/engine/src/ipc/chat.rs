@@ -22,6 +22,8 @@ pub struct ChatRequest {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_model: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

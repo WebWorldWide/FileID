@@ -10,7 +10,7 @@ use gtk::glib;
 use crate::engine_client::{EngineClient, EngineState};
 use fileid_engine::models::registry::{self, LookupResult, Model};
 
-const LOCAL_MODELS: [(&str, &str, &str); 4] = [
+const LOCAL_MODELS: [(&str, &str, &str); 3] = [
     (
         "mobileclip_s2",
         "CLIP image encoder",
@@ -25,11 +25,6 @@ const LOCAL_MODELS: [(&str, &str, &str); 4] = [
         "qwen2_5_vl_7b",
         "Qwen2.5-VL-7B · optional weights; needs a llama.cpp runtime",
         "Approved Apache-2.0 visual weights. Install pinned GGUF + projector on request only. Deep Analyze and timeline analysis use them when a llama-server runtime is available; downloading weights alone does not provide one.",
-    ),
-    (
-        "whisper",
-        "Whisper base · optional weights; speech generation unavailable",
-        "Pinned MIT speech weights. Timeline speech generation remains unavailable with this backend regardless of FILEID_WHISPER_CLI or FFmpeg configuration. No runtime is downloaded here.",
     ),
 ];
 

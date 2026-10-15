@@ -83,6 +83,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest, result: &mut Cat
                     params![event.id, file_id],
                 )?;
             }
+            if before.as_ref().is_some_and(|snapshot| snapshot.event.goal != event.goal) {
+                tx.execute("UPDATE catalog_take_scores SET stale=1 WHERE event_id=?1", [&event.id])?;
+            }
             let after = snapshot(&tx, &event.id)?;
             journal(&tx, "event", &event.id, None, before.as_ref(), after.as_ref())?;
             tx.commit()?;
@@ -504,5 +507,27 @@ mod tests {
             .unwrap()
             .quality_score
             .is_none());
+    }
+
+    #[test]
+    fn changed_goal_invalidates_prior_outcomes_and_preference_until_review_or_undo() {
+        let mut conn = fixture();
+        let saved = run(&mut conn, serde_json::json!({"requestID":"save","action":"saveEvent","event":{"id":"game","title":"Baseball","goal":"A batter gets a hit","fileIDs":[1,2],"userEdited":false}}));
+        assert!(saved.takes.unwrap().iter().all(|take| take.outcome_score.is_none()));
+        run(&mut conn, serde_json::json!({"requestID":"miss","action":"setTakeFeedback","takeFeedback":{"eventID":"game","fileID":1,"outcomeScore":0.0,"preferred":false}}));
+        let reviewed = run(&mut conn, serde_json::json!({"requestID":"hit","action":"setTakeFeedback","takeFeedback":{"eventID":"game","fileID":2,"outcomeScore":1.0,"preferred":true}}));
+        assert_eq!(reviewed.recommendation.unwrap().file_ids, vec![2]);
+        let renamed = run(&mut conn, serde_json::json!({"requestID":"title","action":"saveEvent","event":{"id":"game","title":"Practice","goal":"A batter gets a hit","fileIDs":[1,2],"userEdited":false}}));
+        assert!(renamed.takes.unwrap().iter().all(|take| !take.stale));
+        let changed = run(&mut conn, serde_json::json!({"requestID":"goal","action":"saveEvent","event":{"id":"game","title":"Practice","goal":"A fielder completes a catch","fileIDs":[1,2],"userEdited":false}}));
+        assert_eq!(changed.recommendation.unwrap().status, "insufficient");
+        let takes = changed.takes.unwrap();
+        assert!(takes.iter().all(|take| take.stale));
+        assert!(takes[1].preferred);
+        assert_eq!(takes[1].outcome_score, Some(1.0));
+        run(&mut conn, serde_json::json!({"requestID":"undo","action":"undoEventEdit","eventID":"game"}));
+        let restored = run(&mut conn, serde_json::json!({"requestID":"read","action":"takeGroup","eventID":"game"}));
+        assert_eq!(restored.recommendation.unwrap().file_ids, vec![2]);
+        assert!(restored.takes.unwrap().iter().all(|take| !take.stale));
     }
 }

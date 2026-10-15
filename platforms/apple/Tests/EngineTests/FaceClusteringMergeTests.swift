@@ -7,6 +7,7 @@
 import Testing
 import Foundation
 import GRDB
+import FileIDShared
 @testable import FileIDEngine
 // Disambiguate from GRDB.Database (both modules export `Database`).
 private typealias Database = FileIDEngine.Database
@@ -45,10 +46,13 @@ struct FaceClusteringMergeTests {
             let blob = ArcFaceService.embeddingToBlob(vector)
             var faceIDs: [Int64] = []
             for k in 0..<faces {
+                let url = URL(fileURLWithPath: db.pool.path).deletingLastPathComponent().appendingPathComponent("p\(pid)_f\(k).jpg")
+                try Data([1]).write(to: url)
+                try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: url.path)
                 try d.execute(sql: """
-                    INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
-                    VALUES (?, ?, 1, ?, 'image', 'jpg')
-                    """, arguments: ["/p\(pid)_f\(k).jpg", pid * 1000 + Int64(k),
+                    INSERT INTO files (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension)
+                    VALUES (?, ?, 1, 1, ?, 'image', 'jpg')
+                    """, arguments: [url.path, pid * 1000 + Int64(k),
                                      Date().timeIntervalSince1970])
                 let fileID = d.lastInsertedRowID
                 try d.execute(sql: """
@@ -56,8 +60,8 @@ struct FaceClusteringMergeTests {
                     VALUES (?, ?, ?, '0,0,1,1', ?)
                     """, arguments: [fileID, pid, Data(), blob])
                 let faceID = d.lastInsertedRowID
-                try d.execute(sql: "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?,'fixture-revision','file-stat-v1',0)", arguments: [fileID])
-                try d.execute(sql: "UPDATE face_prints SET embedding_model='fixture-sface',processing_version='fixture-align',source_revision='fixture-revision' WHERE id=?", arguments: [faceID])
+                try d.execute(sql: "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?,'1:4607182418800017408','file-stat-v1',0)", arguments: [fileID])
+                try d.execute(sql: "UPDATE face_prints SET embedding_model='fixture-sface',processing_version='fixture-align',source_revision='1:4607182418800017408' WHERE id=?", arguments: [faceID])
                 faceIDs.append(faceID)
             }
             return (pid, faceIDs)
@@ -76,9 +80,9 @@ struct FaceClusteringMergeTests {
             #expect(priors[0].centroid == nil)
             #expect(priors[0].faceIDs == Set(faces))
             #expect(priors[0].firstName == "Confirmed")
-            #expect(throws: FaceClustering.FaceProtectionError.self) {
-                try FaceClustering.loadClusteringFaceRows(from: d, phaseZeroUnknownFaceIDs: [], minQuality: 0, limit: 100, expectedSpace: .init(model: "replacement-weights", processing: "fixture-align"))
-            }
+            let selected = try FaceClustering.loadSelectedPartition(from: d, expectedSpace: .init(model: "replacement-weights", processing: "fixture-align"))
+            #expect(selected.rows.isEmpty)
+            #expect(selected.deferredFaces == 1)
         }
     }
 
@@ -97,12 +101,12 @@ struct FaceClusteringMergeTests {
                 default: try d.execute(sql: "UPDATE face_prints SET arcface_embedding=? WHERE id=?", arguments: [ArcFaceService.embeddingToBlob([Float](repeating: .nan, count: 128)), faces[0]])
                 }
             }
-            #expect(await FaceClustering.tightPairAutoMerge(database: db) == 0)
+            #expect(await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align")) == 0)
             #expect(try await personIDs(db) == Set([first,second]))
             try await db.pool.read { d in
-                #expect(throws: FaceClustering.FaceProtectionError.self) {
-                    try FaceClustering.loadClusteringFaceRows(from: d, phaseZeroUnknownFaceIDs: [], minQuality: 0, limit: 100)
-                }
+                let selected = try FaceClustering.loadSelectedPartition(from: d, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align"))
+                #expect(selected.rows.count == 1)
+                #expect(selected.deferredFaces == 1)
                 let name = try String.fetchOne(d, sql: "SELECT first_name FROM persons WHERE id=?", arguments: [first])
                 let owner = try Int64.fetchOne(d, sql: "SELECT person_id FROM face_prints WHERE id=?", arguments: [faces[0]])
                 #expect(name == "Confirmed")
@@ -250,7 +254,7 @@ struct FaceClusteringMergeTests {
                 from: database,
                 phaseZeroUnknownFaceIDs: Set(unknownFaces),
                 minQuality: 0,
-                limit: 1
+                limit: 1, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align")
             )
         }
         #expect(loaded.rows.map(\.id) == eligibleFaces)
@@ -274,7 +278,7 @@ struct FaceClusteringMergeTests {
         try await insertPerson(db, embedding: v)   // unnamed, identical centroid
         try await insertPerson(db, embedding: v)   // unnamed, identical centroid
 
-        let merged = await FaceClustering.tightPairAutoMerge(database: db)
+        let merged = await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align"))
         #expect(merged == 1, "the two unnamed persons collapse; the unknown stays out of it")
         let ids = try await personIDs(db)
         #expect(ids.contains(u), "the unknown person row survives untouched")
@@ -306,7 +310,7 @@ struct FaceClusteringMergeTests {
             try FaceClustering.differentFacePairs(from: d)
         }
         #expect(resolved == Set([FaceClustering.ProtectedFacePair(fa[0], fb[0])]))
-        let merged = await FaceClustering.tightPairAutoMerge(database: db)
+        let merged = await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align"))
         #expect(merged == 0, "the user-refused pair must not be force-merged")
         let ids = try await personIDs(db)
         #expect(ids.contains(a) && ids.contains(b))
@@ -330,18 +334,25 @@ struct FaceClusteringMergeTests {
                 "a rejected complete-search plan must not mutate the database")
     }
 
-    @Test("one oversized embedding rejects auto-merge before decoding")
+    @Test("oversized evidence is deferred while compatible people can merge")
     func oversizedEmbeddingFailsClosed() async throws {
         let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
         let vector = l2norm([1, 0, 0])
         try await insertPerson(db, embedding: vector)
         try await insertPerson(db, embedding: vector)
-        try await insertPerson(db, embedding: [Float](repeating: 1, count: 4_097))
+        let (deferredPerson, deferredFaces) = try await insertPerson(db, embedding: [Float](repeating: 1, count: 4_097))
 
-        let merged = await FaceClustering.tightPairAutoMerge(database: db)
-        #expect(merged == 0)
+        let merged = await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align"))
+        #expect(merged == 1)
         let remaining = try await personIDs(db)
         #expect(remaining.count == 3)
+        #expect(remaining.contains(deferredPerson))
+        let retained = try await db.pool.read { d -> (Int64?, Int?) in
+            let row = try Row.fetchOne(d, sql: "SELECT person_id,LENGTH(arcface_embedding) AS bytes FROM face_prints WHERE id=?", arguments: [deferredFaces[0]])
+            return (row?["person_id"], row?["bytes"])
+        }
+        #expect(retained.0 == deferredPerson)
+        #expect(retained.1 == 4_097 * 4)
     }
 
     // A bridge singleton high-cosine to two distinct NAMED persons
@@ -354,7 +365,7 @@ struct FaceClusteringMergeTests {
         let (b, _) = try await insertPerson(db, firstName: "Bob", fileCount: 5, embedding: v)
         try await insertPerson(db, firstName: nil, fileCount: 1, embedding: v)  // bridge
 
-        let merged = await FaceClustering.tightPairAutoMerge(database: db)
+        let merged = await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align"))
         #expect(merged == 1, "only the bridge is absorbed; the named pair stays apart")
         let ids = try await personIDs(db)
         #expect(ids.contains(a) && ids.contains(b), "neither named identity is deleted")
@@ -382,21 +393,24 @@ struct FaceClusteringMergeTests {
                 let pid = d.lastInsertedRowID
                 let blob = ArcFaceService.embeddingToBlob(v)
                 try d.execute(sql: """
-                    INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension)
-                    VALUES (?, ?, 1, ?, 'image', 'jpg')
+                    INSERT INTO files (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension)
+                    VALUES (?, ?, 1, 1, ?, 'image', 'jpg')
                     """, arguments: ["/titled\(pid).jpg", pid * 7000, Date().timeIntervalSince1970])
                 let fileID = d.lastInsertedRowID
                 try d.execute(sql: """
                     INSERT INTO face_prints (file_id, person_id, print_data, bbox, arcface_embedding)
                     VALUES (?, ?, ?, '0,0,1,1', ?)
                     """, arguments: [fileID, pid, Data(), blob])
+                let faceID = d.lastInsertedRowID
+                try d.execute(sql: "INSERT INTO catalog_revisions(file_id,revision,processing_version,updated_at) VALUES(?,'1:4607182418800017408','file-stat-v1',0)", arguments: [fileID])
+                try d.execute(sql: "UPDATE face_prints SET embedding_model='fixture-sface',processing_version='fixture-align',source_revision='1:4607182418800017408' WHERE id=?", arguments: [faceID])
                 return pid
             }
         }
         let a = try await insertTitled(title: "Dr.", middle: nil, suffix: nil)
         let b = try await insertTitled(title: nil, middle: "Quincy", suffix: "Jr.")
 
-        let merged = await FaceClustering.tightPairAutoMerge(database: db)
+        let merged = await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align"))
         #expect(merged == 0, "two persons named via title/middle/suffix must not merge")
         let ids = try await personIDs(db)
         #expect(ids.contains(a) && ids.contains(b), "neither structured-named identity is deleted")
@@ -452,6 +466,23 @@ struct FaceClusteringMergeTests {
     }
 
 
+    @Test("Disk changes after partition selection reject a merge commit")
+    func changedSourceRejectsCommit() async throws {
+        let (db, root) = try makeDB(); defer { try? FileManager.default.removeItem(at: root) }
+        let (person, _) = try await insertPerson(db, firstName: "Maya", embedding: l2norm([1,0,0]))
+        let space = FaceClustering.EmbeddingSpace(model: "fixture-sface", processing: "fixture-align")
+        let selected = try await db.pool.read { try FaceClustering.loadSelectedPartition(from: $0, expectedSpace: space) }
+        #expect(selected.rows.count == 1)
+        let path = try #require(try await db.pool.read { try String.fetchOne($0, sql: "SELECT path_text FROM files LIMIT 1") })
+        try Data([1,2]).write(to: URL(fileURLWithPath: path))
+        await #expect(throws: (any Error).self) {
+            try await db.pool.write { _ = try FaceClustering.requireUnchangedPartition(selected, from: $0, expectedSpace: space) }
+        }
+        let current = try await db.pool.read { try FaceClustering.loadSelectedPartition(from: $0, expectedSpace: space) }
+        #expect(current.rows.isEmpty)
+        #expect(current.deferredFaces == 1)
+        #expect(try await personIDs(db) == [person])
+    }
 }
 
 @Suite("Exact face centroid threshold join")
@@ -646,4 +677,6 @@ struct FaceQualitySuppressionTests {
         #expect(FaceClustering.minClusterSizeToKeep == 3)
         #expect(abs(FaceClustering.soloQualityFloor - 0.12) < 1e-9)
     }
+
+
 }

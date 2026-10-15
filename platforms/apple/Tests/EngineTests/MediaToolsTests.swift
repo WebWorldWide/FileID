@@ -56,11 +56,17 @@ struct MediaToolsTests {
         let tall = try MediaTools.photoRasterSize(width: 1, height: 32, recipe: recipe)
         #expect(tall.width == 2 && tall.height == 64)
         #expect(!MediaTools.supports(ToolRecipe(kind: "photo", format: "png", maxDimension: 8193, allowUpscale: true)))
-        #expect(!MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, allowUpscale: true)))
+        #expect(MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, allowUpscale: true)))
         #expect(!MediaTools.supports(ToolRecipe(kind: "chapters", format: "vtt", allowUpscale: true)))
         #expect(!MediaTools.supports(ToolRecipe(kind: "photo", format: "png", videoAspectRatio: "9:16")))
         #expect(!MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoAspectRatio: "10:3")))
         #expect(MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoAspectRatio: "9:16")))
+        #expect(MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoAspectRatio: "9:16", videoFraming: "auto")))
+        #expect(!MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoFraming: "auto")))
+        #expect(!MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoAspectRatio: "9:16", videoFraming: "unknown")))
+        #expect(!MediaTools.supports(ToolRecipe(kind: "photo", format: "png", videoFraming: "fit")))
+        #expect(MediaTools.supports(ToolRecipe(kind: "video", format: "mp4", maxDimension: 1920, videoStabilization: true)))
+        #expect(!MediaTools.supports(ToolRecipe(kind: "photo", format: "png", videoStabilization: false)))
         #expect(throws: MediaTools.Failure.self) {
             try MediaTools.photoRasterSize(width: 0, height: 16, recipe: recipe)
         }

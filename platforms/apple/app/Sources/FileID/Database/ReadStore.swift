@@ -544,6 +544,25 @@ public final class ReadStore: @unchecked Sendable {
         return Self.uniqueDisplayTags(tags)
     }
 
+    /// Named people whose faces appear in the file; unnamed clusters are skipped.
+    public func personNames(forFileID id: Int64) -> [String] {
+        guard let q = queue else { return [] }
+        let rows = (try? q.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT DISTINCT p.id, p.name, p.title, p.first_name, p.middle_name, p.last_name, p.suffix
+                FROM face_prints f JOIN persons p ON p.id = f.person_id
+                WHERE f.file_id = ? AND COALESCE(p.is_unknown, 0) = 0
+                ORDER BY p.id
+                """, arguments: [id])
+        }) ?? []
+        var seen = Set<String>()
+        return rows.compactMap { row in
+            let name = Self.personTagName(title: row["title"], first: row["first_name"], middle: row["middle_name"],
+                                          last: row["last_name"], suffix: row["suffix"], legacy: row["name"])
+            return name.isEmpty || !seen.insert(name.lowercased()).inserted ? nil : name
+        }
+    }
+
     /// Bulk-fetch top vision tags for many files in one SQL query
     /// (the per-tile call would fire 1000+ queries on a large grid).
     /// Each file gets at most `limit` tags in confidence-descending order.
@@ -885,6 +904,7 @@ public final class ReadStore: @unchecked Sendable {
         public let representativeFileID: Int64?
         public let representativeBBox: String?
         public let representativePath: String?
+        public let representativeCacheRevision: String?
         public let fileCount: Int
         public let faceCount: Int
 
@@ -925,6 +945,9 @@ public final class ReadStore: @unchecked Sendable {
                       p.representative_face_id, p.file_count,
                       f.bbox AS rep_bbox, f.file_id AS rep_file_id,
                       files.path_text AS rep_path,
+                      COALESCE(f.embedding_model,'') || '|' || COALESCE(f.processing_version,'') || '|' ||
+                      COALESCE(f.source_revision,'') || '|' || COALESCE(CAST(files.size_bytes AS TEXT),'') || ':' ||
+                      COALESCE(CAST(files.modified_at AS TEXT),'') AS rep_cache_revision,
                       COUNT(fp.id) AS face_count
                     FROM persons p
                     LEFT JOIN face_prints f ON f.id = p.representative_face_id
@@ -948,6 +971,7 @@ public final class ReadStore: @unchecked Sendable {
                         representativeFileID: r["rep_file_id"],
                         representativeBBox: r["rep_bbox"],
                         representativePath: r["rep_path"],
+                        representativeCacheRevision: r["rep_cache_revision"],
                         fileCount: r["file_count"] ?? 0,
                         faceCount: r["face_count"] ?? 0
                     )

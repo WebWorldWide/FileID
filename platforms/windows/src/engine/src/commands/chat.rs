@@ -177,6 +177,7 @@ mod tests {
             action: "send".into(),
             text: Some("Please find my birthday videos".into()),
             use_model: Some(true),
+            model_kind: None,
         };
         let result = execute(&mut conn, &request).unwrap();
         assert_eq!(result.hits[0].file_id, 1);
@@ -234,6 +235,7 @@ mod tests {
                 action: "send".into(),
                 text: Some(text.into()),
                 use_model: Some(false),
+                model_kind: None,
             };
             let result = execute(&mut conn, &request).unwrap();
             if text == "only videos" {
@@ -254,6 +256,7 @@ mod tests {
                 action: "send".into(),
                 text: Some(text),
                 use_model: None,
+                model_kind: None,
             };
             assert!(execute(&mut conn, &request).is_err());
         }

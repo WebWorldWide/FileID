@@ -136,6 +136,8 @@ fn supports(recipe: &ToolRecipe) -> bool {
     (1..=8192).contains(&recipe.max_dimension)
         && (recipe.allow_upscale != Some(true) || recipe.kind == "photo")
         && (recipe.video_aspect_ratio.is_none() || recipe.kind == "video")
+        && recipe.video_framing.is_none()
+        && recipe.video_stabilization.is_none()
         && ((recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(&recipe.format.as_str()))
             || (recipe.kind == "chapters" && ["json", "vtt"].contains(&recipe.format.as_str()))
             || (recipe.kind == "video"
@@ -736,6 +738,8 @@ mod tests {
                     max_dimension: 16,
                     allow_upscale: None,
                     video_aspect_ratio: None,
+                    video_framing: None,
+                    video_stabilization: None,
                 }),
                 operation_id: None,
                 destination_bookmark: None,
@@ -825,7 +829,9 @@ mod tests {
                 format: format.into(),
                 max_dimension: dimension,
                 allow_upscale: Some(true),
-                video_aspect_ratio: None
+                video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
             }));
         }
         let framed: ToolRecipe =
@@ -924,6 +930,8 @@ mod tests {
             max_dimension: 1280,
             allow_upscale: None,
             video_aspect_ratio: Some("16:9".into()),
+            video_framing: None,
+            video_stabilization: None,
         });
         let preview = execute(&mut fixture.conn, &request).unwrap();
         assert!(preview.outputs[0].output_path.contains("16x9 Fit"));
@@ -976,6 +984,8 @@ mod tests {
             max_dimension: 1280,
             allow_upscale: None,
             video_aspect_ratio: Some("16:9".into()),
+            video_framing: None,
+            video_stabilization: None,
         });
         let preview = execute(&mut fixture.conn, &request).unwrap();
         let id = preview.operation_id.clone().unwrap();
@@ -1037,6 +1047,8 @@ mod tests {
             max_dimension: 1920,
             allow_upscale: None,
             video_aspect_ratio: Some("16:9".into()),
+            video_framing: None,
+            video_stabilization: None,
         });
         let preview = execute(&mut fixture.conn, &request).unwrap();
         let id = preview.operation_id.clone().unwrap();
@@ -1130,6 +1142,8 @@ mod tests {
                 max_dimension: 16,
                 allow_upscale: None,
                 video_aspect_ratio: None,
+                video_framing: None,
+                video_stabilization: None,
             },
             items: vec![item],
             stage_paths: Some(vec![

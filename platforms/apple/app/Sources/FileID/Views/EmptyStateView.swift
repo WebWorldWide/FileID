@@ -18,16 +18,16 @@ struct EmptyStateView: View {
                 .font(.system(size: 56, weight: .light))
                 .foregroundStyle(Theme.gold.opacity(0.55))
             Text(title)
-                .font(.title2.bold())
+                .font(Theme.Font.body(20, .semibold))
             Text(message)
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 480)
                 .fixedSize(horizontal: false, vertical: true)
             if let secondary = secondaryMessage {
                 Text(secondary)
-                    .font(.callout)
+                    .font(Theme.Font.body(13.5))
                     .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 480)
@@ -36,9 +36,9 @@ struct EmptyStateView: View {
             if let action = primaryAction {
                 Button(action: action.run) {
                     Text(action.label)
-                        .font(.callout.bold())
+                        .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 18).padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.gold))
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                         .foregroundStyle(.black)
                 }
                 .buttonStyle(.plain)

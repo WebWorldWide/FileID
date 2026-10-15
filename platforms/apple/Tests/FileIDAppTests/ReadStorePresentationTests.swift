@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import FileIDShared
 import Testing
 @testable import FileID
 
@@ -20,6 +21,7 @@ struct ReadStorePresentationTests {
                     failed INTEGER NOT NULL DEFAULT 0,
                     content_hash BLOB,
                     size_bytes INTEGER NOT NULL DEFAULT 0,
+                    modified_at REAL,
                     aesthetic REAL,
                     created_at REAL,
                     vlm_proposed_name TEXT,
@@ -56,7 +58,8 @@ struct ReadStorePresentationTests {
                     excluded INTEGER NOT NULL DEFAULT 0,
                     bbox TEXT,
                     file_id INTEGER,
-                    arcface_embedding BLOB
+                    arcface_embedding BLOB,
+                    embedding_model TEXT, processing_version TEXT, source_revision TEXT
                 )
                 """)
             try db.execute(sql: """
@@ -76,11 +79,53 @@ struct ReadStorePresentationTests {
                     PRIMARY KEY (person_a, person_b)
                 )
                 """)
+            try db.execute(sql: "CREATE TABLE catalog_revisions(file_id INTEGER PRIMARY KEY,revision TEXT,processing_version TEXT,updated_at REAL)")
             try seed(db)
+            for row in try Row.fetchAll(db, sql: "SELECT id,file_id,arcface_embedding FROM face_prints WHERE LENGTH(arcface_embedding)>0") {
+                let file: Int64 = row["file_id"]
+                let face: Int64 = row["id"]
+                let data: Data = row["arcface_embedding"]
+                var vector = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+                if vector.count < 128 { vector += [Float](repeating: 0, count: 128-vector.count) }
+                let padded = vector.withUnsafeBytes { Data($0) }
+                try db.execute(sql: "INSERT OR IGNORE INTO files(id,path_text,size_bytes,modified_at) VALUES(?,'/fixture.jpg',1,1)", arguments: [file])
+                try db.execute(sql: "INSERT OR IGNORE INTO catalog_revisions(file_id,revision) VALUES(?,'1:4607182418800017408')", arguments: [file])
+                try db.execute(sql: "UPDATE face_prints SET arcface_embedding=?,embedding_model='fixture-sface',processing_version=?,source_revision='1:4607182418800017408' WHERE id=?", arguments: [padded,FaceCacheProvenance.processingVersion,face])
+            }
         }
         let store = ReadStore(dbURL: databaseURL)
         store.openIfPossible()
         return (store, root)
+    }
+
+    @Test("Representative thumbnail revisions change without changing the confirmed person")
+    func representativeRevisions() throws {
+        let fixture = try makeStore { db in
+            try db.execute(sql: "INSERT INTO files(id,path_text,size_bytes,modified_at) VALUES(1,'/tmp/photo.jpg',42,100)")
+            try db.execute(sql: "INSERT INTO persons(id,name,representative_face_id) VALUES(1,'Alex',1)")
+            try db.execute(sql: "INSERT INTO face_prints(id,person_id,file_id,bbox,embedding_model,processing_version,source_revision) VALUES(1,1,1,'0.1,0.2,0.3,0.4','model-a','v2','source-a')")
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        let writer = try DatabaseQueue(path: fixture.root.appending(component: "fileid.sqlite").path)
+        var previous = try #require(fixture.store.persons().first)
+        for sql in [
+            "UPDATE face_prints SET processing_version='v3' WHERE id=1",
+            "UPDATE face_prints SET embedding_model='model-b' WHERE id=1",
+            "UPDATE face_prints SET source_revision='source-b' WHERE id=1",
+            "UPDATE files SET modified_at=101 WHERE id=1",
+            "UPDATE files SET size_bytes=43 WHERE id=1"
+        ] {
+            try writer.write { try $0.execute(sql: sql) }
+            let current = try #require(fixture.store.persons().first)
+            #expect(current.id == previous.id)
+            #expect(current.displayName == "Alex")
+            #expect(current.representativeFaceID == previous.representativeFaceID)
+            #expect(current.representativeCacheRevision != previous.representativeCacheRevision)
+            previous = current
+        }
     }
 
     @Test("generic tags do not consume a file's visible tag slots")
@@ -203,7 +248,7 @@ struct ReadStorePresentationTests {
         }
 
         let candidates = ClusterSuggestions.findCandidates(
-            dbPath: fixture.root.appending(component: "fileid.sqlite").path
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
         )
         #expect(!candidates.contains { ($0.personA, $0.personB) == (1, 2) })
         #expect(candidates.contains { ($0.personA, $0.personB) == (1, 3) })
@@ -238,7 +283,7 @@ struct ReadStorePresentationTests {
         }
 
         let candidates = ClusterSuggestions.findCandidates(
-            dbPath: fixture.root.appending(component: "fileid.sqlite").path
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
         )
         #expect(candidates.isEmpty)
     }
@@ -269,7 +314,7 @@ struct ReadStorePresentationTests {
         }
 
         let candidates = ClusterSuggestions.findCandidates(
-            dbPath: fixture.root.appending(component: "fileid.sqlite").path
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
         )
         #expect(candidates.count == ClusterSuggestions.resultLimit)
     }

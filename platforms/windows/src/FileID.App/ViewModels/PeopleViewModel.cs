@@ -179,25 +179,8 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
         // quality score in the cluster — picked via subquery so it's stable.
         bool hideUnknown = false;
         try { hideUnknown = AppViewModel.Instance.Settings.PeopleHideUnknown; } catch { /* default false */ }
-        string whereClause = hideUnknown ? "WHERE COALESCE(p.is_unknown, 0) = 0" : "";
+        cmd.CommandText = ClusterQuery(hideUnknown);
 
-        cmd.CommandText = $"""
-            SELECT
-                p.id                                                    AS cluster_id,
-                COALESCE(p.name, p.first_name, 'Person ' || p.id)       AS display_name,
-                COUNT(fp.id)                                            AS member_count,
-                COALESCE(
-                    p.representative_face_id,
-                    (SELECT fp2.id FROM face_prints fp2
-                     WHERE fp2.person_id = p.id
-                     ORDER BY COALESCE(fp2.face_quality, 0) DESC LIMIT 1)
-                )                                                       AS anchor_face_id
-            FROM persons p
-            JOIN face_prints fp ON fp.person_id = p.id
-            {whereClause}
-            GROUP BY p.id
-            ORDER BY member_count DESC
-            """;
         var rows = new List<PersonCluster>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
@@ -209,10 +192,50 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
                 DisplayName = reader.IsDBNull(1) ? null : reader.GetString(1),
                 MemberCount = reader.GetInt32(2),
                 AnchorFaceId = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                AnchorCacheRevision = PersonCluster.ReadCropRevision(
+                    PersonCluster.BuildCropPath(reader.IsDBNull(3) ? 0 : reader.GetInt64(3)),
+                    reader.IsDBNull(4) ? null : reader.GetString(4)),
             });
         }
         return rows;
     }
+
+    internal static string ClusterQuery(bool hideUnknown)
+    {
+        string whereClause = hideUnknown ? "WHERE COALESCE(p.is_unknown, 0) = 0" : "";
+
+        return $"""
+            WITH active_faces AS (
+                SELECT fp.* FROM face_prints fp JOIN files f ON f.id = fp.file_id
+                WHERE COALESCE(fp.excluded, 0) = 0 AND f.failed = 0
+            ), clusters AS (
+                SELECT p.id AS cluster_id,
+                       COALESCE(p.name, p.first_name, 'Person ' || p.id) AS display_name,
+                       COUNT(fp.id) AS member_count,
+                       COALESCE(
+                           (SELECT picked.id FROM active_faces picked
+                            WHERE picked.id = p.representative_face_id AND picked.person_id = p.id
+                              AND COALESCE(picked.excluded, 0) = 0),
+                           (SELECT fp2.id FROM active_faces fp2
+                            WHERE fp2.person_id = p.id AND COALESCE(fp2.excluded, 0) = 0
+                            ORDER BY COALESCE(fp2.face_quality, 0) DESC, fp2.id ASC LIMIT 1)
+                       ) AS anchor_face_id
+                FROM persons p
+                JOIN active_faces fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
+                {whereClause}
+                GROUP BY p.id
+            )
+            SELECT clusters.cluster_id, clusters.display_name, clusters.member_count, clusters.anchor_face_id,
+                   COALESCE(anchor.bbox,'') || '|' || COALESCE(anchor.embedding_model,'') || '|' ||
+                   COALESCE(anchor.processing_version,'') || '|' || COALESCE(anchor.source_revision,'')
+            FROM clusters LEFT JOIN active_faces anchor ON anchor.id = clusters.anchor_face_id
+            ORDER BY clusters.member_count DESC
+            """;
+    }
+
+    internal static string DeferredFaceStatus(ulong? deferredFaces) => deferredFaces is > 0
+        ? $"{deferredFaces} face{(deferredFaces == 1 ? string.Empty : "s")} {(deferredFaces == 1 ? "awaits" : "await")} analysis; existing assignments were kept."
+        : string.Empty;
 
     private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
     {
@@ -288,7 +311,8 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
             if (existingById.TryGetValue(fresh.ClusterId, out var keep)
                 && keep.AnchorFaceId == fresh.AnchorFaceId
                 && keep.MemberCount == fresh.MemberCount
-                && keep.DisplayName == fresh.DisplayName)
+                && keep.DisplayName == fresh.DisplayName
+                && keep.AnchorCacheRevision == fresh.AnchorCacheRevision)
             {
                 // Reuse the instance (preserving IsSelected + the decoded
                 // AnchorImage) ONLY when nothing visible changed. The Caption is a
@@ -343,6 +367,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
 {
     public required int ClusterId { get; init; }
     public required long AnchorFaceId { get; init; }
+    public string? AnchorCacheRevision { get; init; }
     public required int MemberCount { get; init; }
     public string? DisplayName { get; init; }
 
@@ -389,6 +414,7 @@ internal sealed class PersonCluster : INotifyPropertyChanged
                 _cachedAnchorImage = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
                 {
                     DecodePixelWidth = 120,
+                    CreateOptions = Microsoft.UI.Xaml.Media.Imaging.BitmapCreateOptions.IgnoreImageCache,
                     UriSource = new Uri(path),
                 };
                 return _cachedAnchorImage;
@@ -405,6 +431,22 @@ internal sealed class PersonCluster : INotifyPropertyChanged
     /// assert the path shape without depending on the cache state.</summary>
     public static string BuildCropPath(long faceId) =>
         System.IO.Path.Combine(Services.AppPaths.Root, "face_crops", $"{faceId}.jpg");
+
+    internal static string ReadCropRevision(string path, string? provenance)
+    {
+        try
+        {
+            var file = new FileInfo(path);
+            return file.Exists
+                ? string.Concat(provenance, "|", file.Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ":", file.LastWriteTimeUtc.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                : string.Concat(provenance, "|missing");
+        }
+        catch
+        {
+            return string.Concat(provenance, "|unavailable");
+        }
+    }
 
     public string Caption =>
         string.IsNullOrEmpty(DisplayName)

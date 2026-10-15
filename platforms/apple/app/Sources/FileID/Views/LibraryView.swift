@@ -52,6 +52,8 @@ struct LibraryView: View {
     /// (not a raw `FileRow`) so navigation mutates the displayed file in
     /// place — the sheet keeps identity instead of dismissing+re-presenting.
     @State private var previewSelectedID: Int64? = nil
+    @State private var paneSelectedID: Int64? = nil
+    private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
     /// nav context (the LIMIT 200 query reorders by scanned_at).
@@ -120,7 +122,19 @@ struct LibraryView: View {
             if rows.isEmpty {
                 empty
             } else {
-                grid
+                HStack(spacing: 0) {
+                    grid.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if let row = paneRow {
+                        VHairline()
+                        LibrarySelectedPane(row: row, store: store, engine: engine,
+                                            onOpen: { openPreview(row) },
+                                            onFindSimilar: { similarSeed = row },
+                                            onClose: { paneSelectedID = nil })
+                            .frame(width: 300)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+                .animation(Theme.spring, value: paneRow == nil)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -206,17 +220,17 @@ struct LibraryView: View {
         HStack(spacing: 10) {
             Image(systemName: icon)
                 .foregroundStyle(Theme.ai)
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.callout.bold())
-                Text(detail).font(.caption2).foregroundStyle(.secondary)
+                Text(title).font(Theme.Font.body(13.5, .semibold))
+                Text(detail).font(Theme.Font.body(11)).foregroundStyle(.secondary)
             }
             Spacer()
             ProgressView().controlSize(.small).tint(Theme.ai)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -247,11 +261,11 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.ai)
             VStack(alignment: .leading, spacing: 1) {
                 Text(similarSeed == nil ? "Showing keyword matches." : "Finding similar files.")
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text(hint == .preparing
                      ? "Preparing semantic search… results will refresh automatically."
                      : "Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -260,8 +274,8 @@ struct LibraryView: View {
             }
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.30), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -274,18 +288,18 @@ struct LibraryView: View {
                 .foregroundStyle(Theme.ai)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Photos similar to \(seed.url.lastPathComponent)")
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text("Ranked by visual similarity using on-device CLIP embeddings.")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.secondary)
             }
             Spacer()
             Button("Clear") { similarSeed = nil }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.ai.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.10)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.ai.opacity(0.4), lineWidth: 1))
         .padding(.horizontal, 20)
         .padding(.top, 8)
     }
@@ -298,20 +312,20 @@ struct LibraryView: View {
             HStack(spacing: 12) {
                 Image(systemName: "brain.head.profile")
                     .foregroundStyle(Theme.gold)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(p.phase == .discovering ? "Discovering files…"
                          : p.phase == .tagging ? "Tagging files…" : "Post-scan…")
-                        .font(.headline)
+                        .font(Theme.Font.body(14, .semibold))
                     Text("Tags + face detection. Smart names come later via Deep Analyze.")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text(p.total > 0
                      ? "\(p.processed) / \(p.total)  ·  \(p.discovered) found"
                      : "\(p.processed) processed  ·  \(p.discovered) found")
-                    .font(.callout.monospacedDigit())
+                    .font(Theme.Font.body(13.5).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             if p.total > 0 {
@@ -332,18 +346,18 @@ struct LibraryView: View {
                 }
                 Spacer()
                 if p.failed > 0 {
-                    Text("\(p.failed) couldn't be read").foregroundStyle(.red)
+                    Text("\(p.failed) couldn't be read").foregroundStyle(Theme.danger)
                 }
             }
-            .font(.caption.monospacedDigit())
+            .font(Theme.Font.body(12).monospacedDigit())
             .help("Memory and resource details are in Settings → Advanced.")
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
                 )
         )
@@ -369,18 +383,18 @@ struct LibraryView: View {
             HStack(spacing: 12) {
                 Image(systemName: "wand.and.rays")
                     .foregroundStyle(Theme.ai)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Deep Analyze running…")
-                        .font(.headline)
+                        .font(Theme.Font.body(14, .semibold))
                     Text("On-device AI is captioning images and proposing smart filenames.")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if let p {
                     Text("\(p.processed) / \(p.total)")
-                        .font(.callout.monospacedDigit())
+                        .font(Theme.Font.body(13.5).monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
@@ -404,7 +418,7 @@ struct LibraryView: View {
                     }
                     Spacer()
                 }
-                .font(.caption.monospacedDigit())
+                .font(Theme.Font.body(12).monospacedDigit())
                 .foregroundStyle(.tertiary)
             }
             if let last {
@@ -412,15 +426,15 @@ struct LibraryView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "wand.and.rays")
                         .foregroundStyle(Theme.gold)
-                        .font(.callout)
+                        .font(Theme.Font.body(13.5))
                     VStack(alignment: .leading, spacing: 4) {
                         if let n = last.proposedName {
                             Text(n)
-                                .font(.callout.monospaced().bold())
+                                .font(Theme.Font.mono(12.5, .semibold))
                                 .foregroundStyle(Theme.gold)
                         }
                         Text(last.description)
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .foregroundStyle(.secondary)
                             .lineLimit(3)
                     }
@@ -430,10 +444,10 @@ struct LibraryView: View {
         }
         .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Theme.gold.opacity(0.4), lineWidth: 1)
                 )
         )
@@ -446,76 +460,57 @@ struct LibraryView: View {
     @ViewBuilder
     private var header: some View {
         VStack(alignment: .leading, spacing: 12) {
-            // Title row — matches the rhythm of every other primary tab.
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("Library").font(.largeTitle.bold())
-                Text("\(rows.count) of \(store.totalFiles)")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            // Action row — search, filter, bulk actions.
-            HStack(alignment: .center, spacing: 12) {
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search filenames, captions, tags, people, text in photos…",
-                               text: $searchText)
+            HStack(alignment: .center, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
+                    TextField("Filter by name, tag, caption or person", text: $searchText)
                         .textFieldStyle(.plain)
-                        .frame(minWidth: 220)
+                        .font(Theme.Font.body(13.5))
                         .focused($searchFocused)
                     if !searchText.isEmpty {
-                        Button { searchText = "" } label: {
-                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Clear search")
+                        Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
+                            .buttonStyle(.plain)
+                            .help("Clear search")
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: 360)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
-
-                Spacer(minLength: 8)
+                .padding(.horizontal, 10)
+                .frame(height: Theme.Metrics.controlLarge)
+                .frame(minWidth: 140, maxWidth: 320)
+                .layoutPriority(1)
+                .background(Color.black.opacity(0.3), ignoresSafeAreaEdges: [])
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong.opacity(1.15), lineWidth: 1))
 
                 kindPicker
+
+                ViewThatFits(in: .horizontal) {
+                    MetaText("\(rows.count.formatted()) of \(store.totalFiles.formatted()) shown", size: 11).fixedSize()
+                    MetaText("\(rows.count.formatted())/\(store.totalFiles.formatted())", size: 11).fixedSize()
+                    Color.clear.frame(width: 0, height: 0)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 8)
 
             // multi-select mode toggle. Tiles render with check-
             // boxes; "Tag selected" + "Done" appear in place of the
             // normal action set.
             if selectMode {
-                Text("\(checkedFiles.count) selected")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                MetaText("\(checkedFiles.count) selected", size: 11)
                 Button {
                     if !checkedFiles.isEmpty { bulkTagSheetOpen = true }
-                } label: {
-                    Label("Tag selected", systemImage: "tag.fill")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().fill(Theme.gold))
-                        .foregroundStyle(.black)
-                }
-                .buttonStyle(.plain)
+                } label: { Label("Tag selected", systemImage: "tag.fill") }
+                .buttonStyle(DSPrimaryButtonStyle(height: 28))
                 .disabled(checkedFiles.isEmpty)
                 Button("Done") {
                     selectMode = false
                     checkedFiles.removeAll()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(DSSecondaryButtonStyle(height: 28))
                 .keyboardShortcut(.escape, modifiers: [])
             } else {
-                Button {
-                    selectMode = true
-                } label: {
-                    Label("Select", systemImage: "checkmark.square")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().stroke(.secondary.opacity(0.5), lineWidth: 1))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+                Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
+                .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                .fixedSize()
                 .help("Enter multi-select mode to apply tags to many files at once")
             }
 
@@ -523,32 +518,26 @@ struct LibraryView: View {
             // that's where smart names come from in the workflow. Keep
             // only the per-row "Undo last rename" affordance here.
             if lastBatchAvailable {
-                Button(action: undoLastBatch) {
-                    Label("Undo last rename", systemImage: "arrow.uturn.backward")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().stroke(Theme.gold, lineWidth: 1))
-                        .foregroundStyle(Theme.gold)
-                }
-                .buttonStyle(.plain)
+                Button(action: undoLastBatch) { Label("Undo last rename", systemImage: "arrow.uturn.backward") }
+                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
                 .help("Reverse the most recent rename batch")
             }
 
             if lastTagBatchAvailable {
-                Button(action: undoLastTagBatch) {
-                    Label("Undo last tags", systemImage: "arrow.uturn.backward")
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Capsule().stroke(Theme.gold, lineWidth: 1))
-                        .foregroundStyle(Theme.gold)
-                }
-                .buttonStyle(.plain)
+                Button(action: undoLastTagBatch) { Label("Undo last tags", systemImage: "arrow.uturn.backward") }
+                .buttonStyle(DSAccentOutlineButtonStyle(height: 28))
                 .help("Remove only the tags FileID added in the most recent bulk tag batch")
             }
 
             }
         }
-        .padding(20)
+        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, Theme.Metrics.pageInsetY).padding(.bottom, 12)
+        .onAppear {
+            if let handoff = UserDefaults.standard.string(forKey: "libraryQueryHandoff"), !handoff.isEmpty {
+                searchText = handoff
+                UserDefaults.standard.removeObject(forKey: "libraryQueryHandoff")
+            }
+        }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshBulkState) {
             BulkRenameSheet(store: store)
         }
@@ -620,24 +609,28 @@ struct LibraryView: View {
             ("PDFs",     "pdf"),
             ("Audio",    "audio")
         ]
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
                 Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
+                    withAnimation(Theme.spring) {
                         kindFilterRaw = k.value ?? ""
                     }
                 } label: {
                     Text(k.label)
-                        .font(.system(size: 11, weight: active ? .bold : .medium))
-                        .foregroundStyle(active ? Color.black : Color.primary.opacity(0.7))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Capsule().fill(active ? Theme.gold : Color.white.opacity(0.06)))
+                        .font(Theme.Font.body(12.5, active ? .semibold : .medium))
+                        .foregroundStyle(active ? Theme.onGold : Theme.text2)
+                        .lineLimit(1).fixedSize()
+                        .padding(.horizontal, 12)
+                        .frame(height: Theme.Metrics.control)
+                        .background(active ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(active ? .isSelected : [])
             }
         }
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
     // MARK: - Grid
@@ -660,9 +653,20 @@ struct LibraryView: View {
                                     checkedFiles[row.id] = row
                                 }
                             } else {
-                                openPreview(row)
+                                paneSelectedID = row.id
                             }
                         }
+                        .simultaneousGesture(TapGesture(count: 2).onEnded {
+                            if !selectMode { openPreview(row) }
+                        })
+                        .accessibilityAction {
+                            if selectMode {
+                                checkedFiles[row.id] = checkedFiles[row.id] == nil ? row : nil
+                            } else {
+                                paneSelectedID = row.id
+                            }
+                        }
+                        .accessibilityAction(named: "Open preview") { openPreview(row) }
                         .contextMenu {
                             Button {
                                 similarSeed = row
@@ -676,10 +680,11 @@ struct LibraryView: View {
                             }
                         }
                         .background(
-                            RoundedRectangle(cornerRadius: Theme.Radius.m)
-                                .stroke(previewSelectedID == row.id && !selectMode
+                            RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                                .stroke((paneSelectedID == row.id || previewSelectedID == row.id) && !selectMode
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
+                                .padding(-5)
                         )
                         // Tiles fade + scale in so the grid "fills
                         // the room" during a live scan instead of
@@ -802,7 +807,7 @@ struct LibraryView: View {
             // N+1 across the grid before. Off-main too (same read-store scan).
             let ids = newRows.map { $0.id }
             let tags = await Task.detached(priority: .userInitiated) { [store] in
-                store.topVisionTagsBulk(forFileIDs: ids, limit: 2)
+                store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
             guard !Task.isCancelled else { return }
             rows = newRows
@@ -835,6 +840,13 @@ struct FileTile: View {
     /// → "Aquatic", "Year_2024" → "2024"). Last underscore segment wins,
     /// with first letter capitalized. Multi-word labels added by `extraTags`
     /// like "Has Faces" pass through unchanged.
+    /// Hierarchical labels collapse to the same chip ("blue_sky" and "sky"
+    /// are both "Sky"), so dedupe after formatting.
+    private var displayTags: [String] {
+        var seen = Set<String>()
+        return Array(topTags.map(Self.formatTag).filter { seen.insert($0.lowercased()).inserted }.prefix(2))
+    }
+
     private static func formatTag(_ raw: String) -> String {
         if raw.contains(" ") { return raw }   // pre-formatted (Has Faces, etc.)
         let last = raw.split(separator: "_").last.map(String.init) ?? raw
@@ -846,10 +858,10 @@ struct FileTile: View {
     private var kindColor: Color {
         switch row.kind {
         case "image": return Theme.gold
-        case "video": return .purple
-        case "pdf":   return .red
-        case "doc":   return .blue
-        case "audio": return .pink
+        case "video": return Theme.ai
+        case "pdf":   return Theme.danger
+        case "doc":   return Theme.info
+        case "audio": return Theme.delight
         default:      return .secondary
         }
     }
@@ -873,17 +885,14 @@ struct FileTile: View {
             // sources stay aligned. Thumbs crossfade instead of
             // popping; hover lifts via elevation.
             Color.white.opacity(0.04)
-                .aspectRatio(1, contentMode: .fit)
+                .aspectRatio(4 / 3, contentMode: .fit)
                 .overlay(thumbContent)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(hovering ? 0.18 : 0.08),
-                                lineWidth: 1)
+                    LinearGradient(stops: [.init(color: .white.opacity(0.07), location: 0), .init(color: .clear, location: 0.4), .init(color: .black.opacity(0.38), location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
                 )
-                .shadow(color: .black.opacity(hovering ? 0.45 : 0.18),
-                        radius: hovering ? 14 : 5, x: 0, y: hovering ? 6 : 3)
-                .scaleEffect(hovering ? 1.012 : 1.0)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Color.white.opacity(hovering ? 0.28 : 0.08), lineWidth: 1))
                 .animation(.easeOut(duration: 0.18), value: hovering)
                 .animation(.easeOut(duration: 0.40), value: thumb != nil)
                 .onHover { hovering = $0 }
@@ -919,8 +928,8 @@ struct FileTile: View {
                 .help("Click to apply the smart name. Original name shown crossed out.")
             } else {
                 Text(row.url.lastPathComponent)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.primary)
+                    .font(Theme.Font.body(13, .medium))
+                    .foregroundStyle(Theme.text1)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -928,31 +937,19 @@ struct FileTile: View {
             // Vision tag chips — at-a-glance content cues. Reserved 18pt height
             // eliminates vertical grid popping when tags land asynchronously.
             HStack(spacing: 3) {
-                if !topTags.isEmpty {
-                    ForEach(topTags.prefix(2), id: \.self) { tag in
-                        Text(Self.formatTag(tag))
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5).padding(.vertical, 2)
-                            .background(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .fill(Color.secondary.opacity(0.10))
-                            )
-                            .lineLimit(1)
+                if !displayTags.isEmpty {
+                    ForEach(displayTags, id: \.self) { label in
+                        TagChip(text: label)
                     }
                 }
                 Spacer(minLength: 0)
             }
             .frame(height: 18)
             HStack(spacing: 4) {
-                Text(formatBytes(row.sizeBytes))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                MetaText(formatBytes(row.sizeBytes), size: 11)
                 Spacer()
                 if let date = row.displayDate {
-                    Text(date.formatted(date: .numeric, time: .omitted))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                    MetaText(date.formatted(date: .numeric, time: .omitted), size: 11)
                 }
             }
         }
@@ -977,7 +974,7 @@ struct FileTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Opens the file preview")
+        .accessibilityHint("Shows details. Double-click opens the preview.")
     }
 
     @ViewBuilder
@@ -985,18 +982,9 @@ struct FileTile: View {
         if selectMode {
             ZStack(alignment: .topLeading) {
                 if isChecked {
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Theme.gold.opacity(0.18))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(Theme.gold, lineWidth: 3)
-                        )
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.14)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 2))
                 }
-                Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 22))
-                    .foregroundStyle(isChecked ? Theme.gold : Color.white.opacity(0.85))
-                    .background(Circle().fill(.black.opacity(0.45)))
-                    .padding(8)
+                DSCheck(on: isChecked).padding(8)
             }
         }
     }
@@ -1029,7 +1017,7 @@ struct FileTile: View {
             // Show a shimmer while the thumbnail loads — feels more
             // alive than a static placeholder, signals "something is
             // arriving".
-            ShimmerView(cornerRadius: 10)
+            ShimmerView(cornerRadius: 0)
         } else {
             // Non-image kinds get the icon placeholder (no thumb pending).
             VStack(spacing: 4) {
@@ -1037,7 +1025,7 @@ struct FileTile: View {
                     .font(.system(size: 36))
                     .foregroundStyle(kindColor.opacity(0.7))
                 Text(row.extension.uppercased())
-                    .font(.caption2.monospaced().bold())
+                    .font(Theme.Font.mono(10.5, .semibold))
                     .foregroundStyle(.secondary)
             }
         }
@@ -1047,12 +1035,7 @@ struct FileTile: View {
     private var badgeOverlay: some View {
         ZStack(alignment: .topLeading) {
             // Kind badge top-left.
-            Text(row.kind.uppercased())
-                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .foregroundStyle(.black)
-                .padding(.horizontal, 5)
-                .padding(.vertical, 2)
-                .background(Capsule().fill(kindColor.opacity(0.95)))
+            KindBadge(text: row.kind)
                 .padding(6)
 
             // OCR-text / Finder-tag indicators top-right. (The "Faces"
@@ -1095,9 +1078,7 @@ struct FileTile: View {
     }
 
     private func formatBytes(_ b: Int64) -> String {
-        let kb = Double(b) / 1024
-        if kb < 1024 { return String(format: "%.0f KB", kb) }
-        return String(format: "%.1f MB", kb / 1024)
+        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
     }
 }
 
@@ -1149,10 +1130,10 @@ private struct FilePreviewSheet: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file.url.lastPathComponent)
-                        .font(.title3.bold())
+                        .font(Theme.Font.body(16, .semibold))
                         .lineLimit(1).truncationMode(.middle)
                     Text(file.url.deletingLastPathComponent().path)
-                        .font(.caption.monospaced())
+                        .font(Theme.Font.mono(11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.head)
                 }
@@ -1160,19 +1141,19 @@ private struct FilePreviewSheet: View {
                 if siblings.count > 1 {
                     let idx = siblingIndex ?? 0
                     Text("\(idx + 1) of \(siblings.count)")
-                        .font(.caption.monospacedDigit())
+                        .font(Theme.Font.body(12).monospacedDigit())
                         .foregroundStyle(.secondary)
                     HStack(spacing: 4) {
                         Button { step(-1) } label: {
                             Image(systemName: "chevron.left")
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .disabled(idx <= 0)
                         .help("Previous file")
                         Button { step(1) } label: {
                             Image(systemName: "chevron.right")
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .disabled(idx >= siblings.count - 1)
                         .help("Next file")
                     }
@@ -1186,7 +1167,7 @@ private struct FilePreviewSheet: View {
                     Label("Open", systemImage: "arrow.up.right.square")
                         .font(.system(size: 12))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .help("Open in the default app (Preview, QuickTime, etc.)")
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -1194,7 +1175,7 @@ private struct FilePreviewSheet: View {
                     Label("Show in Finder", systemImage: "folder")
                         .font(.system(size: 12))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .help("Reveal this file in Finder")
                 Button {
                     dismiss()
@@ -1210,7 +1191,7 @@ private struct FilePreviewSheet: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
 
             HStack(spacing: 0) {
                 // Preview canvas — kind-specific for fidelity, QLPreview as
@@ -1233,7 +1214,7 @@ private struct FilePreviewSheet: View {
                                 VStack {
                                     ProgressView()
                                     Text("Loading preview…")
-                                        .font(.caption)
+                                        .font(Theme.Font.body(12))
                                         .foregroundStyle(.secondary)
                                         .padding(.top, 8)
                                 }
@@ -1257,11 +1238,11 @@ private struct FilePreviewSheet: View {
                     VStack(alignment: .leading, spacing: 12) {
                         GlassCard {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("Metadata").font(.headline)
+                                Text("Metadata").font(Theme.Font.body(14, .semibold))
                                 Divider().opacity(0.3)
                                 row("Path",   file.pathText)
                                 row("Kind",   file.kind)
-                                row("Size",   String(format: "%.2f MB", file.sizeMB))
+                                row("Size",   ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                                 if let d = file.displayDate {
                                     row("Date", d.formatted(date: .long, time: .shortened))
                                 }
@@ -1284,14 +1265,14 @@ private struct FilePreviewSheet: View {
                             GlassCard {
                                 VStack(alignment: .leading, spacing: 8) {
                                     HStack {
-                                        Text("Deep Analyze").font(.headline)
+                                        Text("Deep Analyze").font(Theme.Font.body(14, .semibold))
                                         Spacer()
                                         if let model = file.vlmModel,
                                            let kind = AIModelKind(rawValue: model) {
                                             BadgePill(label: kind.displayName, color: .secondary)
                                         }
                                     }
-                                    Text(caption).font(.callout)
+                                    Text(caption).font(Theme.Font.body(13.5))
                                     if let proposed = file.vlmProposedName, !proposed.isEmpty {
                                         Divider().opacity(0.3)
                                         HStack(spacing: 8) {
@@ -1299,10 +1280,10 @@ private struct FilePreviewSheet: View {
                                                 .foregroundStyle(Theme.gold)
                                             VStack(alignment: .leading, spacing: 2) {
                                                 Text("Smart name")
-                                                    .font(.caption.bold())
+                                                    .font(Theme.Font.body(12, .semibold))
                                                     .foregroundStyle(.secondary)
                                                 Text("\(proposed).\(file.extension)")
-                                                    .font(.caption.monospaced())
+                                                    .font(Theme.Font.mono(11))
                                                     .foregroundStyle(Theme.gold)
                                             }
                                             Spacer()
@@ -1324,7 +1305,7 @@ private struct FilePreviewSheet: View {
                                                 }
                                                 dismiss()
                                             }
-                                            .buttonStyle(.bordered)
+                                            .buttonStyle(.dsSecondary)
                                             .help("Renames the file on disk and updates the library row. Undo from the Library header if you change your mind.")
                                         }
                                     }
@@ -1334,7 +1315,7 @@ private struct FilePreviewSheet: View {
                         if !tags.isEmpty {
                             GlassCard {
                                 VStack(alignment: .leading, spacing: 8) {
-                                    Text("Tags").font(.headline)
+                                    Text("Tags").font(Theme.Font.body(14, .semibold))
                                     FlowLayout(spacing: 6) {
                                         ForEach(tags, id: \.self) { tag in
                                             BadgePill(label: tag)
@@ -1408,8 +1389,8 @@ private struct FilePreviewSheet: View {
     @ViewBuilder
     private func row(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Text(k).font(.caption.bold()).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
-            Text(v).font(.caption.monospaced()).textSelection(.enabled).lineLimit(3)
+            Text(k).font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
+            Text(v).font(Theme.Font.mono(11)).textSelection(.enabled).lineLimit(3)
             Spacer()
         }
     }
@@ -1449,15 +1430,15 @@ private struct FinderTagsEditor: View {
                 HStack(spacing: 6) {
                     Image(systemName: "tag.fill")
                         .foregroundStyle(Theme.gold)
-                    Text("Finder tags").font(.headline)
+                    Text("Finder tags").font(Theme.Font.body(14, .semibold))
                     Spacer()
                     Text("(visible in Finder + Spotlight)")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.tertiary)
                 }
                 if tags.isEmpty {
                     Text("None yet — add a tag below.")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                 } else {
                     FlowLayout(spacing: 6) {
@@ -1468,18 +1449,18 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption)
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                        .font(Theme.Font.body(12))
                         .focused(isFocused)
                     Button("Apply tag", systemImage: "checkmark", action: addDraft)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .foregroundStyle(.black)
                         .keyboardShortcut(.defaultAction)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
                 if let e = error {
-                    Text(e).font(.caption2).foregroundStyle(.orange)
+                    Text(e).font(Theme.Font.body(11)).foregroundStyle(Theme.warning)
                 }
             }
         }
@@ -1550,7 +1531,7 @@ private struct FinderTagsEditor: View {
         HStack(spacing: 4) {
             Image(systemName: "tag.fill")
                 .font(.system(size: 9))
-            Text(tag).font(.caption)
+            Text(tag).font(Theme.Font.body(12))
             Button {
                 remove(tag)
             } label: {
@@ -1563,8 +1544,8 @@ private struct FinderTagsEditor: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(Capsule().fill(Theme.gold.opacity(0.15)))
-        .overlay(Capsule().stroke(Theme.gold.opacity(0.3), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.15)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.3), lineWidth: 1))
         .foregroundStyle(Theme.gold)
     }
 }
@@ -1603,10 +1584,10 @@ private struct VideoPreview: View {
                 .buttonStyle(.plain)
                 .help("Play in QuickTime / default video app")
                 Text("Click to play")
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(12, .semibold))
                     .foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(Capsule().fill(.black.opacity(0.55)))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.black.opacity(0.55)))
             }
         }
         .task(id: url) {
@@ -1626,22 +1607,22 @@ private struct AudioPreview: View {
                 .font(.system(size: 96, weight: .light))
                 .foregroundStyle(Theme.gold)
             Text(url.lastPathComponent)
-                .font(.headline)
+                .font(Theme.Font.body(14, .semibold))
                 .lineLimit(1).truncationMode(.middle)
             Button {
                 NSWorkspace.shared.open(url)
             } label: {
                 Label("Play in default app", systemImage: "play.fill")
                     .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                     .foregroundStyle(.black)
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
             }
             .buttonStyle(.plain)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.4))
+        .background(Color.black.opacity(0.4), ignoresSafeAreaEdges: [])
     }
 }
 
@@ -1667,7 +1648,7 @@ private struct PDFPreview: View {
                         .font(.system(size: 64))
                         .foregroundStyle(.secondary)
                     Text("Loading PDF…")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1713,10 +1694,10 @@ private struct UniversalPreview: View {
                         .font(.system(size: 96, weight: .light))
                         .foregroundStyle(.secondary)
                     Text(url.lastPathComponent)
-                        .font(.callout)
+                        .font(Theme.Font.body(13.5))
                         .lineLimit(1).truncationMode(.middle)
                     Text("Open in default app for full preview")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -1773,5 +1754,137 @@ struct FlowLayout: Layout {
             x += s.width + spacing
             rowHeight = max(rowHeight, s.height)
         }
+    }
+}
+
+// MARK: - Selected pane
+
+/// Right-hand details for the clicked tile; double-click opens the full preview.
+private struct LibrarySelectedPane: View {
+    let row: FileRow
+    let store: ReadStore
+    let engine: EngineClient
+    let onOpen: () -> Void
+    let onFindSimilar: () -> Void
+    let onClose: () -> Void
+    @State private var thumbnail: NSImage?
+    @State private var tags: [String] = []
+    @State private var people: [String] = []
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    SectionLabel("Selected")
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.dsRow)
+                    .keyboardShortcut(.cancelAction)
+                    .help("Close details")
+                }
+                ZStack {
+                    Color.black.opacity(0.35)
+                    if let thumbnail {
+                        Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fit)
+                    } else {
+                        Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
+                    }
+                }
+                .aspectRatio(16.0 / 10.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
+                .onTapGesture(count: 2, perform: onOpen)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(row.url.lastPathComponent)
+                        .font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                        .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    Text(row.url.deletingLastPathComponent().path)
+                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                        .lineLimit(1).truncationMode(.head)
+                }
+
+                VStack(spacing: 0) {
+                    detail("Kind", row.kind.capitalized + " · " + row.extension.uppercased())
+                    if let date = row.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
+                    detail("Size", ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file))
+                    if let camera = row.cameraModel, !camera.isEmpty { detail("Camera", camera) }
+                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
+                }
+
+                if let caption = row.vlmDescription, !caption.isEmpty {
+                    Text(caption).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !tags.isEmpty {
+                    FlowLayout(spacing: 6) {
+                        ForEach(tags.prefix(12), id: \.self) { tag in
+                            Text(tag)
+                                .font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2)
+                                .lineLimit(1).truncationMode(.tail)
+                                .padding(.horizontal, 8).frame(height: 22)
+                                .frame(maxWidth: 260, alignment: .leading).fixedSize()
+                                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                                .help(tag)
+                        }
+                    }
+                }
+
+                VStack(spacing: 6) {
+                    Button(action: onOpen) { Label("Open preview", systemImage: "eye").frame(maxWidth: .infinity) }
+                        .buttonStyle(DSPrimaryButtonStyle(height: 30))
+                        .help("Full preview with tags, smart name and Deep Analyze (or double-click the tile)")
+                    HStack(spacing: 6) {
+                        if row.kind == "image" || row.kind == "video" {
+                            Button(action: onFindSimilar) { Text("Similar").lineLimit(1).frame(maxWidth: .infinity) }
+                                .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                                .help("Find visually similar files")
+                        }
+                        Button { NSWorkspace.shared.activateFileViewerSelecting([row.url]) } label: { Text("Finder").lineLimit(1).frame(maxWidth: .infinity) }
+                            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                            .help("Show in Finder")
+                        Button { NSWorkspace.shared.open(row.url) } label: { Text("Open").lineLimit(1).frame(maxWidth: .infinity) }
+                            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                            .help("Open in the default app")
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(Theme.bg1.opacity(0.35), ignoresSafeAreaEdges: [])
+        .task(id: row.id) {
+            thumbnail = nil
+            let id = row.id
+            let loaded = await Task.detached { [store] in (store.tags(forFileID: id), store.personNames(forFileID: id)) }.value
+            guard !Task.isCancelled else { return }
+            tags = loaded.0
+            people = loaded.1
+            let image = await ThumbnailService.shared.thumbnail(for: row.url, size: 480)
+            guard !Task.isCancelled else { return }
+            thumbnail = image
+        }
+    }
+
+    private var icon: String {
+        switch row.kind {
+        case "video": return "film"
+        case "audio": return "waveform"
+        case "pdf": return "doc.richtext"
+        default: return "doc"
+        }
+    }
+
+    private func detail(_ key: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
+            Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(2).textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 }

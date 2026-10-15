@@ -56,13 +56,13 @@ struct ProcessingControl: View {
             Image(systemName: startRequested ? "hourglass" : "moon.zzz")
                 .foregroundStyle(.secondary)
             Text(startRequested ? "Starting…" : "Idle")
-                .font(.caption.bold()).foregroundStyle(.secondary)
+                .font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary)
             Spacer()
         }
         Text(startRequested
              ? "Sent to engine. The first phase event will appear shortly."
              : "Ready to scan this folder. Click Start when you're ready.")
-            .font(.caption2)
+            .font(Theme.Font.body(11))
             .foregroundStyle(.secondary)
         pillButton("Start Scan", color: Theme.gold, system: "play.fill",
                     filled: true, disabled: startRequested) {
@@ -78,7 +78,7 @@ struct ProcessingControl: View {
     private func liveOrDone(_ p: ScanProgress) -> some View {
         HStack(spacing: 8) {
             Image(systemName: phaseIcon(p.phase))
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
                 .foregroundStyle(Theme.gold)
             BadgePill(label: p.phase.rawValue.capitalized)
             Spacer()
@@ -94,11 +94,11 @@ struct ProcessingControl: View {
                 .tint(Theme.gold)
             HStack {
                 Text("\(p.processed) / \(p.total)")
-                    .font(.caption2.monospacedDigit())
+                    .font(Theme.Font.body(11).monospacedDigit())
                 Spacer()
                 let pct = Double(p.processed) / Double(max(p.total, 1)) * 100
                 Text(String(format: "%.1f%%", pct))
-                    .font(.caption2.bold().monospacedDigit())
+                    .font(Theme.Font.body(11, .semibold).monospacedDigit())
                     .foregroundStyle(Theme.gold)
             }
         } else if p.phase == .discovering {
@@ -121,62 +121,62 @@ struct ProcessingControl: View {
             }
             statRow(icon: "memorychip",
                      label: "\(p.residentMB) MB used",
-                     labelTint: p.residentMB > 1200 ? .orange : .secondary,
+                     labelTint: p.residentMB > 1200 ? Theme.warning : .secondary,
                      trailing: "\(p.availableMB) MB free",
                      trailingTint: .secondary)
             if p.failed > 0 {
                 statRow(icon: "exclamationmark.triangle",
                          label: "\(p.failed) failed",
-                         labelTint: .red,
+                         labelTint: Theme.danger,
                          trailing: nil,
                          trailingTint: .secondary)
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(Color.white.opacity(0.04))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(Color.white.opacity(0.06), lineWidth: 1)
         )
 
         if engine.isPaused {
             HStack(spacing: 6) {
-                Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                Image(systemName: "pause.circle.fill").foregroundStyle(Theme.warning)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Paused")
-                        .font(.caption.bold())
-                        .foregroundStyle(.orange)
+                        .font(Theme.Font.body(12, .semibold))
+                        .foregroundStyle(Theme.warning)
                     Text("Workers idle. Click Resume to continue or Cancel to stop.")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
             .padding(8)
-            .background(Color.orange.opacity(0.10))
+            .background(Theme.warning.opacity(0.10), ignoresSafeAreaEdges: [])
             .overlay(
-                RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.5), lineWidth: 1)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.5), lineWidth: 1)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         }
         // Lid-closed safety hint moved to Settings → Engine info to
         // keep the sidebar focused on actionable scan controls.
         HStack(spacing: 8) {
             if engine.isPaused {
-                pillButton("Resume", color: .green, system: "play.fill", filled: true) {
+                pillButton("Resume", color: Theme.delight, system: "play.fill", filled: true) {
                     engine.resume()
                 }
-                pillButton("Cancel", color: .red, system: "xmark.circle.fill") {
+                pillButton("Cancel", color: Theme.danger, system: "xmark.circle.fill") {
                     engine.cancel()
                 }
             } else if p.phase == .tagging || p.phase == .discovering || p.phase == .postScan {
-                pillButton("Pause", color: .orange, system: "pause.fill") {
+                pillButton("Pause", color: Theme.warning, system: "pause.fill") {
                     engine.pause()
                 }
-                pillButton("Cancel", color: .red, system: "xmark.circle.fill") {
+                pillButton("Cancel", color: Theme.danger, system: "xmark.circle.fill") {
                     engine.cancel()
                 }
             } else {
@@ -194,16 +194,16 @@ struct ProcessingControl: View {
                           trailingTint: Color) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .foregroundStyle(labelTint)
                 .frame(width: 14, alignment: .leading)
             Text(label)
-                .font(.caption2.monospacedDigit())
+                .font(Theme.Font.body(11).monospacedDigit())
                 .foregroundStyle(labelTint)
             Spacer(minLength: 8)
             if let trailing {
                 Text(trailing)
-                    .font(.caption2.bold().monospacedDigit())
+                    .font(Theme.Font.body(11, .semibold).monospacedDigit())
                     .foregroundStyle(trailingTint)
             }
         }
@@ -265,7 +265,7 @@ struct ProcessingControl: View {
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: system)
-                .font(.caption.bold())
+                .font(Theme.Font.body(12, .semibold))
                 .foregroundStyle(disabled ? color.opacity(0.5)
                                   : (filled ? Color.black : color))
                 .frame(maxWidth: .infinity)
@@ -273,10 +273,10 @@ struct ProcessingControl: View {
                 .background(filled ? color.opacity(disabled ? 0.4 : 1.0)
                                    : color.opacity(0.18))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(color.opacity(filled ? 1.0 : 0.6), lineWidth: 1)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(disabled)

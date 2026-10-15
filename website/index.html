@@ -4,404 +4,312 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>FileID — On-device AI file organization</title>
-<meta name="description" content="Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own. Native apps on macOS, Windows, and Linux." />
+<meta name="description" content="Tag, dedupe, restructure, and rename tens of thousands of files — privately, on hardware you own. Native apps for macOS, Windows, and Linux. No telemetry." />
 <meta property="og:title" content="FileID — On-device AI file organization" />
-<meta property="og:description" content="Point FileID at a folder. It reads every file inside and builds one searchable library. 100% on-device. Zero telemetry." />
+<meta property="og:description" content="Point FileID at a folder. Browse, analyze and act on everything inside it. 100% on-device. Zero telemetry." />
+<meta property="og:image" content="assets/app-icon@2x.png" />
 <link rel="icon" type="image/png" href="assets/app-icon.png" />
+<link rel="apple-touch-icon" href="assets/app-icon.png" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
 
-<!-- ────────── NAV ────────── -->
 <header class="nav">
   <a class="nav-brand" href="#top" aria-label="FileID home">
-    <img src="assets/app-icon.png" alt="" class="nav-icon" />
-    <span>FileID</span>
+    <img src="assets/app-icon.png" alt="" />
+    <span class="wordmark">FileID</span>
+    <span class="label">On-device</span>
   </a>
   <nav class="nav-links">
-    <a href="#features">Features</a>
+    <a href="#areas">Browse · Analyze · Act</a>
     <a href="#front-ends">Front-ends</a>
     <a href="#privacy">Privacy</a>
     <a href="#download">Download</a>
     <a class="nav-cta" href="https://github.com/WebWorldWide/FileID" target="_blank" rel="noopener">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-      Star on GitHub
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      Source
     </a>
   </nav>
 </header>
 
 <!-- ────────── HERO ────────── -->
 <section id="top" class="hero">
-  <!-- LavaLamp canvas + dim overlay -->
   <canvas id="lavalamp" aria-hidden="true"></canvas>
-  <div class="hero-tint" aria-hidden="true"></div>
+  <div class="hero-shade" aria-hidden="true"></div>
   <div class="hero-grain" aria-hidden="true"></div>
 
-  <!-- 3D spinning logo -->
   <div class="logo-stage" id="logoStage">
     <div class="logo-halo" aria-hidden="true"></div>
-    <div class="logo-sparkles" id="logoSparkles" aria-hidden="true"></div>
     <div class="logo-bob">
-      <div class="logo-3d" id="logo3d" role="img" aria-label="FileID app icon">
-        <!-- layers injected by JS -->
-      </div>
+      <div class="logo-3d" id="logo3d" role="img" aria-label="FileID app icon"></div>
       <div class="logo-shadow" aria-hidden="true"></div>
     </div>
     <div class="logo-hint" id="logoHint">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8a7 7 0 0 1 14 0v8a7 7 0 0 1-14 0V8z"/><path d="M12 4v6"/></svg>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8a7 7 0 0 1 14 0v8a7 7 0 0 1-14 0V8z"/><path d="M12 4v6"/></svg>
       <span>Drag to spin</span>
     </div>
   </div>
 
-  <!-- Hero copy -->
   <div class="hero-copy">
-    <div class="hero-eyebrow">
-      <span class="dot"></span>
-      On-device AI file organization
-    </div>
-    <h1 class="hero-title">
-      <span>FileID</span>
-    </h1>
-    <p class="hero-tagline">
-      Tag, dedupe, restructure, and rename<br />
-      tens of thousands of files — <em>privately</em>,<br />
-      on hardware you own.
-    </p>
+    <div class="hero-eyebrow label"><span class="dot"></span>On-device AI file organization</div>
+    <h1 class="hero-title">Find the <em>moment</em>.<br />Keep the files.</h1>
+    <p class="hero-tagline">Point FileID at a folder. It tags, groups people, finds the best take, proposes real names and a tidier layout — on this machine, with models you install yourself. Nothing leaves it.</p>
     <div class="hero-ctas">
       <a class="btn btn-gold" href="#download">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
         Download
       </a>
-      <a class="btn btn-ghost" href="https://github.com/WebWorldWide/FileID" target="_blank" rel="noopener">
-        View source
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
-      </a>
+      <a class="btn" href="https://github.com/WebWorldWide/FileID" target="_blank" rel="noopener">View source</a>
     </div>
     <ul class="hero-pills" aria-label="Platform support">
-      <li><span class="pill-dot pill-dot-on"></span>macOS&nbsp;15+</li>
-      <li><span class="pill-dot pill-dot-on"></span>Windows&nbsp;10/11 + WoA</li>
-      <li><span class="pill-dot pill-dot-on"></span>Linux&nbsp;(GTK4)</li>
+      <li><span class="pill-dot"></span>macOS 15+</li>
+      <li><span class="pill-dot"></span>Windows 10/11 · x64 · ARM64</li>
+      <li><span class="pill-dot"></span>Linux · GTK4</li>
+      <li><span class="pill-dot"></span>Apache-2.0</li>
     </ul>
   </div>
-
-  <a class="hero-scroll" href="#features" aria-label="Scroll for more">
-    <span></span>
-  </a>
 </section>
 
-<!-- ────────── FEATURES ────────── -->
-<section id="features" class="band band-canvas">
+<!-- ────────── PRODUCT FRAME ────────── -->
+<section id="window" class="band band-pane">
   <div class="band-inner">
     <div class="section-head reveal">
-      <div class="kicker"><span class="kicker-dot"></span>The six tabs</div>
-      <h2>Every workflow in one window.</h2>
+      <span class="label">The window</span>
+      <h2>Three areas. One folder. <em>Every</em> job in view.</h2>
+      <p class="section-sub">Browse, Analyze and Act sit in the title bar. The sidebar lists the pages of the current area and where the library is in the pipeline. Running work, search and chat are one keystroke away.</p>
     </div>
-    <div class="features-grid reveal-stagger">
-      <article class="feature">
-        <div class="feature-glyph" data-glyph="library"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h11v14H4z"/><path d="M8 8h4M8 12h4M8 16h2M16 15l4 4M18 13a4 4 0 1 1-8 0 4 4 0 0 1 8 0z"/></svg></div>
-        <h3>Library</h3>
-        <p>FTS5 search over filenames + OCR. Semantic CLIP search — type "a dog at the beach" and get the photo. RAM++ auto-tagging, thumbnail grid + preview sheet.</p>
-        <div class="feature-tag">RAM++ · CLIP · FTS5 · OCR</div>
+
+    <div class="frame reveal" aria-label="FileID window, Deep Analyze page" role="img">
+      <div class="frame-lava" aria-hidden="true"></div>
+      <div class="frame-grain" aria-hidden="true"></div>
+      <div class="frame-title">
+        <div style="display:flex;align-items:center">
+          <span class="lights" aria-hidden="true"><i style="background:#FF5F57"></i><i style="background:#FEBC2E"></i><i style="background:#28C840"></i></span>
+          <span class="frame-folder"><span class="wordmark">FileID</span><span class="vsep"></span><b>Family 2026</b><span class="meta">▾</span></span>
+        </div>
+        <div class="seg"><span>Browse</span><span class="on">Analyze</span><span>Act</span></div>
+        <div class="frame-right">
+          <span class="frame-search">Search or ask <kbd>⌘K</kbd></span>
+          <span class="frame-activity"><i></i>Captions <span class="bar bar-ai" style="--p:38%;--frac:.38"><i></i></span><em>38%</em></span>
+          <span class="frame-gear" aria-hidden="true">⚙</span>
+        </div>
+      </div>
+      <div class="frame-body">
+        <aside class="frame-side">
+          <div class="side-head"><span class="label">Analyze</span><span class="meta">3 pages</span></div>
+          <div class="side-row on"><i></i><span><b>Deep Analyze</b><span class="meta" style="color:#B19BCE">38% · running</span></span><span class="meta">⌘4</span></div>
+          <div class="side-row"><i></i><span><b>Chat</b><span class="meta">2 questions</span></span><span class="meta">⌘5</span></div>
+          <div class="side-row"><i></i><span><b>Best Takes</b><span class="meta">2 groups</span></span><span class="meta">⌘6</span></div>
+          <div class="side-foot">
+            <div class="row"><span>Writing captions</span><em>38%</em></div>
+            <div class="bar bar-ai" style="--p:38%;--frac:.38"><i></i></div>
+            <div class="stages"><span class="done">Scan</span><span class="done">Tag</span><span class="done">Faces</span><span class="cur">Captions</span><span>Done</span></div>
+            <span class="meta">1,296 of 3,410 captioned</span>
+          </div>
+        </aside>
+        <div class="frame-page">
+          <div class="page-head">
+            <div><span class="label">Analyze / Deep Analyze</span><h3>Deep Analyze</h3></div>
+            <span class="meta" style="font-size:12px;color:#CFD3D8">1,296 / 3,410</span>
+          </div>
+          <div class="page-content">
+            <div class="panel">
+              <div class="run-head"><span class="label">This run · Qwen3-VL 8B</span><em>RUNNING 38%</em></div>
+              <div class="run-bar"><div class="bar bar-ai" style="--p:38%;--frac:.38"><i></i></div></div>
+              <div class="metrics">
+                <div class="metric"><span class="label">Captioned</span><strong>1,296</strong><span class="meta">of 3,410 files</span></div>
+                <div class="metric"><span class="label">New names</span><strong>414</strong><span class="meta">proposed</span></div>
+                <div class="metric"><span class="label">Kept names</span><strong>98</strong><span class="meta">caption too generic</span></div>
+                <div class="metric"><span class="label">Rate</span><strong>2.2</strong><span class="meta">files / sec</span></div>
+                <div class="metric"><span class="label">Elapsed</span><strong>9:34</strong><span class="meta">min:sec</span></div>
+              </div>
+            </div>
+            <div class="panel proposals">
+              <div class="panel-head"><span class="label">Proposed names · 4 to review</span><span class="btn btn-gold" style="height:28px">Rename 2</span></div>
+              <div class="row"><span><span class="from">IMG_2214.HEIC</span> <span class="from">→</span> <span class="to">dog-park-fetch.heic</span><span class="why">Caption: dog running with a ball across grass</span></span><span class="acts"><span class="mini accent">Accept</span><span class="mini">Keep name</span></span></div>
+              <div class="row"><span><span class="from">DSC00381.JPG</span> <span class="from">→</span> <span class="to">grandma-rose-kitchen-baking.jpg</span><span class="why">Grandma Rose (confirmed) · flour, mixing bowl</span></span><span class="acts"><span class="mini accent">Accept</span><span class="mini">Keep name</span></span></div>
+              <div class="row"><span><span class="from">VID_0119.MOV</span> <span class="from">→</span> <span class="to">fireworks-over-lake.mov</span><span class="why">Frames 0:12, 0:40, 1:05 · night sky over water</span></span><span class="acts"><span class="mini accent">Accept</span><span class="mini">Keep name</span></span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="frame-caption">
+      <span class="meta">Gold: scanning, exporting, moving · Lavender: a model is running · Pink: done · Grey: paused.</span>
+      <span class="meta">The background glows lavender while a model works.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ────────── AREAS ────────── -->
+<section id="areas" class="band">
+  <div class="band-inner">
+    <div class="section-head reveal">
+      <span class="label">Browse · Analyze · Act</span>
+      <h2>Nine pages, grouped by what you're doing.</h2>
+      <p class="section-sub">Each page is a reviewable, undoable step. Nothing is renamed, moved or trashed until you say so, and every automatic result says where it came from.</p>
+    </div>
+    <div class="areas reveal-stagger">
+      <article class="panel area">
+        <div class="panel-head"><span class="label">Browse</span><span class="meta">⌘1–3</span></div>
+        <div class="page"><i></i><div><h3>Library</h3><p>One searchable library: filenames, captions, tags, people and text in photos. Filter by kind, pick a file, see what FileID knows about it.</p><span class="chip">FTS5 · CLIP · RAM++ · OCR</span></div></div>
+        <div class="page"><i></i><div><h3>People</h3><p>Faces grouped on-device. Confirm the uncertain ones, name a person once, and every caption and file name uses that name from then on.</p><span class="chip">YuNet · SFace</span></div></div>
+        <div class="page"><i></i><div><h3>Search &amp; Moments</h3><p>Search inside videos. Chapters, sampled frames and speech become seekable evidence; drafts stay drafts until you accept them.</p><span class="chip">Chapters · Speech · Evidence</span></div></div>
       </article>
-      <article class="feature">
-        <div class="feature-glyph" data-glyph="people"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M3.5 19c.5-3.2 2.3-5 5.5-5s5 1.8 5.5 5M14 15c2.8-.8 5.3.4 6.5 4"/></svg></div>
-        <h3>People</h3>
-        <p>Face clusters from on-device SFace embeddings. Drag to merge. Name a cluster once — every AI caption uses real names from then on.</p>
-        <div class="feature-tag">YuNet · SFace</div>
+      <article class="panel area">
+        <div class="panel-head"><span class="label">Analyze</span><span class="meta">⌘4–6</span></div>
+        <div class="page"><i></i><div><h3>Deep Analyze</h3><p>A local vision-language model writes a caption and proposes a short, specific file name for photos, PDFs and video keyframes. You accept or keep.</p><span class="chip">Qwen3-VL · Gemma 3 · 265 MLX models</span></div></div>
+        <div class="page"><i></i><div><h3>Chat</h3><p>Ask about your files. Answers cite the frame, chapter or document they came from, and keyword search works without a model.</p><span class="chip">Cited · Local</span></div></div>
+        <div class="page"><i></i><div><h3>Best Takes</h3><p>Group related attempts, state the goal, and let timestamped evidence pick the take that meets it — or say honestly that it's a tie.</p><span class="chip">Goal-conditioned</span></div></div>
       </article>
-      <article class="feature">
-        <div class="feature-glyph" data-glyph="cleanup"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h10v12H5zM8 4h10v12M9 10h4M9 14h4"/></svg></div>
-        <h3>Cleanup</h3>
-        <p>Duplicate groups by perceptual hash. Trashed files stay recoverable until you say otherwise. No surprises.</p>
-        <div class="feature-tag">dHash · pHash</div>
-      </article>
-      <article class="feature feature-accent">
-        <div class="feature-glyph" data-glyph="deep"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.3 5.7L19 10l-5.7 1.3L12 17l-1.3-5.7L5 10l5.7-1.3zM19 16l.6 2.4L22 19l-2.4.6L19 22l-.6-2.4L16 19l2.4-.6z"/></svg></div>
-        <h3>Deep Analyze</h3>
-        <p>On-device vision-language model writes a caption and proposes a smart filename — for images, PDFs, video keyframes, doc thumbnails.</p>
-        <div class="feature-tag">Qwen 2.5-VL 7B · Gemma 3 · Mistral-Small-3.2</div>
-      </article>
-      <article class="feature">
-        <div class="feature-glyph" data-glyph="restructure"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h6M4 18h6M14 12h6M10 6l4 6-4 6"/><circle cx="4" cy="6" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="12" r="2"/></svg></div>
-        <h3>Restructure</h3>
-        <p>Folder reorganization with a Sankey flow diagram. Apply as shortcuts (reversible), then convert to real moves when you're happy.</p>
-        <div class="feature-tag">Reversible · Sankey</div>
-      </article>
-      <article class="feature">
-        <div class="feature-glyph" data-glyph="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg></div>
-        <h3>Settings</h3>
-        <p>Model downloads, GPU acceleration picker, engine info, logs, privacy controls. Hardware diagnostics for the curious.</p>
-        <div class="feature-tag">DirectML · CoreML · AVX2/NEON floor</div>
+      <article class="panel area">
+        <div class="panel-head"><span class="label">Act</span><span class="meta">⌘7–9</span></div>
+        <div class="page"><i></i><div><h3>Cleanup</h3><p>Exact and look-alike duplicate groups. Keep one per group; the rest go to the Trash and stay recoverable.</p><span class="chip">SHA-256 · dHash</span></div></div>
+        <div class="page"><i></i><div><h3>Restructure</h3><p>Preview a folder layout by kind, date or both. Try it with shortcuts first, then move for real, then undo if you change your mind.</p><span class="chip">Preview · Shortcuts · Move</span></div></div>
+        <div class="page"><i></i><div><h3>File Tools</h3><p>Convert photos, export social-frame and stabilized video, write chapter files. Originals are never changed; every export is reopened and checked.</p><span class="chip">H.264 · 9:16 · Undo</span></div></div>
       </article>
     </div>
   </div>
 </section>
 
 <!-- ────────── FRONT-ENDS ────────── -->
-<section id="front-ends" class="band band-dark">
+<section id="front-ends" class="band band-pane">
   <div class="band-inner">
     <div class="section-head reveal">
-      <div class="kicker"><span class="kicker-dot"></span>Five front-ends</div>
-      <h2>One engine. Pick your window.</h2>
-      <p class="section-sub">Three native desktop apps and two terminal clients — all reading and writing the same library. No web tech anywhere: every GUI is native to its OS.</p>
+      <span class="label">Five front-ends</span>
+      <h2>One library. Pick your window.</h2>
+      <p class="section-sub">Three native desktop apps and two terminal clients read and write the same SQLite library. No web technology in any of them.</p>
     </div>
-    <div class="features-grid reveal-stagger">
-      <article class="feature">
-        <h3>macOS app</h3>
-        <p>The canonical visual and behavioral reference, tuned for Apple Silicon. Writes real Finder tags, so they show up in Spotlight and Smart Folders.</p>
-        <div class="feature-tag">SwiftUI · MLX · CoreML</div>
-      </article>
-      <article class="feature">
-        <h3>Windows app</h3>
-        <p>Mica backdrop, springs-everywhere motion, and the same six tabs. Windows 10/11 on x64 and Snapdragon WoA.</p>
-        <div class="feature-tag">WinUI 3 · .NET 8 · DirectML</div>
-      </article>
-      <article class="feature">
-        <h3>Linux app</h3>
-        <p>GNOME-native port over the shared Rust engine — the same six tabs, the same gold palette, the same motion language.</p>
-        <div class="feature-tag">GTK4 · libadwaita</div>
-      </article>
-      <article class="feature">
-        <h3><code>fileid</code> CLI</h3>
-        <p>Scan, search, dedupe, and plan restructures headlessly — ideal for servers and NAS boxes. Read-only by default; every destructive action is behind an explicit flag.</p>
-        <div class="feature-tag">Rust · scriptable · <code>--json</code></div>
-      </article>
-      <article class="feature">
-        <h3><code>fileid-tui</code></h3>
-        <p>A terminal dashboard over the same library. Browse, search, and kick off a full-ML scan without leaving the shell.</p>
-        <div class="feature-tag">Rust · ratatui</div>
-      </article>
-      <article class="feature">
-        <h3>One library</h3>
-        <p>A library scanned on one platform opens on another — database migrations are byte-faithful across the Swift and Rust engines.</p>
-        <div class="feature-tag">SQLite WAL · portable</div>
-      </article>
+    <div class="grid3 reveal-stagger">
+      <article class="panel card"><div class="panel-head"><span class="label">macOS</span><span class="meta">reference</span></div><div class="body"><p>SwiftUI app and Swift engine on Apple Silicon: MLX for vision-language models, the Neural Engine for faces and search. Writes real Finder tags.</p><div class="tags"><span class="chip">SwiftUI</span><span class="chip">MLX</span><span class="chip">CoreML</span></div></div></article>
+      <article class="panel card"><div class="panel-head"><span class="label">Windows</span><span class="meta">x64 · ARM64</span></div><div class="body"><p>WinUI 3 app over the shared Rust engine. ONNX Runtime picks DirectML, CUDA or CPU; llama.cpp runs the same catalog models.</p><div class="tags"><span class="chip">WinUI 3</span><span class="chip">.NET 8</span><span class="chip">DirectML</span></div></div></article>
+      <article class="panel card"><div class="panel-head"><span class="label">Linux</span><span class="meta">GTK4</span></div><div class="body"><p>GNOME-native app over the same Rust engine, with the same areas, palette and motion language. Flatpak packaging.</p><div class="tags"><span class="chip">GTK4</span><span class="chip">libadwaita</span></div></div></article>
+      <article class="panel card"><div class="panel-head"><span class="label"><code>fileid</code> CLI</span><span class="meta">headless</span></div><div class="body"><p>Scan, search, dedupe and plan restructures from a shell or a NAS. Read-only by default; destructive actions sit behind explicit flags.</p><div class="tags"><span class="chip">Rust</span><span class="chip">--json</span></div></div></article>
+      <article class="panel card"><div class="panel-head"><span class="label"><code>fileid-tui</code></span><span class="meta">terminal</span></div><div class="body"><p>A terminal dashboard over the same library: browse, search and start a full scan without leaving the shell.</p><div class="tags"><span class="chip">Rust</span><span class="chip">ratatui</span></div></div></article>
+      <article class="panel card"><div class="panel-head"><span class="label">One library</span><span class="meta">portable</span></div><div class="body"><p>A library scanned on one platform opens on another. Migrations are byte-faithful across the Swift and Rust engines.</p><div class="tags"><span class="chip">SQLite WAL</span><span class="chip">IPC 1.16</span></div></div></article>
     </div>
   </div>
 </section>
 
 <!-- ────────── PRIVACY ────────── -->
-<section id="privacy" class="band band-stripes">
+<section id="privacy" class="band">
   <div class="band-inner privacy-grid">
-    <div class="privacy-copy reveal">
-      <div class="kicker"><span class="kicker-dot"></span>Privacy posture</div>
-      <h2>100% on-device.<br /><em>Zero</em> telemetry.</h2>
-      <p class="privacy-lede">
-        FileID ships no analytics SDKs, no crash reporters, no "anonymous usage" pings. Your files never leave the machine. User-requested model and optional hardware-runtime downloads are restricted to the reviewed upstream host baseline; CI rejects unreviewed additions.
-      </p>
+    <div class="reveal">
+      <div class="section-head" style="margin-bottom:0">
+        <span class="label">Privacy posture</span>
+        <h2>100% on-device.<br /><em>Zero</em> telemetry.</h2>
+        <p class="section-sub">No analytics SDKs, no crash reporters, no usage pings. The only network use is a model download you start yourself, from Hugging Face, verified against pinned hashes. CI rejects anything else.</p>
+      </div>
       <ul class="privacy-list">
-        <li><strong>Local SQLite WAL database</strong> in your app-support directory.</li>
-        <li><strong>Model weights download directly from Hugging Face</strong> — FileID never redistributes weights.</li>
-        <li><strong>Outbound allowlist:</strong> CI rejects any addition beyond the documented, reviewed upstream baseline.</li>
-        <li><strong>Privacy gate</strong> scans every shipped binary against a 23-string deny-list before release.</li>
+        <li><span><strong>Local SQLite library</strong> in your application-support folder. Delete it any time; your files are untouched.</span></li>
+        <li><span><strong>Models download directly from their upstream repositories.</strong> FileID never redistributes weights, and every default weight is Apache-2.0 or MIT.</span></li>
+        <li><span><strong>Reviewed egress baseline.</strong> A release gate diffs every network-capable source file against reviewed digests.</span></li>
+        <li><span><strong>Binary privacy scan.</strong> Every shipped binary is checked against a deny-list of telemetry SDK strings before release.</span></li>
       </ul>
     </div>
-    <div class="privacy-card glass reveal">
-      <div class="privacy-card-head">
-        <span class="status-dot"></span>
-        <span>CI privacy gate</span>
+    <div class="panel reveal">
+      <div class="panel-head"><span class="label">CI privacy gate</span><span class="meta" style="color:#F2A6C0">PASSING</span></div>
+      <div class="stats">
+        <div class="metric"><span class="label">Telemetry</span><strong>0</strong><span class="meta">strings allowed</span></div>
+        <div class="metric"><span class="label">Deny-list</span><strong>23</strong><span class="meta">SDK substrings</span></div>
+        <div class="metric"><span class="label">Egress hosts</span><strong>1</strong><span class="meta">huggingface.co</span></div>
       </div>
-      <div class="privacy-stats">
-        <div class="stat">
-          <div class="stat-val">0</div>
-          <div class="stat-label">telemetry strings allowed in any release binary</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val">23</div>
-          <div class="stat-label">deny-listed SDK substrings (Sentry, Datadog, Firebase, …)</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val">6</div>
-          <div class="stat-label">reviewed upstream runtime host families</div>
-        </div>
-      </div>
-      <div class="privacy-gate">
-        <pre><code><span class="c-key">$</span> <span class="c-cmd">privacy_scan</span> --binary FileIDEngine.exe
+      <div class="gate"><pre><code><span class="c-key">$</span> <span class="c-cmd">check_binary_privacy</span> FileIDEngine
 <span class="c-ok">✓</span> 0 telemetry strings
-<span class="c-ok">✓</span> 0 unreviewed runtime hosts
-<span class="c-ok">✓</span> reviewed runtime host baseline
-<span class="c-ok">✓</span> release egress gate passed
-<span class="c-ok">→</span> no unreviewed network destinations</code></pre>
-      </div>
+<span class="c-key">$</span> <span class="c-cmd">check_runtime_egress</span> --known-blockers
+<span class="c-ok">✓</span> reviewed network-capable sources unchanged
+<span class="c-ok">✓</span> release egress gate passed</code></pre></div>
     </div>
   </div>
 </section>
 
 <!-- ────────── DOWNLOAD ────────── -->
-<section id="download" class="band band-dark">
+<section id="download" class="band band-pane">
   <div class="band-inner">
     <div class="section-head reveal">
-      <div class="kicker"><span class="kicker-dot"></span>Releases</div>
-      <h2>v0.1.0 is live.</h2>
-      <p class="section-sub">Clearly labeled unsigned v0.1.0 binaries and installers are published on the releases page. They are not public-trust signed. Building from source is also supported.</p>
+      <span class="label">Releases</span>
+      <h2>Get FileID.</h2>
+      <p class="section-sub">Builds are published on the releases page. Early builds are clearly labeled and not yet public-trust signed; building from source is one command on every platform.</p>
     </div>
-
     <div class="downloads reveal-stagger">
-      <!-- Windows -->
-      <article class="dl-card dl-card-primary">
-        <div class="dl-head">
-          <div class="dl-platform">
-            <svg class="platform-icon platform-icon-windows" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3v-6zM11.5 4.4 21 3v8.5H11.5V4.4zM3 12.5h7.5v7L3 18.5v-6zM11.5 12.5H21V21l-9.5-1.4v-7.1z"/></svg>
-            <h3>Windows</h3>
-          </div>
-          <span class="dl-badge dl-badge-windows">10 22H2+ · 11</span>
-        </div>
-        <p class="dl-blurb">Standard MSI install under <code>Program Files\FileID\</code>. Start menu shortcut. WinUI 3 app + Rust engine. Auto-detects x64 vs ARM64 (Snapdragon X Elite).</p>
-        <div class="dl-actions">
-          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
-            <span>
-              <span class="btn-pri">Windows releases page</span>
-              <span class="btn-sec">unsigned v0.1.0 installers</span>
-            </span>
-          </a>
-        </div>
+      <article class="panel dl">
+        <div class="panel-head"><h3><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.4 12.2c0-2.6 2.1-3.9 2.2-3.9-1.2-1.7-3-2-3.7-2-1.6-.2-3.1.9-3.9.9-.8 0-2.1-.9-3.4-.9-1.8.1-3.4 1-4.3 2.6-1.8 3.2-.5 7.9 1.3 10.5.9 1.3 2 2.7 3.4 2.6 1.4-.1 1.9-.9 3.5-.9 1.6 0 2.1.9 3.5.8 1.4-.1 2.3-1.3 3.2-2.6 1-1.5 1.4-2.9 1.5-3 0 0-2.8-1.1-2.8-4.2zM13.8 4.3c.7-.9 1.2-2.1 1.1-3.3-1.1.1-2.4.7-3.1 1.6-.7.8-1.3 2-1.1 3.2 1.2.1 2.4-.6 3.1-1.5z"/></svg>macOS</h3><span class="meta">15+ · Apple Silicon</span></div>
+        <p>The reference app. Drag to Applications. Every page ships end-to-end, including the bundled catalog of 265 MLX models.</p>
+        <div class="panel-foot"><a class="btn btn-gold" style="height:28px" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">Releases</a><span class="meta">.pkg · .dmg</span></div>
       </article>
-
-      <!-- macOS -->
-      <article class="dl-card">
-        <div class="dl-head">
-          <div class="dl-platform">
-            <svg class="platform-icon platform-icon-apple" width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M16.4 12.2c0-2.6 2.1-3.9 2.2-3.9-1.2-1.7-3-2-3.7-2-1.6-.2-3.1.9-3.9.9-.8 0-2.1-.9-3.4-.9-1.8.1-3.4 1-4.3 2.6-1.8 3.2-.5 7.9 1.3 10.5.9 1.3 2 2.7 3.4 2.6 1.4-.1 1.9-.9 3.5-.9 1.6 0 2.1.9 3.5.8 1.4-.1 2.3-1.3 3.2-2.6 1-1.5 1.4-2.9 1.5-3 0 0-2.8-1.1-2.8-4.2zM13.8 4.3c.7-.9 1.2-2.1 1.1-3.3-1.1.1-2.4.7-3.1 1.6-.7.8-1.3 2-1.1 3.2 1.2.1 2.4-.6 3.1-1.5z"/></svg>
-            <h3>macOS</h3>
-          </div>
-          <span class="dl-badge dl-badge-apple">15+ · Apple Silicon</span>
-        </div>
-        <p class="dl-blurb">Drag to Applications. SwiftUI app + Swift engine on MLX / CoreML / Neural Engine. The canonical reference port — every tab ships end-to-end.</p>
-        <div class="dl-actions">
-          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
-            <span>
-              <span class="btn-pri">macOS releases page</span>
-              <span class="btn-sec">unsigned v0.1.0 dmg</span>
-            </span>
-          </a>
-        </div>
+      <article class="panel dl">
+        <div class="panel-head"><h3><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.5 10.5 4.5v7H3v-6zM11.5 4.4 21 3v8.5H11.5V4.4zM3 12.5h7.5v7L3 18.5v-6zM11.5 12.5H21V21l-9.5-1.4v-7.1z"/></svg>Windows</h3><span class="meta">10 22H2+ · 11</span></div>
+        <p>MSI installer under Program Files. WinUI 3 app and Rust engine; x64 and ARM64 (Snapdragon X) builds.</p>
+        <div class="panel-foot"><a class="btn btn-gold" style="height:28px" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">Releases</a><span class="meta">.msi · Store MSIX</span></div>
       </article>
-
-      <!-- Linux -->
-      <article class="dl-card">
-        <div class="dl-head">
-          <div class="dl-platform">
-            <svg class="platform-icon platform-icon-linux" width="22" height="22" viewBox="0 0 448 512" aria-hidden="true"><path d="M220.8 123.3c1 .5 1.8 1.7 3 1.7 1.1 0 2.8-.4 2.9-1.5 .2-1.4-1.9-2.3-3.2-2.9-1.7-.7-3.9-1-5.5-.1-.4 .2-.8 .7-.6 1.1 .3 1.3 2.3 1.1 3.4 1.7zm-21.9 1.7c1.2 0 2-1.2 3-1.7 1.1-.6 3.1-.4 3.5-1.6 .2-.4-.2-.9-.6-1.1-1.6-.9-3.8-.6-5.5 .1-1.3 .6-3.4 1.5-3.2 2.9 .1 1 1.8 1.5 2.8 1.4zM420 403.8c-3.6-4-5.3-11.6-7.2-19.7-1.8-8.1-3.9-16.8-10.5-22.4-1.3-1.1-2.6-2.1-4-2.9-1.3-.8-2.7-1.5-4.1-2 9.2-27.3 5.6-54.5-3.7-79.1-11.4-30.1-31.3-56.4-46.5-74.4-17.1-21.5-33.7-41.9-33.4-72C311.1 85.4 315.7 .1 234.8 0 132.4-.2 158 103.4 156.9 135.2c-1.7 23.4-6.4 41.8-22.5 64.7-18.9 22.5-45.5 58.8-58.1 96.7-6 17.9-8.8 36.1-6.2 53.3-6.5 5.8-11.4 14.7-16.6 20.2-4.2 4.3-10.3 5.9-17 8.3s-14 6-18.5 14.5c-2.1 3.9-2.8 8.1-2.8 12.4 0 3.9 .6 7.9 1.2 11.8 1.2 8.1 2.5 15.7 .8 20.8-5.2 14.4-5.9 24.4-2.2 31.7 3.8 7.3 11.4 10.5 20.1 12.3 17.3 3.6 40.8 2.7 59.3 12.5 19.8 10.4 39.9 14.1 55.9 10.4 11.6-2.6 21.1-9.6 25.9-20.2 12.5-.1 26.3-5.4 48.3-6.6 14.9-1.2 33.6 5.3 55.1 4.1 .6 2.3 1.4 4.6 2.5 6.7v.1c8.3 16.7 23.8 24.3 40.3 23 16.6-1.3 34.1-11 48.3-27.9 13.6-16.4 36-23.2 50.9-32.2 7.4-4.5 13.4-10.1 13.9-18.3 .4-8.2-4.4-17.3-15.5-29.7zM223.7 87.3c9.8-22.2 34.2-21.8 44-.4 6.5 14.2 3.6 30.9-4.3 40.4-1.6-.8-5.9-2.6-12.6-4.9 1.1-1.2 3.1-2.7 3.9-4.6 4.8-11.8-.2-27-9.1-27.3-7.3-.5-13.9 10.8-11.8 23-4.1-2-9.4-3.5-13-4.4-1-6.9-.3-14.6 2.9-21.8zM183 75.8c10.1 0 20.8 14.2 19.1 33.5-3.5 1-7.1 2.5-10.2 4.6 1.2-8.9-3.3-20.1-9.6-19.6-8.4 .7-9.8 21.2-1.8 28.1 1 .8 1.9-.2-5.9 5.5-15.6-14.6-10.5-52.1 8.4-52.1zm-13.6 60.7c6.2-4.6 13.6-10 14.1-10.5 4.7-4.4 13.5-14.2 27.9-14.2 7.1 0 15.6 2.3 25.9 8.9 6.3 4.1 11.3 4.4 22.6 9.3 8.4 3.5 13.7 9.7 10.5 18.2-2.6 7.1-11 14.4-22.7 18.1-11.1 3.6-19.8 16-38.2 14.9-3.9-.2-7-1-9.6-2.1-8-3.5-12.2-10.4-20-15-8.6-4.8-13.2-10.4-14.7"/></svg>
-            <h3>Linux</h3>
-          </div>
-          <span class="dl-badge dl-badge-linux">GTK4 · x86_64</span>
-        </div>
-        <p class="dl-blurb">GTK4 + libadwaita app over the shared Rust engine — all six tabs, plus the headless <code>fileid</code> CLI and <code>fileid-tui</code>. Grab the AppImage or build from source.</p>
-        <div class="dl-actions">
-          <a class="btn btn-gold btn-block" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v13"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/></svg>
-            <span>
-              <span class="btn-pri">Linux releases page</span>
-              <span class="btn-sec">unsigned tools available</span>
-            </span>
-          </a>
-          <div class="dl-sub">
-            <a class="btn-link" href="https://github.com/WebWorldWide/FileID/blob/main/platforms/linux/CLAUDE.md" target="_blank" rel="noopener">Build from source</a>
-          </div>
-        </div>
+      <article class="panel dl">
+        <div class="panel-head"><h3><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a5 5 0 0 0-5 5v3.2c0 .9-.4 1.6-1 2.3-1.7 2-3 4.3-3 6.3 0 1 .5 1.7 1.3 2 .5.2 1.2.1 1.8-.1.9.9 2.4 1.3 3.9 1.3h4c1.5 0 3-.4 3.9-1.3.6.2 1.3.3 1.8.1.8-.3 1.3-1 1.3-2 0-2-1.3-4.3-3-6.3-.6-.7-1-1.4-1-2.3V7a5 5 0 0 0-5-5zm-2 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm4 0a1 1 0 1 1 0-2 1 1 0 0 1 0 2zm-2 1.5 2 1.5-2 1.5-2-1.5 2-1.5z"/></svg>Linux</h3><span class="meta">GTK4 · x86_64 · aarch64</span></div>
+        <p>GTK4 + libadwaita app over the shared engine, plus the <code>fileid</code> CLI and <code>fileid-tui</code>. Flatpak or build from source.</p>
+        <div class="panel-foot"><a class="btn btn-gold" style="height:28px" href="https://github.com/WebWorldWide/FileID/releases/latest" target="_blank" rel="noopener">Releases</a><span class="meta"><a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/linux/CLAUDE.md" target="_blank" rel="noopener">Build from source</a></span></div>
       </article>
     </div>
-
     <div class="dl-foot reveal">
-      <p>Or build from source — one command, every platform:</p>
-      <pre class="code-block"><code><span class="c-cmd">./build.sh</span> <span class="c-flag">-windows</span>         <span class="c-cmt"># Windows: full fresh-install build + run</span>
-<span class="c-cmd">./build.sh</span> <span class="c-flag">-mac</span>             <span class="c-cmt"># macOS:   build + launch</span>
-<span class="c-cmd">./build.sh</span> <span class="c-flag">-linux</span>           <span class="c-cmt"># Linux:   GTK4 app + engine</span></code></pre>
+      <p class="meta">Or build from source:</p>
+      <pre class="code-block"><code><span class="c-cmd">./build.sh</span> <span class="c-flag">-mac</span>       <span class="c-cmt"># macOS: build + launch</span>
+<span class="c-cmd">./build.sh</span> <span class="c-flag">-windows</span>   <span class="c-cmt"># Windows: fresh-install build + run</span>
+<span class="c-cmd">./build.sh</span> <span class="c-flag">-linux</span>     <span class="c-cmt"># Linux: GTK4 app + engine</span></code></pre>
     </div>
   </div>
 </section>
 
 <!-- ────────── ARCHITECTURE ────────── -->
-<section class="band band-canvas arch-band">
+<section class="band">
   <div class="band-inner">
     <div class="section-head reveal">
-      <div class="kicker"><span class="kicker-dot"></span>How it's built</div>
-      <h2>Two binaries. One IPC contract.<br />Crash isolation by design.</h2>
-      <p class="section-sub">Same architecture as VS Code's renderer / extension-host split. A panic in ML doesn't kill the UI — the engine respawns with bounded backoff.</p>
+      <span class="label">How it's built</span>
+      <h2>Two binaries. One IPC contract.</h2>
+      <p class="section-sub">The app and the engine are separate processes talking newline-delimited JSON over stdio. A model crash never takes the window down; the engine respawns with bounded backoff.</p>
     </div>
-
-    <div class="arch-diagram reveal">
-      <div class="arch-node arch-app">
-        <div class="arch-tag">APP</div>
-        <div class="arch-name">FileID.exe / FileID.app</div>
-        <ul>
-          <li>SwiftUI (macOS) · WinUI 3 (Windows) · GTK4 (Linux)</li>
-          <li>Verifies engine signature before spawn</li>
-          <li>Auto-respawns on crash (1s · 4s · 16s)</li>
-        </ul>
+    <div class="arch reveal">
+      <div class="panel node">
+        <div class="panel-head"><span class="label">App</span><span class="meta">FileID.app · FileID.exe · fileid-linux</span></div>
+        <ul><li>SwiftUI · WinUI 3 · GTK4</li><li>Verifies the engine before spawning it</li><li>Auto-respawns on crash (1 s · 4 s · 16 s)</li></ul>
       </div>
-
-      <div class="arch-link">
-        <div class="arch-link-label">
-          <code>stdin / stdout</code>
-          <span>newline-delimited JSON</span>
-        </div>
-        <svg class="arch-arrow" viewBox="0 0 100 40" aria-hidden="true" preserveAspectRatio="none">
-          <defs>
-            <marker id="ar-right" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0 0 L10 5 L0 10 z" fill="#FFCC00"/>
-            </marker>
-            <marker id="ar-left" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0 0 L10 5 L0 10 z" fill="#B19BCE"/>
-            </marker>
-          </defs>
-          <path d="M2 14 H 98" stroke="#FFCC00" stroke-width="2" fill="none" marker-end="url(#ar-right)" />
-          <path d="M98 26 H 2" stroke="#B19BCE" stroke-width="2" fill="none" marker-end="url(#ar-left)" />
-        </svg>
+      <div class="link">
+        <span class="meta">stdin / stdout · newline-delimited JSON</span>
+        <span class="line"></span>
+        <span class="line back"></span>
+        <span class="meta">IPC schema 1.16.0 · Swift, Rust and C# mirrors</span>
       </div>
-
-      <div class="arch-node arch-engine">
-        <div class="arch-tag arch-tag-ai">ENGINE</div>
-        <div class="arch-name">FileIDEngine</div>
-        <ul>
-          <li>Rust (Windows · Linux) · Swift (macOS)</li>
-          <li>SQLite WAL · single writer</li>
-          <li>Scan pipeline · ML inference</li>
-        </ul>
+      <div class="panel node">
+        <div class="panel-head"><span class="label" style="color:#B19BCE">Engine</span><span class="meta">FileIDEngine</span></div>
+        <ul><li>Swift (macOS) · Rust (Windows, Linux, CLI, TUI)</li><li>SQLite WAL · single writer</li><li>Scan pipeline · on-device inference</li></ul>
       </div>
     </div>
-
   </div>
 </section>
 
-<!-- ────────── FOOTER ────────── -->
 <footer class="footer">
   <div class="band-inner footer-inner">
     <div class="footer-brand">
-      <img src="assets/app-icon.png" alt="" class="footer-icon" />
-      <div>
-        <div class="footer-name">FileID</div>
-        <div class="footer-tag">On-device AI file organization.</div>
-      </div>
+      <img src="assets/app-icon.png" alt="" />
+      <div><div class="wordmark">FileID</div><div class="meta">On-device AI file organization.</div></div>
     </div>
-    <div class="footer-cols">
-      <div class="footer-col">
-        <h5>Source</h5>
-        <a href="https://github.com/WebWorldWide/FileID" target="_blank" rel="noopener">Repository</a>
-        <a href="https://github.com/WebWorldWide/FileID/releases" target="_blank" rel="noopener">Releases</a>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a>
-        <a href="https://github.com/WebWorldWide/FileID/issues" target="_blank" rel="noopener">Issues</a>
-      </div>
-      <div class="footer-col">
-        <h5>Docs</h5>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/README.md" target="_blank" rel="noopener">README</a>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/shared/docs/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/shared/docs/DECISIONS.md" target="_blank" rel="noopener">Decisions</a>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/shared/docs/MODELS.md" target="_blank" rel="noopener">Models</a>
-      </div>
-      <div class="footer-col">
-        <h5>Build</h5>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/windows/CLAUDE.md" target="_blank" rel="noopener">Windows</a>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/apple/CLAUDE.md" target="_blank" rel="noopener">macOS</a>
-        <a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/linux/CLAUDE.md" target="_blank" rel="noopener">Linux</a>
-      </div>
+    <div class="footer-col"><h5 class="label">Source</h5>
+      <a href="https://github.com/WebWorldWide/FileID" target="_blank" rel="noopener">Repository</a>
+      <a href="https://github.com/WebWorldWide/FileID/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/WebWorldWide/FileID/issues" target="_blank" rel="noopener">Issues</a>
     </div>
-    <div class="footer-fine">
-      <span>© 2026 FileID. Apache-2.0 — app code is yours to keep / re-license.</span>
-      <span>Model weights remain governed by their upstream licenses.</span>
-      <span>Built with Claude + Codex.</span>
+    <div class="footer-col"><h5 class="label">Docs</h5>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/README.md" target="_blank" rel="noopener">README</a>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/shared/docs/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/shared/docs/DESIGN_V3.md" target="_blank" rel="noopener">Design</a>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/shared/docs/MODELS.md" target="_blank" rel="noopener">Models</a>
+    </div>
+    <div class="footer-col"><h5 class="label">Build</h5>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/apple/CLAUDE.md" target="_blank" rel="noopener">macOS</a>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/windows/CLAUDE.md" target="_blank" rel="noopener">Windows</a>
+      <a href="https://github.com/WebWorldWide/FileID/blob/main/platforms/linux/CLAUDE.md" target="_blank" rel="noopener">Linux</a>
+    </div>
+    <div class="footer-fine meta">
+      <span>© 2026 FileID · Apache-2.0.</span>
+      <span>Model weights stay under their upstream licenses.</span>
+      <span>Instrument Serif and Archivo are used under the SIL Open Font License.</span>
     </div>
   </div>
 </footer>

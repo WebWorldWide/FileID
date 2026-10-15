@@ -3657,6 +3657,42 @@ The `macos-15` GitHub runner's `/Applications/Xcode_16.app` is Xcode 16.0 / Swif
 ## 2026-10-08 — Correct hosted macOS CI to Xcode 26.6
 
 The Xcode 26.3 hosted attempt still failed: transitive MLX Swift 0.32.3 declares Swift tools 6.3, and Xcode 26.3 ships Swift 6.2. GitHub's macOS 26 image includes Xcode 26.6, which Apple documents as including Swift 6.3. Pin that image and toolchain, retaining the package's macOS 15 deployment target. This supersedes the Xcode 26.3 decision above; check exact-head CI before considering the change validated.
+
+## 2026-10-09 — Keep People thumbnails in the refreshed face coordinate space
+
+The native face worker's orientation correction did not reach People cards: their separate crop path omitted EXIF orientation, and their task identity used only the person ID. Read source orientation under the existing bounded thumbnail gate only for imported JSON boxes, crop upright pixels through the shared coordinate parser, and fall back to the full image when provenance is ambiguous. Reload on representative geometry and cache provenance changes, passing an optional revision into the existing thumbnail memory cache. Preserve the confirmed person and the existing disk cache; no schema, IPC, model, or dependency changes are needed. Actual generated rotated/mirrored JPEGs are the geometry regression fixture; they provide no identity-accuracy evidence.
+
+## 2026-10-09 — Separate native display geometry from portable inference upgrades
+
+Use a dependency-free Rust library bbox adapter for GTK fallback display: explicit raw-pixel boxes follow EXIF orientation, normalized CSV boxes already describe upright pixels, and rotated dimensionless legacy boxes defer. Preserve saved aligned-crop preference and include processing provenance in its cache identity. Keep portable inference unchanged until upright decode can preserve raw source coordinates and a new processing namespace can be refreshed durably; rotating the scanner without that transition would silently mix vector spaces or double-transform exported boxes.
+
+Windows refresh must invalidate both the reconciled card object and WinUI's URI image cache. Combine catalog bbox/model/processing/source provenance with saved-crop metadata, retain unchanged instances, and let the existing stable-ID selection reconciliation restore selection. Make People filter tests call the production query so copied predicates cannot hide presentation regressions; ignored or foreign representative faces are now rejected. The internal C# harness checks real model/query methods against actual WinUI metadata without constructing native objects; it cannot establish a WinUI runtime or full app build.
+
+
+2026-10-09: Portable People refresh uses a distinct orientation/matching namespace instead of assigning current provenance to raw-scan or imported vectors. Reuse v24 source-scoped failure records and registered YuNet/SFace dependencies; retain confirmed identity IDs, corrections and ignored rows. Decode through a held file descriptor, compare both descriptor and current pathname identity, and check the catalog/bbox snapshot again before publishing. This covers replacement during processing but does not establish detection of same-stat replacement between catalog scans. Bound pages and decode allocations; reject malformed vector lengths inside SQLite. Encode/stage crops outside the writer, then commit guarded vector/cache state. Hold scan admission while reserving People processing and reject deep analysis during that reservation to avoid overlapping heavyweight inference. Keep the IPC payload unchanged and document cancellation/refresh semantics in the canonical command description. Generated injected-backend fixtures prove geometry and publication safety; real ONNX accuracy and native runtime performance require separate evidence.
+
+
+2026-10-09: Preserve raw source dimensions and inverse-transform upright scan boxes rather than relabeling pixel-top-left as display space. Direct same-weight detected-landmark alignment shares the v2 refresh namespace; unverified HEIC/video adapters retain v1. Skip heavyweight inference admission for healthy current caches and delayed retries. Defer incompatible evidence instead of blocking the entire portable library, retaining nonparticipant identities/corrections and rechecking the participating snapshot plus current verdicts at publication. Suggestions may compare only compatible in-person face anchors, not arbitrary legacy representatives. Expose optional deferred coverage in IPC v1.13 and use library-count wording so retained identities are not presented as the result of only the current subset.
+
+2026-10-09: Reuse the timeline multi-image worker for saved open-vocabulary video goals. Bind persisted windows and outcomes to original goal hash, source revision and pinned model/processing identity; reviewed user feedback stays authoritative. Do not interpret a desired goal as evidence that it happened. Invalidate old outcomes on goal edits in both engines, with Undo recovery. Mac automatic drafts are uncalibrated until held-out event/identity evaluation.
+
+2026-10-09: Native social auto framing follows the union of valid Vision human observations, without an invented confidence cutoff. Bounded sampling and containment checks produce smooth crop paths, with full-picture fallback around lost/unsafe/group-too-wide observations. Preserve default fit exports, reject unsupported portable auto recipes, and disclose the ten-minute/two-samples-per-second scope in native UI. Generated export/Undo tests and isolated UI smoke prove wiring and fallback, not human tracking accuracy. Ordinary crop cache/database commit failure uses rollback restoration; abrupt-process reconciliation remains separate work.
+
+2026-10-09: Portable face crop publication uses an atomically installed, synced internal journal before moving the old cache or publishing a replacement. The journal contains bounded hashes of old/new face provenance and crops, canonical face/operation IDs, and no source pathname. Restart admission compares committed database evidence: keep a verified committed crop, or restore/remove an uncommitted replacement. Preserve unexpected provenance, malformed journals, symlinks and independently changed artifacts for review rather than guessing or deleting them. Legacy rollback files without this evidence remain untouched. This private cache protocol adds no dependency or catalog migration; original media and person/correction rows are never recovery targets. Child processes exit without destructors at each publication boundary to verify actual SQLite rollback/commit recovery.
+
+## 2026-10-10 — Finish Mac first; offline catalog and native inspectors
+
+The latest human scope supersedes the historical all-platform objective: finish the Mac implementation and record native Windows/Linux gaps. Preserve existing port changes; canonical IPC/DTO compatibility work is shared, while port feature implementation is deferred.
+
+Use a bundled metadata catalog rather than remote browsing or unrestricted repository IDs. The permissive audit covers recursive lineage, actual pinned runtime architecture/processor/quantization requirements and immutable weight hashes. Keep legacy favorites/defaults stable and separate runtime registration from measured quality. Reuse the existing downloader, local tokenizer adapter, memory admission and already pinned MLX package; MLXLLM adds text chat support without adding a package. Download/load is a distinct user action. Bind chat to its selected already-loaded model so another task cannot silently substitute a model.
+
+Chat occupies a 380-point right inspector. Command-K toggles it; Escape/header close it, local drafts/conversation survive reopening, reduced motion disables its spring, and narrow layouts collapse navigation without changing the user's stored preference. Keep FileID's native palette/materials/Lava canvas. Catalog browsing is a searchable lazy native list, not hundreds of eager Settings cards. Cast displays reviewed/current compatible identities and distinguishes timed observations from untimed sampled appearances.
+
+Native stabilization requires translation registration to seed the homography residual; using homography alone selected a wrong local minimum on generated jitter. Convert Vision's image coordinates to AVFoundation's display coordinates before composing correction and social framing. Generated worker exports prove reduced translation/rotation variance, protected source bytes and Undo. Native 4K/conventional enlargement uses system codecs; it is not neural super-resolution. Keep explicit SDR/stream/duration/frame-rate limits.
+
+SwiftPM's standalone resource accessor expects a different bundle location from a conventional app. Prefer packaged Resources before its build fallback, copy resource bundles in the shared assembly script, and fail assembly if the catalog is missing. Embed Swift SDK compatibility dylibs and sign them inside-out before signing the executables/app. The isolated debug app passed an offline catalog probe with the build-resource fallback hidden and local signature verification; this does not imply Developer ID notarization/release approval.
+
+Bounded organizer prompts pass `enable_thinking=false` through the pinned runtime's template context so optional reasoning templates do not consume the caption/tag/JSON token budget. A CPU-only opt-in test against the approved local Qwen3.5 tokenizer verified the closed reasoning prefix and the difference from enabled reasoning without loading weights. This is a tokenizer-routing proof, not an inference-quality result.
 ## 2026-10-13 — Approved portable media runtime uses LGPL FFmpeg and BSD OpenH264
 
 The owner approved a vetted LGPL-only FFmpeg runtime for Linux and Windows. Pin the FFmpeg 9.0.2 source checksum and upstream release signature, and Cisco OpenH264 2.6.0 source commit. OpenH264 supplies the H.264 encoder without a GPL library; it is BSD-2-Clause. Build FFmpeg as shared libraries with `--disable-gpl --disable-nonfree --disable-network --disable-autodetect --enable-libopenh264`; keep its corresponding source, build recipe, license, and checksum manifest with any staged runtime. The Rust adapter accepts only a runtime reporting that exact version and flag set and constrains media reads to local MP4/MOV/M4V, with external MOV references explicitly disabled. Linux development bundles are opt-in through `FILEID_LINUX_MEDIA_DIR`; release distribution still requires codec patent review, Windows and ARM64 runtime builds, signing, and package validation. Do not treat LGPL configuration alone as patent clearance or complete release acceptance.
@@ -3848,3 +3884,67 @@ A DirectML device-removed error invalidates every ORT session in the process. `S
 
 The engine compiles each module twice: as the `FileIDEngine` binary and as the `fileid_engine` library used by the CLI, TUI, GTK app, examples and tests. The library keeps a crate-wide `allow(dead_code)` because items only `main.rs` calls look unused there. Dead code is judged against the binary on both Windows and Linux: an item the binary never uses must either have a named external consumer (stated on its `allow`), be `#[cfg(test)]`, or be deleted. Unwired "foundation" code with no roadmap entry is deleted rather than kept for a future integration. Formatting stays opted out via `rustfmt.toml`, except files with no hand layout to preserve, which may be formatted individually.
 
+## 2026-10-14 — Restore the pre-rollback engine selectively, not wholesale
+
+The August rollback removed mature engine work, but `main` has since gained features the old tip lacks. Restore per file with three-way merges (base = rollback, ours = `main`, theirs = pre-rollback tip), preferring the pre-rollback engine where they conflict and keeping every post-August feature and policy. Not restored: runtime downloads from GitHub/NVIDIA (Hugging Face-only egress) and the whisper.cpp backend (speech runs through the catalog ASR models on llama.cpp).
+
+## 2026-10-14 — Linux path hashes are case-sensitive; rehash once on upgrade
+
+Linux filesystems are case-sensitive, so lowercasing before hashing made `Photo.JPG` and `photo.jpg` collide. Existing catalogs hold the old hashes and the missing-file sweep compares hashes, so `open_writer` rehashes every row once and records it in `PRAGMA user_version` bit 0. The marker cannot go in `grdb_migrations`, which refuses unknown identifiers as a newer-database guard.
+
+## 2026-10-14 — Restructure identity: inode binding plus the planned snapshot
+
+The pre-rollback engine binds each move to the stored `file_ref`; `main` compared the move's recorded hash, size, mtime and ref with the live row. Both are kept. A row with no `file_ref` (cataloged before v8) is adopted only when the move's hash and size match the live row and the bytes on disk. Stored plans keep strict destinations (an occupied approved name fails and asks for a re-plan); inline moves get a ` (2)` sibling like macOS.
+
+## 2026-10-14 — Single-file Deep Analyze falls back to llama-server
+
+The per-file CLI is optional. When `llama-mtmd-cli` is missing, a single-file request uses the resident llama-server lease like the batch path, so a server-only runtime (the Linux source build) analyzes individual files.
+
+
+## 2026-10-15 — Two model catalogs, one per runtime
+
+The Mac completion branch and `main` each shipped a `shared/models/catalog.json` in incompatible shapes: 265 MLX conversions filtered to the pinned `mlx-swift-lm 3.32.3` factories (architectures, affine quantization, group sizes) versus 333 GGUF/MLX candidates for the portable llama.cpp engine. They answer different questions, so neither was rewritten into the other. The portable file keeps the shared path and its `build_model_catalog.py`/egress-gate wiring; the MLX list lives only as the Mac resource `FileIDShared/Resources/model-catalog.json` behind `MLXModelCatalog` (renamed from `ModelCatalog` to stop clashing with the IPC `ModelCatalog` DTO). The Mac engine's `listModels` now reports favorites as `curated` and bundled entries as `candidate` with their real vision/text role, so a future cross-platform browser sees the same vocabulary. Merging the lists is deferred until an MLX entry can carry portable hashes without losing the per-runtime filter.
+
+## 2026-10-15 — Shared-engine port slice dropped in favour of the restored engine
+
+The branch also carried an unlanded Rust slice (portable face refresh, crop publication, naming context, a `face_active` scan gate) written against the pre-#248 engine. PR #248 restored the pre-rollback shared engine and rewrote the same files (`face_clustering.rs`, `main.rs`, `tagging.rs`, `bulk.rs`, `dbwriter.rs`), with real-engine IPC verification. Re-basing the slice onto that would have meant redoing it blind, with no Windows/Linux hardware in the session. `main`'s versions were kept; only the IPC mirrors (`videoFraming`, `videoStabilization`, `modelKind`, `deferredFaces`), the goal-change take invalidation and `face_bbox` (used by the GTK People tab) were retained. The slice is recoverable from commit `03c50bcd`; MAC_FINISH.md already lists it as port handoff work.
+
+## 2026-10-15 — IPC 1.16.0 is the union, not a renumbering
+
+Both sides had minted "1.15.0" for different additions. Rather than pick one, the merged schema is 1.16.0 and contains every optional field from both lineages; all additions are optional with `skip_serializing_if`, so 1.12–1.15 peers still parse.
+
+## 2026-10-15 — Brand fonts are bundled, not downloaded
+
+Instrument Serif and Archivo are the Prototype v3 faces. Both are SIL OFL, so the TTFs ship inside each app (macOS `Resources/Fonts`, WinUI `Assets/Fonts`, the website `assets/fonts`) with their licenses beside them, and macOS registers them per-process with CoreText at launch. No runtime font fetch exists; if registration fails the type scale falls back to the system serif/sans. The mono face stays the platform mono (SF Mono, Cascadia Mono, GNOME monospace) rather than bundling JetBrains Mono.
+
+## 2026-10-15 — The design contract lives in the repo, not only in claude.ai/design
+
+`shared/docs/DESIGN_V3.md` restates the prototype as tokens, geometry, shell structure, components and per-page contracts so Windows and Linux can port from a stable text source. Tokens went into GTK CSS and WinUI resources first (compiles in CI without the hosts), the shell and pages follow per platform.
+
+## 2026-10-15 — Square everything, including legacy views
+
+Rather than restyle 12,000 lines of SwiftUI view-by-view, the shared primitives (`GlassCard`, `BadgePill`, `ThemedSegmentedControl`, `GoldButton`, text fields, bordered buttons) were redefined in the v3 geometry and every remaining `RoundedRectangle`/`Capsule`/`cornerRadius` in `app/Sources/FileID/Views` was replaced mechanically. Pages inherit the look immediately; their v3 layouts are finished one by one.
+
+## 2026-10-15 — Rounded corners and Archivo text replace the square v3 geometry
+
+The owner asked for less sharpness, more roundness and more readable type, pointing at the cosmic-studio reference. The tokens moved to a small continuous radius scale (4/6/8/10), and every shape the earlier "square everything" pass flattened was converted back with one rule: a stroke uses the same radius as the clip it outlines, and 1–3 px rules and hit-test shapes stay square. UI text and numbers moved from mono to Archivo with tabular digits; mono remains only where character alignment matters (paths, filenames, shortcuts). This supersedes "Square everything, including legacy views" above; `DESIGN_V3.md` carries the revision.
+
+## 2026-10-15 — macOS benchmarks measure MLX directly and never download
+
+`benchmarkModel` on macOS follows the Magnitude-style approach the shared engine uses: a cold load, fixed prompts run twice with greedy decoding, medians, peak memory and a hardware fingerprint. Throughput comes from MLX's own completion info (prefill and decode tokens per second); seconds per image uses a synthetic, deterministic test card so no personal file is read, and the card doubles as a one-word colour probe. Only installed models qualify, so the command can never start a download. Results are stored per model in the engine state root and dropped when the hardware fingerprint changes, and `listModels` attaches them. `tune` is accepted and ignored because MLX has no launch flags to search. If the benchmark loaded a different model than the one Deep Analyze had resident, it unloads afterwards; it refuses to run while Deep Analyze is mid-file.
+
+## 2026-10-15 — Scan decode prefers a large embedded preview
+
+RAW files carry a full-size JPEG preview. The bounded scan decode now asks ImageIO for that preview first and keeps it when its long edge is at least two-thirds of the working size (1536 px by default); otherwise it decodes the image as before, so small EXIF thumbnails still never feed face detection. On Adlon Sony ARW files this took the decode from 606 ms to 35–55 ms per file. Tags, faces and embeddings come from the camera's own rendering instead of ImageIO's demosaic, which is the same picture the photographer saw on the camera.
+
+## 2026-10-15 — Model memory admission trusts the kernel's availability level
+
+Counting only free and inactive pages refused a 0.8B model on a 16 GB Mac that macOS reported as 50% free, because file cache, speculative and purgeable pages are reclaimable but uncounted. Admission now takes the larger of the page count (with speculative and purgeable added) and `kern.memorystatus_level` × physical memory, and keeps the existing working-set budget and free-memory floor. The transient check moved after the download so a busy moment delays loading, not fetching.
+
+## 2026-10-15 — MLX buffer cache capped per model
+
+The old note said setting MLX's cache limit killed the engine; on the pinned MLX it does not. A 256 MB cap (512 MB for models budgeted above 8 GB) cut Qwen3-VL 4B's measured peak footprint from 4.33 to 3.92 GB with equal or better speed. `FILEID_MLX_CACHE_MB` overrides it for experiments. Quantized KV caches were evaluated and not enabled: at Deep Analyze's ~500-token prompts the KV cache is about 75 MB, so 8-bit KV saves tens of megabytes at a quality risk.
+
+## 2026-10-15 — CLIP image tower runs in MLX, from the installed ONNX weights
+
+The CoreML execution provider cannot compile the pinned CLIP ONNX export (it is built from dynamic-shape primitives), so CLIP ran on the CPU and dominated scan time. Rather than add a CoreML conversion step, a new model download, or a new dependency, the engine reads the float32 weights directly out of the ONNX file and runs the ViT-B/32 image tower with MLX, which FileID already ships for Deep Analyze. Weight names come from the graph, not from export order; the encoder refuses to load unless all 200+ expected tensors are present, and a parity test pins it above 0.999 cosine to ONNX Runtime so the stored embedding space and the ONNX text encoder stay compatible. Float16 is used for half the memory and faster batches at the same parity. Each GPU batch runs on its own MLX stream so it cannot interleave with a Deep Analyze generation on the default stream. ONNX Runtime stays as the fallback.

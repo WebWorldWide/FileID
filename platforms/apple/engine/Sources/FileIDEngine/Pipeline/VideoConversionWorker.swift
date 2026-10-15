@@ -16,6 +16,10 @@ enum VideoConversionWorker {
         var audioCodec: UInt32?
         var audioStart: Double?
         var audioDuration: Double?
+        var framingSummary: String?
+        var stabilizationSummary: String?
+        var frameRate: Double?
+        var toolSummary: String { [framingSummary, stabilizationSummary].compactMap { $0 }.joined(separator: " ") }
     }
     struct Report: Codable, Sendable {
         var probe: Probe?
@@ -32,14 +36,24 @@ enum VideoConversionWorker {
         }
         defer { monitor.cancel() }
         do {
-            guard (4...5).contains(arguments.count), ["probe", "export"].contains(arguments[0]),
-                  let dimension = Int(arguments[2]), [1280,1920].contains(dimension) else {
-                throw MediaTools.Failure(text: "Choose a 1280 or 1920 pixel video export.")
+            guard (4...8).contains(arguments.count), ["probe", "export"].contains(arguments[0]),
+                  let dimension = Int(arguments[2]), [1280,1920,3840].contains(dimension) else {
+                throw MediaTools.Failure(text: "Choose a 1280, 1920 or 3840 pixel video export.")
             }
-            let aspectRatio = arguments.count == 5 ? arguments[4] : "source"
+            let aspectRatio = arguments.count >= 5 ? arguments[4] : "source"
             guard ["source", "9:16", "16:9", "1:1", "4:5"].contains(aspectRatio) else {
                 throw MediaTools.Failure(text: "Choose a supported video frame.")
             }
+            let framing = arguments.count >= 6 ? arguments[5] : "fit"
+            guard ["fit", "auto"].contains(framing), framing != "auto" || aspectRatio != "source" else {
+                throw MediaTools.Failure(text: "Choose a social frame before following people.")
+            }
+            let stabilizationFlag = arguments.count >= 7 ? arguments[6] : "0"
+            guard ["0", "1"].contains(stabilizationFlag) else { throw MediaTools.Failure(text: "Invalid stabilization selection.") }
+            let stabilize = stabilizationFlag == "1"
+            let enlargementFlag = arguments.count == 8 ? arguments[7] : "0"
+            guard ["0", "1"].contains(enlargementFlag) else { throw MediaTools.Failure(text: "Invalid enlargement selection.") }
+            let enlarge = enlargementFlag == "1"
             let source = URL(fileURLWithPath: arguments[1])
             let output = URL(fileURLWithPath: arguments[3])
             if arguments[0] == "export" {
@@ -48,19 +62,35 @@ enum VideoConversionWorker {
             }
             guard ["mp4","mov","m4v"].contains(source.pathExtension.lowercased()) else { throw MediaTools.Failure(text: "Video inputs must be MP4, MOV or M4V.") }
             let asset = AVURLAsset(url: source, options: [AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue])
-            let before = try await inspect(asset)
-            let preset = dimension == 1280 ? AVAssetExportPreset1280x720 : AVAssetExportPreset1920x1080
+            var before = try await inspect(asset)
+            let preset = dimension == 1280 ? AVAssetExportPreset1280x720 : dimension == 1920 ? AVAssetExportPreset1920x1080 : AVAssetExportPreset3840x2160
             guard let exporter = AVAssetExportSession(asset: asset, presetName: preset), exporter.supportedFileTypes.contains(.mp4) else {
                 throw MediaTools.Failure(text: "This video cannot use the selected native MP4 preset.")
             }
-            if aspectRatio != "source" {
-                exporter.videoComposition = try await fitComposition(asset: asset, dimension: dimension, aspectRatio: aspectRatio)
+            if stabilize {
+                guard before.duration <= 600, let rate = before.frameRate, rate > 0, rate <= 60 else {
+                    throw MediaTools.Failure(text: "Stabilization currently supports clips up to ten minutes and 60 frames per second.")
+                }
+                before.stabilizationSummary = "Stabilization analyzes translation and rotation during export, with up to 12% edge-covering zoom. Unsafe or unavailable registrations remain uncorrected."
+            }
+            if arguments[0] == "export" || !stabilize {
+                let stabilization = stabilize ? try VideoStabilization.analyze(asset: asset, duration: before.duration, sourceSize: CGSize(width: before.width, height: before.height), frameRate: before.frameRate ?? 0) : nil
+                if let stabilization { before.stabilizationSummary = stabilization.summary }
+                if let ratio = frameRatio(aspectRatio) ?? (stabilize || enlarge ? before.width / before.height : nil) {
+                    let plan = framing == "auto" ? try VideoReframing.analyze(asset: asset, duration: before.duration, sourceSize: CGSize(width: before.width, height: before.height), ratio: ratio, stabilization: stabilization) : nil
+                    before.framingSummary = plan?.summary
+                    exporter.videoComposition = try await VideoReframing.composition(asset: asset, dimension: dimension, ratio: ratio, plan: plan, stabilization: stabilization)
+                }
+            } else if framing == "auto" {
+                before.framingSummary = "People framing follows the stabilized canvas during export."
             }
             if arguments[0] == "export" {
                 exporter.metadata = []
                 exporter.shouldOptimizeForNetworkUse = true
                 try await exporter.export(to: output, as: .mp4)
-                let after = try await inspect(AVURLAsset(url: output, options: [AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue, AVURLAssetOverrideMIMETypeKey: "video/mp4"]))
+                var after = try await inspect(AVURLAsset(url: output, options: [AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue, AVURLAssetOverrideMIMETypeKey: "video/mp4"]))
+                after.framingSummary = before.framingSummary
+                after.stabilizationSummary = before.stabilizationSummary
                 let expectedRatio = frameRatio(aspectRatio) ?? before.width / before.height
                 guard abs(after.duration - before.duration) <= 0.25, after.audioCount == before.audioCount,
                       after.codec == kCMVideoCodecType_H264, max(after.width, after.height) <= Double(dimension) + 2,
@@ -98,41 +128,6 @@ enum VideoConversionWorker {
         }
     }
 
-    private static func fitComposition(asset: AVURLAsset, dimension: Int, aspectRatio: String) async throws -> AVMutableVideoComposition {
-        guard let ratio = frameRatio(aspectRatio),
-              let video = try await asset.load(.tracks).first(where: { $0.mediaType == .video }) else {
-            throw MediaTools.Failure(text: "The requested video frame is unavailable.")
-        }
-        let size = try await video.load(.naturalSize)
-        let orientation = try await video.load(.preferredTransform)
-        let bounds = CGRect(origin: .zero, size: size).applying(orientation)
-        let longEdge = Double(dimension)
-        let canvas = ratio < 1
-            ? CGSize(width: (longEdge * ratio).rounded(), height: longEdge)
-            : CGSize(width: longEdge, height: (longEdge / ratio).rounded())
-        guard bounds.width > 0, bounds.height > 0, canvas.width > 0, canvas.height > 0 else {
-            throw MediaTools.Failure(text: "The video has invalid display dimensions.")
-        }
-        let scale = min(canvas.width / bounds.width, canvas.height / bounds.height)
-        let paddingX = (canvas.width - bounds.width * scale) / 2
-        let paddingY = (canvas.height - bounds.height * scale) / 2
-        let transform = orientation
-            .concatenating(CGAffineTransform(translationX: -bounds.minX, y: -bounds.minY))
-            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-            .concatenating(CGAffineTransform(translationX: paddingX, y: paddingY))
-        let layer = AVMutableVideoCompositionLayerInstruction(assetTrack: video)
-        layer.setTransform(transform, at: .zero)
-        let instruction = AVMutableVideoCompositionInstruction()
-        instruction.timeRange = CMTimeRange(start: .zero, duration: try await asset.load(.duration))
-        instruction.layerInstructions = [layer]
-        let composition = AVMutableVideoComposition()
-        composition.renderSize = canvas
-        let nominalRate = try await video.load(.nominalFrameRate)
-        composition.frameDuration = CMTime(seconds: nominalRate.isFinite && nominalRate > 0 ? 1.0 / Double(nominalRate) : 1.0 / 30.0, preferredTimescale: 60_000)
-        composition.instructions = [instruction]
-        return composition
-    }
-
     private static func inspect(_ asset: AVURLAsset) async throws -> Probe {
         guard try await asset.load(.isPlayable), !(try await asset.load(.hasProtectedContent)) else {
             throw MediaTools.Failure(text: "The input is unreadable or protected.")
@@ -163,8 +158,10 @@ enum VideoConversionWorker {
               display.width <= 8192, display.height <= 8192, display.width * display.height <= 32_000_000 else {
             throw MediaTools.Failure(text: "Unsupported video duration or dimensions.")
         }
+        let nominalRate = try await video.load(.nominalFrameRate)
         let videoRange = try await video.load(.timeRange)
         var probe = Probe(duration: duration, width: display.width, height: display.height, audioCount: audioCount, codec: CMFormatDescriptionGetMediaSubType(description), videoStart: videoRange.start.seconds)
+        probe.frameRate = nominalRate.isFinite ? Double(nominalRate) : nil
         guard probe.videoStart.isFinite else { throw MediaTools.Failure(text: "Invalid video timestamps.") }
         if let audio {
             let range = try await audio.load(.timeRange)
@@ -180,8 +177,10 @@ enum VideoConversionWorker {
     }
 
     static func request(source: URL, output: URL? = nil, recipe: ToolRecipe) async throws -> Probe {
-        guard recipe.kind == "video", recipe.format == "mp4", [1280,1920].contains(recipe.maxDimension),
-              ["source", "9:16", "16:9", "1:1", "4:5"].contains(recipe.videoAspectRatio ?? "source") else {
+        guard recipe.kind == "video", recipe.format == "mp4", [1280,1920,3840].contains(recipe.maxDimension),
+              ["source", "9:16", "16:9", "1:1", "4:5"].contains(recipe.videoAspectRatio ?? "source"),
+              ["fit", "auto"].contains(recipe.videoFraming ?? "fit"),
+              recipe.videoFraming != "auto" || (recipe.videoAspectRatio ?? "source") != "source" else {
             throw MediaTools.Failure(text: "Unsupported video recipe.")
         }
         if let output { try ReadOnlyLocations.requireWritable(output) }
@@ -191,11 +190,11 @@ enum VideoConversionWorker {
         executable = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] ?? executable
         #endif
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["--convert-video", output == nil ? "probe" : "export", source.path, String(recipe.maxDimension), output?.path ?? "-", recipe.videoAspectRatio ?? "source"]
+        process.arguments = ["--convert-video", output == nil ? "probe" : "export", source.path, String(recipe.maxDimension), output?.path ?? "-", recipe.videoAspectRatio ?? "source", recipe.videoFraming ?? "fit", recipe.videoStabilization == true ? "1" : "0", recipe.allowUpscale == true ? "1" : "0"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        let status = try await CancellableProcess.wait(process, timeoutSeconds: output == nil ? 20 : 3600)
+        let status = try await CancellableProcess.wait(process, timeoutSeconds: output == nil && recipe.videoFraming != "auto" ? 20 : 3600)
         guard let data = try pipe.fileHandleForReading.read(upToCount: 4096), let report = try? JSONDecoder().decode(Report.self, from: data) else {
             throw MediaTools.Failure(text: "The native video worker did not return a valid result.")
         }

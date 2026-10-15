@@ -52,10 +52,11 @@ struct CleanupView: View {
         }
     }
 
-    private var totalSelectedMB: Double {
-        visibleGroups.reduce(0.0) { acc, g in
-            acc + g.files.reduce(0.0) { $0 + (selection.contains($1.id) ? $1.sizeMB : 0) }
+    private var totalSelectedSize: String {
+        let bytes = visibleGroups.reduce(Int64(0)) { acc, g in
+            acc + g.files.reduce(Int64(0)) { $0 + (selection.contains($1.id) ? $1.sizeBytes : 0) }
         }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     var body: some View {
@@ -121,12 +122,7 @@ struct CleanupView: View {
     @ViewBuilder
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Cleanup").font(.largeTitle.bold())
-                Text(headerSubtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+            MetaText(headerSubtitle, color: Theme.text2)
             ThemedSegmentedControl(
                 selection: $mode,
                 options: [(tag: "exact", label: "Exact"), (tag: "similar", label: "Similar")]
@@ -140,30 +136,30 @@ struct CleanupView: View {
                     // be unsafe — the user must pick copies deliberately per group.
                     if !isSimilar {
                         Button("Select all non-keepers") { selectAllNonKeepers() }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.dsSecondary)
                             .help("Select every duplicate except the keeper in each group.")
                     }
                     Button("Clear selection") { selection.removeAll() }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         .disabled(totalSelected == 0)
                 }
                 Button {
                     confirmDeleteSelected()
                 } label: {
                     Label(
-                        "Delete \(totalSelected) selected (\(String(format: "%.1f MB", totalSelectedMB)))",
+                        "Delete \(totalSelected) selected (\(totalSelectedSize))",
                         systemImage: "trash"
                     )
                     .fontWeight(.semibold)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(Theme.danger)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Color.red.opacity(0.12))
+                    .background(Theme.danger.opacity(0.12), ignoresSafeAreaEdges: [])
                     .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.red.opacity(0.5), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                            .stroke(Theme.danger.opacity(0.5), lineWidth: 1)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
@@ -195,8 +191,9 @@ struct CleanupView: View {
                 : "\(g) similar group\(g == 1 ? "" : "s") · review each before deleting — these are NOT byte-identical"
         } else {
             let bytes = visibleGroups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
-            let mb = String(format: "%.1f", Double(bytes) / 1_048_576)
-            base = "\(g) verified duplicate group\(g == 1 ? "" : "s") · \(mb) MB reclaimable if you keep 1 per group"
+            base = g == 0
+                ? "No verified duplicate groups"
+                : "\(g.formatted()) verified duplicate group\(g == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) reclaimable if you keep 1 per group"
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
@@ -225,7 +222,7 @@ struct CleanupView: View {
                     message: "You've hidden every group from this view. Want to revisit them?"
                 )
                 Button("Show skipped groups again") { skippedGroups.removeAll() }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
             }
         } else if !isSimilar && exactPreviewPartial {
             EmptyStateView(
@@ -243,7 +240,7 @@ struct CleanupView: View {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
                 title: "No duplicates found",
-                message: "All \(store.totalFiles) indexed files considered — none in this verified preview are byte-for-byte identical."
+                message: "All \(store.totalFiles.formatted()) indexed files considered — none in this verified preview are byte-for-byte identical."
             )
         }
     }
@@ -258,31 +255,31 @@ struct CleanupView: View {
                     // CRITICAL safety UX: similar groups are NOT byte-identical.
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(Theme.warning)
                         Text("**Visually similar — review before deleting (not identical).** These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected: open each, confirm it's a true duplicate, then choose which copies to Trash.")
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.10)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.10)))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.35), lineWidth: 1))
                     .padding(.bottom, 4)
                 } else {
                     HStack(spacing: 8) {
                         Image(systemName: exactPreviewPartial
                               ? "exclamationmark.triangle.fill" : "info.circle")
-                            .foregroundStyle(exactPreviewPartial ? .orange : .green)
+                            .foregroundStyle(exactPreviewPartial ? Theme.warning : Theme.delight)
                         Text(exactPreviewPartial
                              ? "**Verified preview is partial.** Every group shown passed a live full-file SHA-256 check, but candidate/read limits may leave additional duplicates undisplayed. Selected copies are re-read again immediately before Trash."
                              : "Each group was verified with a live full-file SHA-256. The **KEEPER** is the copy we recommend you keep. Selected copies are re-read again immediately before Trash; you can restore them if you change your mind.")
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(
-                        (exactPreviewPartial ? Color.orange : Color.green).opacity(0.08)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(
-                        (exactPreviewPartial ? Color.orange : Color.green).opacity(0.3),
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
+                        (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.08)))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
+                        (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.3),
                         lineWidth: 1))
                     .padding(.bottom, 4)
                 }
@@ -302,9 +299,9 @@ struct CleanupView: View {
                     HStack(spacing: 10) {
                         Image(systemName: statusWarning
                               ? "exclamationmark.triangle.fill" : "trash.fill")
-                            .foregroundStyle(statusWarning ? .orange : .green)
+                            .foregroundStyle(statusWarning ? Theme.warning : Theme.delight)
                         Text(s)
-                            .font(.callout)
+                            .font(Theme.Font.body(13.5))
                         Spacer()
                         Button("Open Trash") {
                             NSWorkspace.shared.open(
@@ -312,7 +309,7 @@ struct CleanupView: View {
                                     .appendingPathComponent(".Trash")
                             )
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(.dsSecondary)
                         Button("Dismiss") {
                             status = nil
                             statusWarning = false
@@ -320,10 +317,10 @@ struct CleanupView: View {
                             .buttonStyle(.borderless)
                     }
                     .padding(12)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(
-                        (statusWarning ? Color.orange : Color.green).opacity(0.10)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(
-                        (statusWarning ? Color.orange : Color.green).opacity(0.4),
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
+                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.10)))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
+                        (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
                         lineWidth: 1))
                     .help("Files moved to Trash can be restored in Finder: open Trash, right-click a file, and choose Put Back.")
                 }
@@ -361,7 +358,7 @@ struct CleanupView: View {
     // MARK: - Trash actions
 
     private var confirmDeleteMessage: String {
-        let mb = String(format: "%.1f MB", totalSelectedMB)
+        let mb = totalSelectedSize
         return "Moves the selected copies to Trash. Frees about \(mb). You can restore them from Trash if you change your mind."
     }
 
@@ -467,7 +464,7 @@ struct CleanupView: View {
             trashedIDs.append(result.id)
             freedBytes += result.size
         }
-        let mb = Double(freedBytes) / 1_048_576
+        let freed = ByteCountFormatter.string(fromByteCount: freedBytes, countStyle: .file)
         var keeperURLSet = Set<URL>()
         for id in trashedIDs {
             for url in keeperTagsByVictim[id] ?? [] { keeperURLSet.insert(url) }
@@ -505,7 +502,7 @@ struct CleanupView: View {
             tagSummary = " · tagged \(taggedAdded) keeper\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
         }
         var summary = "Trashed \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
-            + " · freed \(String(format: "%.1f", mb)) MB"
+            + " · freed \(freed)"
             + tagSummary
         if verificationRejected > 0 {
             summary += " · \(verificationRejected) skipped because full-byte verification changed or failed"
@@ -607,33 +604,23 @@ private struct GroupCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    BadgePill(label: "\(group.totalFileCount) \(group.isSimilar ? "images" : "copies")")
+                HStack(spacing: 10) {
+                    SectionLabel(group.isSimilar ? "Look-alike · \(group.totalFileCount) images" : "Exact copies · \(group.totalFileCount)")
                     if group.isSimilar {
-                        BadgePill(label: "Visually similar", color: .orange)
+                        BadgePill(label: "perceptual match", color: Theme.warning)
                             .help("Matched by perceptual hash (dHash), NOT byte-for-byte. Resizes, re-encodes, crops, and light edits land here — review each before deleting.")
                     }
-                    Text(String(format: "%.1f MB total · %.1f MB if you keep 1",
-                                Double(group.totalBytes) / 1_048_576,
-                                Double(group.reclaimableBytes) / 1_048_576))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                    if group.isTruncated {
-                        Text("showing \(group.files.count)")
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("\(ByteCountFormatter.string(fromByteCount: group.totalBytes, countStyle: .file)) total · \(ByteCountFormatter.string(fromByteCount: group.reclaimableBytes, countStyle: .file)) if you keep 1")
+                        .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                    if group.isTruncated { MetaText("showing \(group.files.count)", size: 11) }
                     Spacer()
                     if selectedInGroup > 0 {
-                        Text(String(format: "%d selected · %.1f MB",
-                                    selectedInGroup,
-                                    Double(selectedBytes) / 1_048_576))
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.red)
+                        MetaText("\(selectedInGroup) selected · \(ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file))", color: Theme.danger, size: 11)
                     }
                 }
+                .padding(.horizontal, 14).padding(.top, 10)
 
                 HStack(spacing: 6) {
                     Menu {
@@ -645,33 +632,22 @@ private struct GroupCard: View {
                         Button("Invert") { onInvert() }
                     } label: {
                         Label("Select…", systemImage: "checkmark.circle")
-                            .font(.caption)
+                            .font(Theme.Font.body(12))
                     }
                     .menuStyle(.borderlessButton)
                     .frame(width: 100)
 
-                    Button {
-                        onDeleteGroup()
-                    } label: {
-                        Label("Delete \(selectedInGroup) from this group",
-                              systemImage: "trash")
-                            .font(.caption)
-                            .foregroundStyle(selectedInGroup > 0 ? .red : .secondary)
-                    }
-                    .buttonStyle(.bordered)
+                    Button { onDeleteGroup() } label: { Label("Trash \(selectedInGroup)", systemImage: "trash") }
+                    .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle(height: 26)))
                     .disabled(selectedInGroup == 0)
 
-                    Button {
-                        onSkip()
-                    } label: {
-                        Label("Skip group", systemImage: "eye.slash")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.bordered)
+                    Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
+                    .buttonStyle(DSSecondaryButtonStyle(height: 26))
                     .help("Hide this group — useful for false positives.")
 
                     Spacer()
                 }
+                .padding(.horizontal, 14)
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 12) {
@@ -690,7 +666,9 @@ private struct GroupCard: View {
                             )
                         }
                     }
+                    .padding(.horizontal, 14)
                 }
+                .padding(.bottom, 12)
             }
         }
     }
@@ -705,8 +683,8 @@ private struct CopyTile: View {
     @State private var hovering = false
 
     private var borderColor: Color {
-        if isSelected { return .red }
-        if isKeeper   { return .green }
+        if isSelected { return Theme.danger }
+        if isKeeper   { return Theme.delight }
         return Color.white.opacity(0.10)
     }
 
@@ -719,9 +697,9 @@ private struct CopyTile: View {
             Color.white.opacity(0.04)
                 .frame(width: 132, height: 132)
                 .overlay(thumbContent)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .stroke(borderColor, lineWidth: borderWidth)
                 )
                 .overlay(badgeOverlay)
@@ -743,7 +721,7 @@ private struct CopyTile: View {
                 .lineLimit(1).truncationMode(.middle)
                 .frame(width: 132, alignment: .center)
             HStack(spacing: 4) {
-                Text(String(format: "%.1f MB", file.sizeMB))
+                Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -767,7 +745,7 @@ private struct CopyTile: View {
     }
 
     private var accessibilityDescription: String {
-        let mb = String(format: "%.1f megabytes", file.sizeMB)
+        let mb = ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file)
         let role = isKeeper ? "Keeper. " : ""
         return "\(role)\(file.url.lastPathComponent), \(mb)"
     }
@@ -785,7 +763,7 @@ private struct CopyTile: View {
     private var badgeOverlay: some View {
         ZStack(alignment: .topLeading) {
             if isKeeper {
-                BadgePill(label: "KEEPER", color: .green)
+                BadgePill(label: "KEEPER", color: Theme.delight)
                     .padding(6)
                     .help("This is the copy we recommend you keep — usually the largest / highest-resolution one. The other copies in this group are duplicates of it. You can override by clicking another tile to make it the keeper instead.")
             }
@@ -793,7 +771,7 @@ private struct CopyTile: View {
             Button(action: onToggle) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 22))
-                    .foregroundStyle(isSelected ? Color.red : Color.white.opacity(0.85))
+                    .foregroundStyle(isSelected ? Theme.danger : Color.white.opacity(0.85))
                     .background(Circle().fill(.black.opacity(0.4)))
             }
             .buttonStyle(.plain)

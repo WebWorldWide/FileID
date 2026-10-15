@@ -8,7 +8,9 @@ public sealed record ToolRecipe(
     string Format,
     uint MaxDimension,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? AllowUpscale = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VideoAspectRatio = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VideoAspectRatio = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? VideoFraming = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? VideoStabilization = null);
 public sealed record ToolCapability(string Id, bool Available, IReadOnlyList<string> InputFormats, IReadOnlyList<string> OutputFormats, string Detail);
 public sealed record ToolOutput(long FileID, string SourcePath, string OutputPath, string State, string Message);
 public sealed record ToolRequest(

@@ -33,6 +33,14 @@ public sealed record StartScanCommand(
 public sealed record PauseScanCommand : CommandPayload;
 public sealed record ResumeScanCommand : CommandPayload;
 public sealed record CancelScanCommand : CommandPayload;
+public sealed record CancelRestructureCommand : CommandPayload;
+
+/// <summary>Immediately remove cataloged rows under the given excluded
+/// folders (files on disk untouched). Sent when the user adds an exclusion
+/// so the Library reflects it without waiting for a rescan. Replies with a
+/// <c>bulkActionResult</c> (action "purgeExcluded").</summary>
+public sealed record PurgeExcludedCommand(
+    System.Collections.Generic.IReadOnlyList<string> ExcludedPaths) : CommandPayload;
 public sealed record RequestStatusCommand : CommandPayload;
 public sealed record HealthCheckCommand(
     [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
@@ -145,6 +153,14 @@ public sealed record EmbedTextQueryCommand(
     string Query,
     [property: JsonPropertyName("queryID")] string QueryId) : CommandPayload;
 
+/// <summary>Move a face through the engine writer. A null destination removes
+/// the face from its current person; createNewPerson creates a fresh unnamed
+/// person before assigning it.</summary>
+public sealed record ReassignFaceCommand(
+    [property: JsonPropertyName("faceID")] long FaceId,
+    [property: JsonPropertyName("destinationPersonID")] long? DestinationPersonId = null,
+    bool CreateNewPerson = false) : CommandPayload;
+
 public sealed record RenamePersonCommand(
     [property: JsonPropertyName("personID")] long PersonId,
     string? Title = null,
@@ -247,6 +263,9 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "pauseScan" => Empty<PauseScanCommand>(ref reader),
             "resumeScan" => Empty<ResumeScanCommand>(ref reader),
             "cancelScan" => Empty<CancelScanCommand>(ref reader),
+            "cancelRestructure" => Empty<CancelRestructureCommand>(ref reader),
+            "purgeExcluded" => JsonSerializer.Deserialize<PurgeExcludedCommand>(ref reader, options) ?? throw new JsonException("purgeExcluded: null body"),
+            "reassignFace" => JsonSerializer.Deserialize<ReassignFaceCommand>(ref reader, options) ?? throw new JsonException("reassignFace: null body"),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
             "listModels" => JsonSerializer.Deserialize<ListModelsCommand>(ref reader, options) ?? throw new JsonException("listModels: null body"),
@@ -283,6 +302,9 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case PauseScanCommand: WriteEmpty(writer, "pauseScan"); break;
             case ResumeScanCommand: WriteEmpty(writer, "resumeScan"); break;
             case CancelScanCommand: WriteEmpty(writer, "cancelScan"); break;
+            case CancelRestructureCommand: WriteEmpty(writer, "cancelRestructure"); break;
+            case PurgeExcludedCommand c: WriteVariant(writer, "purgeExcluded", c, options); break;
+            case ReassignFaceCommand c: WriteVariant(writer, "reassignFace", c, options); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
             case ListModelsCommand c: WriteVariant(writer, "listModels", c, options); break;

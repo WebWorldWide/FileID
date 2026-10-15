@@ -708,6 +708,7 @@ mod tests {
                     face_count: 9,
                     unmatched_faces: 2,
                     duration_seconds: 0.4,
+                    deferred_faces: None,
                 },
             ))),
         ]

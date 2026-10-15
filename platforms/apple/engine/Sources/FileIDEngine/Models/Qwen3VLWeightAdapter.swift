@@ -20,9 +20,21 @@ final class Qwen3VLWeightAdapter: Module, LanguageModel {
         try model.prepare(input, cache: cache, state: state, prefill: prefill)
     }
 
+    func prepare() throws {
+        try model.prepare()
+    }
+
+    /// Every decode step comes through here; without the forward the protocol
+    /// default calls the raw-token entry point, which Qwen3VL aborts on.
+    func callAsFunction(_ input: LMInput.Text, cache: [any KVCache]?, state: LMOutput.State?) -> LMOutput {
+        model(input, cache: cache, state: state)
+    }
+
     func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
         model(inputs, cache: cache)
     }
+
+    var reasoningConfig: ReasoningConfig? { model.reasoningConfig }
 
     func newCache(parameters: GenerateParameters?) throws -> [any KVCache] {
         try model.newCache(parameters: parameters)

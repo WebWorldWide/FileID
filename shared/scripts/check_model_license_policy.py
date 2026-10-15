@@ -67,6 +67,15 @@ def main() -> int:
         if key not in ALLOWED_POLICIES:
             errors.append(f"{name}: unknown license policy {key!r}")
 
+    repository = Path(__file__).resolve().parents[2]
+    if args.manifest.resolve() == repository / "shared/models/manifest.json":
+        from check_model_catalog import check
+        try:
+            entries = check(repository)
+            print(f"Offline model catalog checked: {len(entries)} permissive entries.")
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            errors.append(f"Model catalog: {error}")
+
     if errors:
         for error in errors:
             print(f"ERROR: {error}")

@@ -51,7 +51,7 @@ struct PeopleView: View {
             Divider().opacity(0.15)
             if let s = mergeStatus {
                 Text(s)
-                    .font(.caption)
+                    .font(Theme.Font.body(12))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 6)
@@ -62,7 +62,7 @@ struct PeopleView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
         .onChange(of: store.version) { _, _ in reload() }
-        .onChange(of: engine.lastFaceClustering?.personCount) { _, _ in reload() }
+        .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload() }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .personDetail(let pid):
@@ -190,13 +190,14 @@ struct PeopleView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("People")
-                    .font(.largeTitle.bold())
-                Text(headerCountLine)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                MetaText(headerCountLine, color: Theme.text2)
                 Spacer()
                 headerActions
+            }
+            if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
+                Text("\(count) face\(count == 1 ? "" : "s") await processing. Unknown people are excluded.")
+                    .font(Theme.Font.body(13.5))
+                    .foregroundStyle(.secondary)
             }
             if mergeMode || unknownMode {
                 bulkActionStrip
@@ -231,7 +232,7 @@ struct PeopleView: View {
                 mergeMode = false; unknownMode = false
                 mergeChecked.removeAll(); unknownChecked.removeAll()
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.dsSecondary)
         } else if persons.count >= 2 {
             Button {
                 suggestionsLoading = true
@@ -254,7 +255,7 @@ struct PeopleView: View {
                 Label(suggestionsLoading ? "Scanning…" : "Suggest merges",
                       systemImage: suggestionsLoading ? "hourglass" : "sparkle.magnifyingglass")
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.dsPrimary)
             .tint(Theme.gold)
             .disabled(suggestionsLoading)
 
@@ -263,7 +264,7 @@ struct PeopleView: View {
             } label: {
                 Label("Merge people", systemImage: "arrow.triangle.merge")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.dsSecondary)
             .help("Pick two or more people to combine into one. Use this when face clustering split the same person into multiple cards.")
 
             Button {
@@ -271,7 +272,7 @@ struct PeopleView: View {
             } label: {
                 Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.dsSecondary)
             .help("Mark people you don't want to identify (strangers, crowd extras). They're hidden from the People tab and won't be merged into named clusters on the next run.")
         }
     }
@@ -281,7 +282,7 @@ struct PeopleView: View {
         HStack(spacing: 10) {
             if mergeMode {
                 Text("\(mergeChecked.count) selected to merge")
-                    .font(.callout)
+                    .font(Theme.Font.body(13.5))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -289,12 +290,12 @@ struct PeopleView: View {
                 } label: {
                     Label("Merge \(mergeChecked.count) selected", systemImage: "arrow.triangle.merge")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .disabled(mergeChecked.count < 2)
             } else if unknownMode {
                 Text("\(unknownChecked.count) selected to mark unknown")
-                    .font(.callout)
+                    .font(Theme.Font.body(13.5))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -302,7 +303,7 @@ struct PeopleView: View {
                 } label: {
                     Label("Mark \(unknownChecked.count) as unknown", systemImage: "person.crop.circle.badge.questionmark")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(.gray)
                 .disabled(unknownChecked.isEmpty)
             }
@@ -314,7 +315,7 @@ struct PeopleView: View {
         let p = persons.count
         let unnamed = persons.filter { !$0.hasAnyName }.count
         if p == 0 && totalFacePrints == 0 { return "" }
-        if p == 0 { return "\(totalFacePrints) faces · clustering…" }
+        if p == 0 { return engine.faceClusteringInFlight ? "\(totalFacePrints.formatted()) faces · grouping…" : "\(totalFacePrints.formatted()) faces detected · not grouped yet" }
         if unnamed > 0 { return "\(p) people · \(unnamed) still unnamed" }
         return "\(p) people · all named"
     }
@@ -364,9 +365,9 @@ struct PeopleView: View {
         HStack(spacing: 10) {
             Image(systemName: "forward.circle")
                 .foregroundStyle(.secondary)
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
             Text("Don't want to name anyone?")
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .foregroundStyle(.secondary)
             Button {
                 let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
@@ -375,9 +376,9 @@ struct PeopleView: View {
             } label: {
                 Label("Skip — run Deep Analyze with generic captions",
                       systemImage: "forward.fill")
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Capsule().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.6), lineWidth: 1))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -386,8 +387,8 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Color.secondary.opacity(0.08)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 0.5))
     }
 
     /// Item 2: positive "keep moving" affordance — once at least one person is
@@ -399,9 +400,9 @@ struct PeopleView: View {
         HStack(spacing: 10) {
             Image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(Theme.gold)
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
             Text("Names set — keep going.")
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .foregroundStyle(.secondary)
             Button {
                 let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
@@ -409,9 +410,9 @@ struct PeopleView: View {
                 onSwitchTab(.deep)
             } label: {
                 Label("Continue to Deep Analyze", systemImage: "arrow.forward.circle.fill")
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Capsule().fill(Theme.gold))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
                     .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
@@ -420,8 +421,8 @@ struct PeopleView: View {
             Spacer()
         }
         .padding(10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.gold.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.10)))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
     }
 
     private var headerSubtitle: String {
@@ -467,15 +468,15 @@ struct PeopleView: View {
     private func stepBadge(idx: Int, label: String, done: Bool) -> some View {
         HStack(spacing: 4) {
             Image(systemName: done ? "checkmark.circle.fill" : "\(idx).circle")
-                .foregroundStyle(done ? .green : .secondary)
+                .foregroundStyle(done ? Theme.delight : .secondary)
             Text(label)
                 .foregroundStyle(done ? Color.primary : Color.secondary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(done ? Color.green.opacity(0.10) : Color.white.opacity(0.04))
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                .fill(done ? Theme.delight.opacity(0.10) : Color.white.opacity(0.04))
         )
     }
 
@@ -572,7 +573,7 @@ struct PeopleView: View {
                 Text(showHiddenUnknowns
                      ? "\(hiddenUnknownCount) marked unknown — currently visible"
                      : "\(hiddenUnknownCount) hidden as unknown")
-                    .font(.caption)
+                    .font(Theme.Font.body(12))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button(showHiddenUnknowns ? "Hide them" : "Show them") {
@@ -580,7 +581,7 @@ struct PeopleView: View {
                     reload()
                 }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .help("People marked as unknown stay hidden so the grid only shows folks you might want to identify. They also don't get re-grouped when face clustering re-runs.")
             }
             .padding(.horizontal, 16)
@@ -613,12 +614,10 @@ struct PeopleView: View {
     }
 
     private var modelMissingBanner: some View {
-        EmptyStateView(
-            icon: "person.crop.circle.badge.exclamationmark",
-            title: "Face recognition needs a model",
-            message: "FileID uses a small AI model to find and group faces in your photos.",
-            secondaryMessage: "Install the SFace model in Settings → AI Models to group detected faces."
-        )
+        FaceModelInstallPanel(engine: engine, detectedFaces: totalFacePrints)
+            .frame(maxWidth: 560)
+            .padding(.top, 40)
+            .frame(maxWidth: .infinity)
     }
 
     // MARK: - Reload
@@ -704,33 +703,28 @@ private struct PersonCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Color.black.opacity(0.4)
+            Color.white.opacity(person.hasAnyName ? 0.04 : 0.03)
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(faceCrop)
+                .overlay(LinearGradient(colors: [.white.opacity(0.06), .black.opacity(0.3)], startPoint: .top, endPoint: .bottom))
                 .overlay(selectionOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(displayName)
-                    .font(.callout.bold())
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.horizontal, 4)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .overlay {
+                    if person.hasAnyName {
+                        RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairline, lineWidth: 1)
+                    } else {
+                        RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(style: StrokeStyle(lineWidth: 1, dash: [4, 3])).foregroundStyle(Color.white.opacity(0.2))
+                    }
+                }
+            Text(displayName)
+                .font(Theme.Font.body(14, .semibold))
+                .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")", size: 11)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.ultraThinMaterial)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
-        )
-        .task(id: person.id) {
+        .task(id: thumbnailIdentity) {
             await loadThumb()
         }
         .accessibilityElement(children: .combine)
@@ -760,9 +754,9 @@ private struct PersonCard: View {
                 .resizable()
                 .scaledToFill()
         } else {
-            Image(systemName: "person.crop.circle.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(Theme.gold.opacity(0.4))
+            Text(person.hasAnyName ? String(displayName.split(separator: " ").prefix(2).compactMap(\.first)) : "?")
+                .font(Theme.Font.display(44))
+                .foregroundStyle(person.hasAnyName ? Theme.text1 : Theme.text3)
         }
     }
 
@@ -770,74 +764,52 @@ private struct PersonCard: View {
     private var selectionOverlay: some View {
         if selectionMode {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(isChecked ? selectionTint : Color.white.opacity(0.25),
                             lineWidth: isChecked ? 3 : 1.5)
                 if isChecked {
-                    RoundedRectangle(cornerRadius: 10)
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .fill(selectionTint.opacity(0.18))
                 }
                 VStack {
-                    HStack {
-                        Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 26))
-                            .foregroundStyle(isChecked ? selectionTint : Color.white.opacity(0.85))
-                            .background(Circle().fill(.black.opacity(0.45)))
-                            .padding(8)
-                        Spacer()
-                    }
+                    HStack { DSCheck(on: isChecked).padding(8); Spacer() }
                     Spacer()
                 }
             }
         }
     }
 
-    /// Thumbnail for the representative file, cropped to the face bbox
-    /// (falls back to the whole image when bbox is missing).
-    private func loadThumb() async {
-        guard let path = person.representativePath else { return }
-        let url = URL(fileURLWithPath: path)
-        guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360) else { return }
-        guard let bboxStr = person.representativeBBox,
-              let cropped = Self.cropFace(in: full, bbox: bboxStr) else {
-            self.thumbnail = full
-            return
-        }
-        self.thumbnail = cropped
+    private var thumbnailIdentity: String {
+        [String(person.id), String(person.representativeFaceID ?? 0),
+         person.representativePath ?? "", person.representativeBBox ?? "",
+         person.representativeCacheRevision ?? ""].joined(separator: "|")
     }
 
-    /// Crop an NSImage to a Vision normalized "x,y,w,h" bbox, padded 20%.
-    static func cropFace(in img: NSImage, bbox: String) -> NSImage? {
-        // Format-tolerant (FaceBBox): macOS CSV-normalized OR a Windows-scanned
-        // library's JSON pixel bbox → normalized bottom-left. Pixel dims (not the
-        // points `img.size`) are needed to normalize the Windows pixel form.
-        let pw = img.representations.first?.pixelsWide ?? Int(img.size.width)
-        let ph = img.representations.first?.pixelsHigh ?? Int(img.size.height)
-        guard let b = FaceBBox.parseNormalized(bbox, imageWidth: pw, imageHeight: ph) else { return nil }
-        let pad: CGFloat = 0.20
-        let x = max(0, CGFloat(b.x) - CGFloat(b.w) * pad)
-        let y = max(0, CGFloat(b.y) - CGFloat(b.h) * pad)
-        let w = min(1 - x, CGFloat(b.w) * (1 + 2 * pad))
-        let h = min(1 - y, CGFloat(b.h) * (1 + 2 * pad))
-        let imgSize = img.size
-        let pixelRect = NSRect(
-            x: x * imgSize.width,
-            y: y * imgSize.height,
-            width: w * imgSize.width,
-            height: h * imgSize.height
-        )
-        guard pixelRect.width > 4, pixelRect.height > 4 else { return nil }
-        let out = NSImage(size: NSSize(width: pixelRect.width, height: pixelRect.height))
-        out.lockFocus()
-        defer { out.unlockFocus() }
-        img.draw(
-            in: NSRect(origin: .zero, size: pixelRect.size),
-            from: pixelRect,
-            operation: .copy,
-            fraction: 1.0
-        )
-        return out
+    private func loadThumb() async {
+        guard !Task.isCancelled else { return }
+        thumbnail = nil
+        guard let path = person.representativePath else { return }
+        let url = URL(fileURLWithPath: path)
+        guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360,
+                  revision: person.representativeCacheRevision), !Task.isCancelled else { return }
+        guard let bbox = person.representativeBBox else {
+            thumbnail = full
+            return
+        }
+        let orientation: Int
+        if bbox.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {
+            guard let value = await ThumbnailService.sourceOrientation(for: url), !Task.isCancelled else {
+                if !Task.isCancelled { thumbnail = full }
+                return
+            }
+            orientation = value
+        } else {
+            orientation = 1
+        }
+        guard !Task.isCancelled else { return }
+        thumbnail = ThumbnailService.cropFace(in: full, bbox: bbox, sourceOrientation: orientation) ?? full
     }
+
 }
 
 // MARK: - Person detail sheet
@@ -869,7 +841,7 @@ private struct PersonDetailSheet: View {
         HStack(spacing: 8) {
             if selectMode {
                 Text("\(checked.count) selected")
-                    .font(.caption.monospaced())
+                    .font(Theme.Font.mono(11))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -877,16 +849,16 @@ private struct PersonDetailSheet: View {
                 } label: {
                     Label("Move to another person…",
                           systemImage: "arrow.right.circle.fill")
-                        .font(.caption.bold())
+                        .font(Theme.Font.body(12, .semibold))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .disabled(checked.isEmpty)
                 Button("Cancel") {
                     selectMode = false
                     checked.removeAll()
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .keyboardShortcut(.escape, modifiers: [])
             } else if files.count >= 2 {
                 Spacer()
@@ -896,9 +868,9 @@ private struct PersonDetailSheet: View {
                     moveStatus = nil
                 } label: {
                     Label("Select photos", systemImage: "checkmark.square")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.dsSecondary)
                 .help("Move individual photos to another person's group when face clustering put them in the wrong place.")
             } else {
                 Spacer()
@@ -913,10 +885,10 @@ private struct PersonDetailSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(headerTitle)
-                        .font(.title2.bold())
+                        .font(Theme.Font.body(20, .semibold))
                     Spacer()
                     Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
-                        .font(.caption.monospaced())
+                        .font(Theme.Font.mono(11))
                         .foregroundStyle(.secondary)
                     Button("Done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
@@ -924,13 +896,13 @@ private struct PersonDetailSheet: View {
                 Toggle(isOn: $isUnknown) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("I don't know who this is")
-                            .font(.callout)
+                            .font(Theme.Font.body(13.5))
                         Text("Excludes this person from AI clustering and from Deep Analyze captions. Their photos stay in the library.")
-                            .font(.caption2)
+                            .font(Theme.Font.body(11))
                             .foregroundStyle(.secondary)
                     }
                 }
-                .toggleStyle(.checkbox)
+                .toggleStyle(DSCheckboxToggleStyle())
                 if !isUnknown {
                     Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                         GridRow {
@@ -945,7 +917,7 @@ private struct PersonDetailSheet: View {
                         }
                     }
                     Text("Deep Analyze captions will reference this person as **“\(deepAnalyzeRef)”**.")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                 }
                 if !isUnknown && person.fileCount > 0 {
@@ -959,7 +931,7 @@ private struct PersonDetailSheet: View {
             // makes no sense otherwise.
             photoGridToolbar
             if let status = moveStatus {
-                Text(status).font(.caption)
+                Text(status).font(Theme.Font.body(12))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16).padding(.vertical, 4)
             }
@@ -1026,7 +998,7 @@ private struct PersonDetailSheet: View {
                           : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with \"\(tagName)\"",
                           systemImage: "tag.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.dsPrimary)
                 .tint(Theme.gold)
                 .disabled(tagBatchInFlight || tagName.isEmpty)
                 .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
@@ -1041,13 +1013,13 @@ private struct PersonDetailSheet: View {
                         Label("Replace \"\(oldTag)\" with \"\(tagName)\"",
                               systemImage: "arrow.triangle.2.circlepath")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.dsSecondary)
                     .disabled(tagBatchInFlight)
                     .help("Photos were tagged \"\(oldTag)\" earlier. Removes the old tag and adds the new one.")
                 }
             }
             if let s = tagBatchStatus {
-                Text(s).font(.caption2).foregroundStyle(.secondary)
+                Text(s).font(Theme.Font.body(11)).foregroundStyle(.secondary)
             }
         }
     }
@@ -1132,10 +1104,10 @@ private struct PersonDetailSheet: View {
     private func namedField(_ label: String, placeholder: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
-                .font(.caption.bold())
+                .font(Theme.Font.body(12, .semibold))
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: text)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .frame(minWidth: 140)
         }
     }
@@ -1172,14 +1144,14 @@ private struct PersonFileTile: View {
                 .aspectRatio(1, contentMode: .fit)
                 .overlay(tile)
                 .overlay(selectionOverlay)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
                         .stroke(isChecked ? Theme.gold : Color.clear,
                                 lineWidth: isChecked ? 2 : 0)
                 )
             Text(file.url.lastPathComponent)
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -1244,9 +1216,9 @@ private struct MovePhotosTargetPicker: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Move \(fileIDs.count) photo\(fileIDs.count == 1 ? "" : "s") to…")
-                        .font(.title3.bold())
+                        .font(Theme.Font.body(16, .semibold))
                     Text("Pick the person these photos actually show. Only the selected photos move; the rest of \(sourcePerson.displayName)'s group stays put.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -1313,12 +1285,12 @@ private struct SuggestedMergesSheet: View {
             HStack {
                 Image(systemName: "sparkle.magnifyingglass")
                     .foregroundStyle(Theme.gold)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Suggested merges")
-                        .font(.headline)
+                        .font(Theme.Font.body(14, .semibold))
                     Text("\(candidates.count) cluster pairs look like they might be the same person.")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -1326,7 +1298,7 @@ private struct SuggestedMergesSheet: View {
                     .keyboardShortcut(.defaultAction)
             }
             Text("These pairs were close enough to look like the same person, but not close enough to merge automatically. Review and merge the ones that match.")
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .foregroundStyle(.secondary)
             HStack(spacing: 8) {
                 // Bulk-accept the highest-confidence ("Very likely same",
@@ -1338,10 +1310,10 @@ private struct SuggestedMergesSheet: View {
                 } label: {
                     Label("Merge \(veryLikely.count) very-likely-same",
                           systemImage: "checkmark.circle.fill")
-                        .font(.callout.bold())
+                        .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.18)))
-                        .foregroundStyle(.green)
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.delight.opacity(0.18)))
+                        .foregroundStyle(Theme.delight)
                 }
                 .buttonStyle(.plain)
                 .disabled(veryLikely.isEmpty || inFlight)
@@ -1351,9 +1323,9 @@ private struct SuggestedMergesSheet: View {
                 } label: {
                     Label("Merge all \(candidates.count)",
                           systemImage: "rectangle.stack.fill")
-                        .font(.callout.bold())
+                        .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 7)
-                        .background(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary, lineWidth: 1))
+                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary, lineWidth: 1))
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
@@ -1367,11 +1339,11 @@ private struct SuggestedMergesSheet: View {
                 VStack(spacing: 10) {
                     Image(systemName: "checkmark.seal.fill")
                         .font(.system(size: 48))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Theme.delight)
                     Text("No borderline pairs found.")
-                        .font(.callout.bold())
+                        .font(Theme.Font.body(13.5, .semibold))
                     Text("Every cluster centroid is either reliably the same person (already merged) or reliably different. Re-run after adding more photos.")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 400)
@@ -1410,17 +1382,17 @@ private struct SuggestedMergesSheet: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(similarityLabel(cand.similarity))
-                        .font(.caption.bold())
+                        .font(Theme.Font.body(12, .semibold))
                         .foregroundStyle(similarityColor(cand.similarity))
                     Button("Merge") { onAccept(cand) }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .disabled(inFlight)
                 }
             }
             .padding(10)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(.ultraThinMaterial)
             )
         }
@@ -1430,14 +1402,14 @@ private struct SuggestedMergesSheet: View {
     private func miniCard(_ p: ReadStore.PersonRow) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "person.crop.circle")
-                .font(.title2)
+                .font(Theme.Font.body(20, .semibold))
                 .foregroundStyle(Theme.gold)
             VStack(alignment: .leading, spacing: 1) {
                 Text(p.displayName)
-                    .font(.callout.bold())
+                    .font(Theme.Font.body(13.5, .semibold))
                     .lineLimit(1)
                 Text("\(p.fileCount) photo\(p.fileCount == 1 ? "" : "s")")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.secondary)
             }
         }
@@ -1445,9 +1417,9 @@ private struct SuggestedMergesSheet: View {
     }
 
     private func similarityColor(_ s: Float) -> Color {
-        if s >= 0.55 { return .green }
-        if s >= 0.50 { return .yellow }
-        return .orange
+        if s >= 0.55 { return Theme.delight }
+        if s >= 0.50 { return Theme.gold }
+        return Theme.warning
     }
 
     private func similarityLabel(_ s: Float) -> String {
@@ -1478,13 +1450,13 @@ private struct MergeTargetPickerSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Merge \(checked.count) clusters into one person")
-                    .font(.headline)
+                    .font(Theme.Font.body(14, .semibold))
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
             }
             Text("Pick which one becomes the primary. The others will be absorbed — their photos move into the primary, and the source clusters disappear.")
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Divider().opacity(0.3)
@@ -1494,13 +1466,13 @@ private struct MergeTargetPickerSheet: View {
                         Button { onPick(person) } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "person.crop.circle")
-                                    .font(.title2)
+                                    .font(Theme.Font.body(20, .semibold))
                                     .foregroundStyle(Theme.gold)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(person.displayName)
-                                        .font(.callout.bold())
+                                        .font(Theme.Font.body(13.5, .semibold))
                                     Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
-                                        .font(.caption)
+                                        .font(Theme.Font.body(12))
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
@@ -1509,11 +1481,11 @@ private struct MergeTargetPickerSheet: View {
                             }
                             .padding(10)
                             .background(
-                                RoundedRectangle(cornerRadius: 8)
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                                     .fill(.ultraThinMaterial)
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 8)
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                                     .stroke(person.hasAnyName
                                               ? Theme.gold.opacity(0.6)
                                               : Color.white.opacity(0.10),
@@ -1529,5 +1501,70 @@ private struct MergeTargetPickerSheet: View {
         .frame(minWidth: 460, minHeight: 320)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
+    }
+}
+
+
+/// Inline install for the face model, so People can be grouped, named and
+/// tagged without a trip to Settings. Downloads only when the user clicks.
+private struct FaceModelInstallPanel: View {
+    let engine: EngineClient
+    let detectedFaces: Int
+    @State private var installer = ArcFaceModelInstaller.shared
+    private let kind = FaceEmbedderKind.defaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
+
+    var body: some View {
+        Panel {
+            PanelHeader("Face recognition") {
+                MetaText(detectedFaces > 0 ? "\(detectedFaces.formatted()) faces detected" : "No faces yet", size: 11)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Install the face model to group these faces into people").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
+                Text("\(kind.displayName) finds and groups faces on this Mac. Once people are grouped you can name them, merge them, mark unknowns and tag every photo they appear in.")
+                    .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
+                statusRow
+            }
+            .padding(14)
+            PanelFooter {
+                MetaText("Downloads from Hugging Face only when you click. Runs on this Mac.", size: 11)
+                Spacer()
+                actions
+            }
+        }
+        .onAppear { installer.refreshStatus() }
+    }
+
+    @ViewBuilder
+    private var statusRow: some View {
+        switch installer.status[kind] ?? .unknown {
+        case .downloading(let fraction, let message, _, _):
+            VStack(alignment: .leading, spacing: 6) {
+                GrainProgressBar(progress: fraction, tone: .gold)
+                MetaText(message, size: 11)
+            }
+        case .installFailed(let reason):
+            MetaText(reason, color: Theme.danger, size: 11)
+        case .installed:
+            MetaText("Installed. Group faces to see people here.", color: Theme.delight, size: 11)
+        default:
+            MetaText("\(kind.displayName) · about \(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file))", size: 11)
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        switch installer.status[kind] ?? .unknown {
+        case .downloading:
+            Button("Cancel") { installer.cancel(kind) }.buttonStyle(DSSecondaryButtonStyle(height: 28))
+        case .installed:
+            Button { engine.runFaceClustering() } label: { Label("Group faces", systemImage: "person.2") }
+                .buttonStyle(DSPrimaryButtonStyle(height: 28))
+                .disabled(engine.faceClusteringInFlight)
+        case .installFailed:
+            Button("Retry") { installer.install(kind) }.buttonStyle(DSPrimaryButtonStyle(height: 28))
+        default:
+            Button { installer.install(kind) } label: { Label("Install face model", systemImage: "arrow.down") }
+                .buttonStyle(DSPrimaryButtonStyle(height: 28))
+        }
     }
 }

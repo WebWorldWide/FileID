@@ -335,6 +335,8 @@ mod tests {
             max_dimension: 1024,
             allow_upscale: None,
             video_aspect_ratio: None,
+            video_framing: None,
+            video_stabilization: None,
         };
         assert!(!s.supports(&recipe));
         s.capabilities.push(ToolCapability {
@@ -360,6 +362,7 @@ mod tests {
             action: action.into(),
             text: Some("fixture subject".into()),
             use_model: Some(false),
+            model_kind: None,
         }
     }
     #[test]

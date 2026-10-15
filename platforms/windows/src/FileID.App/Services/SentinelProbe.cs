@@ -76,8 +76,6 @@ internal static class SentinelProbe
             "llama_runtime_x64" => TreeContains("llama.cpp", 20_000, "llama-server.exe")
                 && TreeContains("llama.cpp", 20_000, "llama-mtmd-cli.exe")
                 && TreeContains("llama.cpp", 20_000, "mtmd.dll"),
-            "whisper" => TreeContains("whisper.cpp", 20_000, "main.exe", "whisper-cli.exe")
-                && FilePresent(Path.Combine("whisper", "ggml-base.bin"), 1_000_000),
             // cudnn64_9.dll is the small cuDNN 9 dispatch shim (~260 KB); the real
             // ops live in cudnn_ops64_9.dll / cudnn_cnn64_9.dll. A 1 MB floor made
             // this probe report an installed cuDNN pack as missing (same bug shape

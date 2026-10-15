@@ -35,7 +35,20 @@ public enum ClusterSuggestions {
     }
 
     /// Run on a Task.detached. ~100 ms for 200 clusters.
-    public static func findCandidates(dbPath: String) -> [Candidate] {
+    public static func findCandidates(
+        dbPath: String, selectedModel: String? = nil,
+        processingVersion: String = FaceCacheProvenance.processingVersion
+    ) -> [Candidate] {
+        let weightURL = FaceEmbedderKind.modelsDirectory.appendingPathComponent(FaceEmbedderKind.sface.modelFileName)
+        let model: String
+        if let selectedModel {
+            model = selectedModel
+        } else {
+            guard let values = try? weightURL.resourceValues(forKeys: [.fileSizeKey]), let size = values.fileSize,
+                  let digest = ExactFileDigest.computeWithIdentity(url: weightURL, expectedSize: Int64(size))
+            else { return [] }
+            model = "sface128-sha256:" + digest.digest.map { String(format: "%02x", $0) }.joined()
+        }
         struct VectorRow: Sendable { let personID: Int64; let faceID: Int64; let blob: Data }
         struct MembershipRow: Sendable { let personID: Int64; let fileID: Int64 }
         let vectors: [VectorRow]
@@ -46,24 +59,33 @@ public enum ClusterSuggestions {
             config.readonly = true
             let q = try DatabaseQueue(path: dbPath, configuration: config)
             (vectors, memberships, blockedPairs) = try q.read { db in
-                let vectorRows = try Row.fetchAll(db, sql: """
-                    SELECT p.id AS person_id,
-                           p.representative_face_id AS face_id,
-                           COALESCE(p.centroid, rep.arcface_embedding) AS embedding
-                    FROM persons p
-                    LEFT JOIN face_prints rep
-                      ON rep.id = p.representative_face_id
-                     AND COALESCE(rep.excluded, 0) = 0
-                    WHERE COALESCE(p.is_unknown, 0) = 0
-                      AND LENGTH(COALESCE(p.centroid, rep.arcface_embedding)) > 0
-                    ORDER BY p.id
+                let sourceRows = try Row.fetchAll(db, sql: """
+                    SELECT p.id AS person_id,fp.id AS face_id,p.representative_face_id,
+                           CASE WHEN LENGTH(fp.arcface_embedding)=512 THEN fp.arcface_embedding END AS embedding,
+                           fp.embedding_model,fp.processing_version,fp.source_revision,
+                           r.revision AS catalog_revision,f.size_bytes,f.modified_at
+                    FROM persons p JOIN face_prints fp ON fp.person_id=p.id
+                    JOIN files f ON f.id=fp.file_id LEFT JOIN catalog_revisions r ON r.file_id=f.id
+                    WHERE p.is_unknown=0 AND fp.excluded=0 AND f.failed=0
+                    ORDER BY p.id,(fp.id=p.representative_face_id) DESC,fp.id LIMIT 200001
                     """)
+                guard sourceRows.count <= 200_000 else { return ([],[],[]) }
+                var vectorRows: [VectorRow] = []
+                var selectedPeople = Set<Int64>()
+                for row in sourceRows {
+                    let person: Int64 = row["person_id"]
+                    guard !selectedPeople.contains(person), FaceCacheProvenance.isCurrent(
+                        embedding: row["embedding"], model: row["embedding_model"], processing: row["processing_version"],
+                        sourceRevision: row["source_revision"], catalogRevision: row["catalog_revision"],
+                        size: row["size_bytes"], modified: row["modified_at"],
+                        selectedModel: model, selectedProcessing: processingVersion)
+                    else { continue }
+                    selectedPeople.insert(person)
+                    vectorRows.append(.init(personID: person, faceID: row["face_id"], blob: row["embedding"]))
+                }
                 let membershipRows = try Row.fetchAll(db, sql: """
-                    SELECT person_id, file_id
-                    FROM face_prints
-                    WHERE person_id IS NOT NULL
-                      AND COALESCE(excluded, 0) = 0
-                    ORDER BY person_id, file_id
+                    SELECT fp.person_id,fp.file_id FROM face_prints fp JOIN files f ON f.id=fp.file_id
+                    WHERE fp.person_id IS NOT NULL AND fp.excluded=0 AND f.failed=0 ORDER BY fp.person_id
                     """)
                 let verdictRows = try Row.fetchAll(db, sql: """
                     SELECT person_a, person_b, face_a, face_b,
@@ -72,13 +94,10 @@ public enum ClusterSuggestions {
                     WHERE same_person = 0
                     """)
                 func resolveFace(_ legacy: Int64?, fileID: Int64?, bbox: String?) throws -> Int64? {
-                    if let fileID, let bbox,
-                       let current = try Int64.fetchOne(
-                        db,
-                        sql: "SELECT id FROM face_prints WHERE file_id = ? AND bbox = ? LIMIT 1",
-                        arguments: [fileID, bbox]
-                       ) {
-                        return current
+                    if let fileID, let bbox {
+                        let ids = try Int64.fetchAll(db, sql: "SELECT id FROM face_prints WHERE file_id=? AND bbox=? ORDER BY id LIMIT 2", arguments: [fileID,bbox])
+                        guard ids.count <= 1 else { throw NSError(domain: "FileID.FaceCorrection", code: 1) }
+                        if let current = ids.first { return current }
                     }
                     guard let legacy else { return nil }
                     return try Int64.fetchOne(
@@ -105,11 +124,7 @@ public enum ClusterSuggestions {
                     }
                 }
                 return (
-                    vectorRows.map {
-                        VectorRow(personID: $0["person_id"] ?? 0,
-                                  faceID: $0["face_id"] ?? 0,
-                                  blob: $0["embedding"] ?? Data())
-                    },
+                    vectorRows,
                     membershipRows.map {
                         MembershipRow(personID: $0["person_id"] ?? 0,
                                       fileID: $0["file_id"] ?? 0)

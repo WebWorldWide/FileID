@@ -208,14 +208,6 @@ const CATALOG: &[Catalog] = &[
         category: "Document search",
         required: false,
     },
-    #[cfg(windows)]
-    Catalog {
-        name: "whisper",
-        kind: "whisper",
-        license: "MIT",
-        category: "Speech transcription",
-        required: false,
-    },
     Catalog {
         name: "mistral_small_3_2",
         kind: "mistral_small_3_2",

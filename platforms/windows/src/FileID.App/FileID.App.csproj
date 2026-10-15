@@ -109,6 +109,9 @@
     <Content Include="Assets\Logo\*.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Assets\Fonts\*.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <!-- WinUI 3 SDK auto-includes XAML via Microsoft.WinUI.targets globs.

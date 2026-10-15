@@ -563,6 +563,8 @@ impl ToolsUi {
             max_dimension: self.dimension.value() as u32,
             allow_upscale: None,
             video_aspect_ratio: None,
+            video_framing: None,
+            video_stabilization: None,
         }
     }
     fn update(&self) {
@@ -1018,6 +1020,7 @@ pub fn chat(engine: Engine) -> gtk::Widget {
                     None
                 },
                 use_model: Some(false),
+                model_kind: None,
             };
             let dispatch = state.borrow_mut().begin(&r);
             match dispatch {

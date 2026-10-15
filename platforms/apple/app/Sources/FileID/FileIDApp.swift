@@ -10,6 +10,8 @@ struct FileIDApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var engine = EngineClient()
     @State private var toolsSession = ToolsSession()
+
+    init() { BrandFonts.register() }
     @State private var engineStarted = false
     @State private var showWelcome = false
     @AppStorage("welcomeSheetSeen") private var welcomeSheetSeen: Bool = false
@@ -17,6 +19,10 @@ struct FileIDApp: App {
     var body: some Scene {
         WindowGroup("FileID") {
             MainWindow(engine: engine)
+                .font(Theme.Font.body(13.5))
+                .toggleStyle(DSCheckboxToggleStyle())
+                .progressViewStyle(DSProgressViewStyle())
+                .buttonStyle(DSSecondaryButtonStyle())
                 .frame(minWidth: 1200, minHeight: 800)
                 .background(
                     VisualEffectView(material: .underWindowBackground,
@@ -49,6 +55,18 @@ struct FileIDApp: App {
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .help) {
+                Button("FileID Help") { NSWorkspace.shared.open(URL(string: "https://github.com/WebWorldWide/FileID#readme")!) }
+                Button("Show Welcome Sheet…") { showWelcome = true }
+                Divider()
+                Button("Privacy on this Mac") {
+                    let alert = NSAlert()
+                    alert.messageText = "Everything stays on this Mac"
+                    alert.informativeText = "FileID never sends telemetry. The only network use is a model download you start yourself, fetched from huggingface.co and verified against pinned hashes."
+                    alert.alertStyle = .informational
+                    alert.runModal()
+                }
+            }
             CommandGroup(after: .appInfo) {
                 Button("About FileID") {
                     let info = Bundle.main.infoDictionary
@@ -65,6 +83,10 @@ struct FileIDApp: App {
         }
         Window("File Tools", id: "file-tools") {
             ToolsWorkbench(engine: engine, session: toolsSession)
+                .toggleStyle(DSCheckboxToggleStyle())
+                .progressViewStyle(DSProgressViewStyle())
+                .buttonStyle(DSSecondaryButtonStyle())
+                .padding(20)
                 .background { LavaLampBackground().ignoresSafeArea() }
                 .preferredColorScheme(.dark)
                 .onAppear { startEngineIfNeeded() }

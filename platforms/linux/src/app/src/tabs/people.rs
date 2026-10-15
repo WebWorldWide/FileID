@@ -53,6 +53,7 @@ struct PersonThumbKey {
     modified_bits: Option<u64>,
     file_ref: Option<i64>,
     content_hash: Option<Vec<u8>>,
+    face_revision: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -74,6 +75,7 @@ struct PersonRow {
     rep_modified: Option<f64>,
     rep_file_ref: Option<i64>,
     rep_content_hash: Option<Vec<u8>>,
+    rep_face_revision: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -622,20 +624,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     EngineEvent::ScanComplete(_) => reload(&ui),
                     EngineEvent::FaceClusteringComplete(result) => {
                         ui.face_clustering.borrow_mut().finish_active();
-                        set_status(
-                            &ui,
-                            format!(
-                                "Grouped {} face{} into {} {}.",
-                                result.face_count,
-                                plural(result.face_count as i64),
-                                result.person_count,
-                                if result.person_count == 1 {
-                                    "person"
-                                } else {
-                                    "people"
-                                },
-                            ),
-                        );
+                        set_status(&ui, face_grouping_status(&result));
                         reload(&ui);
                     }
                     EngineEvent::FaceClusteringFailed(message) => {
@@ -1100,6 +1089,7 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
                     modified_bits: p.rep_modified.map(f64::to_bits),
                     file_ref: p.rep_file_ref,
                     content_hash: p.rep_content_hash.clone(),
+                    face_revision: p.rep_face_revision.clone(),
                 },
             )
         }
@@ -2154,6 +2144,29 @@ fn read_snapshot_async() -> async_channel::Receiver<Snapshot> {
     rx
 }
 
+fn face_grouping_status(result: &fileid_engine::ipc::FaceClusteringResult) -> String {
+    let mut status = format!(
+        "Processed {} face{}. {} {} in library.",
+        result.face_count,
+        plural(result.face_count as i64),
+        result.person_count,
+        if result.person_count == 1 {
+            "person"
+        } else {
+            "people"
+        }
+    );
+    if let Some(deferred) = result.deferred_faces.filter(|count| *count > 0) {
+        status.push_str(&format!(
+            " {} face{} {} analysis; existing assignments were kept.",
+            deferred,
+            plural(deferred as i64),
+            if deferred == 1 { "awaits" } else { "await" }
+        ));
+    }
+    status
+}
+
 fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<PersonFace>> {
     let (tx, rx) = async_channel::bounded::<Vec<PersonFace>>(1);
     std::thread::spawn(move || {
@@ -2171,19 +2184,20 @@ fn read_person_files_async(pid: i64) -> async_channel::Receiver<Vec<PersonFace>>
 const PERSON_SNAPSHOT_SQL: &str = "\
     SELECT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name, \
            COALESCE(p.is_unknown, 0), \
-           (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0) AS active_file_count, \
-           (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0), \
-           rf.id, f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash \
+           (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0 AND COALESCE(fp.excluded,0)=0) AS active_file_count, \
+           (SELECT COUNT(*) FROM face_prints fp JOIN files af ON af.id = fp.file_id WHERE fp.person_id = p.id AND af.failed = 0 AND COALESCE(fp.excluded,0)=0), \
+           rf.id, f.path_text, rf.bbox, COALESCE(f.size_bytes, 0), f.modified_at, f.file_ref, f.content_hash, \
+           COALESCE(rf.embedding_model,'') || '|' || COALESCE(rf.processing_version,'') || '|' || COALESCE(rf.source_revision,'') \
     FROM persons p \
     LEFT JOIN face_prints rf ON rf.id = COALESCE( \
         (SELECT fp1.id FROM face_prints fp1 \
          JOIN files af1 ON af1.id = fp1.file_id \
-         WHERE fp1.id = p.representative_face_id AND fp1.person_id = p.id AND af1.failed = 0), \
+         WHERE fp1.id = p.representative_face_id AND fp1.person_id = p.id AND af1.failed = 0 AND COALESCE(fp1.excluded,0)=0), \
         (SELECT MIN(fp2.id) FROM face_prints fp2 \
          JOIN files af2 ON af2.id = fp2.file_id \
-         WHERE fp2.person_id = p.id AND af2.failed = 0)) \
+         WHERE fp2.person_id = p.id AND af2.failed = 0 AND COALESCE(fp2.excluded,0)=0)) \
     LEFT JOIN files f ON f.id = rf.file_id AND f.failed = 0 \
-    WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0) \
+    WHERE EXISTS (SELECT 1 FROM face_prints active_fp JOIN files active_f ON active_f.id = active_fp.file_id WHERE active_fp.person_id = p.id AND active_f.failed = 0 AND COALESCE(active_fp.excluded,0)=0) \
     ORDER BY \
       CASE WHEN TRIM(COALESCE(p.title,'') || COALESCE(p.first_name,'') || \
            COALESCE(p.last_name,'') || COALESCE(p.name,'')) = '' THEN 1 ELSE 0 END, \
@@ -2203,7 +2217,7 @@ fn read_snapshot_at_path(db_path: &std::path::Path) -> anyhow::Result<Snapshot> 
     let conn = fileid_engine::db::open_read(db_path)?;
     let total_faces: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE f.failed = 0",
+            "SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id WHERE f.failed = 0 AND COALESCE(fp.excluded,0)=0",
             [],
             |r| r.get(0),
         )
@@ -2230,6 +2244,7 @@ fn read_snapshot_at_path(db_path: &std::path::Path) -> anyhow::Result<Snapshot> 
                 rep_modified: row.get(14)?,
                 rep_file_ref: row.get(15)?,
                 rep_content_hash: row.get(16)?,
+                rep_face_revision: row.get(17)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2242,15 +2257,22 @@ fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
     let Ok(db_path) = fileid_engine::paths::db_path() else {
         return Ok(Vec::new());
     };
+    read_person_files_at_path(&db_path, pid)
+}
+
+fn read_person_files_at_path(
+    db_path: &std::path::Path,
+    pid: i64,
+) -> anyhow::Result<Vec<PersonFace>> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
-    let conn = fileid_engine::db::open_read(&db_path)?;
+    let conn = fileid_engine::db::open_read(db_path)?;
     let mut stmt = conn.prepare(
         "SELECT fp.id, f.id, f.path_text, fp.bbox FROM files f \
          JOIN face_prints fp ON fp.file_id = f.id \
          WHERE fp.person_id = ?1 \
-         AND f.failed = 0 ORDER BY f.scanned_at DESC, fp.id LIMIT ?2",
+         AND f.failed = 0 AND COALESCE(fp.excluded,0)=0 ORDER BY f.scanned_at DESC, fp.id LIMIT ?2",
     )?;
     let rows = stmt
         .query_map((pid, PERSON_FILE_LIMIT), |r| {
@@ -2311,8 +2333,24 @@ fn request_face_thumbnail(
 }
 
 fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
-    let full = gtk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
-    let cropped = bbox.and_then(|b| crop_to_bbox(&full, b)).unwrap_or(full);
+    let (_, width, height) = gtk::gdk_pixbuf::Pixbuf::file_info(path)?;
+    if width <= 0 || height <= 0 || i64::from(width) * i64::from(height) > 50_000_000 {
+        return None;
+    }
+    let raw = gtk::gdk_pixbuf::Pixbuf::from_file(path).ok()?;
+    let orientation = raw
+        .option("orientation")
+        .map(|value| value.parse::<u8>())
+        .transpose()
+        .ok()?
+        .unwrap_or(1);
+    if !(1..=8).contains(&orientation) {
+        return None;
+    }
+    let full = raw.apply_embedded_orientation()?;
+    let cropped = bbox
+        .and_then(|b| crop_to_bbox(&full, b, orientation))
+        .unwrap_or(full);
 
     let (w, h) = (cropped.width(), cropped.height());
     if w <= 0 || h <= 0 {
@@ -2349,33 +2387,39 @@ fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<Decode
     })
 }
 
-fn crop_to_bbox(full: &gtk::gdk_pixbuf::Pixbuf, bbox: &str) -> Option<gtk::gdk_pixbuf::Pixbuf> {
-    let v: serde_json::Value = serde_json::from_str(bbox).ok()?;
-    let x = v.get("x")?.as_f64()?;
-    let y = v.get("y")?.as_f64()?;
-    let w = v.get("w")?.as_f64()?;
-    let h = v.get("h")?.as_f64()?;
-    if w <= 0.0 || h <= 0.0 {
-        return None;
-    }
-    let iw = full.width() as f64;
-    let ih = full.height() as f64;
+fn crop_to_bbox(
+    full: &gtk::gdk_pixbuf::Pixbuf,
+    bbox: &str,
+    orientation: u8,
+) -> Option<gtk::gdk_pixbuf::Pixbuf> {
+    let bounds = fileid_engine::face_bbox::NormalizedFaceBBox::parse(
+        bbox,
+        full.width() as u32,
+        full.height() as u32,
+        orientation,
+    )?;
+    let iw = f64::from(full.width());
+    let ih = f64::from(full.height());
     let pad = 0.20;
-    let cx = (x - w * pad).max(0.0);
-    let cy = (y - h * pad).max(0.0);
-    let mut cw = w * (1.0 + 2.0 * pad);
-    let mut ch = h * (1.0 + 2.0 * pad);
-    if cx + cw > iw {
-        cw = iw - cx;
-    }
-    if cy + ch > ih {
-        ch = ih - cy;
-    }
-    let (cx, cy, cw, ch) = (cx as i32, cy as i32, cw as i32, ch as i32);
-    if cw <= 4 || ch <= 4 || cx < 0 || cy < 0 || cx + cw > full.width() || cy + ch > full.height() {
+    let cx = (bounds.x - bounds.width * pad).max(0.0);
+    let cy = (bounds.y - bounds.height * pad).max(0.0);
+    let cw = (bounds.width * (1.0 + 2.0 * pad)).min(1.0 - cx);
+    let ch = (bounds.height * (1.0 + 2.0 * pad)).min(1.0 - cy);
+    let (x, y) = ((cx * iw).floor() as i32, (cy * ih).floor() as i32);
+    let (width, height) = (
+        ((cx + cw) * iw).ceil() as i32 - x,
+        ((cy + ch) * ih).ceil() as i32 - y,
+    );
+    if width <= 4
+        || height <= 4
+        || x < 0
+        || y < 0
+        || x + width > full.width()
+        || y + height > full.height()
+    {
         return None;
     }
-    Some(full.new_subpixbuf(cx, cy, cw, ch))
+    Some(full.new_subpixbuf(x, y, width, height))
 }
 
 fn person_icon() -> Option<gtk::IconPaintable> {
@@ -2429,6 +2473,109 @@ mod tests {
     };
     use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
 
+    fn oriented_jpeg_fixture(orientation: u8) -> Vec<u8> {
+        let (width, height) = (84, 64);
+        let mut pixels = vec![0_u8; width * height * 3];
+        for y in 0..height {
+            for x in 0..width {
+                let offset = (y * width + x) * 3;
+                let green = (8..24).contains(&x) && (8..24).contains(&y);
+                pixels[offset + 1] = if green { 255 } else { 0 };
+                pixels[offset + 2] = if green { 0 } else { 255 };
+            }
+        }
+        let pixbuf = gtk::gdk_pixbuf::Pixbuf::from_bytes(
+            &glib::Bytes::from_owned(pixels),
+            gtk::gdk_pixbuf::Colorspace::Rgb,
+            false,
+            8,
+            width as i32,
+            height as i32,
+            (width * 3) as i32,
+        );
+        let encoded = pixbuf
+            .save_to_bufferv("jpeg", &[("quality", "100")])
+            .unwrap();
+        let mut metadata = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+        metadata.extend_from_slice(&[orientation, 0, 0, 0, 0, 0, 0, 0]);
+        let mut jpeg = encoded[..2].to_vec();
+        jpeg.extend_from_slice(&[0xff, 0xe1]);
+        jpeg.extend_from_slice(&((metadata.len() + 2) as u16).to_be_bytes());
+        jpeg.extend_from_slice(&metadata);
+        jpeg.extend_from_slice(&encoded[2..]);
+        jpeg
+    }
+
+    #[test]
+    fn fallback_people_crops_follow_real_jpeg_orientation_and_imported_formats() {
+        let dir = std::env::temp_dir().join(format!(
+            "fileid-people-orientation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let bbox = r#"{"x":8,"y":8,"w":16,"h":16,"coordinateSpace":"pixel-top-left","sourceWidth":84,"sourceHeight":64}"#;
+        for orientation in 1..=8 {
+            let path = dir.join(format!("{orientation}.jpg"));
+            let bytes = oriented_jpeg_fixture(orientation);
+            std::fs::write(&path, &bytes).unwrap();
+            let full = super::cropped_texture(path.to_str().unwrap(), None, 360).unwrap();
+            assert_eq!(
+                (full.width, full.height),
+                if orientation >= 5 { (64, 84) } else { (84, 64) }
+            );
+            let image = super::cropped_texture(path.to_str().unwrap(), Some(bbox), 360).unwrap();
+            let offset = ((image.height / 2 * image.width + image.width / 2) * 4) as usize;
+            assert!(
+                image.rgba[offset + 1] > 200 && image.rgba[offset + 2] < 40,
+                "orientation {orientation}"
+            );
+            if orientation == 6 {
+                let csv = "0.625,0.7142857142857143,0.25,0.19047619047619047";
+                let native =
+                    super::cropped_texture(path.to_str().unwrap(), Some(csv), 360).unwrap();
+                assert_eq!(native.rgba, image.rgba);
+                let legacy = super::cropped_texture(
+                    path.to_str().unwrap(),
+                    Some(r#"{"x":8,"y":8,"w":16,"h":16}"#),
+                    360,
+                )
+                .unwrap();
+                assert_eq!(legacy.rgba, full.rgba);
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert!(
+            super::cropped_texture(dir.join("missing.jpg").to_str().unwrap(), None, 360).is_none()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn grouping_status_reports_deferred_faces_without_claiming_old_people_were_regrouped() {
+        let mut result = fileid_engine::ipc::FaceClusteringResult {
+            person_count: 7,
+            face_count: 1,
+            unmatched_faces: 0,
+            duration_seconds: 0.0,
+            deferred_faces: Some(3),
+        };
+        assert_eq!(super::face_grouping_status(&result),"Processed 1 face. 7 people in library. 3 faces await analysis; existing assignments were kept.");
+        result.deferred_faces = None;
+        assert_eq!(
+            super::face_grouping_status(&result),
+            "Processed 1 face. 7 people in library."
+        );
+        result.deferred_faces = Some(0);
+        assert_eq!(
+            super::face_grouping_status(&result),
+            "Processed 1 face. 7 people in library."
+        );
+    }
+
     #[test]
     fn snapshot_uses_active_faces_and_falls_back_from_stale_representative() {
         let dir = std::env::temp_dir().join(format!(
@@ -2451,10 +2598,12 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO persons (id, first_name, created_at, representative_face_id) VALUES (1,'Ada',1,3);
              INSERT INTO persons (id, created_at) VALUES (2,1);
-             INSERT INTO persons (id, created_at) VALUES (3,1);
+             INSERT INTO persons (id, created_at) VALUES (3,1), (4,1);
              INSERT INTO face_prints (id,file_id,person_id,print_data,bbox) VALUES
                 (1,1,1,X'00','{}'), (2,1,1,X'00','{}'),
-                (3,2,1,X'00','{}'), (4,3,2,X'00','{}');"
+                (3,2,1,X'00','{}'), (4,3,2,X'00','{}'),
+                (5,3,1,X'00','{}'), (6,3,3,X'00','{}'), (7,2,4,X'00','{}');
+             UPDATE face_prints SET excluded=1 WHERE id IN (5,6);"
         ).unwrap();
         let snapshot = super::read_snapshot_at_path(&db_path).unwrap();
         assert_eq!(snapshot.total_faces, 3);
@@ -2466,6 +2615,48 @@ mod tests {
             (1, 2, Some(1))
         );
         assert_eq!(snapshot.all_with_faces[1].id, 2);
+        assert_eq!(
+            super::read_person_files_at_path(&db_path, 1)
+                .unwrap()
+                .iter()
+                .map(|face| face.face_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(super::read_person_files_at_path(&db_path, 3)
+            .unwrap()
+            .is_empty());
+        assert!(super::read_person_files_at_path(&db_path, 4)
+            .unwrap()
+            .is_empty());
+        conn.execute_batch("UPDATE persons SET representative_face_id=5 WHERE id=1")
+            .unwrap();
+        let ignored_anchor = super::read_snapshot_at_path(&db_path).unwrap();
+        assert_eq!(
+            (
+                ignored_anchor.all_with_faces[0].file_count,
+                ignored_anchor.all_with_faces[0].face_count,
+                ignored_anchor.all_with_faces[0].rep_face_id
+            ),
+            (1, 2, Some(1))
+        );
+        let mut revision = named.rep_face_revision.clone();
+        for sql in [
+            "UPDATE face_prints SET processing_version='v3' WHERE id=1",
+            "UPDATE face_prints SET embedding_model='model-b' WHERE id=1",
+            "UPDATE face_prints SET source_revision='source-b' WHERE id=1",
+        ] {
+            conn.execute_batch(sql).unwrap();
+            let updated = super::read_snapshot_at_path(&db_path).unwrap();
+            let person = &updated.all_with_faces[0];
+            assert_eq!(
+                (person.id, person.rep_face_id),
+                (named.id, named.rep_face_id)
+            );
+            assert_eq!(person.first_name.as_deref(), Some("Ada"));
+            assert_ne!(person.rep_face_revision, revision);
+            revision = person.rep_face_revision.clone();
+        }
         drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
     }

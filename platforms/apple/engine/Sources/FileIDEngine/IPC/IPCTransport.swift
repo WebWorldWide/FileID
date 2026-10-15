@@ -25,9 +25,7 @@ enum IPCTransport {
         guard saved >= 0 else { return }
         _ = fcntl(saved, F_SETFD, FD_CLOEXEC)
 
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("FileID/logs", isDirectory: true)
+        let base = EngineStateRoot.logsDirectory
         guard (try? ReadOnlyLocations.requireWritable(base)) != nil else { close(saved); return }
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let logURL = base.appendingPathComponent("engine-stderr.log")

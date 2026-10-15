@@ -283,7 +283,7 @@ struct RestructureView: View {
                         Image(systemName: "arrow.uturn.backward.circle.fill")
                             .foregroundStyle(Theme.gold)
                         Text("Files were moved on disk — you can put them back.")
-                            .font(.callout).foregroundStyle(.secondary)
+                            .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                         Spacer()
                         Button("Undo last run") {
                             guard let root = libraryRoot, !applying else { return }
@@ -299,7 +299,7 @@ struct RestructureView: View {
                                 statusIsError = true
                             }
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.dsPrimary)
                         .tint(Theme.gold)
                         .disabled(applying)
                     }
@@ -436,18 +436,18 @@ struct RestructureView: View {
     private var missingContentModelsBanner: some View {
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.orange.opacity(0.18))
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                    .fill(Theme.warning.opacity(0.18))
                     .frame(width: 38, height: 38)
                 Image(systemName: "wand.and.stars.inverse")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.warning)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Organizing by date only — AI models aren't installed")
-                    .font(.callout.weight(.semibold))
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text("Without the image (CLIP) + document (BGE) models, the butler can't read what your files ARE, so it falls back to year/month folders. Install them in Settings → AI Models, then rescan, and photos group by what's in them and documents by their content.")
-                    .font(.caption)
+                    .font(Theme.Font.body(12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -456,19 +456,19 @@ struct RestructureView: View {
                 activeTabRaw = MainWindow.Tab.settings.rawValue
             } label: {
                 Label("Open Settings", systemImage: "gearshape")
-                    .font(.caption.weight(.semibold))
+                    .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(Capsule().fill(Color.orange.opacity(0.85)))
+                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.85)))
                     .foregroundStyle(.black)
             }
             .buttonStyle(.plain)
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.m)
-                .fill(Color.orange.opacity(0.08))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m)
-                    .stroke(Color.orange.opacity(0.25), lineWidth: 1))
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                .fill(Theme.warning.opacity(0.08))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                    .stroke(Theme.warning.opacity(0.25), lineWidth: 1))
         )
     }
 
@@ -478,7 +478,7 @@ struct RestructureView: View {
         let pct = Int((captionedFraction * 100).rounded())
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Theme.ai.opacity(0.18))
                     .frame(width: 38, height: 38)
                 Image(systemName: "sparkles")
@@ -487,11 +487,11 @@ struct RestructureView: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text("Sharper proposals with Deep Analyze")
-                    .font(.callout.weight(.semibold))
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text(captioned == 0
                       ? "Right now we're sorting by folder name + people only. Running Deep Analyze reads the contents of each file (captions, OCR text, scene tags) so receipts go to Documents, screenshots to Photos, and so on."
                       : "Captioned \(captioned) of \(totalAnalyzableFiles) (\(pct)%). Running Deep Analyze on the rest gives bucketing more to work with.")
-                    .font(.caption)
+                    .font(Theme.Font.body(12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -502,10 +502,10 @@ struct RestructureView: View {
                     engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
                 } label: {
                     Label("Run Deep Analyze", systemImage: "sparkles")
-                        .font(.caption.weight(.semibold))
+                        .font(Theme.Font.body(12, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 6)
                         .background(
-                            Capsule().fill(Theme.ai.opacity(0.85))
+                            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.85))
                         )
                         .foregroundStyle(.black)
                 }
@@ -514,16 +514,16 @@ struct RestructureView: View {
                     dismissedDeepAnalyzeHint = true
                 }
                 .buttonStyle(.plain)
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 14)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 14)
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Theme.ai.opacity(0.30), lineWidth: 1)
                 )
         )
@@ -539,10 +539,10 @@ struct RestructureView: View {
         // Background lives on its own subtree so the cached blur +
         // shadow don't re-rasterize when interactive children update.
         .background(
-            RoundedRectangle(cornerRadius: 18)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 18)
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                         .stroke(Color.white.opacity(0.07), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.28), radius: 22, y: 8)
@@ -555,16 +555,16 @@ struct RestructureView: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "arrow.triangle.branch")
                     .foregroundStyle(Theme.gold)
-                    .font(.callout.weight(.semibold))
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text("Folder map")
-                    .font(.title3.weight(.semibold))
+                    .font(Theme.Font.body(16, .semibold))
                 Spacer()
                 Text(sankeyHeaderStat)
-                    .font(.caption.monospaced())
+                    .font(Theme.Font.mono(11))
                     .foregroundStyle(.secondary)
             }
             Text("Hover any folder, ribbon, or card to trace where its files are going. Tap to drill into the exact list.")
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
             SankeyFlowView(
@@ -598,12 +598,12 @@ struct RestructureView: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "sparkles")
                     .foregroundStyle(Theme.gold)
-                    .font(.callout.weight(.semibold))
+                    .font(Theme.Font.body(13.5, .semibold))
                 Text("Recommendations")
-                    .font(.title3.weight(.semibold))
+                    .font(Theme.Font.body(16, .semibold))
                 Spacer()
                 Text("Tap Skip to exclude a group from the next apply.")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 12)
@@ -682,18 +682,18 @@ struct RestructureView: View {
     private func statusBanner(_ message: String, isError: Bool = false) -> some View {
         HStack(spacing: 10) {
             Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(isError ? .orange : Theme.gold)
+                .foregroundStyle(isError ? Theme.warning : Theme.gold)
             Text(message)
-                .font(.callout)
+                .font(Theme.Font.body(13.5))
             Spacer()
         }
         .padding(.horizontal, 16).padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(Theme.gold.opacity(0.25), lineWidth: 1)
         )
     }
@@ -703,13 +703,9 @@ struct RestructureView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "rectangle.3.offgrid")
-                    .font(.system(size: 32))
-                    .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Restructure").font(.largeTitle.bold())
                     Text("FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply.")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
@@ -717,10 +713,10 @@ struct RestructureView: View {
             if let root = libraryRoot {
                 HStack(spacing: 4) {
                     Image(systemName: "folder.fill")
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                     Text("Library root: \(root.path)")
-                        .font(.caption.monospaced())
+                        .font(Theme.Font.mono(11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.head)
                 }
@@ -732,12 +728,12 @@ struct RestructureView: View {
         GlassCard {
             HStack(spacing: 10) {
                 Image(systemName: "checkmark.seal.fill")
-                    .font(.title2)
-                    .foregroundStyle(.green)
+                    .font(Theme.Font.body(20, .semibold))
+                    .foregroundStyle(Theme.delight)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Nothing to move").font(.headline)
+                    Text("Nothing to move").font(Theme.Font.body(14, .semibold))
                     Text("Your library is already organized — every folder is a recognized anchor.")
-                        .font(.callout).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -748,10 +744,10 @@ struct RestructureView: View {
         GlassCard {
             HStack(spacing: 12) {
                 Image(systemName: "externaldrive.badge.checkmark")
-                    .font(.title2)
+                    .font(Theme.Font.body(20, .semibold))
                     .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Large plan ready").font(.headline)
+                    Text("Large plan ready").font(Theme.Font.body(14, .semibold))
                     // The engine's stored-plan apply only ever moves the "auto"
                     // confidence tier — most rows in a plan this size were never
                     // shown to the user, so Review/Ask/unknown-confidence rows
@@ -760,11 +756,11 @@ struct RestructureView: View {
                     if let counts = storedPlanConfidenceCounts {
                         let heldBack = counts.review + counts.ask + counts.unknown
                         Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Ready to apply \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) Review, Needs approval, or unknown-confidence move\(heldBack == 1 ? "" : "s") stay put for you to review first.")
-                            .font(.callout)
+                            .font(Theme.Font.body(13.5))
                             .foregroundStyle(.secondary)
                     } else {
                         Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Applying streams only the confident (Auto) moves without loading every file path into the app.")
-                            .font(.callout)
+                            .font(Theme.Font.body(13.5))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -789,20 +785,20 @@ struct RestructureView: View {
             let isHovered = hoverBus.touchesSource(entry.folder)
             HStack(spacing: 8) {
                 Image(systemName: "folder.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green.opacity(isHovered ? 1.0 : 0.8))
+                    .font(Theme.Font.body(12))
+                    .foregroundStyle(Theme.delight.opacity(isHovered ? 1.0 : 0.8))
                 Text(entry.folder)
-                    .font(.caption.monospaced())
+                    .font(Theme.Font.mono(11))
                     .foregroundStyle(isHovered ? Color.primary : .secondary)
                 Spacer()
                 Text("\(entry.count) file\(entry.count == 1 ? "" : "s")")
-                    .font(.caption2.monospaced())
+                    .font(Theme.Font.mono(10.5))
                     .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 6).padding(.vertical, 3)
             .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(Color.green.opacity(isHovered ? 0.10 : 0))
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                    .fill(Theme.delight.opacity(isHovered ? 0.10 : 0))
             )
             .contentShape(Rectangle())
             .onHover { hovering in
@@ -817,7 +813,7 @@ struct RestructureView: View {
             DisclosureGroup(isExpanded: $staysPutExpanded) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("These folders are recognized as anchors — meaningful name plus matching contents. Their files stay exactly where they are.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                         .padding(.top, 4)
                     if !summary.staysPutBreakdown.isEmpty {
                         Divider().opacity(0.3)
@@ -829,10 +825,10 @@ struct RestructureView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "lock.fill")
-                        .foregroundStyle(.green)
-                    Text("Staying put").font(.headline)
+                        .foregroundStyle(Theme.delight)
+                    Text("Staying put").font(Theme.Font.body(14, .semibold))
                     Text("\(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") · \(summary.staysPutFiles) file\(summary.staysPutFiles == 1 ? "" : "s")")
-                        .font(.caption.monospaced())
+                        .font(Theme.Font.mono(11))
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -855,16 +851,14 @@ struct RestructureView: View {
             // the app — the only "loading" UI in the tree that earns
             // its motion budget.
             ZStack {
-                LavaLampBackground()
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                Theme.panel
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1)
                 VStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.large)
-                        .tint(Theme.gold)
+                    IndeterminateBar().frame(width: 220)
                     Text("Computing proposals…")
-                        .font(.callout.bold())
+                        .font(Theme.Font.display(24))
                     Text("Looking at every folder, classifying it, and picking a tidy home for every file.")
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 380)
@@ -873,7 +867,7 @@ struct RestructureView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 240)
             .overlay(
-                RoundedRectangle(cornerRadius: 14)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
             )
         } else {
@@ -909,12 +903,12 @@ struct RestructureView: View {
             HStack(alignment: .center, spacing: 10) {
                 Image(systemName: bucketIcon(g.bucket))
                     .foregroundStyle(Theme.gold)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                     .frame(width: 22, alignment: .center)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(g.bucket).font(.callout.bold())
+                    Text(g.bucket).font(Theme.Font.body(13.5, .semibold))
                     Text("Folder · \(g.proposals.count) file\(g.proposals.count == 1 ? "" : "s") moving in")
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(allSelected ? "Deselect all" : "Select all") {
@@ -925,7 +919,7 @@ struct RestructureView: View {
                     }
                 }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(Theme.Font.body(12))
             }
             .padding(.bottom, 8)
             // File list — indented with a thin vertical tree guide on
@@ -936,7 +930,7 @@ struct RestructureView: View {
                 }
                 if hiddenCount > 0 {
                     Text("+ \(hiddenCount) more file\(hiddenCount == 1 ? "" : "s")")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .font(Theme.Font.body(11)).foregroundStyle(.tertiary)
                         .padding(.leading, 4)
                 }
             }
@@ -966,20 +960,20 @@ struct RestructureView: View {
             // header above it at a glance.
             Image(systemName: icon)
                 .foregroundStyle(.secondary)
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .frame(width: 14, alignment: .center)
             VStack(alignment: .leading, spacing: 1) {
                 Text(filename)
-                    .font(.caption.monospaced())
+                    .font(Theme.Font.mono(11))
                     .lineLimit(1).truncationMode(.head)
                 Text("from \(sourceName.isEmpty ? "root" : sourceName)")
-                    .font(.caption2)
+                    .font(Theme.Font.body(11))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.head)
                 // Item D1: the engine's plain-language "why filed here".
                 if let reason = p.reason, !reason.isEmpty {
                     Text(reason)
-                        .font(.caption2)
+                        .font(Theme.Font.body(11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.tail)
                 }
@@ -1007,19 +1001,19 @@ struct RestructureView: View {
         case "auto":
             Image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(Theme.gold)
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .help("High confidence — safe to apply.")
                 .accessibilityLabel("High confidence")
         case "review":
             Image(systemName: "questionmark.circle")
-                .foregroundStyle(.orange)
-                .font(.caption)
+                .foregroundStyle(Theme.warning)
+                .font(Theme.Font.body(12))
                 .help("Medium confidence — worth a look.")
                 .accessibilityLabel("Medium confidence — review")
         case "ask":
             Image(systemName: "hand.raised")
                 .foregroundStyle(.secondary)
-                .font(.caption)
+                .font(Theme.Font.body(12))
                 .help("Low confidence — review before applying.")
                 .accessibilityLabel("Low confidence — ask")
         default:
@@ -1307,7 +1301,7 @@ struct RestructureView: View {
             Text(viewMode == .cards
                   ? "Recommendations + flow diagram"
                   : "Side-by-side folder trees (power user)")
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 4)
@@ -1322,12 +1316,12 @@ struct RestructureView: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.caption)
-                Text(label).font(.caption.bold())
+                Image(systemName: icon).font(Theme.Font.body(12))
+                Text(label).font(Theme.Font.body(12, .semibold))
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(
-                Capsule().fill(active ? Theme.gold : Color.clear)
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(active ? Theme.gold : Color.clear)
             )
             .foregroundStyle(active ? .black : Color.primary.opacity(0.7))
         }
@@ -1374,7 +1368,7 @@ struct RestructureView: View {
                         } label: {
                             Label("See all \(matchedCount) files in detail",
                                   systemImage: "arrow.up.right.square")
-                                .font(.caption.bold())
+                                .font(Theme.Font.body(12, .semibold))
                         }
                         .buttonStyle(.borderless)
                         .foregroundStyle(.secondary)
@@ -1418,10 +1412,10 @@ struct RestructureView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "list.bullet.indent")
                         .foregroundStyle(Theme.gold)
-                    Text("Side-by-side tree").font(.headline)
+                    Text("Side-by-side tree").font(Theme.Font.body(14, .semibold))
                     Spacer()
                     Text("Tap any folder to see its files.")
-                        .font(.caption2).foregroundStyle(.tertiary)
+                        .font(Theme.Font.body(11)).foregroundStyle(.tertiary)
                 }
                 TreeDiffView(
                     proposals: proposals,
@@ -1452,11 +1446,11 @@ struct RestructureView: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: drillDownIcon(scope))
                     .foregroundStyle(Theme.gold)
-                    .font(.title3)
+                    .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.headline)
+                    Text(title).font(Theme.Font.body(14, .semibold))
                     Text("\(matchedCount) file\(matchedCount == 1 ? "" : "s") affected. Tap any row to include or skip it before applying.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Done") { drillDown = nil }
@@ -1466,8 +1460,8 @@ struct RestructureView: View {
             if groups.isEmpty {
                 VStack(spacing: 6) {
                     Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 36)).foregroundStyle(.green)
-                    Text("Nothing to show.").font(.callout.bold())
+                        .font(.system(size: 36)).foregroundStyle(Theme.delight)
+                    Text("Nothing to show.").font(Theme.Font.body(13.5, .semibold))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(40)

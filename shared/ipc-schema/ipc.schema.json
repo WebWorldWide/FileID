@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.14.0",
+  "version": "1.16.0",
 
   "$defs": {
     "IPCCommand": {
@@ -15,7 +15,6 @@
         "payload": { "$ref": "#/$defs/CommandPayload" }
       }
     },
-
     "IPCEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -25,7 +24,6 @@
         "payload": { "$ref": "#/$defs/EventPayload" }
       }
     },
-
     "CommandPayload": {
       "description": "Externally-tagged union. Exactly one key matching a variant name.",
       "oneOf": [
@@ -113,7 +111,18 @@
         { "type": "object", "required": ["cancelBenchmark"], "additionalProperties": false, "properties": { "cancelBenchmark": { "type": "object", "additionalProperties": false, "description": "Stop the running benchmark; it replies with benchmarkResult status cancelled." } } },
         { "type": "object", "required": ["requestStatus"],      "additionalProperties": false, "properties": { "requestStatus":      { "type": "object", "additionalProperties": false } } },
         { "type": "object", "required": ["shutdown"],           "additionalProperties": false, "properties": { "shutdown":           { "type": "object", "additionalProperties": false } } },
-        { "type": "object", "required": ["runFaceClustering"],  "additionalProperties": false, "properties": { "runFaceClustering":  { "type": "object", "additionalProperties": false, "description": "Recluster compatible face evidence while retaining identity IDs and user corrections. Failed validation must not publish partial assignments." } } },
+        {
+          "type": "object",
+          "required": ["runFaceClustering"],
+          "additionalProperties": false,
+          "properties": {
+            "runFaceClustering": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Refresh eligible stale face caches in bounded, source-checked batches, then recluster selected compatible evidence while retaining deferred identities and user corrections. Report deferred coverage when available. Retryable failures are durable; cancelScan stops remaining work. Failed participant-snapshot validation must not publish assignments."
+            }
+          }
+        },
         { "type": "object", "required": ["verifyCudaPack"],     "additionalProperties": false, "properties": { "verifyCudaPack":     { "type": "object", "additionalProperties": false, "description": "Re-probe CUDA Toolkit + cuDNN availability without restarting the engine. Engine replies with a `hardwareReprobed` event." } } },
         {
           "type": "object",
@@ -184,7 +193,6 @@
           }
         },
         { "type": "object", "required": ["cancelPrewarm"], "additionalProperties": false, "properties": { "cancelPrewarm": { "type": "object", "additionalProperties": false, "properties": { "modelKind": { "type": ["string", "null"], "description": "Cancel this model's in-flight download; null/absent cancels ALL in-flight prewarms." } } } } },
-
         { "type": "object", "required": ["planRestructure"], "additionalProperties": false,
           "properties": { "planRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
@@ -192,7 +200,6 @@
               "libraryRoot": { "type": "string" },
               "supportsPagedPlans": { "type": "boolean", "default": false, "description": "Opt in to a bounded move preview backed by an engine-owned plan spool. Older clients omit this and receive the legacy full plan." }
             } } } },
-
         { "type": "object", "required": ["applyRestructure"], "additionalProperties": false,
           "properties": { "applyRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot", "moves", "useSymlinks"],
@@ -218,12 +225,10 @@
               } },
               "useSymlinks": { "type": "boolean" }
             } } } },
-
         { "type": "object", "required": ["undoRestructure"], "additionalProperties": false,
           "properties": { "undoRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
             "properties": { "libraryRoot": { "type": "string" } } } } },
-
         { "type": "object", "required": ["applyTags"], "additionalProperties": false,
           "properties": { "applyTags": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs", "tags", "mode"],
@@ -232,7 +237,6 @@
               "tags": { "type": "array", "items": { "type": "string" } },
               "mode": { "type": "string", "enum": ["add", "replace", "remove"] }
             } } } },
-
         { "type": "object", "required": ["renameFiles"], "additionalProperties": false,
           "properties": { "renameFiles": { "type": "object", "additionalProperties": false,
             "required": ["renames"],
@@ -246,7 +250,6 @@
                 }
               } }
             } } } },
-
         { "type": "object", "required": ["trashFiles"], "additionalProperties": false,
           "properties": { "trashFiles": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs"],
@@ -266,7 +269,6 @@
                 }
               } }
             } } } },
-
         { "type": "object", "required": ["mergeClusters"], "additionalProperties": false,
           "properties": { "mergeClusters": { "type": "object", "additionalProperties": false, "description": "Explicit merge validates both identities and commits all assignments, name transfer and counts atomically. An unnamed destination inherits one source identity; a named destination keeps its name. SQL failure leaves the catalog unchanged.",
             "required": ["sourcePersonID", "destinationPersonID"],
@@ -274,7 +276,6 @@
               "sourcePersonID": { "type": "integer" },
               "destinationPersonID": { "type": "integer" }
             } } } },
-
         { "type": "object", "required": ["embedTextQuery"], "additionalProperties": false,
           "properties": { "embedTextQuery": { "type": "object", "additionalProperties": false,
             "required": ["query", "queryID"],
@@ -282,7 +283,6 @@
               "query": { "type": "string" },
               "queryID": { "type": "string" }
             } } } },
-
         { "type": "object", "required": ["renamePerson"], "additionalProperties": false,
           "properties": { "renamePerson": { "type": "object", "additionalProperties": false,
             "required": ["personID"],
@@ -294,15 +294,12 @@
               "lastName": { "type": ["string", "null"] },
               "suffix": { "type": ["string", "null"] }
             } } } },
-
         { "type": "object", "required": ["markPersonsAsUnknown"], "additionalProperties": false,
           "properties": { "markPersonsAsUnknown": { "type": "object", "additionalProperties": false,
             "required": ["personIDs"],
             "properties": { "personIDs": { "type": "array", "items": { "type": "integer" } } } } } },
-
         { "type": "object", "required": ["findMergeSuggestions"], "additionalProperties": false,
           "properties": { "findMergeSuggestions": { "type": "object", "additionalProperties": false } } },
-
         { "type": "object", "required": ["markPersonsDifferent"], "additionalProperties": false,
           "properties": { "markPersonsDifferent": { "type": "object", "additionalProperties": false,
             "required": ["sourcePersonID", "destinationPersonID", "sourceAnchorFaceID", "destinationAnchorFaceID"],
@@ -312,7 +309,6 @@
               "sourceAnchorFaceID": { "type": "integer" },
               "destinationAnchorFaceID": { "type": "integer" }
             } } } },
-
         { "type": "object", "required": ["embedImageQuery"], "additionalProperties": false,
           "properties": { "embedImageQuery": { "type": "object", "additionalProperties": false,
             "required": ["fileID", "queryID"],
@@ -320,7 +316,6 @@
               "fileID": { "type": "integer" },
               "queryID": { "type": "string" }
             } } } },
-
         { "type": "object", "required": ["generateVideoThumbnail"], "additionalProperties": false,
           "properties": { "generateVideoThumbnail": { "type": "object", "additionalProperties": false,
             "required": ["path"],
@@ -329,12 +324,10 @@
               "path": { "type": "string", "description": "Absolute filesystem path to the video file." },
               "modifiedAt": { "type": ["number", "null"], "description": "File's modified-unix time (f64 seconds). Echoed back on the reply so the app can key its (path, modifiedAt) thumbnail cache. Optional." }
             } } } },
-
         { "type": "object", "required": ["restoreFromTrash"], "additionalProperties": false,
           "properties": { "restoreFromTrash": { "type": "object", "additionalProperties": false,
             "required": ["batchID"],
             "properties": { "batchID": { "type": "string" } } } } },
-
         { "type": "object", "required": ["revertMerge"], "additionalProperties": false,
           "properties": { "revertMerge": { "type": "object", "additionalProperties": false,
             "required": ["sourcePersonID", "destinationPersonID", "faceIDsToRevert"],
@@ -343,7 +336,6 @@
               "destinationPersonID": { "type": "integer" },
               "faceIDsToRevert": { "type": "array", "items": { "type": "integer" } }
             } } } },
-
         { "type": "object", "required": ["wipeLibrary"], "additionalProperties": false, "properties": { "wipeLibrary": { "type": "object", "additionalProperties": false, "description": "Truncate all learned library state (tags, faces, captions, embeddings) in-process on the engine's writer connection — no file deletion, so it never races the OS file-lock. Replies with a libraryWiped event." } } },
         {
           "type": "object",
@@ -386,10 +378,80 @@
               }
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cancelRestructure"
+          ],
+          "properties": {
+            "cancelRestructure": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Cooperatively cancel only the active restructure plan, apply, or undo operation. Must not cancel a library scan."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reassignFace"
+          ],
+          "properties": {
+            "reassignFace": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "faceID"
+              ],
+              "description": "Move one face to another person, or to a new person when createNewPerson is true. Replies with a bulkActionResult.",
+              "properties": {
+                "faceID": {
+                  "type": "integer"
+                },
+                "destinationPersonID": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "createNewPerson": {
+                  "type": "boolean",
+                  "default": false
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "purgeExcluded"
+          ],
+          "properties": {
+            "purgeExcluded": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Remove cataloged rows under the given excluded folders immediately (files on disk untouched; cascades tags/faces/captions/embeddings). Sent when the user adds an exclusion so the Library reflects it without waiting for a rescan. Replies with a bulkActionResult (action 'purgeExcluded', succeeded = purged row count).",
+              "required": [
+                "excludedPaths"
+              ],
+              "properties": {
+                "excludedPaths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
         }
       ]
     },
-
     "EventPayload": {
       "description": "Externally-tagged union. Exactly one key matching a variant name. The associated value is wrapped in {\"_0\": ...} when Swift's auto-synthesis treats the case as a single-positional argument; for cases where Swift uses named parameters, the wrapping object's keys are the parameter names directly.",
       "oneOf": [
@@ -532,7 +594,6 @@
         }
       ]
     },
-
     "HealthRequestID": {
       "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$",
       "description": "Client-generated correlation nonce, never a file path, document text or secret. Invalid nonces receive invalid_health_request and no success reply. Use a fresh nonce for each probe."
@@ -620,7 +681,6 @@
     },
     "SinglePositional": {
       "description": "Helpers for Swift's Codable auto-synthesis: a case with a single unnamed associated value encodes as {\"_0\": <encoded value>}. Each generator unwraps appropriately.",
-
       "EngineInfo": {
         "type": "object",
         "additionalProperties": false,
@@ -640,7 +700,6 @@
           }
         }
       },
-
       "ScanProgress": {
         "type": "object",
         "additionalProperties": false,
@@ -665,14 +724,12 @@
           }
         }
       },
-
       "ScanPhase": {
         "type": "object",
         "additionalProperties": false,
         "required": ["_0"],
         "properties": { "_0": { "$ref": "#/$defs/ScanPhase" } }
       },
-
       "FileDoneEvent": {
         "type": "object",
         "additionalProperties": false,
@@ -693,7 +750,6 @@
           }
         }
       },
-
       "BatchSummary": {
         "type": "object",
         "additionalProperties": false,
@@ -722,7 +778,6 @@
           }
         }
       },
-
       "ScanComplete": {
         "type": "object",
         "additionalProperties": false,
@@ -742,7 +797,6 @@
           }
         }
       },
-
       "EngineError": {
         "type": "object",
         "additionalProperties": false,
@@ -761,7 +815,6 @@
           }
         }
       },
-
       "LogLine": {
         "type": "object",
         "additionalProperties": false,
@@ -778,7 +831,6 @@
           }
         }
       },
-
       "FaceClusteringResult": {
         "type": "object",
         "additionalProperties": false,
@@ -789,15 +841,19 @@
             "additionalProperties": false,
             "required": ["personCount", "faceCount", "unmatchedFaces", "durationSeconds"],
             "properties": {
-              "personCount":     { "type": "integer", "minimum": 0 },
-              "faceCount":       { "type": "integer", "minimum": 0 },
-              "unmatchedFaces":  { "type": "integer", "minimum": 0 },
-              "durationSeconds": { "type": "number", "minimum": 0 }
+              "personCount": { "type": "integer", "minimum": 0 },
+              "faceCount": { "type": "integer", "minimum": 0 },
+              "unmatchedFaces": { "type": "integer", "minimum": 0 },
+              "durationSeconds": { "type": "number", "minimum": 0 },
+              "deferredFaces": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional coverage count of active faces deferred from this pass because selected-model evidence is unavailable, incompatible or invalid; their existing identities and corrections are retained. Omitted means this engine does not report coverage."
+              }
             }
           }
         }
       },
-
       "DeepAnalyzeStarting": {
         "type": "object",
         "additionalProperties": false,
@@ -815,7 +871,6 @@
           }
         }
       },
-
       "DeepAnalyzeProgress": {
         "type": "object",
         "additionalProperties": false,
@@ -836,7 +891,6 @@
           }
         }
       },
-
       "DeepAnalyzeFileDone": {
         "type": "object",
         "additionalProperties": false,
@@ -855,7 +909,6 @@
           }
         }
       },
-
       "DeepAnalyzeComplete": {
         "type": "object",
         "additionalProperties": false,
@@ -875,7 +928,6 @@
           }
         }
       },
-
       "ModelDownloadProgress": {
         "type": "object",
         "additionalProperties": false,
@@ -895,7 +947,6 @@
           }
         }
       },
-
       "QueueState": {
         "type": "object",
         "additionalProperties": false,
@@ -913,7 +964,6 @@
           }
         }
       },
-
       "RestructurePlan": {
         "description": "Engine-computed plan for re-organizing files into category folders. On macOS this is returned synchronously from planRestructure; on Windows the engine emits this event so the cross-process app can render the Sankey diagram.",
         "type": "object",
@@ -981,7 +1031,6 @@
           }
         }
       },
-
       "RestructureApplyResult": {
         "description": "Reply to applyRestructure. applied/failed are file counts; privilegeError surfaces a 'Developer Mode required for symlinks' message when the user opted into symlink mode without SeCreateSymbolicLinkPrivilege.",
         "type": "object",
@@ -1004,7 +1053,6 @@
           }
         }
       },
-
       "BulkActionResult": {
         "description": "Reply to a bulk action (applyTags / renameFiles / trashFiles / mergeClusters / renamePerson / markPersonsAsUnknown / restoreFromTrash / revertMerge). `action` is the originating command's discriminator; the trashFiles reply additionally carries the undo batch id as a ':<uuid>' suffix (e.g. 'trashFiles:5f2c…'), which UndoStack parses. messages carries per-file results.",
         "type": "object",
@@ -1031,7 +1079,6 @@
           }
         }
       },
-
       "ClipTextEmbedding": {
         "description": "Reply to embedTextQuery. The app dot-products this 512-d L2-normalized float32 embedding against clip_embeddings rows to rank Library files by semantic similarity to the user's text query.",
         "type": "object",
@@ -1050,7 +1097,6 @@
           }
         }
       },
-
       "MergeSuggestions": {
         "description": "Reply to findMergeSuggestions. Each pair surfaces two person clusters that may belong to the same identity, with a similarity score and the anchor face IDs the user can preview.",
         "type": "object",
@@ -1078,7 +1124,6 @@
           }
         }
       },
-
       "LibraryWiped": {
         "description": "Reply to wipeLibrary. ok=true when every table was truncated; message carries the error on failure so the app can fall back to its own wipe path.",
         "type": "object",
@@ -1096,7 +1141,6 @@
           }
         }
       },
-
       "ThumbnailGenerated": {
         "description": "Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved, long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the request so the app can write the bytes under its (path, modifiedAt) cache key.",
         "type": "object",
@@ -1116,12 +1160,10 @@
         }
       }
     },
-
     "ScanPhase": {
       "type": "string",
       "enum": ["idle", "discovering", "tagging", "postScan", "completed", "cancelled", "failed"]
     },
-
     "QueuedJob": {
       "type": "object",
       "additionalProperties": false,
@@ -1523,6 +1565,11 @@
         },
         "useModel": {
           "type": "boolean"
+        },
+        "modelKind": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Optional registered local model selection. Summarize only when this model is already loaded; never download from a chat send."
         }
       }
     },
@@ -1606,12 +1653,24 @@
         },
         "allowUpscale": {
           "type": "boolean",
-          "description": "For photo conversion only. Omitted or false preserves bounded downsize behavior; true enlarges smaller images to maxDimension with conventional interpolation, not AI super-resolution."
+          "description": "For photo or video conversion. True permits conventional enlargement to the requested maximum dimension. This increases pixels without recovering detail; it is not AI super-resolution."
         },
         "videoAspectRatio": {
           "type": "string",
           "enum": ["source", "9:16", "16:9", "1:1", "4:5"],
-          "description": "For video conversion only. Omitted or source retains the source aspect ratio. Other values fit the entire image inside the requested frame with padding; no content is cropped or synthesized."
+          "description": "For video conversion only. Omitted or source retains the source aspect ratio. Other values select the output frame; videoFraming determines whether the full image is fitted or people are followed."
+        },
+        "videoFraming": {
+          "type": "string",
+          "enum": [
+            "fit",
+            "auto"
+          ],
+          "description": "For video conversion only. Omitted or fit preserves full-image fitting and padding. Auto requires a non-source aspect ratio: on macOS, follow the union of detected people with smooth crop paths, fitting the full image when detections are lost or cannot safely fit. Auto is limited to ten-minute clips and samples at two frames per second; it does not identify people or synthesize scenery. Platforms without an auto-reframing adapter must reject auto recipes."
+        },
+        "videoStabilization": {
+          "type": "boolean",
+          "description": "For video conversion only. Omitted or false preserves existing motion. On macOS, true estimates bounded frame-to-frame translation and rotation, smooths camera motion and applies corrective transforms with at most 12 percent zoom to cover exposed edges. Registration failures or unsafe motion remain uncorrected and are reported. Supports SDR clips up to ten minutes and up to 60 frames per second; can combine with social framing. No generated pixels or neural enhancement. Platforms without a stabilization adapter must reject enabled recipes."
         }
       }
     },
@@ -1769,9 +1828,7 @@
       }
     }
   },
-
   "type": "object",
-  "description": "The wire is a sequence of newline-delimited JSON values, each conforming to either IPCCommand (app→engine) or IPCEvent (engine→app). The schema's root permits either as the canonical anchor; per-direction validation is the consumer's responsibility.",
   "oneOf": [
     { "$ref": "#/$defs/IPCCommand" },
     { "$ref": "#/$defs/IPCEvent"   }

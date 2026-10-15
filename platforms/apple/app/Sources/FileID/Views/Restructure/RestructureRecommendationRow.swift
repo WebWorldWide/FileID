@@ -29,9 +29,9 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
             HStack(alignment: .top, spacing: 14) {
                 iconBadge
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(headline).font(.callout.weight(.semibold))
+                    Text(headline).font(Theme.Font.body(13.5, .semibold))
                     Text(bodyText)
-                        .font(.caption)
+                        .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if !isInformational {
@@ -50,7 +50,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
                 expandedContent()
                     .padding(.horizontal, 18)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.025))
+                    .background(Color.white.opacity(0.025), ignoresSafeAreaEdges: [])
                     .transition(
                         .asymmetric(
                             insertion: .opacity.combined(with: .move(edge: .top)),
@@ -61,14 +61,15 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
         }
         .opacity(isApproved || isInformational ? 1.0 : 0.55)
         .background(
-            Rectangle().fill(
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
                 highlighted ? outcome.tint.opacity(0.06) : Color.clear
             )
         )
         .overlay(alignment: .leading) {
-            Rectangle()
+            Capsule()
                 .fill(outcome.tint)
-                .frame(width: 2)
+                .frame(width: 3)
+                .padding(.vertical, 6)
                 .opacity(highlighted ? 1.0 : 0.0)
         }
         .contentShape(Rectangle())
@@ -87,7 +88,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
     @ViewBuilder
     private var iconBadge: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(outcome.tint.opacity(0.18))
                 .frame(width: 38, height: 38)
             Image(systemName: outcome.icon)
@@ -104,7 +105,7 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
                 .monospacedDigit()
                 .foregroundStyle(outcome.tint)
             Text(folderCount == 1 ? "1 folder" : "\(folderCount) folders")
-                .font(.caption2.monospaced())
+                .font(Theme.Font.mono(10.5))
                 .foregroundStyle(.tertiary)
         }
     }
@@ -122,13 +123,13 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
         Button(action: onToggleExpand) {
             HStack(spacing: 4) {
                 Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.caption.bold())
+                    .font(Theme.Font.body(12, .semibold))
                 Text(isExpanded ? "Hide files" : "Review files")
-                    .font(.caption.weight(.semibold))
+                    .font(Theme.Font.body(12, .semibold))
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
             .background(
-                Capsule().stroke(
+                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
                     isExpanded ? outcome.tint.opacity(0.7) : Color.secondary.opacity(0.5),
                     lineWidth: 1
                 )
@@ -149,11 +150,11 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
         let fg: Color = isApproved ? .primary : .black
         Button(action: onToggleApproval) {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.caption)
-                Text(label).font(.caption.weight(.semibold))
+                Image(systemName: icon).font(Theme.Font.body(12))
+                Text(label).font(Theme.Font.body(12, .semibold))
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(Capsule().fill(bgFill))
+            .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(bgFill))
             .foregroundStyle(fg)
         }
         .buttonStyle(.plain)

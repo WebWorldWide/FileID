@@ -10,6 +10,7 @@ import Testing
 import Foundation
 import GRDB
 import AsyncAlgorithms
+import FileIDShared
 @testable import FileIDEngine
 // Disambiguate from GRDB.Database (both modules export `Database`).
 private typealias Database = FileIDEngine.Database
@@ -132,8 +133,8 @@ struct ScanPipelinePerfTests {
                 d, sql: "SELECT id FROM files WHERE path_text = ?",
                 arguments: [pathByName["a.jpg"]!])!
             try d.execute(
-                sql: "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?, ?, 'test')",
-                arguments: [aID, Data(count: 2048)])
+                sql: "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (?, ?, ?)",
+                arguments: [aID, Data(count: 2048), CLIPEmbeddingSpace.modelID])
         }
 
         let incremental = await discovery.walk(root: root, database: db, forceReprocess: false)

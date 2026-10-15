@@ -237,6 +237,8 @@ fn recipe(ui: &Ui) -> Option<ToolRecipe> {
     Some(ToolRecipe {
         allow_upscale: (kind == "photo").then_some(ui.enlarge.is_active()),
         video_aspect_ratio: if kind == "video" { Some(ui.video_frame.active_id()?.to_string()) } else { None },
+        video_framing: None,
+        video_stabilization: None,
         kind,
         format,
         max_dimension: dimension,

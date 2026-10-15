@@ -19,8 +19,8 @@ enum RestructureOutcome: String, CaseIterable, Identifiable {
 
     var tint: Color {
         switch self {
-        case .keep:       return .green
-        case .tidy:       return .orange
+        case .keep:       return Theme.delight
+        case .tidy:       return Theme.warning
         case .reorganize: return Theme.gold
         }
     }

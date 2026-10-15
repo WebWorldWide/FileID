@@ -116,7 +116,7 @@ struct TreeDiffView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text("Filter:").font(.caption.bold()).foregroundStyle(.secondary)
+                Text("Filter:").font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary)
                 ForEach(FilterMode.allCases) { mode in
                     Button {
                         withAnimation(.easeInOut(duration: 0.15)) {
@@ -124,10 +124,10 @@ struct TreeDiffView: View {
                         }
                     } label: {
                         Text(mode.label)
-                            .font(.caption.bold())
+                            .font(Theme.Font.body(12, .semibold))
                             .padding(.horizontal, 10).padding(.vertical, 4)
                             .background(
-                                Capsule().fill(filter == mode
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(filter == mode
                                                 ? Theme.gold
                                                 : Color.secondary.opacity(0.10))
                             )
@@ -157,8 +157,8 @@ struct TreeDiffView: View {
     @ViewBuilder
     private var legendStrip: some View {
         HStack(spacing: 10) {
-            legendDot(letter: "=", tint: .green, label: "Unchanged")
-            legendDot(letter: "M", tint: .orange, label: "Moved")
+            legendDot(letter: "=", tint: Theme.delight, label: "Unchanged")
+            legendDot(letter: "M", tint: Theme.warning, label: "Moved")
             legendDot(letter: "+", tint: Theme.gold, label: "New folder")
         }
     }
@@ -167,11 +167,11 @@ struct TreeDiffView: View {
     private func legendDot(letter: String, tint: Color, label: String) -> some View {
         HStack(spacing: 4) {
             Text(letter)
-                .font(.caption.bold().monospaced())
+                .font(Theme.Font.mono(11, .semibold))
                 .foregroundStyle(.black)
                 .frame(width: 16, height: 16)
                 .background(Circle().fill(tint))
-            Text(label).font(.caption2).foregroundStyle(.secondary)
+            Text(label).font(Theme.Font.body(11)).foregroundStyle(.secondary)
         }
     }
 
@@ -188,8 +188,8 @@ struct TreeDiffView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.caption.bold()).foregroundStyle(.primary)
-                Text(subtitle).font(.caption2).foregroundStyle(.tertiary)
+                Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(.primary)
+                Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
@@ -205,8 +205,8 @@ struct TreeDiffView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .background(RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.20), lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.ultraThinMaterial))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 1))
         .frame(minHeight: 280, idealHeight: 420, maxHeight: 600)
     }
 
@@ -241,29 +241,29 @@ struct TreeDiffView: View {
                                 tint: Color, isHighlighted: Bool) -> some View {
         HStack(spacing: 6) {
             Text(letter)
-                .font(.caption.bold().monospaced())
+                .font(Theme.Font.mono(11, .semibold))
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
             Image(systemName: "folder.fill")
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .foregroundStyle(tint)
             Text(row.displayName)
-                .font(.caption.monospaced())
+                .font(Theme.Font.mono(11))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 6)
             Text("\(row.totalFiles)")
-                .font(.caption.monospacedDigit())
+                .font(Theme.Font.body(12).monospacedDigit())
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
                           lineWidth: isHighlighted ? 1 : 0)
         )
@@ -273,7 +273,7 @@ struct TreeDiffView: View {
     @ViewBuilder
     private func destRowView(_ row: DestRow) -> some View {
         let letter = row.isExisting ? "=" : "+"
-        let tint: Color = row.isExisting ? .green : Theme.gold
+        let tint: Color = row.isExisting ? Theme.delight : Theme.gold
         let isHighlighted = hoverBus.touchesDest(row.bucket)
         let label = destRowLabel(row, letter: letter, tint: tint,
                                  isHighlighted: isHighlighted)
@@ -301,29 +301,29 @@ struct TreeDiffView: View {
                               tint: Color, isHighlighted: Bool) -> some View {
         HStack(spacing: 6) {
             Text(letter)
-                .font(.caption.bold().monospaced())
+                .font(Theme.Font.mono(11, .semibold))
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
             Image(systemName: bucketIcon(row.bucket))
-                .font(.caption2)
+                .font(Theme.Font.body(11))
                 .foregroundStyle(tint)
             Text(row.bucket)
-                .font(.caption.monospaced())
+                .font(Theme.Font.mono(11))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 6)
             Text("\(row.count)")
-                .font(.caption.monospacedDigit())
+                .font(Theme.Font.body(12).monospacedDigit())
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(tint.opacity(isHighlighted ? 0.22 : 0.06))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .stroke(tint.opacity(isHighlighted ? 0.7 : 0),
                           lineWidth: isHighlighted ? 1 : 0)
         )
@@ -332,8 +332,8 @@ struct TreeDiffView: View {
 
     private func sourceLetter(for kind: SourceKind) -> (String, Color) {
         switch kind {
-        case .anchor: return ("=", .green)
-        case .mixed:  return ("M", .orange)
+        case .anchor: return ("=", Theme.delight)
+        case .mixed:  return ("M", Theme.warning)
         case .junk:   return ("M", Theme.gold)
         }
     }

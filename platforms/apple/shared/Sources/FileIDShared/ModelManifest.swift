@@ -141,6 +141,8 @@ public enum ModelManifest {
     }
 
     public static func vlmPin(forRepo repo: String) -> VLMRepoPin? {
-        vlmRepos.first { $0.repo == repo }
+        if let pin = vlmRepos.first(where: { $0.repo == repo }) { return pin }
+        guard let entry = MLXModelCatalog.entry(forRepo: repo) else { return nil }
+        return VLMRepoPin(repo: entry.repo, kind: entry.id, revision: entry.revision, approxBytes: entry.weightBytes)
     }
 }

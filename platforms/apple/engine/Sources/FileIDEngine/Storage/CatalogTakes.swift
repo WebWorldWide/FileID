@@ -58,6 +58,9 @@ enum CatalogTakes {
                 for fileID in savedEvent.fileIDs {
                     try db.execute(sql: "INSERT INTO catalog_event_files(event_id,file_id) VALUES(?,?)", arguments: [savedEvent.id, fileID])
                 }
+                if let before, before.event.goal != savedEvent.goal {
+                    try db.execute(sql: "UPDATE catalog_take_scores SET stale=1 WHERE event_id=?", arguments: [savedEvent.id])
+                }
                 try journal(db, kind: "event", eventID: savedEvent.id, fileID: nil, before: before, after: snapshot(db, eventID: savedEvent.id))
             }
             return try await database.pool.read { db in try group(db, eventID: savedEvent.id, requestID: request.requestID) }

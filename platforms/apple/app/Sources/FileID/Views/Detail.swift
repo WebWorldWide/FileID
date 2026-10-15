@@ -1,4 +1,4 @@
-// Detail pane: tab switcher + onboarding splash.
+// Page area: crumb + serif title header, then the active page.
 import SwiftUI
 import AppKit
 import FileIDShared
@@ -6,24 +6,24 @@ import FileIDShared
 struct Detail: View {
     let engine: EngineClient
     let store: ReadStore
+    let toolsSession: ToolsSession
     let activeTab: MainWindow.Tab
     @Binding var pickedURL: URL?
-    /// When the sidebar is hidden, Detail shows a toggle button in the
-    /// top safe-area inset to bring it back.
-    @Binding var sidebarVisible: Bool
     var onSwitchTab: (MainWindow.Tab) -> Void = { _ in }
+    var pickFolder: () -> Void = {}
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
             if pickedURL == nil && store.totalFiles == 0 {
                 EmptyState(onPickFolder: pickFolder)
             } else {
-                tabContent.transition(.opacity)
+                pageHeader
+                tabContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        // Re-index Spotlight whenever a scan or Deep Analyze batch
-        // completes — cheap (single bulk write) and keeps the
-        // ⌘Space search results fresh.
+        .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.8), ignoresSafeAreaEdges: [])
+        .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .onChange(of: engine.lastProgress?.phase) { _, new in
             if new == .completed {
                 Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
@@ -33,210 +33,115 @@ struct Detail: View {
             Task { await SpotlightIndexer.indexAll(dbPath: ReadStore.defaultDBURL.path) }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 28 pt strip at the top for traffic-light buttons + the sidebar
-        // toggle when the sidebar is collapsed.
-        .safeAreaInset(edge: .top, spacing: 0) {
-            HStack(spacing: 0) {
-                if !sidebarVisible {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            sidebarVisible = true
-                        }
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help("Show sidebar (⌃⌘S)")
-                    .keyboardShortcut("s", modifiers: [.control, .command])
-                    .padding(.leading, 80)   // clear the traffic-light buttons
-                }
-                Spacer()
-            }
-            .frame(height: 28)
+    }
+
+    private var crumb: String {
+        activeTab == .settings ? "FileID / Settings" : "\(activeTab.area?.rawValue ?? "FileID") / \(activeTab.rawValue)"
+    }
+
+    private var pageMeta: String {
+        switch activeTab {
+        case .library: return store.totalFiles > 0 ? "\(store.totalFiles.formatted()) files" : ""
+        case .deep:
+            if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) / \(d.total.formatted())" }
+            return ""
+        case .settings: return "macOS"
+        case .restructure: return pickedURL?.lastPathComponent ?? ""
+        default: return ""
         }
     }
 
-    /// NSOpenPanel for `pickedURL`. Mirrors the sidebar's button so the
-    /// splash CTA can call it directly.
-    private func pickFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.message = "Pick a folder to scan"
-        if panel.runModal() == .OK, let url = panel.url {
-            // Pre-validate readability. NSOpenPanel happily returns
-            // folders the user can't read (e.g. restricted system
-            // dirs, offline network mounts), and the engine then fails
-            // opaquely on bookmark resolve. Surface a clear NSAlert
-            // here instead of letting it bubble up as a generic IPC
-            // error.
-            guard FileManager.default.isReadableFile(atPath: url.path) else {
-                let alert = NSAlert()
-                alert.messageText = "Can't read \(url.lastPathComponent)"
-                alert.informativeText = "FileID doesn't have permission to read this folder. Pick a different folder or grant Full Disk Access in System Settings → Privacy & Security."
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-                return
+    private var pageHeader: some View {
+        HStack(alignment: .bottom, spacing: 16) {
+            VStack(alignment: .leading, spacing: 7) {
+                SectionLabel(crumb)
+                Text(activeTab.rawValue).font(Theme.Font.pageTitle).foregroundStyle(Theme.text1).lineLimit(1)
             }
-            if pickedURL != url {
-                engine.clearProgress()
-            }
-            pickedURL = url
+            Spacer(minLength: 0)
+            MetaText(pageMeta, color: Theme.text2, size: 12)
         }
+        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, 18).padding(.bottom, 14)
+        .overlay(alignment: .bottom) { Hairline() }
     }
 
     @ViewBuilder
     private var tabContent: some View {
-        // Wrapped to give every tab swap an implicit cross-fade. Keyed
-        // on the tab raw value so SwiftUI knows when it's a different
-        // view tree.
         Group {
             switch activeTab {
             case .library:     LibraryView(engine: engine, store: store)
-            case .people:      PeopleView(engine: engine, store: store,
-                                          onSwitchTab: onSwitchTab)
+            case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
+            case .moments:     CatalogWorkbench(engine: engine, inline: true)
+            case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)
+            case .chat:        ChatWorkbench(engine: engine)
+            case .takes:       TakeWorkbench(engine: engine, candidates: [], inline: true)
             case .cleanup:     CleanupView(engine: engine, store: store)
-            case .deep:        DeepAnalyzeView(engine: engine, store: store,
-                                                onSwitchTab: onSwitchTab)
-            case .restructure: RestructureView(store: store, engine: engine,
-                                                selectedRoot: pickedURL)
+            case .restructure: RestructureView(store: store, engine: engine, selectedRoot: pickedURL)
+            case .tools:       ToolsWorkbench(engine: engine, session: toolsSession, inline: true)
             case .settings:    SettingsTab(engine: engine, store: store)
             }
         }
         .id(activeTab)
-        .transition(.opacity.combined(with: .move(edge: .trailing)))
-        .animation(.easeInOut(duration: 0.22), value: activeTab)
+        .transition(.opacity)
+        .animation(.easeInOut(duration: 0.18), value: activeTab)
     }
 }
 
-// MARK: - Empty state — onboarding splash
+// MARK: - Empty state — before any folder is picked
 
 private struct EmptyState: View {
     let onPickFolder: () -> Void
-    @State private var shimmer: Double = 0
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private struct PipelineStep {
-        let n: Int
-        let title: String
-        let detail: String
-    }
-
-    private let steps: [PipelineStep] = [
-        .init(n: 1, title: "Scan",
-              detail: "Reads your files, finds faces, indexes text in photos."),
-        .init(n: 2, title: "Cluster",
-              detail: "Groups faces by person."),
-        .init(n: 3, title: "Verify",
-              detail: "Double-checks the ambiguous matches."),
-        .init(n: 4, title: "Name",
-              detail: "You name the people you recognize."),
-        .init(n: 5, title: "Deep Analyze",
-              detail: "Writes captions and smart filenames using the names you gave."),
-        .init(n: 6, title: "Restructure",
-              detail: "Proposes a clean folder layout. Reversible via shortcuts before any real moves."),
+    private let steps: [(String, String, String)] = [
+        ("Browse", "Scan the folder", "Reads your files, finds faces, indexes text in photos."),
+        ("Browse", "Confirm faces", "Group faces by person and name the ones you recognize."),
+        ("Analyze", "Captions and names", "Deep Analyze writes captions and proposes specific file names."),
+        ("Analyze", "Review moments", "Chapters, searchable evidence and the best take of each attempt."),
+        ("Act", "Clean up and restructure", "Trash extra copies, preview a folder layout, try it with shortcuts, then move.")
     ]
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                titleBlock
-                stepsList
-                cta
-                footer
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    SectionLabel("FileID / Get started")
+                    Text("FileID").font(Theme.Font.display(56)).foregroundStyle(Theme.text1)
+                    Text("Local-first file organizer. Every model runs on this Mac. Files never leave it.")
+                        .font(Theme.Font.body(15)).foregroundStyle(Theme.text2)
+                }
+                .padding(.bottom, 26)
+
+                Panel {
+                    PanelHeader("What happens next")
+                    ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                        HStack(alignment: .firstTextBaseline, spacing: 14) {
+                            Text(String(index + 1)).font(Theme.Font.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
+                                .frame(width: 16, height: 16).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 1))
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 8) {
+                                    Text(step.1).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                                    MetaText(step.0.uppercased(), size: 10.5)
+                                }
+                                Text(step.2).font(Theme.Font.body(13)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+                    }
+                }
+                .padding(.bottom, 20)
+
+                HStack(spacing: 12) {
+                    Button { onPickFolder() } label: { Label("Pick a folder", systemImage: "folder.badge.plus") }
+                        .buttonStyle(.dsPrimary)
+                        .keyboardShortcut("o", modifiers: .command)
+                    MetaText("…or drag a folder into this window. ⌘O at any time.")
+                }
             }
             .frame(maxWidth: 720, alignment: .leading)
             .padding(.horizontal, 40)
-            .padding(.vertical, 56)
-            .frame(maxWidth: .infinity)
+            .padding(.vertical, 48)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    private var titleBlock: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Group {
-                if reduceMotion {
-                    // Solid gold for users who prefer reduced motion —
-                    // still distinctive, just not animated.
-                    Text("FileID")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Theme.gold)
-                } else {
-                    // Iridescent gradient pulled from the FileID logo's
-                    // rainbow backdrop. Slowly drifts so the title feels
-                    // alive without being distracting — the splash's
-                    // signature visual.
-                    Text("FileID")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [
-                                    Theme.gold, Theme.delight, Theme.ai,
-                                    Theme.info, Theme.gold
-                                ],
-                                startPoint: UnitPoint(x: shimmer, y: 0),
-                                endPoint: UnitPoint(x: shimmer + 1, y: 1)
-                            )
-                        )
-                        .onAppear {
-                            withAnimation(
-                                .linear(duration: 12).repeatForever(autoreverses: false)
-                            ) {
-                                shimmer = 1
-                            }
-                        }
-                }
-            }
-            Text("Local-first file organizer. Everything runs on your Mac.")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var stepsList: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            ForEach(steps, id: \.n) { step in
-                HStack(alignment: .firstTextBaseline, spacing: 16) {
-                    Text("\(step.n)")
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.black)
-                        .frame(width: 24, height: 24)
-                        .background(Circle().fill(Theme.gold))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(step.title)
-                            .font(.callout.bold())
-                        Text(step.detail)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
-    }
-
-    private var cta: some View {
-        Button(action: onPickFolder) {
-            Label("Pick a folder", systemImage: "folder.badge.plus")
-                .font(.callout.bold())
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Theme.gold))
-                .foregroundStyle(.black)
-        }
-        .buttonStyle(.plain)
-        .keyboardShortcut("o", modifiers: .command)
-    }
-
-    private var footer: some View {
-        Text("…or drag a folder into this window. Press ⌘O at any time.")
-            .font(.caption)
-            .foregroundStyle(.tertiary)
     }
 }

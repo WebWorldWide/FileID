@@ -52,7 +52,6 @@
     "qwen25vl_mmproj": "Apache-2.0",
     "gemma3_gguf": "Gemma",
     "gemma3_mmproj": "Gemma",
-    "whisper_base_model": "MIT",
     "bge_model": "MIT",
     "bge_vocab": "MIT"
   },
@@ -264,16 +263,6 @@
       "url": "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF/resolve/main/mmproj-model-f16.gguf",
       "sha256": "8c0fb064b019a6972856aaae2c7e4792858af3ca4561be2dbf649123ba6c40cb",
       "approxBytes": 851251104
-    },
-    {
-      "id": "whisper_base_model",
-      "kind": "whisper",
-      "platforms": [
-        "windows"
-      ],
-      "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-      "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
-      "approxBytes": 147951465
     },
     {
       "id": "bge_model",

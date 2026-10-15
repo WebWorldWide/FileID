@@ -15,7 +15,7 @@ struct ShimmerView: View {
     var body: some View {
         AtmosphereTimeline { elapsed in
             let phase = CGFloat(-1.2 + 2.4 * elapsed.truncatingRemainder(dividingBy: 1.6) / 1.6)
-            RoundedRectangle(cornerRadius: cornerRadius)
+            Rectangle()
                 .fill(Color.white.opacity(0.05))
                 .overlay {
                     GeometryReader { geo in
@@ -33,7 +33,7 @@ struct ShimmerView: View {
                         .offset(x: w * phase)
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

@@ -688,6 +688,62 @@ public class PeopleSelectionReprojectTests
         new() { ClusterId = id, AnchorFaceId = anchor, MemberCount = members, DisplayName = name };
 
     [Fact]
+    public void RefreshedCropReplacesOnlyItsCardAndPreservesConfirmedIdentityAndSelection()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "fileid-people-refresh-" + System.Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "face.jpg");
+        try
+        {
+            var missing = PersonCluster.ReadCropRevision(path, "v2");
+            File.WriteAllBytes(path, new byte[] { 1, 2, 3 });
+            var revision = PersonCluster.ReadCropRevision(path, "v2");
+            Assert.NotEqual(missing, revision);
+            var initial = new PersonCluster
+            {
+                ClusterId = 5,
+                AnchorFaceId = 8,
+                MemberCount = 3,
+                DisplayName = "Alex",
+                AnchorCacheRevision = revision
+            };
+            var items = new ObservableCollection<PersonCluster> { initial };
+            initial.IsSelected = true;
+            var unchanged = new PersonCluster
+            {
+                ClusterId = 5,
+                AnchorFaceId = 8,
+                MemberCount = 3,
+                DisplayName = "Alex",
+                AnchorCacheRevision = revision
+            };
+            PeopleViewModel.MergeByClusterId(items, new[] { unchanged });
+            Assert.Same(initial, items[0]);
+            File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path).AddSeconds(2));
+            var updated = PersonCluster.ReadCropRevision(path, "v2");
+            Assert.NotEqual(revision, updated);
+            Assert.NotEqual(updated, PersonCluster.ReadCropRevision(path, "v3"));
+            var refreshed = new PersonCluster
+            {
+                ClusterId = 5,
+                AnchorFaceId = 8,
+                MemberCount = 3,
+                DisplayName = "Alex",
+                AnchorCacheRevision = updated
+            };
+            PeopleViewModel.MergeByClusterId(items, new[] { refreshed });
+            FileID.Views.People.PeopleView.ReprojectSelection(items, new HashSet<int> { 5 });
+            Assert.Same(refreshed, items[0]);
+            Assert.Equal("Alex", items[0].DisplayName);
+            Assert.True(items[0].IsSelected);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void MergeByClusterId_ReplacesInstanceOnChangedCount_DropsSelection()
     {
         var a = Cluster(5, members: 3);

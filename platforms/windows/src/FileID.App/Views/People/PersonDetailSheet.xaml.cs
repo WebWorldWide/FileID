@@ -30,6 +30,21 @@ public sealed partial class PersonDetailSheet : UserControl
         public string FaceLabel => $"Face {FaceId}";
     }
 
+    internal const string PersonQuery = """
+        SELECT p.title, p.first_name, p.middle_name, p.last_name, p.suffix,
+               COUNT(f.id), COALESCE(p.is_unknown, 0)
+        FROM persons p
+        LEFT JOIN face_prints fp ON fp.person_id = p.id AND COALESCE(fp.excluded, 0) = 0
+        LEFT JOIN files f ON f.id = fp.file_id AND f.failed = 0
+        WHERE p.id = @id GROUP BY p.id
+        """;
+
+    internal const string FacesQuery = """
+        SELECT fp.id FROM face_prints fp JOIN files f ON f.id = fp.file_id
+        WHERE fp.person_id = @id AND COALESCE(fp.excluded, 0) = 0 AND f.failed = 0
+        ORDER BY COALESCE(fp.face_quality, 0) DESC, fp.id ASC LIMIT 200
+        """;
+
     private long _personId;
     private readonly ObservableCollection<FaceTile> _faces = new();
 
@@ -100,9 +115,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 // Pull structured name fields.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, COUNT(fp.id), COALESCE(p.is_unknown, 0) " +
-                                      "FROM persons p LEFT JOIN face_prints fp ON fp.person_id = p.id " +
-                                      "WHERE p.id = @id GROUP BY p.id";
+                    cmd.CommandText = PersonQuery;
                     cmd.Parameters.AddWithValue("@id", personId);
                     using var r = cmd.ExecuteReader();
                     if (r.Read())
@@ -121,7 +134,7 @@ public sealed partial class PersonDetailSheet : UserControl
                 // Pull every face id for this cluster + check for an on-disk JPEG.
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT id FROM face_prints WHERE person_id = @id ORDER BY COALESCE(face_quality, 0) DESC LIMIT 200";
+                    cmd.CommandText = FacesQuery;
                     cmd.Parameters.AddWithValue("@id", personId);
                     using var r = cmd.ExecuteReader();
                     while (r.Read())

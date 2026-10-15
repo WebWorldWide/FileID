@@ -43,6 +43,7 @@ let package = Package(
         .target(
             name: "FileIDShared",
             path: "shared/Sources/FileIDShared",
+            resources: [.process("Resources")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 
@@ -61,6 +62,7 @@ let package = Package(
                 .product(name: "GRDB",                 package: "GRDB.swift"),
                 .product(name: "MLXLMCommon",          package: "mlx-swift-lm"),
                 .product(name: "MLXVLM",               package: "mlx-swift-lm"),
+                .product(name: "MLXLLM",               package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace",       package: "mlx-swift-lm"),
                 .product(name: "Tokenizers",           package: "swift-transformers"),
                 .product(name: "onnxruntime",          package: "onnxruntime-swift-package-manager")
@@ -85,6 +87,7 @@ let package = Package(
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
             path: "app/Sources/FileID",
+            resources: [.copy("Resources/Fonts")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
 

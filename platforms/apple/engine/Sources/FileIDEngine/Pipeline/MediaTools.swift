@@ -84,18 +84,22 @@ public actor MediaTools {
     static var capabilities: [ToolCapability] {
         [ToolCapability(id: "photo", available: true, inputFormats: ["png", "jpeg", "tiff", "heic"], outputFormats: ["png", "jpeg", "tiff"], detail: "Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected. Orientation is applied; location and camera metadata are stripped. Output is 8-bit SDR; this is not AI enhancement. JPEG transparency is flattened onto white."),
          ToolCapability(id: "chapters", available: true, inputFormats: ["catalog chapters"], outputFormats: ["json", "vtt"], detail: "Export non-stale chapter markers. WebVTT is a chapter cue list, not a speech transcript."),
-         ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280 or 1920 pixels. Optional 9:16, 16:9, 1:1 or 4:5 frames fit the entire picture with padding. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
-         ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Stabilization, AI upscaling, and tracked reframing are not installed yet.")]
+         ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280, 1920 or 3840 pixels. Optional conventional enlargement renders smaller sources at the selected resolution without recovering detail. Optional 9:16, 16:9, 1:1 or 4:5 frames fit the entire picture, or follow detected people with smooth cropping and full-picture fallback. Follow-people mode samples twice per second and supports clips up to ten minutes. Optional stabilization corrects estimated translation and rotation at up to 60 fps, with up to 12% edge-covering zoom and reported uncorrected samples. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
+         ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Neural super-resolution is unavailable. Conventional enlargement is available through video export.")]
     }
 
     static func supports(_ recipe: ToolRecipe) -> Bool {
         (1...8192).contains(recipe.maxDimension) &&
-        (recipe.allowUpscale != true || recipe.kind == "photo") &&
+        (recipe.allowUpscale != true || ["photo", "video"].contains(recipe.kind)) &&
         (recipe.videoAspectRatio == nil || recipe.kind == "video") &&
+        (recipe.videoFraming == nil || recipe.kind == "video") &&
+        (recipe.videoStabilization == nil || recipe.kind == "video") &&
+        (recipe.videoFraming.map { ["fit", "auto"].contains($0) } ?? true) &&
+        (recipe.videoFraming != "auto" || (recipe.videoAspectRatio ?? "source") != "source") &&
         (recipe.videoAspectRatio.map { ["source", "9:16", "16:9", "1:1", "4:5"].contains($0) } ?? true) &&
         ((recipe.kind == "photo" && ["png", "jpeg", "tiff"].contains(recipe.format)) ||
          (recipe.kind == "chapters" && ["json", "vtt"].contains(recipe.format)) ||
-         (recipe.kind == "video" && recipe.format == "mp4" && [1280,1920].contains(recipe.maxDimension)))
+         (recipe.kind == "video" && recipe.format == "mp4" && [1280,1920,3840].contains(recipe.maxDimension)))
     }
 
     public func recover(database: Database) async {
@@ -139,10 +143,13 @@ public actor MediaTools {
             let chapters = try await database.pool.read { db in try CatalogStore.chapters(db, fileID: fileID).filter { !$0.stale } }
             if recipe.kind == "chapters", chapters.isEmpty { throw Failure(text: "A selected file has no current chapter markers.") }
             if recipe.kind == "photo" { try Self.validateImage(sourceURL) }
-            if recipe.kind == "video" { _ = try await VideoConversionWorker.request(source: sourceURL, recipe: recipe) }
+            var framingSummary = ""
+            if recipe.kind == "video" { framingSummary = try await VideoConversionWorker.request(source: sourceURL, recipe: recipe).toolSummary }
             let sourceHash = try Self.hash(sourceURL)
-            let frame = recipe.videoAspectRatio.flatMap { $0 == "source" ? nil : " - \($0.replacingOccurrences(of: ":", with: "x")) Fit" } ?? ""
-            let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + (recipe.kind == "chapters" ? " - Chapters" : " - Export\(frame)")
+            let framingLabel = recipe.videoFraming == "auto" ? "People" : "Fit"
+            let stabilizationLabel = recipe.videoStabilization == true ? " - Stabilized" : ""
+            let frame = recipe.videoAspectRatio.flatMap { $0 == "source" ? nil : " - \($0.replacingOccurrences(of: ":", with: "x")) \(framingLabel)" } ?? ""
+            let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + (recipe.kind == "chapters" ? " - Chapters" : " - Export\(frame)\(stabilizationLabel)")
             let ext = recipe.format == "jpeg" ? "jpg" : recipe.format
             var index = 1
             var output: URL
@@ -153,7 +160,7 @@ public actor MediaTools {
                 try ReadOnlyLocations.requireSourceMutation(output)
             } while FileManager.default.fileExists(atPath: output.path) || reserved.contains(output.lastPathComponent.lowercased())
             reserved.insert(output.lastPathComponent.lowercased())
-            items.append(Item(output: ToolOutput(fileID: fileID, sourcePath: source, outputPath: output.path), sourceHash: sourceHash, chapters: chapters))
+            items.append(Item(output: ToolOutput(fileID: fileID, sourcePath: source, outputPath: output.path, message: framingSummary), sourceHash: sourceHash, chapters: chapters))
         }
         let plan = Plan(recipe: recipe, items: items)
         let encoded = String(decoding: try JSONEncoder().encode(plan), as: UTF8.self)
@@ -193,6 +200,7 @@ public actor MediaTools {
         do {
             for item in plan.items {
                 try Task.checkCancellation()
+                var framingSummary = item.output.message
                 let source = URL(fileURLWithPath: item.output.sourcePath)
                 let destination = URL(fileURLWithPath: item.output.outputPath)
                 let stage = destination.deletingLastPathComponent().appendingPathComponent(".FileIDExport-\(UUID().uuidString).part")
@@ -202,7 +210,9 @@ public actor MediaTools {
                 try await database.pool.write { db in try db.execute(sql: "UPDATE catalog_operations SET plan_json=? WHERE id=?", arguments: [checkpoint, id]) }
                 defer { try? FileManager.default.removeItem(at: stage) }
                 if plan.recipe.kind == "photo" { try await VideoFrameWorker.exportPhoto(source: source, output: stage, recipe: plan.recipe) }
-                else if plan.recipe.kind == "video" { _ = try await VideoConversionWorker.request(source: source, output: stage, recipe: plan.recipe) }
+                else if plan.recipe.kind == "video" {
+                    framingSummary = try await VideoConversionWorker.request(source: source, output: stage, recipe: plan.recipe).toolSummary
+                }
                 else { try Self.exportChapters(item.chapters, format: plan.recipe.format).write(to: stage, options: .withoutOverwriting) }
                 try Task.checkCancellation()
                 guard try Self.hash(source) == item.sourceHash else { throw Failure(text: "A source changed during export. No output was published for that file.") }
@@ -214,7 +224,7 @@ public actor MediaTools {
                 try ReadOnlyLocations.requireWritable(destination)
                 try FileManager.default.linkItem(at: stage, to: destination)
                 receipts[receipts.count - 1].output.state = "completed"
-                receipts[receipts.count - 1].output.message = "Original preserved."
+                receipts[receipts.count - 1].output.message = "Original preserved. " + framingSummary
                 let outputSize = (try destination.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
                 let modified = (try destination.resourceValues(forKeys: [.contentModificationDateKey])).contentModificationDate?.timeIntervalSince1970
                 let recipeJSON = String(decoding: try JSONEncoder().encode(plan.recipe), as: UTF8.self)

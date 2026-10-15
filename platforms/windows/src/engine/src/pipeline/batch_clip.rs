@@ -109,6 +109,9 @@ impl ClipBatchCoordinator {
     /// Err if the coordinator thread has exited (process shutting down)
     /// or the underlying embed_batch failed for this batch.
     pub async fn embed(&self, rgb: Vec<u8>) -> Result<Vec<f32>> {
+        if crate::coordinator::process_gpu_device_removed() {
+            return Err(anyhow!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER));
+        }
         let (tx, rx) = oneshot::channel();
         let req = ClipRequest { rgb, response: tx };
         // Use blocking send via a tiny spawn_blocking — crossbeam's send is
@@ -182,6 +185,14 @@ fn run_coordinator(
         for req in batch {
             imgs.push(req.rgb);
             senders.push(req.response);
+        }
+        if crate::coordinator::process_gpu_device_removed() {
+            for sender in senders {
+                let _ = sender.send(Err(anyhow!(
+                    crate::models::runtime::GPU_DEVICE_REMOVED_MARKER
+                )));
+            }
+            continue;
         }
         match model.embed_batch(&imgs) {
             Ok(mut embeddings) if embeddings.len() == senders.len() => {

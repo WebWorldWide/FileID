@@ -56,7 +56,8 @@ actor ChatService {
                         : "Found \(hits.count) file or evidence matches \(scope)\(filter)\(people)\(events)\(time)." + (hits.contains { $0.kind == "sampledFrame" } ? " Sampled-frame descriptions remain unverified." : "")
                 await emit(request, status: "retrieving", message: explanation, hits: hits, database: database, sink: sink)
                 guard active[request.conversationID] == request.requestID else { return }
-                if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState {
+                if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState,
+                   request.modelKind == nil || request.modelKind == model.rawValue {
                     active[request.conversationID] = request.requestID
                     await emit(request, status: "queued", message: "Results are ready. The loaded local model will summarize their evidence when its current work finishes.", hits: hits, database: database, sink: sink)
                     guard active[request.conversationID] == request.requestID else { return }
@@ -66,7 +67,7 @@ actor ChatService {
                 } else {
                     let modelNote = hits.isEmpty
                         ? " No model summary was attempted."
-                        : " No local model is loaded; showing catalog evidence only."
+                        : " The selected model is not loaded. Choose Download & load in the model browser; showing catalog evidence only."
                     let message = explanation + (request.useModel == true ? modelNote + " No download was started." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }

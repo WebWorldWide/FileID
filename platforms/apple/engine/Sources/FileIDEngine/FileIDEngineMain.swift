@@ -19,6 +19,15 @@ struct FileIDEngineMain {
     static let databaseOpenFailureMessage = "FileID could not open its local library database. Check available disk space and permissions, then relaunch."
 
     static func main() async {
+        if Array(CommandLine.arguments.dropFirst()) == ["--model-catalog-status"] {
+            let entries = MLXModelCatalog.entries
+            let vision = entries.filter { $0.role == .vision }.count
+            if let data = try? JSONSerialization.data(withJSONObject: ["catalogEntries":entries.count,"vision":vision,"text":entries.count - vision], options:[.sortedKeys]) {
+                print(String(decoding: data, as: UTF8.self))
+            }
+            exit(entries.count >= 200 ? 0 : 1)
+        }
+
         if CommandLine.arguments.dropFirst().first == "--sample-video" {
             exit(await VideoFrameWorker.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
@@ -370,27 +379,73 @@ struct FileIDEngineMain {
                 return
             }
             let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824
-            // The curated MLX models; the extended catalog's MLX entries need
-            // per-architecture loader support before macOS can offer them.
-            let includeVision = role.map { $0 == "vision" } ?? true
-            let models: [ModelCatalogItem] = !includeVision ? [] : AIModelKind.allCases.map { kind in
-                ModelCatalogItem(
+            let benchmarks = ModelBenchmarkStore.all()
+            // Favorites plus the bundled MLX catalog, every entry pinned to the
+            // locked mlx-swift-lm runtime; only vision and text roles exist on macOS.
+            let models: [ModelCatalogItem] = AIModelKind.allCases.compactMap { kind in
+                let kindRole = kind.supportsVision ? "vision" : "text"
+                guard role.map({ $0 == kindRole }) ?? true else { return nil }
+                let catalog = kind.catalogEntry
+                let isFavorite = AIModelKind.favorites.contains(kind)
+                let quantization = catalog.map { "\($0.quantization.bits)bit" } ?? (kind.displayName.contains("8-bit") ? "8bit" : "4bit")
+                return ModelCatalogItem(
                     id: kind.rawValue, name: kind.displayName, family: kind.sourceRepo.components(separatedBy: "/").last ?? kind.rawValue,
-                    upstream: kind.sourceRepo, role: "vision", format: "mlx", quantization: kind.displayName.contains("8-bit") ? "8bit" : "4bit",
+                    upstream: catalog?.bases.first?.repo ?? kind.sourceRepo, role: kindRole, format: "mlx", quantization: quantization,
                     license: kind.licensePolicyKey, termsRequired: kind.licensePolicyKey == "Gemma", parametersBillion: nil,
                     downloadBytes: kind.approxBytes, estimatedResidentGB: kind.ramBudgetGB,
-                    tier: ModelCatalogItem.tier(forResidentGB: kind.ramBudgetGB), status: "curated", runnable: true,
-                    installed: kind.isInstalledOnDisk(), fits: kind.ramBudgetGB <= memoryGB * 0.6
+                    tier: ModelCatalogItem.tier(forResidentGB: kind.ramBudgetGB), status: isFavorite ? "curated" : "candidate", runnable: true,
+                    installed: kind.isInstalledOnDisk(), fits: kind.ramBudgetGB <= memoryGB * 0.6,
+                    benchmark: benchmarks[kind.rawValue]
                 )
             }
             await sink.emit(.modelCatalog(ModelCatalog(requestID: requestID, physicalMemoryGB: memoryGB, vramMB: 0, models: models)))
         case .benchmarkModel(let requestID, let modelKind, _):
-            await sink.emit(.benchmarkResult(BenchmarkResult(
-                requestID: requestID, modelKind: String(modelKind.prefix(128)), status: "error",
-                message: "On-device benchmarking is available in the shared engine on Windows and Linux; MLX benchmarking on macOS is not yet implemented."
-            )))
+            let reportedKind = String(modelKind.prefix(128))
+            guard HealthCheckResult.isValidRequestID(requestID), let kind = AIModelKind(rawValue: modelKind) else {
+                await sink.emit(.benchmarkResult(BenchmarkResult(
+                    requestID: String(requestID.prefix(128)), modelKind: reportedKind, status: "error",
+                    message: "benchmarkModel needs a valid request ID and model kind.")))
+                return
+            }
+            guard ModelLicenseAcceptance.isAccepted(for: kind) else {
+                await sink.emit(.benchmarkResult(BenchmarkResult(
+                    requestID: requestID, modelKind: reportedKind, status: "error",
+                    message: "Accept the source terms for \(kind.displayName) before benchmarking it.")))
+                return
+            }
+            let claimed = await ModelBenchmarkSlot.shared.claim {
+                Task.detached(priority: .userInitiated) {
+                    SleepGuard.shared.begin(reason: "Model benchmark")
+                    defer { SleepGuard.shared.end() }
+                    JSONLog.shared.info(ev: "benchmark_started", extra: ["kind": AnyCodable(kind.rawValue)])
+                    do {
+                        let benchmark = try await ModelBenchmarkRunner.run(kind: kind) { phase, completed, total in
+                            await sink.emit(.benchmarkProgress(BenchmarkProgress(
+                                requestID: requestID, modelKind: reportedKind, phase: phase, completed: completed, total: total)))
+                        }
+                        ModelBenchmarkStore.save(benchmark, for: kind.rawValue)
+                        await sink.emit(.benchmarkResult(BenchmarkResult(
+                            requestID: requestID, modelKind: reportedKind, status: "ok", benchmark: benchmark)))
+                        JSONLog.shared.info(ev: "benchmark_done", extra: ["kind": AnyCodable(kind.rawValue)])
+                    } catch is CancellationError {
+                        await sink.emit(.benchmarkResult(BenchmarkResult(
+                            requestID: requestID, modelKind: reportedKind, status: "cancelled",
+                            message: "Benchmark cancelled; no result was stored.")))
+                    } catch {
+                        await sink.emit(.benchmarkResult(BenchmarkResult(
+                            requestID: requestID, modelKind: reportedKind, status: "error",
+                            message: String(error.localizedDescription.prefix(2_000)))))
+                    }
+                    await ModelBenchmarkSlot.shared.finish()
+                }
+            }
+            if !claimed {
+                await sink.emit(.benchmarkResult(BenchmarkResult(
+                    requestID: requestID, modelKind: reportedKind, status: "error",
+                    message: "Another benchmark is already running.")))
+            }
         case .cancelBenchmark:
-            break
+            await ModelBenchmarkSlot.shared.cancel()
         case .requestStatus:
             if let snap = await coordinator.snapshot() {
                 await sink.emit(.progress(snap))
@@ -921,6 +976,12 @@ struct FileIDEngineMain {
         case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
             guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
             await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
+        case .reassignFace(let faceID, let destinationPersonID, let createNewPerson):
+            guard let database else { await emitDbUnavailable(sink, action: "reassignFace"); return }
+            await sink.emit(.bulkActionResult(await reassignFace(
+                database: database, faceID: faceID,
+                destinationPersonID: destinationPersonID, createNewPerson: createNewPerson
+            )))
         case .markPersonsAsUnknown(let personIDs):
             guard let database else { await emitDbUnavailable(sink, action: "markPersonsAsUnknown"); return }
             await sink.emit(.bulkActionResult(await markPersonsAsUnknown(database: database, personIDs: personIDs)))
@@ -1146,6 +1207,89 @@ struct FileIDEngineMain {
             return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
         } catch {
             return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
+        }
+    }
+
+    /// Mirrors the shared engine: move one face to an existing or new person,
+    /// recompute both people's counts/representatives, drop an emptied
+    /// unnamed source and its person-level (face-less) verdicts.
+    static func reassignFace(database: Database, faceID: Int64, destinationPersonID: Int64?, createNewPerson: Bool) async -> BulkActionResult {
+        func failure(_ message: String) -> BulkActionResult {
+            BulkActionResult(action: "reassignFace", succeeded: 0, failed: 1, messages: [item(faceID, ok: false, message)])
+        }
+        if createNewPerson && destinationPersonID != nil {
+            return failure("Choose either a new person or an existing destination, not both.")
+        }
+        do {
+            let outcome: Result<Int64?, ReassignFaceRefusal> = try await database.pool.write { db in
+                guard let previousRow = try Row.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id = ?", arguments: [faceID]) else {
+                    return .failure(.missingFace)
+                }
+                let previous: Int64? = previousRow["person_id"]
+                let destination: Int64?
+                if createNewPerson {
+                    try db.execute(sql: "INSERT INTO persons (name, is_unknown, created_at) VALUES (NULL, 0, ?)",
+                                   arguments: [Date().timeIntervalSince1970])
+                    destination = db.lastInsertedRowID
+                } else if let destinationPersonID {
+                    let exists = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?)", arguments: [destinationPersonID]) ?? false
+                    guard exists else { return .failure(.missingDestination) }
+                    destination = destinationPersonID
+                } else {
+                    destination = nil
+                }
+                if destination == previous { return .success(nil) }
+                try db.execute(sql: "UPDATE face_prints SET person_id = ? WHERE id = ?", arguments: [destination, faceID])
+                for personID in Set([previous, destination].compactMap { $0 }) {
+                    try db.execute(sql: """
+                        UPDATE persons
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                            representative_face_id = COALESCE(
+                                (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
+                                 ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
+                                (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1
+                                 ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1)),
+                            centroid = NULL, anchor_radius = NULL, last_clustered_at = NULL
+                        WHERE id = ?1
+                        """, arguments: [personID])
+                }
+                if let previous {
+                    try db.execute(sql: """
+                        DELETE FROM persons
+                        WHERE id = ?1
+                          AND NOT EXISTS (SELECT 1 FROM face_prints WHERE person_id = ?1)
+                          AND COALESCE(TRIM(name), '') = '' AND COALESCE(TRIM(title), '') = ''
+                          AND COALESCE(TRIM(first_name), '') = '' AND COALESCE(TRIM(middle_name), '') = ''
+                          AND COALESCE(TRIM(last_name), '') = '' AND COALESCE(TRIM(suffix), '') = ''
+                        """, arguments: [previous])
+                    if db.changesCount > 0 {
+                        try db.execute(sql: """
+                            DELETE FROM face_verifications
+                            WHERE (person_a = ?1 OR person_b = ?1) AND (face_a IS NULL OR face_b IS NULL)
+                            """, arguments: [previous])
+                    }
+                }
+                return .success(destination)
+            }
+            switch outcome {
+            case .success(let destination):
+                return BulkActionResult(action: "reassignFace", succeeded: 1, failed: 0,
+                                        messages: [item(faceID, ok: true, destination.map { "Assigned to person #\($0)." })])
+            case .failure(let refusal):
+                return failure(refusal.message)
+            }
+        } catch {
+            return failure(error.localizedDescription)
+        }
+    }
+
+    private enum ReassignFaceRefusal: Error {
+        case missingFace, missingDestination
+        var message: String {
+            switch self {
+            case .missingFace: return "This face no longer exists; refresh People and try again."
+            case .missingDestination: return "The destination person no longer exists; refresh People and try again."
+            }
         }
     }
 

@@ -242,7 +242,7 @@ fn batch_cleanup_actual_handler_terminals_and_dispatch_guard_await_finalization(
     let begin = main.find("CommandPayload::DeepAnalyzeAll(payload) =>").unwrap();
     let end = begin
         + main[begin..]
-            .find("handle_deep_analyze_all(sink_c, db_c, payload, cancel).await;")
+            .find("handle_deep_analyze_all(")
             .unwrap();
     assert!(main[begin..end].contains("let _guard = guard;"));
     assert!(!main[begin..end].contains("drop(guard)"));

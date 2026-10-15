@@ -62,6 +62,11 @@ public final class EngineClient {
     public private(set) var deepAnalyzeLast: DeepAnalyzeFileDone?
     public private(set) var deepAnalyzeComplete: DeepAnalyzeComplete?
     public private(set) var modelDownloadProgress: ModelDownloadProgress?
+    public private(set) var benchmarkProgress: BenchmarkProgress?
+    public private(set) var benchmarkResults: [String: ModelBenchmark] = [:]
+    public private(set) var benchmarkMessage: (modelKind: String, text: String)?
+    public private(set) var benchmarkModelKind: String?
+    private var benchmarkRequestID: String?
     public private(set) var deepAnalyzeInFlight: Bool = false
     /// Streamed by the engine between command-receipt and the first
     /// per-file `deepAnalyzeProgress`, so the UI can show progressive
@@ -763,10 +768,23 @@ public final class EngineClient {
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
+        case .modelCatalog(let catalog):
+            for model in catalog.models { if let result = model.benchmark { benchmarkResults[model.id] = result } }
+        case .benchmarkProgress(let progress):
+            guard progress.requestID == benchmarkRequestID else { break }
+            benchmarkProgress = progress
+        case .benchmarkResult(let result):
+            guard result.requestID == benchmarkRequestID else { break }
+            benchmarkRequestID = nil
+            benchmarkModelKind = nil
+            benchmarkProgress = nil
+            if let benchmark = result.benchmark, result.status == "ok" {
+                benchmarkResults[result.modelKind] = benchmark
+                benchmarkMessage = nil
+            } else {
+                benchmarkMessage = (result.modelKind, result.message ?? "The benchmark didn't finish.")
+            }
         case .healthCheckResult,
-             .modelCatalog,
-             .benchmarkProgress,
-             .benchmarkResult,
              .clipTextEmbedding,
              .mergeSuggestions,
              .hardwareReprobed,
@@ -783,6 +801,9 @@ public final class EngineClient {
     /// starts jobless, so nothing else un-sticks them). Both the crash leg and
     /// a deliberate restart run this — see the call in `terminateRunningEngine`.
     private func resetStateOnlyADeadEngineCouldClear() {
+        benchmarkRequestID = nil
+        benchmarkModelKind = nil
+        benchmarkProgress = nil
         deepAnalyzeInFlight = false
         deepAnalyzeStarting = nil
         deepAnalyzeProgress = nil
@@ -1265,6 +1286,29 @@ public final class EngineClient {
     public func prewarmModel(_ modelKind: String) -> Bool {
         guard ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return false }
         return send(.prewarmModel(modelKind: modelKind))
+    }
+
+    /// Measure an installed model on this Mac: cold load, prefill and decode
+    /// speed, seconds per image, peak memory, JSON reliability.
+    @discardableResult
+    public func benchmarkModel(_ kind: AIModelKind) -> Bool {
+        guard benchmarkRequestID == nil else { return false }
+        let requestID = "bench-" + UUID().uuidString.prefix(8).lowercased()
+        guard send(.benchmarkModel(requestID: requestID, modelKind: kind.rawValue, tune: false)) else { return false }
+        benchmarkRequestID = requestID
+        benchmarkModelKind = kind.rawValue
+        benchmarkMessage = nil
+        benchmarkProgress = BenchmarkProgress(requestID: requestID, modelKind: kind.rawValue, phase: "load", completed: 0, total: 1)
+        return true
+    }
+
+    public func cancelBenchmark() {
+        send(.cancelBenchmark)
+    }
+
+    /// Pulls stored benchmark results for this Mac.
+    public func refreshModelCatalog() {
+        send(.listModels(requestID: "catalog-" + UUID().uuidString.prefix(8).lowercased(), role: nil))
     }
 
     /// Cancel a running prewarm. Lands at the next Task.checkCancellation

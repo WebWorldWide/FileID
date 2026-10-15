@@ -1,5 +1,31 @@
 # FileID next version — implementation ledger
 
+## 2026-10-10 — Mac implementation pass and native port handoff
+
+The latest scope is Mac first, then stop and record Windows/Linux work. The requested Mac paths now include saved-goal best takes and related-group suggestions, native stabilization/social framing/conventional photo and video enlargement, editable searchable chapters/current cast, evidence-specific short names and compatible source-checked People processing. The expanded offline catalog contains 265 permissive MLX entries (72 vision/193 text) and uses the existing verified user-triggered downloader. Chat occupies the right inspector with a searchable native model browser and selected already-loaded model binding in IPC v1.15.
+
+Full native validation passed 568 tests/118 suites, native component screenshots and standalone packaged-catalog verification. The compact model's approved download passed but sequence inference was memory-admission blocked. Broad event/identity quality, neural detail recovery, unsupported formats and production/port release gates are not inferred from those results. [MAC_FINISH.md](MAC_FINISH.md) is the current capability/limit record and detailed Windows/Linux handoff; older open-item tables below describe earlier checkpoints. Stop automatically continuing port work after this Mac pass.
+
+
+## 2026-10-09 Saved goals, tracked people framing and compatible face partitions
+
+Mac video best-take events now persist automatic goal-conditioned evidence from the actual multi-image timeline inference path, with source/model/goal provenance, conservative abstention, resumable windows and native controls. Goal edits invalidate old scores in both engines and Undo restores them. Parser/storage/generated-fixture tests pass; actual VLM outcome accuracy and portable generation/UI remain open.
+
+Mac Tools now offers native Follow people crop paths for social frames, with bounded Vision sampling and full-picture fallback. Generated moving/rotated exports, actual isolated UI preview/execute/Undo and original-byte preservation pass. The UI discloses ten-minute/two-samples-per-second limits. Real human tracking, general objects, safe editable crop preview, stabilization, neural upscaling and portable video adapters remain open. IPC v1.13 mirrors the optional framing and deferred face coverage fields.
+
+Portable image-rs scans are upright and retain raw source bbox provenance. Selected-model/v2/file-stat grouping defers unsupported/stale evidence while retaining identity/correction history, and merge suggestions compare only compatible anchors. Full local Rust/Swift/GTK suites and extracted C# regressions pass; actual ONNX accuracy/performance, identity-safe rescans, native Windows runtime and the remaining face coverage controls are not proved. All five broad feature milestones remain incomplete; this is local unlanded work.
+
+## 2026-10-09 Portable face refresh checkpoint
+
+The shared Rust engine now refreshes existing stale face caches with registered YuNet/SFace, bounded upright image decoding, orientation-aware imported boxes, durable source/model-scoped retries and cancellation. Guarded writes preserve confirmed identities and ignored faces; grouping requires the selected model and current processing namespace. Generated fixture/backend tests exercise publication safety and geometry, not real model accuracy. Raw new-scan inference, HEIC/video coverage, native retry controls, held-out calibration and native Windows/Linux hardware remain acceptance gates. All five broad feature milestones remain incomplete.
+
+## 2026-10-09 Portable People display checkpoint
+
+GTK fallback display now supports native upright CSV and imported raw-pixel boxes under all EXIF orientations, with representative cache provenance invalidation. Windows representative refresh now invalidates both the card instance and the URI image cache, preserving selection through reconciliation; its actual People query filters ignored faces and validates representative membership. Rust/GTK tests and five extracted C# production regressions pass. Native Windows/Linux UI and portable inference decoding/refresh/accuracy remain acceptance gates, and these local changes are not landed.
+
+## 2026-10-09 People display checkpoint
+
+Native People cards now apply the face worker's imported-box EXIF coordinate mapping and reload on representative geometry/model/processing/source revision changes. Generated rotated/mirrored JPEG and stable-identity regressions verify the display correction. This does not establish face recognition accuracy, portable refresh execution, video tracking, or coverage/retry controls; those remain required for the five-feature goal.
 ## 2026-10-13 Store/parity integration review
 
 The Store branch's resident VLM ownership, independent request cancellation, source checks, Deep scope, native Search/Tools/Chat workbenches, and safer file moves are being integrated over the durable shared Rust index. Linux VM Rust/GTK checks, Windows .NET tests, and a real-engine GTK workbench fixture pass locally; native Windows Rust validation and hosted branch review remain open. The newer Linux Deep and Restructure tabs are retained. Saved Deep exclusions now travel through the current IPC or block an overlapping explicit target. Optional CUDA runtimes remain local user installs under the Hugging Face-only egress rule. This is a development integration, not production acceptance or completion of timeline generation, loaded-model Chat, tracked reframing, stabilization, enhancement, or large-library evaluation.
