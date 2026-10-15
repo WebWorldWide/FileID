@@ -10,23 +10,20 @@ struct Sidebar: View {
     @Binding var pickedURL: URL?
     var pickFolder: () -> Void
 
+    @State private var shownArea: MainWindow.Area = .browse
+    @Namespace private var areaPill
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            areaSwitcher
+                .padding(.horizontal, 10).padding(.top, 12).padding(.bottom, 10)
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(MainWindow.Area.allCases) { section in
-                        Text(section.rawValue)
-                            .font(Theme.Font.body(11, .semibold))
-                            .tracking(0.6)
-                            .textCase(.uppercase)
-                            .foregroundStyle(Theme.text3)
-                            .padding(.horizontal, 18)
-                            .padding(.top, section == .browse ? 14 : 16)
-                            .padding(.bottom, 4)
-                        ForEach(section.tabs) { tab in navRow(tab) }
-                    }
+                    ForEach(shownArea.tabs) { tab in navRow(tab) }
                 }
                 .padding(.bottom, 10)
+                .id(shownArea)
+                .transition(.opacity)
             }
             .frame(maxHeight: .infinity, alignment: .top)
 
@@ -65,8 +62,45 @@ struct Sidebar: View {
             .padding(10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear { shownArea = activeTab.area ?? .browse }
+        .onChange(of: activeTab) { _, tab in if let area = tab.area, area != shownArea { withAnimation(Theme.quick) { shownArea = area } } }
         .background(Theme.bg1.opacity(0.55), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
+    }
+
+    /// Browse / Analyze / Act: picks which pages the list shows and opens the
+    /// page last used in that area.
+    private var areaSwitcher: some View {
+        HStack(spacing: 2) {
+            ForEach(MainWindow.Area.allCases) { area in
+                let on = shownArea == area
+                Button {
+                    withAnimation(Theme.spring) { shownArea = area }
+                    activeTab = area.remembered(current: activeTab)
+                } label: {
+                    Text(area.rawValue)
+                        .font(Theme.Font.body(12.5, on ? .semibold : .medium))
+                        .foregroundStyle(on ? Theme.onGold : Theme.text2)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 26)
+                        .background {
+                            if on {
+                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                                    .fill(Theme.gold)
+                                    .matchedGeometryEffect(id: "pill", in: areaPill)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("\(area.rawValue) pages (\(area.shortcutHint))")
+                .accessibilityLabel("\(area.rawValue) pages")
+                .accessibilityAddTraits(on ? [.isSelected, .isButton] : [.isButton])
+            }
+        }
+        .padding(3)
+        .background(Color.black.opacity(0.28), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
     }
 
     private var shouldShowEngineSection: Bool {

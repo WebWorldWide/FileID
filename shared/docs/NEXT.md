@@ -52,7 +52,11 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [ ] HIG: keyboard focus order and visible focus rings on every page with Full Keyboard Access; text-size setting for the content area.
 - [ ] Moments tracks, Takes/Tools/Chat panels, Restructure step cells in v3 layout.
 - [x] Model browser "Speed on this Mac" checked on screen with a real in-app run (Qwen3-VL 4B: 4.3 s load, 165/26 tok/s, 5.1 s per image, 3.8 GB); metrics use the full width, the selected row stays in view, measured memory replaces the estimate.
-- [ ] Title bar: rounded controls, consistent heights, toolbar spacing per HIG.
+- [x] Title bar: window buttons vertically centred in the 48 pt bar (re-applied on resize/full screen), search centred, folder left, activity/chat/settings right; Browse/Analyze/Act moved to the top of the sidebar and filters its pages.
+- [x] Preview sheet: sharp ImageIO decode (Quick Look queued it behind grid thumbnails and showed 640 px), neutral backdrop, toolbar with arrows/Finder/Open/info toggle (⌘I)/close, info panel with details, people, description + smart name, tags, Finder tags, technical.
+- [ ] Scrolling: Library grid and long lists must scroll at display refresh rate with thousands of files (owner reports it is very slow); profile tile rendering, thumbnail decode and per-tile tasks.
+- [ ] Database: faster file catalog for large libraries (owner request) — measure query plans, indexes, FTS and paging on the 3,447-file Adlon library and a synthetic 100k library.
+- [ ] Restructure: owner dislikes the proposed folder organisation; review the plan it generates for Adlon/Camera and redesign the rules.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 

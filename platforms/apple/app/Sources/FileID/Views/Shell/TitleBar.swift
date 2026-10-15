@@ -2,8 +2,8 @@ import SwiftUI
 import AppKit
 import FileIDShared
 
-/// Prototype v3 title bar: switch folders, move between the three areas,
-/// search files and pages or ask Chat (⌘K), watch running work, open Settings.
+/// Title bar: folder on the left, search-or-ask (⌘K) centred, running work,
+/// chat and Settings on the right. Areas live at the top of the sidebar.
 struct TitleBar: View {
     let engine: EngineClient
     let store: ReadStore
@@ -24,14 +24,16 @@ struct TitleBar: View {
     private var isNarrow: Bool { false }
 
     var body: some View {
-        HStack(spacing: 12) {
-            leading
-                .frame(maxWidth: .infinity, alignment: .leading)
-            areaTabs
-            trailing
-                .frame(maxWidth: .infinity, alignment: .trailing)
+        ZStack {
+            HStack(spacing: 12) {
+                leading
+                Spacer(minLength: 12)
+                trailing
+            }
+            searchField
+                .frame(width: 360)
         }
-        .padding(.leading, 78)
+        .padding(.leading, TrafficLights.reservedWidth)
         .padding(.trailing, 14)
         .frame(height: Theme.Metrics.titleBar)
         .onAppear {
@@ -132,38 +134,10 @@ struct TitleBar: View {
         .preferredColorScheme(.dark)
     }
 
-    // MARK: Areas
-
-    private var areaTabs: some View {
-        HStack(spacing: 0) {
-            ForEach(MainWindow.Area.allCases) { area in
-                let on = activeTab.area == area
-                Button {
-                    activeTab = area.remembered(current: activeTab)
-                } label: {
-                    Text(area.rawValue)
-                        .font(Theme.Font.body(13.5, on ? .semibold : .medium))
-                        .foregroundStyle(on ? Theme.onGold : Theme.text2)
-                        .padding(.horizontal, 18)
-                        .frame(height: Theme.Metrics.control)
-                        .background(on ? Theme.gold : Color.clear, ignoresSafeAreaEdges: [])
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(on ? .isSelected : [])
-            }
-        }
-        .background(Color.black.opacity(0.28), ignoresSafeAreaEdges: [])
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
-        .disabled(pickedURL == nil && store.totalFiles == 0)
-        .opacity(pickedURL == nil && store.totalFiles == 0 ? 0.5 : 1)
-    }
-
     // MARK: Search / activity / settings
 
     private var trailing: some View {
         HStack(spacing: 8) {
-            searchField
             activityButton
             Button { chatPresented.toggle() } label: {
                 Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 13, weight: .medium))
@@ -213,7 +187,6 @@ struct TitleBar: View {
         }
         .padding(.leading, 10).padding(.trailing, 6)
         .frame(height: Theme.Metrics.controlLarge)
-        .frame(minWidth: 120, idealWidth: 280, maxWidth: 280)
         .background(Color.black.opacity(0.32), ignoresSafeAreaEdges: [])
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(searchOpen || !searchText.isEmpty ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
         .background {
@@ -397,4 +370,65 @@ struct TitleBar: View {
         .background(Color(hex: 0x161618), ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
     }
+}
+
+/// Centres the window's close/minimise/zoom buttons in FileID's title bar.
+/// AppKit lays them out for a 28 pt title bar and re-lays them out on every
+/// resize, so this re-applies after each layout pass.
+enum TrafficLights {
+    static let leadingInset: CGFloat = 18
+    static let spacing: CGFloat = 20
+    static var reservedWidth: CGFloat { leadingInset + spacing * 2 + 14 + 18 }
+
+    @MainActor static func align(_ window: NSWindow, barHeight: CGFloat) {
+        guard !window.styleMask.contains(.fullScreen),
+              let close = window.standardWindowButton(.closeButton),
+              let container = close.superview?.superview else { return }
+        var frame = container.frame
+        if frame.height != barHeight || frame.maxY != window.frame.height {
+            frame.size.height = barHeight
+            frame.origin.y = window.frame.height - barHeight
+            container.frame = frame
+        }
+        for (index, kind) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
+            guard let button = window.standardWindowButton(kind) else { continue }
+            button.setFrameOrigin(NSPoint(x: leadingInset + CGFloat(index) * spacing,
+                                          y: ((barHeight - button.frame.height) / 2).rounded()))
+        }
+    }
+}
+
+struct TrafficLightAligner: NSViewRepresentable {
+    let barHeight: CGFloat
+
+    final class Probe: NSView {
+        var barHeight: CGFloat = 48
+        private var observers: [NSObjectProtocol] = []
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            guard let window else { return }
+            let names: [Notification.Name] = [NSWindow.didResizeNotification, NSWindow.didEndLiveResizeNotification,
+                                              NSWindow.didExitFullScreenNotification, NSWindow.didBecomeKeyNotification,
+                                              NSWindow.didResignKeyNotification]
+            for name in names {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.realign() }
+                })
+            }
+            realign()
+            DispatchQueue.main.async { [weak self] in self?.realign() }
+        }
+        override func layout() { super.layout(); realign() }
+        func realign() { if let window { TrafficLights.align(window, barHeight: barHeight) } }
+        override func removeFromSuperview() {
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers = []
+            super.removeFromSuperview()
+        }
+    }
+
+    func makeNSView(context: Context) -> Probe { let v = Probe(); v.barHeight = barHeight; return v }
+    func updateNSView(_ view: Probe, context: Context) { view.barHeight = barHeight; view.realign() }
 }

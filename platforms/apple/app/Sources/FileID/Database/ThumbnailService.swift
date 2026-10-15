@@ -68,6 +68,30 @@ public final class ThumbnailService {
         return nil
     }
 
+    /// Screen-sized still for the preview sheet, decoded straight from the
+    /// file with ImageIO (a RAW's embedded preview, or a scaled decode). Skips
+    /// Quick Look and the thumbnail gate, which grid thumbnails keep busy.
+    nonisolated static func previewImage(for url: URL, maxPixelSize: Int) async -> NSImage? {
+        await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+            var image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+            if let small = image, max(small.width, small.height) < 800 {
+                var full = options
+                full[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
+                full[kCGImageSourceCreateThumbnailFromImageAlways] = true
+                image = CGImageSourceCreateThumbnailAtIndex(source, 0, full as CFDictionary) ?? small
+            }
+            guard let image else { return nil }
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }.value
+    }
+
     nonisolated static func sourceOrientation(for url: URL) async -> Int? {
         await thumbDecodeGate.acquire()
         defer { Task { await thumbDecodeGate.release() } }
