@@ -569,6 +569,40 @@ public enum Restructure {
         // Windows engine (commands/restructure.rs). (R3 → learn-your-style)
         proposals = await RestructureFeedback.boost(database: database, proposals: proposals)
 
+        // Keep what the user already organized; file loose files into the event
+        // they were captured during; fix RAW/JPEG/video files in the wrong format
+        // folder. Owner kill-switch: FILEID_RESTRUCTURE_RESPECT=0.
+        var keptOrganizedFolders = Set<String>()
+        if ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_RESPECT"] != "0" {
+            let infos = rows.map { RestructureRespect.FileInfo(fileID: $0.id, path: $0.path, kind: $0.kind,
+                                                                captureUnix: $0.createdAt ?? $0.modifiedAt) }
+            let byID = Dictionary(infos.map { ($0.fileID, $0) }, uniquingKeysWith: { a, _ in a })
+            let spans = RestructureRespect.eventSpans(files: infos, root: libraryRoot.path)
+            var filtered = RestructureRespect.apply(proposals, files: byID, libraryRoot: libraryRoot.path).kept
+            var planned = Set(filtered.map(\.fileID))
+            for correction in RestructureRespect.formatCorrections(files: infos, root: libraryRoot.path) where !planned.contains(correction.fileID) {
+                filtered.append(correction)
+                planned.insert(correction.fileID)
+            }
+            for index in filtered.indices {
+                let p = filtered[index]
+                guard !RestructureRespect.isOrganized(p.oldPath, under: libraryRoot.path),
+                      let file = byID[p.fileID],
+                      let destination = RestructureRespect.eventDestination(for: file, spans: spans) else { continue }
+                let event = (destination as NSString).deletingLastPathComponent
+                filtered[index] = RestructureProposal(
+                    fileID: p.fileID, oldPath: p.oldPath, newPath: destination,
+                    bucket: (event as NSString).lastPathComponent, confidence: "auto",
+                    reason: "Captured during \(RestructureRespect.eventRoot(of: destination, under: libraryRoot.path) ?? "this event"); filed with it.")
+            }
+            proposals = filtered
+            let moving = Set(filtered.map { ($0.oldPath as NSString).deletingLastPathComponent })
+            for file in infos where RestructureRespect.isOrganized(file.path, under: libraryRoot.path) {
+                let folder = (file.path as NSString).deletingLastPathComponent
+                if !moving.contains(folder) { keptOrganizedFolders.insert(folder) }
+            }
+        }
+
         // Engine-authoritative folder classification on the FULL proposal set
         // (Windows A1/A3): classify each source folder, then strip every move out
         // of an Anchor folder so files the UI promised would "stay put" are never
@@ -582,7 +616,11 @@ public enum Restructure {
         // undercount the folders actually being left alone. Mirrors the Windows engine,
         // which computes folder_class on the full proposed set before stripping.
         let folderClass = classifyFolders(proposals)
-        let tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
+        var tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
+        for folder in keptOrganizedFolders where tiers.tierByFolder[folder] == nil {
+            tiers.tierByFolder[folder] = "Anchor"
+            tiers.anchor += 1
+        }
         let stripped = stripAnchorFolderMovesExcept(
             proposals, classified: folderClass, exempt: semanticSourceFolders)
         let actionable = stripped.filter { !pathsEqual($0.oldPath, $0.newPath) }

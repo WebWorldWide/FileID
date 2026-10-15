@@ -433,6 +433,11 @@ struct RestructureView: View {
         return c.clip == 0 && c.text == 0
     }
 
+    private var clipModelInstalled: Bool {
+        if case .installed = CLIPModelInstaller.shared.status { return true }
+        return false
+    }
+
     private var missingContentModelsBanner: some View {
         HStack(alignment: .center, spacing: 12) {
             ZStack {
@@ -444,18 +449,24 @@ struct RestructureView: View {
                     .foregroundStyle(Theme.warning)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text("Organizing by date only — AI models aren't installed")
+                Text(clipModelInstalled ? "Rescan so Restructure can see what's in your photos" : "Organizing by date only — the image model isn't installed")
                     .font(Theme.Font.body(13.5, .semibold))
-                Text("Without the image (CLIP) + document (BGE) models, the butler can't read what your files ARE, so it falls back to year/month folders. Install them in Settings → AI Models, then rescan, and photos group by what's in them and documents by their content.")
+                Text(clipModelInstalled
+                     ? "The image model is installed, but this library was scanned before it was, so no photo has been read yet. A rescan reads them; files already up to date are skipped."
+                     : "Without the image (CLIP) and document (BGE) models FileID can't see what your files contain, so loose files fall back to year and month folders. Install them in Settings ▸ AI Models, then rescan.")
                     .font(Theme.Font.body(12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Button {
-                activeTabRaw = MainWindow.Tab.settings.rawValue
+                if clipModelInstalled, let root = libraryRoot {
+                    engine.startScan(rootURL: root)
+                } else {
+                    activeTabRaw = MainWindow.Tab.settings.rawValue
+                }
             } label: {
-                Label("Open Settings", systemImage: "gearshape")
+                Label(clipModelInstalled ? "Rescan" : "Open Settings", systemImage: clipModelInstalled ? "arrow.counterclockwise" : "gearshape")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.85)))
@@ -1106,7 +1117,7 @@ struct RestructureView: View {
 
         let mapped = Self.mapProposals(from: plan)
         proposals = mapped
-        summary = Self.makeSummary(from: plan, proposals: mapped)
+        summary = Self.makeSummary(from: plan, proposals: mapped, libraryFiles: store.totalFiles)
 
         let by = Dictionary(grouping: mapped, by: { $0.bucket })
         groups = by.map { Group(bucket: $0.key, proposals: $0.value) }
@@ -1235,7 +1246,7 @@ struct RestructureView: View {
     /// anchor-folder moves before sending — so we count distinct source folders
     /// per outcome. That is aggregation of the engine's moves, NOT a re-run of
     /// the retired app-side classifier.
-    static func makeSummary(from plan: RestructurePlan, proposals: [Proposal]) -> AssistantSummary {
+    static func makeSummary(from plan: RestructurePlan, proposals: [Proposal], libraryFiles: Int = 0) -> AssistantSummary {
         let movedOut = proposals.filter { $0.kind == .movedOutAsOutlier }
         let dissolved = proposals.filter { $0.kind == .dissolved }
         let anchorFolders: Int
@@ -1254,9 +1265,8 @@ struct RestructureView: View {
             anchorFolders: anchorFolders,
             mixedFolders: mixedFolders,
             junkFolders: junkFolders,
-            // The plan carries only moves; stay-put (anchor) files are absent,
-            // so a stay-put file count isn't derivable here.
-            staysPutFiles: 0,
+            // The plan carries only moves, so everything else in the library stays.
+            staysPutFiles: max(0, libraryFiles - proposals.count),
             movedOutFiles: movedOut.count,
             dissolvedFiles: dissolved.count,
             staysPutBreakdown: [])

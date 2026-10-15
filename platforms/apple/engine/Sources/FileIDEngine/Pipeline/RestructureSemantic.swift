@@ -14,6 +14,7 @@
 // `Restructure.proposeAll`. Stays byte-faithful with the Rust implementation so
 // a library round-trips across platforms.
 import Foundation
+import Accelerate
 import FileIDShared
 
 public enum RestructureSemantic {
@@ -668,9 +669,11 @@ public enum RestructureSemantic {
             for v in fused { _ = idx.insert(v) }
             return idx
         }()
+        let exact = index == nil ? exactNeighbors(fused, k: k) : nil
         let result = IdentityClustering.cluster(
             embeddings: fused,
             searcher: { i in
+                if let exact { return exact[i] }
                 if let index {
                     let hits = index.search(fused[i], k: k + 1)
                     return hits.compactMap { (rawID, l2dist) -> (neighbor: Int, similarity: Float)? in
@@ -687,6 +690,50 @@ public enum RestructureSemantic {
             },
             params: params)
         return result.clusterIDs
+    }
+
+    /// All k-nearest-neighbour lists at once: one blocked matrix multiply
+    /// (Accelerate) instead of n² scalar dot products, then a top-k per row with
+    /// the same ordering the per-row search used (similarity desc, index asc).
+    /// Nil when vectors have mixed dimensions, which keeps the old path.
+    static func exactNeighbors(_ fused: [[Float]], k: Int) -> [[(neighbor: Int, similarity: Float)]]? {
+        let n = fused.count
+        guard n > 1, let d = fused.first?.count, d > 0, fused.allSatisfy({ $0.count == d }) else { return nil }
+        var matrix = [Float](repeating: 0, count: n * d)
+        for (i, v) in fused.enumerated() { matrix.replaceSubrange((i * d)..<((i + 1) * d), with: v) }
+        let block = 256
+        var result = [[(neighbor: Int, similarity: Float)]](repeating: [], count: n)
+        var scores = [Float](repeating: 0, count: block * n)
+        var order = [Int](repeating: 0, count: n)
+        matrix.withUnsafeBufferPointer { all in
+            var start = 0
+            while start < n {
+                let rows = min(block, n - start)
+                scores.withUnsafeMutableBufferPointer { out in
+                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, Int32(rows), Int32(n), Int32(d),
+                                1, all.baseAddress! + start * d, Int32(d), all.baseAddress!, Int32(d),
+                                0, out.baseAddress!, Int32(n))
+                }
+                for r in 0..<rows {
+                    let i = start + r
+                    let base = r * n
+                    for j in 0..<n { order[j] = j }
+                    order.sort { a, b in
+                        let sa = scores[base + a], sb = scores[base + b]
+                        return sa != sb ? sa > sb : a < b
+                    }
+                    var hits: [(neighbor: Int, similarity: Float)] = []
+                    hits.reserveCapacity(k)
+                    for j in order where j != i {
+                        hits.append((neighbor: j, similarity: scores[base + j]))
+                        if hits.count == k { break }
+                    }
+                    result[i] = hits
+                }
+                start += rows
+            }
+        }
+        return result
     }
 
     // MARK: - Learn-your-style assignment

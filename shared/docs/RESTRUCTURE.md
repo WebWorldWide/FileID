@@ -1,5 +1,21 @@
 # Butler-grade restructure — design (on-device, research-backed)
 
+## 2026-10-15 — Respect the user's organization (macOS; Windows/Linux to follow)
+
+Measured on the owner's Adlon/Camera library (3,447 files, organized as `<Event> <date>/Photos/{RAWs,JPEGs}`), the plan below moved 2,966 files, 2,703 of them "auto": across events (265 RAWs from "Kyle Baseball Game 9-19-26" into "Kyle Baseball Game 9-20-26/Hunter/RAW"), across formats (JPEGs into RAW folders, RAWs into "Edited JPEGs"), and into folders named after tags and camera filenames ("Canine Dog Poodle", "Dsc01548 Sunglasses"). It recognized none of the 28 event folders as anchors. Planning took over 10 minutes in a debug build because the non-image kNN was an n² scalar loop.
+
+A final stage, `RestructureRespect`, now runs after every grouping pass:
+
+1. A file inside a named, non-generic folder stays (generic = Downloads, DCIM, `100MSDCF`, New Folder, Misc, Unsorted, …).
+2. No move crosses top-level event folders.
+3. No move lands in a folder for another format (RAW / JPEG / video / photo folder roles from the folder name).
+4. New folder names never come from camera filename stems or tag identifiers.
+5. A RAW in a JPEG folder (or the reverse) moves to its sibling format folder inside the same event.
+6. A loose file captured during an existing event (10th–90th percentile span, ±3 h, events ≤ 4 days) is filed into that event, in its matching format subfolder.
+
+Organized folders count as "Keep". On Adlon/Camera the plan is now 0 moves, 28 folders kept, in ~19 s (debug); the kNN is one blocked Accelerate matrix multiply. Kill switch: `FILEID_RESTRUCTURE_RESPECT=0`. The shared Rust engine still runs the old behaviour and needs the same stage.
+
+
 > Synthesized from a 5-angle deep-research pass (2026-05). Replaces the current
 > flat rule cascade (`pipeline/restructure.rs::classify` — Person → GPS →
 > Document → Photos/Year/Month → …), which ignores CLIP/tags/clusters and so
