@@ -8,6 +8,17 @@ macOS now implements `benchmarkModel`/`cancelBenchmark`: cold load, two greedy r
 
 Researched widely used local models missing from the catalog (MODELS.md): Granite-Docling, Florence-2 and SigLIP 2 are shortlisted; Kimi-VL, GLM-4.1V, Phi-4-multimodal, Pixtral and DeepSeek-OCR are candidates; Ovis2.5 and Molmo 2 are on hold; Moondream 3.x and LFM2-VL are excluded on license.
 
+Library now follows the v3 selection model while keeping the old preview: a single click selects a tile and opens a 300 pt Selected pane (16:10 preview, name and folder, kind/captured/size/camera/people, caption, tags, Open preview, Similar, Finder, Open); a double-click or "Open preview" opens the full preview sheet as before. Tiles expose a default accessibility action and a named "Open preview" action. File sizes everywhere use Finder's decimal units (a tile said 87.2 MB while the pane said 91.4 MB for the same file). Model loading now checks free memory after the download instead of before, so a briefly busy Mac can still fetch a model and loads it once memory frees up.
+
+First real MLX benchmarks on the 16 GB M1 Pro (owner approved the downloads). They exposed three engine-killing bugs, all fixed: FileID's Qwen3-VL weight adapter did not forward the per-token generation call, so every Qwen3-VL 4B/8B generation hit an upstream `fatalError` and took the engine down; the Idefics3 processor in the pinned mlx-swift-lm fixes 384 px tiles while SmolVLM 256M/500M need 512 px (those two entries are now filtered out of the Mac catalog); and Deep Analyze forced a 448 px image size on every model, which fixed-tile architectures cannot take (now skipped for Idefics3/SmolVLM). Free-memory admission counted only free+inactive pages (3.5 GB here while macOS reported 50% free) and refused even a 0.8B model; it now uses the kernel's availability level with the same safety floor, and checks memory after a download rather than before.
+
+| Model | Load | Prefill | Decode | Per image | Peak | JSON | Probe |
+|---|---|---|---|---|---|---|---|
+| Qwen3.5 0.8B 4-bit | 3.1 s | 611 tok/s | 45 tok/s | 3.5 s | 1.1 GB | 100% | 100% |
+| Qwen3-VL 4B 4-bit | 3.5 s | 145 tok/s | 24 tok/s | 4.4 s | 3.6 GB | 100% | 100% |
+
+Performance: the scan decode now uses a RAW file's embedded full-size preview when it is at least two-thirds of the working size — 606 ms → 35–55 ms per Sony ARW on Adlon. Video moment analysis extracts the next window's frames while the model runs on the current one, and checks the source revision in-process instead of spawning a helper and decoding a frame per window.
+
 Test fix: the incremental-walk test seeded a placeholder CLIP model ID, so it failed on any Mac with CLIP installed; it now seeds the real ID. The media-worker tests need `FILEID_TEST_ENGINE_PATH`, as CI sets it. Verified: full Swift suite **597 tests** pass (174 shared, 46 app, 377 engine, including eight new benchmark tests).
 
 ## 2026-10-15 — Prototype v3 redesign on macOS, website refresh, Adlon run

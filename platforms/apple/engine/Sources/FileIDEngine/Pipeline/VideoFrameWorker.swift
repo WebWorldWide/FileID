@@ -304,6 +304,12 @@ enum VideoFrameWorker {
         return Double(total) / Double(lhs.count * 255)
     }
 
+    /// Same identity the worker stamps on frames, read in-process.
+    static func currentRevision(_ source: URL) throws -> String {
+        let state = try attributes(source)
+        return VideoFrameMetadata(seconds: 0, duration: 0, size: state.size, modifiedAt: state.modified).revision
+    }
+
     private struct Attributes: Equatable { let size: Int64; let modified: Double }
     private static func attributes(_ source: URL) throws -> Attributes {
         let values = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])

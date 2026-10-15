@@ -52,10 +52,11 @@ struct CleanupView: View {
         }
     }
 
-    private var totalSelectedMB: Double {
-        visibleGroups.reduce(0.0) { acc, g in
-            acc + g.files.reduce(0.0) { $0 + (selection.contains($1.id) ? $1.sizeMB : 0) }
+    private var totalSelectedSize: String {
+        let bytes = visibleGroups.reduce(Int64(0)) { acc, g in
+            acc + g.files.reduce(Int64(0)) { $0 + (selection.contains($1.id) ? $1.sizeBytes : 0) }
         }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     var body: some View {
@@ -146,7 +147,7 @@ struct CleanupView: View {
                     confirmDeleteSelected()
                 } label: {
                     Label(
-                        "Delete \(totalSelected) selected (\(String(format: "%.1f MB", totalSelectedMB)))",
+                        "Delete \(totalSelected) selected (\(totalSelectedSize))",
                         systemImage: "trash"
                     )
                     .fontWeight(.semibold)
@@ -357,7 +358,7 @@ struct CleanupView: View {
     // MARK: - Trash actions
 
     private var confirmDeleteMessage: String {
-        let mb = String(format: "%.1f MB", totalSelectedMB)
+        let mb = totalSelectedSize
         return "Moves the selected copies to Trash. Frees about \(mb). You can restore them from Trash if you change your mind."
     }
 
@@ -463,7 +464,7 @@ struct CleanupView: View {
             trashedIDs.append(result.id)
             freedBytes += result.size
         }
-        let mb = Double(freedBytes) / 1_048_576
+        let freed = ByteCountFormatter.string(fromByteCount: freedBytes, countStyle: .file)
         var keeperURLSet = Set<URL>()
         for id in trashedIDs {
             for url in keeperTagsByVictim[id] ?? [] { keeperURLSet.insert(url) }
@@ -501,7 +502,7 @@ struct CleanupView: View {
             tagSummary = " · tagged \(taggedAdded) keeper\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
         }
         var summary = "Trashed \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
-            + " · freed \(String(format: "%.1f", mb)) MB"
+            + " · freed \(freed)"
             + tagSummary
         if verificationRejected > 0 {
             summary += " · \(verificationRejected) skipped because full-byte verification changed or failed"
@@ -611,14 +612,12 @@ private struct GroupCard: View {
                         BadgePill(label: "perceptual match", color: Theme.warning)
                             .help("Matched by perceptual hash (dHash), NOT byte-for-byte. Resizes, re-encodes, crops, and light edits land here — review each before deleting.")
                     }
-                    Text(String(format: "%.1f MB total · %.1f MB if you keep 1",
-                                Double(group.totalBytes) / 1_048_576,
-                                Double(group.reclaimableBytes) / 1_048_576))
+                    Text("\(ByteCountFormatter.string(fromByteCount: group.totalBytes, countStyle: .file)) total · \(ByteCountFormatter.string(fromByteCount: group.reclaimableBytes, countStyle: .file)) if you keep 1")
                         .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
                     if group.isTruncated { MetaText("showing \(group.files.count)", size: 11) }
                     Spacer()
                     if selectedInGroup > 0 {
-                        MetaText(String(format: "%d selected · %.1f MB", selectedInGroup, Double(selectedBytes) / 1_048_576), color: Theme.danger, size: 11)
+                        MetaText("\(selectedInGroup) selected · \(ByteCountFormatter.string(fromByteCount: selectedBytes, countStyle: .file))", color: Theme.danger, size: 11)
                     }
                 }
                 .padding(.horizontal, 14).padding(.top, 10)
@@ -722,7 +721,7 @@ private struct CopyTile: View {
                 .lineLimit(1).truncationMode(.middle)
                 .frame(width: 132, alignment: .center)
             HStack(spacing: 4) {
-                Text(String(format: "%.1f MB", file.sizeMB))
+                Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -746,7 +745,7 @@ private struct CopyTile: View {
     }
 
     private var accessibilityDescription: String {
-        let mb = String(format: "%.1f megabytes", file.sizeMB)
+        let mb = ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file)
         let role = isKeeper ? "Keeper. " : ""
         return "\(role)\(file.url.lastPathComponent), \(mb)"
     }

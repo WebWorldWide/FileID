@@ -10,6 +10,7 @@ actor TimelineAnalysis {
     private var runningID: String?
     private var samplerTask: Task<VideoFrameWorker.Sample, Error>?
     private var sequenceTask: Task<[VideoFrameWorker.Sample], Error>?
+    private var prefetchTask: Task<[VideoFrameWorker.Sample], Error>?
     private var signalTask: Task<[TimelineSignalAnalysis.Signal], Error>?
     private var speechTask: Task<[TimelineSpeechTranscription.Passage]?, Never>?
     private struct Recipe: Codable, Sendable {
@@ -67,6 +68,7 @@ actor TimelineAnalysis {
             else if id == runningID {
             samplerTask?.cancel()
             sequenceTask?.cancel()
+            prefetchTask?.cancel()
                 signalTask?.cancel()
                 speechTask?.cancel()
                 await DeepAnalyze.shared.requestCancel()
@@ -309,6 +311,14 @@ actor TimelineAnalysis {
         let windows = TimelineMomentAnalysis.windows(duration: duration, signals: signals)
         guard !windows.isEmpty else { throw UnreadableVideo() }
         let version = "timeline-moment-sequence-v1/" + modelVersion
+        var prefetched: (start: Double, task: Task<[VideoFrameWorker.Sample], Error>)?
+        defer {
+            if let pending = prefetched {
+                pending.task.cancel()
+                Task { for frame in (try? await pending.task.value) ?? [] { try? FileManager.default.removeItem(at: frame.url) } }
+            }
+            prefetchTask = nil
+        }
         for (index, window) in windows.enumerated() {
             try await requireRunning(jobID, database: database)
             guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
@@ -326,7 +336,13 @@ actor TimelineAnalysis {
                 }
                 var frames: [VideoFrameWorker.Sample] = []
                 defer { for frame in frames { try? FileManager.default.removeItem(at: frame.url) } }
-                frames = try await sampleSequence(source: sourceURL, times: window.times)
+                if let pending = prefetched, pending.start == window.start {
+                    prefetched = nil
+                    prefetchTask = nil
+                    frames = try await pending.task.value
+                } else {
+                    frames = try await sampleSequence(source: sourceURL, times: window.times)
+                }
                 try await requireRunning(jobID, database: database)
                 guard frames.allSatisfy({ $0.metadata.revision == sourceRevision }) else { throw SourceChanged() }
                 let distinct = try TimelineMomentAnalysis.distinctFrameIndices(
@@ -334,6 +350,14 @@ actor TimelineAnalysis {
                 )
                 let urls = distinct.map { frames[$0].url }
                 let times = distinct.map { frames[$0].metadata.seconds }
+                // Frame extraction runs on the CPU in a helper process; start the
+                // next window's while the model works on this one.
+                if index + 1 < windows.count, prefetched == nil {
+                    let next = windows[index + 1]
+                    let task = Task { try await VideoFrameWorker.sampleSequence(source: sourceURL, times: next.times) }
+                    prefetched = (next.start, task)
+                    prefetchTask = task
+                }
                 let result = await DeepAnalyze.shared.runCancellableAnalysis {
                     await DeepAnalyze.shared.analyzeMomentSequence(imageURLs: urls, times: times)
                 }
@@ -341,9 +365,7 @@ actor TimelineAnalysis {
                 guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
                       activeModel.rawValue == model else { throw ModelChanged() }
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
-                let verifiedFrame = try await sample(source: sourceURL, seconds: window.times.last!)
-                defer { try? FileManager.default.removeItem(at: verifiedFrame.url) }
-                guard verifiedFrame.metadata.revision == sourceRevision else { throw SourceChanged() }
+                guard (try? VideoFrameWorker.currentRevision(sourceURL)) == sourceRevision else { throw SourceChanged() }
                 let moments = try TimelineMomentAnalysis.parse(result.description, frameCount: distinct.count)
                 let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: times, window: window,
                                                                fileID: fileID, sourceRevision: sourceRevision, modelVersion: version)

@@ -3932,3 +3932,15 @@ The owner asked for less sharpness, more roundness and more readable type, point
 ## 2026-10-15 — macOS benchmarks measure MLX directly and never download
 
 `benchmarkModel` on macOS follows the Magnitude-style approach the shared engine uses: a cold load, fixed prompts run twice with greedy decoding, medians, peak memory and a hardware fingerprint. Throughput comes from MLX's own completion info (prefill and decode tokens per second); seconds per image uses a synthetic, deterministic test card so no personal file is read, and the card doubles as a one-word colour probe. Only installed models qualify, so the command can never start a download. Results are stored per model in the engine state root and dropped when the hardware fingerprint changes, and `listModels` attaches them. `tune` is accepted and ignored because MLX has no launch flags to search. If the benchmark loaded a different model than the one Deep Analyze had resident, it unloads afterwards; it refuses to run while Deep Analyze is mid-file.
+
+## 2026-10-15 — Scan decode prefers a large embedded preview
+
+RAW files carry a full-size JPEG preview. The bounded scan decode now asks ImageIO for that preview first and keeps it when its long edge is at least two-thirds of the working size (1536 px by default); otherwise it decodes the image as before, so small EXIF thumbnails still never feed face detection. On Adlon Sony ARW files this took the decode from 606 ms to 35–55 ms per file. Tags, faces and embeddings come from the camera's own rendering instead of ImageIO's demosaic, which is the same picture the photographer saw on the camera.
+
+## 2026-10-15 — Model memory admission trusts the kernel's availability level
+
+Counting only free and inactive pages refused a 0.8B model on a 16 GB Mac that macOS reported as 50% free, because file cache, speculative and purgeable pages are reclaimable but uncounted. Admission now takes the larger of the page count (with speculative and purgeable added) and `kern.memorystatus_level` × physical memory, and keeps the existing working-set budget and free-memory floor. The transient check moved after the download so a busy moment delays loading, not fetching.
+
+## 2026-10-15 — MLX buffer cache capped per model
+
+The old note said setting MLX's cache limit killed the engine; on the pinned MLX it does not. A 256 MB cap (512 MB for models budgeted above 8 GB) cut Qwen3-VL 4B's measured peak footprint from 4.33 to 3.92 GB with equal or better speed. `FILEID_MLX_CACHE_MB` overrides it for experiments. Quantized KV caches were evaluated and not enabled: at Deep Analyze's ~500-token prompts the KV cache is about 75 MB, so 8-bit KV saves tens of megabytes at a quality risk.

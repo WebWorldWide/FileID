@@ -19,6 +19,8 @@ Checked against the 333-entry catalog for widely used local models it lacks. Lic
 | [Moondream 3 / 3.1](https://huggingface.co/moondream/moondream3-preview) | Small vision MoE | BSL 1.1 / custom | Moondream 2 is Apache-2.0 | Excluded (3.x); Moondream 2 is an option for the tiny tier |
 | [LFM2-VL / LFM2.5-VL](https://www.liquid.ai/lfm-license) | Edge vision | LFM Open License, $10M revenue threshold | — | Excluded: not commercial-clean |
 
+First macOS measurements (`benchmarkModel`, M1 Pro 16 GB, 2026-10-15): Qwen3.5 0.8B 4-bit — 3.1 s load, 611/45 tok/s prefill/decode, 3.5 s per image, 1.1 GB peak, valid JSON and correct colour probe on every run. Qwen3-VL 4B 4-bit — 3.5 s load, 145/24 tok/s, 4.4 s per image, 3.6 GB peak, same quality checks passed. SmolVLM 256M/500M cannot run on the pinned mlx-swift-lm (fixed 384 px Idefics3 tiles vs the checkpoints' 512 px) and are filtered from the Mac catalog.
+
 Measurement plan: install each shortlisted model only with the owner's approval, run `benchmarkModel` on the 16 GB M1 Pro and the RTX 2060 PC, and promote only on the existing gate (meaningful accuracy gain, or at least 20% faster without regression on the same fixtures).
 
 ## 2026-10-13 — Extended local model catalog (333 opt-in models)

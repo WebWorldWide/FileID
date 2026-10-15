@@ -1547,7 +1547,7 @@ private struct FaceModelInstallPanel: View {
         case .installed:
             MetaText("Installed. Group faces to see people here.", color: Theme.delight, size: 11)
         default:
-            MetaText("\(kind.displayName) · about \(kind.approxBytes / 1_048_576) MB", size: 11)
+            MetaText("\(kind.displayName) · about \(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file))", size: 11)
         }
     }
 

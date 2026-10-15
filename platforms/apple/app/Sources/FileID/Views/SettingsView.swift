@@ -471,7 +471,7 @@ struct CLIPSemanticSearchCard: View {
                     .foregroundStyle(Theme.delight)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Installed").font(Theme.Font.body(13.5, .semibold))
-                    Text("\(bytes / 1_048_576) MB on disk · semantic search active.")
+                    Text("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) on disk · semantic search active.")
                         .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -620,7 +620,7 @@ struct RamPlusTaggerCard: View {
             }
         case .installed(let sizeBytes):
             HStack(spacing: 8) {
-                Text("Installed · \(sizeBytes / 1_048_576) MB").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Remove", role: .destructive) { confirmUninstall = true }.font(Theme.Font.body(12))
             }
@@ -706,7 +706,7 @@ struct BGEDocCard: View {
             }
         case .installed(let sizeBytes):
             HStack(spacing: 8) {
-                Text("Installed · \(sizeBytes / 1_048_576) MB").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Remove", role: .destructive) { confirmUninstall = true }.font(Theme.Font.body(12))
             }
@@ -756,8 +756,8 @@ struct FaceEmbedderCard: View {
             }
             Button("Keep", role: .cancel) { confirmUninstall = nil }
         } message: { kind in
-            let mb = kind.approxBytes / 1_048_576
-            Text("Frees ~\(mb) MB. Face clustering will fall back to whichever other variant is installed, or pause if none are.")
+            let size = ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file)
+            Text("Frees about \(size). Face clustering will fall back to whichever other variant is installed, or pause if none are.")
         }
     }
 
@@ -811,7 +811,7 @@ struct FaceEmbedderCard: View {
                 Button {
                     installer.install(kind)
                 } label: {
-                    Label("Install (~\(kind.approxBytes / 1_048_576) MB)",
+                    Label("Install (~\(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file)))",
                           systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
@@ -848,7 +848,7 @@ struct FaceEmbedderCard: View {
 
         case .installed(let bytes):
             HStack(spacing: 8) {
-                Text("\(bytes / 1_048_576) MB installed")
+                Text("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) installed")
                     .font(Theme.Font.body(11)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Uninstall") { confirmUninstall = kind }

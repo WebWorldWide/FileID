@@ -49,6 +49,21 @@ struct ModelBenchmarkTests {
         #expect(corner[2] > corner[0])
     }
 
+    @Test func fixedTileArchitecturesKeepTheirOwnImageSize() {
+        #expect(!DeepAnalyze.acceptsResize(architecture: "idefics3"))
+        #expect(!DeepAnalyze.acceptsResize(architecture: "smolvlm"))
+        #expect(DeepAnalyze.acceptsResize(architecture: "qwen2_5_vl"))
+        #expect(DeepAnalyze.acceptsResize(architecture: "gemma4"))
+        #expect(DeepAnalyze.acceptsResize(architecture: nil))
+    }
+
+    @Test func mlxCacheCapScalesWithModelAndHonoursOverride() {
+        #expect(DeepAnalyze.mlxCacheLimitMB(for: .qwen3VL4B, environment: [:]) == 256)
+        #expect(DeepAnalyze.mlxCacheLimitMB(for: .qwen3VL8B, environment: [:]) == 512)
+        #expect(DeepAnalyze.mlxCacheLimitMB(for: .qwen3VL4B, environment: ["FILEID_MLX_CACHE_MB": "0"]) == 0)
+        #expect(DeepAnalyze.mlxCacheLimitMB(for: .qwen3VL4B, environment: ["FILEID_MLX_CACHE_MB": "x"]) == 256)
+    }
+
     @Test func fingerprintNamesChipMemoryAndOS() {
         let fingerprint = ModelBenchmarkRunner.hardwareFingerprint()
         #expect(fingerprint.contains(" GB"))

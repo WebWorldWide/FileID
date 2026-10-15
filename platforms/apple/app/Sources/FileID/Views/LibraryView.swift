@@ -52,6 +52,8 @@ struct LibraryView: View {
     /// (not a raw `FileRow`) so navigation mutates the displayed file in
     /// place — the sheet keeps identity instead of dismissing+re-presenting.
     @State private var previewSelectedID: Int64? = nil
+    @State private var paneSelectedID: Int64? = nil
+    private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
     /// nav context (the LIMIT 200 query reorders by scanned_at).
@@ -120,7 +122,19 @@ struct LibraryView: View {
             if rows.isEmpty {
                 empty
             } else {
-                grid
+                HStack(spacing: 0) {
+                    grid.frame(maxWidth: .infinity, maxHeight: .infinity)
+                    if let row = paneRow {
+                        VHairline()
+                        LibrarySelectedPane(row: row, store: store, engine: engine,
+                                            onOpen: { openPreview(row) },
+                                            onFindSimilar: { similarSeed = row },
+                                            onClose: { paneSelectedID = nil })
+                            .frame(width: 300)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
+                .animation(Theme.spring, value: paneRow == nil)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -639,9 +653,20 @@ struct LibraryView: View {
                                     checkedFiles[row.id] = row
                                 }
                             } else {
-                                openPreview(row)
+                                paneSelectedID = row.id
                             }
                         }
+                        .simultaneousGesture(TapGesture(count: 2).onEnded {
+                            if !selectMode { openPreview(row) }
+                        })
+                        .accessibilityAction {
+                            if selectMode {
+                                checkedFiles[row.id] = checkedFiles[row.id] == nil ? row : nil
+                            } else {
+                                paneSelectedID = row.id
+                            }
+                        }
+                        .accessibilityAction(named: "Open preview") { openPreview(row) }
                         .contextMenu {
                             Button {
                                 similarSeed = row
@@ -655,10 +680,11 @@ struct LibraryView: View {
                             }
                         }
                         .background(
-                            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                                .stroke(previewSelectedID == row.id && !selectMode
+                            RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                                .stroke((paneSelectedID == row.id || previewSelectedID == row.id) && !selectMode
                                         ? Theme.gold : Color.clear,
                                         lineWidth: 2)
+                                .padding(-5)
                         )
                         // Tiles fade + scale in so the grid "fills
                         // the room" during a live scan instead of
@@ -948,7 +974,7 @@ struct FileTile: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Opens the file preview")
+        .accessibilityHint("Shows details. Double-click opens the preview.")
     }
 
     @ViewBuilder
@@ -1052,9 +1078,7 @@ struct FileTile: View {
     }
 
     private func formatBytes(_ b: Int64) -> String {
-        let kb = Double(b) / 1024
-        if kb < 1024 { return String(format: "%.0f KB", kb) }
-        return String(format: "%.1f MB", kb / 1024)
+        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
     }
 }
 
@@ -1218,7 +1242,7 @@ private struct FilePreviewSheet: View {
                                 Divider().opacity(0.3)
                                 row("Path",   file.pathText)
                                 row("Kind",   file.kind)
-                                row("Size",   String(format: "%.2f MB", file.sizeMB))
+                                row("Size",   ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                                 if let d = file.displayDate {
                                     row("Date", d.formatted(date: .long, time: .shortened))
                                 }
@@ -1730,5 +1754,137 @@ struct FlowLayout: Layout {
             x += s.width + spacing
             rowHeight = max(rowHeight, s.height)
         }
+    }
+}
+
+// MARK: - Selected pane
+
+/// Right-hand details for the clicked tile; double-click opens the full preview.
+private struct LibrarySelectedPane: View {
+    let row: FileRow
+    let store: ReadStore
+    let engine: EngineClient
+    let onOpen: () -> Void
+    let onFindSimilar: () -> Void
+    let onClose: () -> Void
+    @State private var thumbnail: NSImage?
+    @State private var tags: [String] = []
+    @State private var people: [String] = []
+
+    var body: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    SectionLabel("Selected")
+                    Spacer()
+                    Button(action: onClose) {
+                        Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.dsRow)
+                    .keyboardShortcut(.cancelAction)
+                    .help("Close details")
+                }
+                ZStack {
+                    Color.black.opacity(0.35)
+                    if let thumbnail {
+                        Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fit)
+                    } else {
+                        Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
+                    }
+                }
+                .aspectRatio(16.0 / 10.0, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
+                .onTapGesture(count: 2, perform: onOpen)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(row.url.lastPathComponent)
+                        .font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                        .lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    Text(row.url.deletingLastPathComponent().path)
+                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                        .lineLimit(1).truncationMode(.head)
+                }
+
+                VStack(spacing: 0) {
+                    detail("Kind", row.kind.capitalized + " · " + row.extension.uppercased())
+                    if let date = row.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
+                    detail("Size", ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file))
+                    if let camera = row.cameraModel, !camera.isEmpty { detail("Camera", camera) }
+                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
+                }
+
+                if let caption = row.vlmDescription, !caption.isEmpty {
+                    Text(caption).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !tags.isEmpty {
+                    FlowLayout(spacing: 6) {
+                        ForEach(tags.prefix(12), id: \.self) { tag in
+                            Text(tag)
+                                .font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2)
+                                .lineLimit(1).truncationMode(.tail)
+                                .padding(.horizontal, 8).frame(height: 22)
+                                .frame(maxWidth: 260, alignment: .leading).fixedSize()
+                                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                                .help(tag)
+                        }
+                    }
+                }
+
+                VStack(spacing: 6) {
+                    Button(action: onOpen) { Label("Open preview", systemImage: "eye").frame(maxWidth: .infinity) }
+                        .buttonStyle(DSPrimaryButtonStyle(height: 30))
+                        .help("Full preview with tags, smart name and Deep Analyze (or double-click the tile)")
+                    HStack(spacing: 6) {
+                        if row.kind == "image" || row.kind == "video" {
+                            Button(action: onFindSimilar) { Text("Similar").lineLimit(1).frame(maxWidth: .infinity) }
+                                .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                                .help("Find visually similar files")
+                        }
+                        Button { NSWorkspace.shared.activateFileViewerSelecting([row.url]) } label: { Text("Finder").lineLimit(1).frame(maxWidth: .infinity) }
+                            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                            .help("Show in Finder")
+                        Button { NSWorkspace.shared.open(row.url) } label: { Text("Open").lineLimit(1).frame(maxWidth: .infinity) }
+                            .buttonStyle(DSSecondaryButtonStyle(height: 28))
+                            .help("Open in the default app")
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(Theme.bg1.opacity(0.35), ignoresSafeAreaEdges: [])
+        .task(id: row.id) {
+            thumbnail = nil
+            let id = row.id
+            let loaded = await Task.detached { [store] in (store.tags(forFileID: id), store.personNames(forFileID: id)) }.value
+            guard !Task.isCancelled else { return }
+            tags = loaded.0
+            people = loaded.1
+            let image = await ThumbnailService.shared.thumbnail(for: row.url, size: 480)
+            guard !Task.isCancelled else { return }
+            thumbnail = image
+        }
+    }
+
+    private var icon: String {
+        switch row.kind {
+        case "video": return "film"
+        case "audio": return "waveform"
+        case "pdf": return "doc.richtext"
+        default: return "doc"
+        }
+    }
+
+    private func detail(_ key: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
+            Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(2).textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 }

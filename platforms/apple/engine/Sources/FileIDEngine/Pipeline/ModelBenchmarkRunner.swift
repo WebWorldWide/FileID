@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import CoreImage
 import FileIDShared
 import MLX
@@ -121,6 +122,14 @@ enum ModelBenchmarkRunner {
         await progress("load", 0, total)
         await analyzer.unload()
         Memory.peakMemory = 0
+        let sampler = FootprintSampler()
+        let sampling = Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                sampler.record(Self.physicalFootprintBytes())
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        defer { sampling.cancel() }
         let loadStart = ContinuousClock.now
         try await analyzer.ensureLoaded(kind: kind)
         let loadSeconds = durationSeconds(ContinuousClock.now - loadStart)
@@ -148,7 +157,8 @@ enum ModelBenchmarkRunner {
             if previous != kind { await analyzer.unload() }
             throw error
         }
-        let peak = Double(Memory.peakMemory) / 1_073_741_824
+        sampler.record(Self.physicalFootprintBytes())
+        let peak = Double(max(Memory.peakMemory, sampler.peak)) / 1_073_741_824
         if previous != kind { await analyzer.unload() }
         await progress("done", total, total)
 
@@ -166,10 +176,29 @@ enum ModelBenchmarkRunner {
         )
     }
 
+    /// What Activity Monitor calls Memory: resident plus compressed, GPU buffers included.
+    static func physicalFootprintBytes() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
+    }
+
     static func durationSeconds(_ duration: Duration) -> Double {
         let parts = duration.components
         return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
     }
+}
+
+final class FootprintSampler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var maximum = 0
+    func record(_ bytes: Int) { lock.lock(); maximum = max(maximum, bytes); lock.unlock() }
+    var peak: Int { lock.lock(); defer { lock.unlock() }; return maximum }
 }
 
 /// Last benchmark per model for this Mac, kept beside the engine's other state.

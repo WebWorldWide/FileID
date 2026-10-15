@@ -82,6 +82,14 @@ public enum MLXModelCatalog {
                       $0.path.hasSuffix(".safetensors") && hex($0.sha256, count: 64) && $0.size > 0 && $0.size < 1_000_000_000_000
                   } && model.weightBytes == model.files.reduce(Int64(0)) { $0 + $1.size }
               }) else { throw CocoaError(.fileReadCorruptFile) }
-        return document.entries
+        return document.entries.filter { !runtimeIncompatibleRepos.contains($0.repo) }
     }
+
+    /// Entries the pinned runtime cannot run. mlx-swift-lm's Idefics3 processor
+    /// fixes tiles at 384 px, but the 256M/500M SmolVLM checkpoints expect 512 px
+    /// and MLX aborts the engine on the shape mismatch.
+    public static let runtimeIncompatibleRepos: Set<String> = [
+        "mlx-community/SmolVLM-256M-Instruct-4bit",
+        "mlx-community/SmolVLM-500M-Instruct-4bit",
+    ]
 }

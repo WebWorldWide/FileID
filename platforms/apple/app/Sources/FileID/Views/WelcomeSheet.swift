@@ -61,7 +61,7 @@ struct WelcomeSheet: View {
             modelRow(
                 title: "CLIP ViT-B/32",
                 detail: "Search by description · Required",
-                size: "~\(CLIPModelInstaller.approxDownloadBytes / 1_048_576) MB",
+                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
                 installed: clipInstalled,
                 inProgress: clipInProgress,
                 progressLabel: clipProgressLabel,
@@ -85,7 +85,7 @@ struct WelcomeSheet: View {
             modelRow(
                 title: recommendedFace.displayName,
                 detail: "Finds and groups faces · Required",
-                size: "~\(recommendedFace.approxBytes / 1_048_576) MB",
+                size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
                 installed: arcfaceInstalled,
                 inProgress: arcfaceInProgress,
                 progressLabel: arcfaceProgressLabel,

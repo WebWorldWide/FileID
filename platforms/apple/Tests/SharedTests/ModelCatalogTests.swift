@@ -13,6 +13,7 @@ struct ModelCatalogTests {
         let entries = try MLXModelCatalog.load(data: Data(contentsOf: canonical))
         #expect(entries == MLXModelCatalog.entries)
         #expect(entries.count >= 200)
+        #expect(MLXModelCatalog.runtimeIncompatibleRepos.allSatisfy { MLXModelCatalog.entry(forRepo: $0) == nil })
         #expect(entries.contains { $0.role == .text })
         #expect(entries.contains { $0.role == .vision })
         for entry in entries {

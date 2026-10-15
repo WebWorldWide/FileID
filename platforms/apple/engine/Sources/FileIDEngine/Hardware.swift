@@ -134,9 +134,15 @@ public enum Hardware {
         }
         guard kr == KERN_SUCCESS else { return 0 }
         let pageSize = Int(getpagesize())
-        let free = Int(stats.free_count) * pageSize
-        let inactive = Int(stats.inactive_count) * pageSize
-        // XNU already includes speculative pages in free_count.
-        return (free + inactive) / (1024 * 1024)
+        let reclaimable = Int(stats.free_count) + Int(stats.inactive_count)
+            + Int(stats.speculative_count) + Int(stats.purgeable_count)
+        let counted = reclaimable * pageSize / (1024 * 1024)
+        // The kernel's availability level (what memory_pressure reports) also
+        // credits compressible and file-backed memory the pager can reclaim.
+        var level: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        guard sysctlbyname("kern.memorystatus_level", &level, &size, nil, 0) == 0, (1...100).contains(level) else { return counted }
+        let kernelMB = Int(ProcessInfo.processInfo.physicalMemory / 1_048_576) * Int(level) / 100
+        return max(counted, kernelMB)
     }
 }

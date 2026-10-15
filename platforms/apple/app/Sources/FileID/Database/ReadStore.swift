@@ -544,6 +544,25 @@ public final class ReadStore: @unchecked Sendable {
         return Self.uniqueDisplayTags(tags)
     }
 
+    /// Named people whose faces appear in the file; unnamed clusters are skipped.
+    public func personNames(forFileID id: Int64) -> [String] {
+        guard let q = queue else { return [] }
+        let rows = (try? q.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT DISTINCT p.id, p.name, p.title, p.first_name, p.middle_name, p.last_name, p.suffix
+                FROM face_prints f JOIN persons p ON p.id = f.person_id
+                WHERE f.file_id = ? AND COALESCE(p.is_unknown, 0) = 0
+                ORDER BY p.id
+                """, arguments: [id])
+        }) ?? []
+        var seen = Set<String>()
+        return rows.compactMap { row in
+            let name = Self.personTagName(title: row["title"], first: row["first_name"], middle: row["middle_name"],
+                                          last: row["last_name"], suffix: row["suffix"], legacy: row["name"])
+            return name.isEmpty || !seen.insert(name.lowercased()).inserted ? nil : name
+        }
+    }
+
     /// Bulk-fetch top vision tags for many files in one SQL query
     /// (the per-tile call would fire 1000+ queries on a large grid).
     /// Each file gets at most `limit` tags in confidence-descending order.
