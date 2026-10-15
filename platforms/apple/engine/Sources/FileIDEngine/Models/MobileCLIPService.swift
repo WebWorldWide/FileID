@@ -117,6 +117,30 @@ public final class MobileCLIPService: @unchecked Sendable {
     /// Returns an L2-normalized 512-d image embedding, or nil if the model
     /// isn't loaded / inference failed.
     public func embedImage(_ cgImage: CGImage) -> [Float]? {
+        if Self.useGPU, let batcher = gpuBatcher() {
+            guard let tensor = makeNCHWTensor(cgImage), let raw = batcher.embed(tensor), raw.count == Self.embeddingDim else { return nil }
+            return normalize(raw)
+        }
+        return embedImageCPU(cgImage)
+    }
+
+    /// MLX aborts the process without its Metal library, so the GPU path also
+    /// requires the library beside the engine; otherwise ONNX Runtime runs.
+    static let useGPU = ProcessInfo.processInfo.environment["FILEID_CLIP_BACKEND"] != "onnx"
+        && DeepAnalyzeCapability.metallibPresent()
+    private var batcher: CLIPGPUBatcher?
+
+    private func gpuBatcher() -> CLIPGPUBatcher? {
+        lock.lock()
+        if let batcher { lock.unlock(); return batcher }
+        lock.unlock()
+        guard let encoder = loadGPUEncoder() else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        if batcher == nil { batcher = CLIPGPUBatcher(encoder: encoder) }
+        return batcher
+    }
+
+    func embedImageCPU(_ cgImage: CGImage) -> [Float]? {
         guard loadImageEncoder() else { return nil }
         lock.lock(); let s = session; let name = inputName; lock.unlock()
         guard let s, let name else { return nil }
@@ -162,7 +186,36 @@ public final class MobileCLIPService: @unchecked Sendable {
     }
 
     /// Pre-warm the model + ANE pipeline. Call before the worker pool starts.
+    private var gpuEncoder: CLIPVisionMLX?
+    private var gpuEncoderFailed = false
+
+    /// The same embedding computed on the GPU through MLX; nil if the encoder
+    /// could not be built from the installed ONNX file.
+    func embedImageGPU(_ cgImage: CGImage) -> [Float]? {
+        guard let encoder = loadGPUEncoder(), let tensor = makeNCHWTensor(cgImage) else { return nil }
+        guard let raw = encoder.embed(pixels: tensor, count: 1).first, raw.count == Self.embeddingDim else { return nil }
+        return normalize(raw)
+    }
+
+    func loadGPUEncoder(at url: URL = MobileCLIPService.defaultImageModelURL) -> CLIPVisionMLX? {
+        lock.lock()
+        if let gpuEncoder { lock.unlock(); return gpuEncoder }
+        if gpuEncoderFailed { lock.unlock(); return nil }
+        lock.unlock()
+        let built = try? CLIPVisionMLX(onnxURL: url)
+        lock.lock(); defer { lock.unlock() }
+        if gpuEncoder == nil { gpuEncoder = built; gpuEncoderFailed = built == nil }
+        if built == nil { JSONLog.shared.warn(ev: "clip_gpu_encoder_unavailable") }
+        return gpuEncoder
+    }
+
     public func preWarm() {
+        if Self.useGPU, FileManager.default.fileExists(atPath: Self.defaultImageModelURL.path), loadGPUEncoder() != nil {
+            let started = CFAbsoluteTimeGetCurrent()
+            if let image = Self.blankImage() { _ = embedImage(image) }
+            JSONLog.shared.info(ev: "clip_prewarmed", extra: ["ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000), "backend": AnyCodable("mlx")])
+            return
+        }
         guard loadImageEncoder() else { return }
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
@@ -174,6 +227,11 @@ public final class MobileCLIPService: @unchecked Sendable {
         _ = embedImage(img)
         let ms = (CFAbsoluteTimeGetCurrent() - started) * 1000
         JSONLog.shared.info(ev: "clip_prewarmed", extra: ["ms": AnyCodable(ms)])
+    }
+
+    private static func blankImage() -> CGImage? {
+        CGContext(data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
+                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
     }
 
     /// Raw little-endian Float32 bytes (length = dims * 4).

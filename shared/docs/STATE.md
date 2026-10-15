@@ -19,6 +19,10 @@ First real MLX benchmarks on the 16 GB M1 Pro (owner approved the downloads). Th
 
 Performance: the scan decode now uses a RAW file's embedded full-size preview when it is at least two-thirds of the working size — 606 ms → 35–55 ms per Sony ARW on Adlon. Video moment analysis extracts the next window's frames while the model runs on the current one, and checks the source revision in-process instead of spawning a helper and decoding a frame per window.
 
+CLIP image embeddings now run on the GPU. The pinned ONNX export is built from dynamic-shape primitives (Shape/Gather/Concat/Reshape), so the CoreML provider placed nothing on the ANE/GPU in any mode tried (default, static shapes, CPU+GPU, ML Program) and CLIP cost ~190 ms per image under scan load. `CLIPVisionMLX` reads the same weights straight out of the installed ONNX file (a small protobuf reader; the exporter's 73 anonymous MatMul weights are named through the graph by the bias each one feeds) and runs ViT-B/32 in MLX float16; `CLIPGPUBatcher` gathers concurrent scan requests into one batch. Parity against ONNX Runtime is above 0.999 cosine, so stored embeddings and text search stay valid. Per image: 40 ms CPU uncontended / 190 ms under load → 21 ms single / 3.2 ms in a batch of 16. ONNX Runtime remains the fallback (`FILEID_CLIP_BACKEND=onnx`, or no Metal library beside the engine).
+
+End-to-end scan of 105 Sony ARW files on Adlon (warm cache, isolated database): previous engine 4.1 files/s and 1,090 MB peak → now 40–42 files/s and ~660 MB. The first scan after installing a new engine binary is slower while Metal compiles shaders.
+
 Test fix: the incremental-walk test seeded a placeholder CLIP model ID, so it failed on any Mac with CLIP installed; it now seeds the real ID. The media-worker tests need `FILEID_TEST_ENGINE_PATH`, as CI sets it. Verified: full Swift suite **597 tests** pass (174 shared, 46 app, 377 engine, including eight new benchmark tests).
 
 ## 2026-10-15 — Prototype v3 redesign on macOS, website refresh, Adlon run

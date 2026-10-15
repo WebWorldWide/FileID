@@ -23,7 +23,9 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [x] Model download no longer refused when memory is briefly busy (memory is checked before loading, not before fetching).
 - [x] SmolVLM 256M/500M removed from the Mac catalog: the pinned MLX runtime aborts the engine on them (384 vs 512 px tiles).
 - [x] Forced 448 px image size skipped for fixed-tile architectures (Idefics3, SmolVLM).
-- [ ] Measure end-to-end scan files/s on Adlon before/after the decode change (target ≥140 files/s).
+- [x] Measure end-to-end scan files/s on Adlon: 4.1 → 40–42 files/s on 105 RAWs (decode preview + GPU CLIP), memory 1,090 → ~660 MB.
+- [x] CLIP on the GPU via MLX, weights read from the installed ONNX, batched (190 ms → 3.2 ms per image).
+- [ ] Reach ≥140 files/s: remaining per-file cost is decode ~40 ms, Vision ~40 ms, OCR ~35 ms (only text-like images); try Vision on a smaller working image for classify, overlap OCR, and batch the DB writer.
 - [ ] Hash only once per image (content hash currently reads the file a second time after decode).
 - [x] Compress AI memory: MLX buffer cache capped (Qwen3-VL 4B peak 4.33 → 3.92 GB, no speed loss); benchmark now reports real process footprint. KV quantization measured as negligible at current prompt sizes (see DECISIONS.md).
 - [ ] Compress AI memory further: free vision-encoder activations between passes; route tag/rename passes to a small model (Qwen3.5 0.8B peaks at 1.1 GB) when quality holds.
@@ -31,7 +33,7 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [ ] Chat: stream first token faster (prompt cache reuse across turns, smaller retrieval context).
 - [x] Video moments: next window's frames extract while the model runs; revision check in-process (one helper spawn and one frame decode fewer per window).
 - [ ] Video analysis: keep one long-lived frame helper per job instead of a process per window; batch frames per model call; measure on Adlon clips.
-- [ ] Scan: overlap I/O with ML (read-ahead on USB/NAS), batch CLIP/RAM++ inference, ANE where available.
+- [ ] Scan: overlap I/O with ML (read-ahead on USB/NAS); move RAM++ to the GPU the same way as CLIP once installed and measured.
 - [ ] Size: audit bundle size (MLX metallib, ONNX Runtime, fonts) and strip unused architectures/resources.
 - [ ] Audit third-party packages for hot-path overhead (GRDB writes, swift-transformers tokenizer, ORT session setup) and replace or rewrite where measurably faster.
 - [x] Run `benchmarkModel` on Qwen3-VL 4B and Qwen3.5 0.8B (results in STATE.md and MODELS.md).
