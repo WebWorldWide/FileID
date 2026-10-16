@@ -159,21 +159,11 @@ struct Cleanup {
 
 pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Header ──────────────────────────────────────────────────────────────
-    let title = gtk::Label::builder()
-        .label("Cleanup")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
     let subtitle = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
         .css_classes(["dim-label"])
         .build();
-    let title_col = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .build();
-    title_col.append(&title);
 
     let pill_exact = gtk::Button::builder()
         .label("Exact")
@@ -221,7 +211,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    header_row.append(&title_col);
     header_row.append(&pillbox);
     header_row.append(&filler);
     header_row.append(&actions_box);

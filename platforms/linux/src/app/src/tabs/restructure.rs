@@ -52,18 +52,12 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["fileid-tab"])
         .build();
 
-    let title = gtk::Label::builder()
-        .label("Restructure")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
     let subtitle = gtk::Label::builder()
         .label("Preview the proposed moves, choose what to apply, and undo the last completed move batch.")
         .xalign(0.0)
         .wrap(true)
         .css_classes(["dim-label"])
         .build();
-    content.append(&title);
     content.append(&subtitle);
 
     let root_label = gtk::Label::builder()

@@ -102,12 +102,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content_stack.add_named(&scroller, Some("grid"));
     content_stack.add_named(&empty_page, Some("empty"));
 
-    // ── Header (title + count + search + pills) ──────────────────────────────
-    let title = gtk::Label::builder()
-        .label("Library")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
+    // ── Header (count + search + pills); the shell draws the page title ─────
     let count_label = gtk::Label::builder()
         .label("0 files")
         .xalign(0.0)
@@ -117,7 +112,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    title_row.append(&title);
     title_row.append(&count_label);
     let moments_button = gtk::Button::with_label("Search & Moments");
     title_row.append(&moments_button);

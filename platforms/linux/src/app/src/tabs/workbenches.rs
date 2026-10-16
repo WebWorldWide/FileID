@@ -36,18 +36,11 @@ fn clear(b: &gtk::Box) {
         b.remove(&c);
     }
 }
-fn page(title: &str, body: &gtk::Box) -> gtk::Widget {
-    body.set_margin_top(16);
-    body.set_margin_bottom(16);
-    body.set_margin_start(16);
-    body.set_margin_end(16);
-    body.prepend(
-        &gtk::Label::builder()
-            .label(title)
-            .xalign(0.0)
-            .css_classes(["title-1"])
-            .build(),
-    );
+fn page(body: &gtk::Box) -> gtk::Widget {
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    body.set_margin_start(26);
+    body.set_margin_end(26);
     gtk::ScrolledWindow::builder()
         .child(body)
         .hexpand(true)
@@ -563,7 +556,7 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         }
         glib::ControlFlow::Continue
     });
-    (page("Search & Moments", &body), ui)
+    (page(&body), ui)
 }
 
 fn timeline_request(file_ids: Vec<i64>, mode: &str) -> CatalogRequest {
@@ -1032,7 +1025,7 @@ fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         });
     }
     ui.update();
-    (page("File Tools", &body), ui)
+    (page(&body), ui)
 }
 
 fn dispatch_chat(
@@ -1161,7 +1154,7 @@ pub fn chat(engine: Engine) -> gtk::Widget {
             }
         }
     });
-    page("Chat", &body)
+    page(&body)
 }
 
 #[cfg(test)]

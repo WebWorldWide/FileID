@@ -397,11 +397,6 @@ struct Ui {
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Header ────────────────────────────────────────────────────────────────
-    let title = gtk::Label::builder()
-        .label("People")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
     let count_label = gtk::Label::builder()
         .label("")
         .xalign(0.0)
@@ -417,7 +412,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    title_row.append(&title);
     title_row.append(&count_label);
     title_row.append(&title_spacer);
     title_row.append(&actions_box);

@@ -265,7 +265,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     stack.set_visible_child_name("deep");
     assert!(text(&deep).contains("Deep Analyze"));
     stack.set_visible_child_name("restructure");
-    assert!(text(&restructure).contains("Restructure"));
+    assert!(text(&restructure).contains("Preview the proposed moves"));
     assert!(source.is_file());
     assert_eq!(count(&read, "files"), preserved_files);
     engine

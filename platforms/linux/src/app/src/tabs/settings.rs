@@ -374,7 +374,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         &gtk::Label::builder()
             .label("Local models and runtimes")
             .xalign(0.0)
-            .css_classes(["title-1"])
+            .css_classes(["title-3"])
             .build(),
     );
     root.append(&gtk::Label::builder()
