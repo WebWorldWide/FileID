@@ -42,7 +42,7 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [x] Qwen3-VL adapter forwards per-token generation (every Qwen3-VL generation aborted the engine before).
 - [x] Free-memory admission uses the kernel availability level (refused a 0.8B model with 50% free).
 
-- [ ] Test isolation: `queuedCancelHonoredWithTerminalComplete` shares the `DeepAnalyze.shared` cancel flag and failed once in three local parallel runs (CI runs `--no-parallel`); give the runner an injectable analyzer.
+- [x] Test isolation: `DeepAnalyzeRunner.run` takes an injectable analyzer; the queued-cancel test uses its own instance instead of the shared cancel flag (6 of 6 parallel engine-suite runs pass).
 
 - [x] In-app playback (macOS): videos and audio play inside the preview sheet with AVKit controls; Chat results, Moments and Best Takes play in their own players instead of opening QuickTime.
 - [x] In-app playback on Linux: the preview dialog plays video/audio with GtkVideo; Search & Moments hits play in a FileID dialog from the matched moment instead of launching another app.

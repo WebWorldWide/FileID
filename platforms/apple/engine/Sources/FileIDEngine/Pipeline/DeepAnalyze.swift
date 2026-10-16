@@ -92,7 +92,7 @@ public actor DeepAnalyze {
         }
     }
 
-    private init() {}
+    init() {}
 
     // MARK: - Cancellation
 

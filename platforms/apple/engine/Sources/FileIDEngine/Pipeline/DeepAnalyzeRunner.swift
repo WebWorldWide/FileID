@@ -157,7 +157,8 @@ public enum DeepAnalyzeRunner {
         scope: DeepAnalyzeScope,
         modelKind: AIModelKind,
         tagsOnly: Bool = false,
-        proposeRenames: Bool = true
+        proposeRenames: Bool = true,
+        analyzer: DeepAnalyze = .shared
     ) async {
         let started = Date()
         let modelKey = modelKind.rawValue
@@ -177,7 +178,7 @@ public enum DeepAnalyzeRunner {
         // run-start clearCancel() that erased a cancel issued while queued
         // .
         func finish(processed: Int, failed: Int, cancelled: Bool) async {
-            await DeepAnalyze.shared.clearCancel()
+            await analyzer.clearCancel()
             await sink.emit(.deepAnalyzeComplete(DeepAnalyzeComplete(
                 processed: processed, failed: failed,
                 totalSeconds: Date().timeIntervalSince(started),
@@ -189,7 +190,7 @@ public enum DeepAnalyzeRunner {
         // (The old code clearCancel()'d here, erasing that cancel and running
         // the whole pass anyway.) Checked before the RAM probe + cold load so a
         // job the user already cancelled does no work at all.
-        if await DeepAnalyze.shared.isCancelled() {
+        if await analyzer.isCancelled() {
             JSONLog.shared.info(ev: "deep_analyze_cancelled_while_queued",
                                 extra: ["model": AnyCodable(modelKey)])
             await finish(processed: 0, failed: 0, cancelled: true)
@@ -247,7 +248,7 @@ public enum DeepAnalyzeRunner {
             message: "Loading \(modelKind.displayName)…"
         )))
         do {
-            try await DeepAnalyze.shared.ensureLoaded(kind: modelKind) { frac, msg, done, total in
+            try await analyzer.ensureLoaded(kind: modelKind) { frac, msg, done, total in
                 Task {
                     await sink.emit(.modelDownloadProgress(ModelDownloadProgress(
                         modelKind: modelKey, fraction: frac, message: msg,
@@ -260,7 +261,7 @@ public enum DeepAnalyzeRunner {
             // A cancel during the cold load/download cancels the load
             // task; surface that as a user cancel, not an alarming load failure.
             // (await is hoisted out of the `||` — its RHS is a non-async autoclosure.)
-            let cancelledDuringLoad = await DeepAnalyze.shared.isCancelled()
+            let cancelledDuringLoad = await analyzer.isCancelled()
             if error is CancellationError || cancelledDuringLoad {
                 JSONLog.shared.info(ev: "deep_analyze_cancelled_during_load",
                                     extra: ["model": AnyCodable(modelKey)])
@@ -295,7 +296,7 @@ public enum DeepAnalyzeRunner {
         var reservedProposedNames = Set<String>()
 
         for (i, target) in targets.enumerated() {
-            if await DeepAnalyze.shared.isCancelled() {
+            if await analyzer.isCancelled() {
                 cancelled = true
                 break
             }
@@ -345,7 +346,7 @@ public enum DeepAnalyzeRunner {
             var result: DeepAnalyze.AnalysisResult
             var requiresGeneratedFilenameMinimum = false
             if kind == .audio {
-                result = await DeepAnalyze.shared.runCancellableAnalysis {
+                result = await analyzer.runCancellableAnalysis {
                     await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                 }
             } else {
@@ -366,8 +367,8 @@ public enum DeepAnalyzeRunner {
                 }
                 // Pull face cluster names (if any) to inject into the prompt.
                 let modelFaceNames = faceNames
-                result = await DeepAnalyze.shared.runCancellableAnalysis {
-                    await DeepAnalyze.shared.analyze(
+                result = await analyzer.runCancellableAnalysis {
+                    await analyzer.analyze(
                         imageURL: url,
                         mediaKind: kind,
                         documentText: documentText,
@@ -380,12 +381,12 @@ public enum DeepAnalyzeRunner {
                 // couldn't caption → its embedded-name metadata, so it still gets a name.
                 if kind == .model, Self.isAnalysisFailure(result.description) {
                     requiresGeneratedFilenameMinimum = false
-                    result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    result = await analyzer.runCancellableAnalysis {
                         await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                     }
                 }
             }
-            if await DeepAnalyze.shared.isCancelled() {
+            if await analyzer.isCancelled() {
                 cancelled = true
                 break
             }
