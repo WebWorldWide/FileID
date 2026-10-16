@@ -13,6 +13,7 @@ mod app_settings;
 mod engine_client;
 mod lavalamp;
 mod model_license;
+mod shell;
 mod spring;
 mod tabs;
 mod theme;
