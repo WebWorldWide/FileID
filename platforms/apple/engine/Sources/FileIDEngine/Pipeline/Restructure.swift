@@ -584,6 +584,19 @@ public enum Restructure {
                 filtered.append(correction)
                 planned.insert(correction.fileID)
             }
+            // Loose photos/videos not captured during an existing event are
+            // grouped into events of their own by capture-time gaps.
+            let unmatched = infos.filter { RestructureRespect.eventDestination(for: $0, spans: spans) == nil }
+            let looseEvents = RestructureRespect.looseEventDestinations(files: unmatched, root: libraryRoot.path)
+            var indexByID = Dictionary(filtered.enumerated().map { ($1.fileID, $0) }, uniquingKeysWith: { a, _ in a })
+            for (id, target) in looseEvents.sorted(by: { $0.key < $1.key }) {
+                guard let file = byID[id], !RestructureRespect.pathsMatch(file.path, target.path) else { continue }
+                let move = RestructureProposal(
+                    fileID: id, oldPath: file.path, newPath: target.path,
+                    bucket: ((target.path as NSString).deletingLastPathComponent as NSString).lastPathComponent,
+                    confidence: "auto", reason: target.reason)
+                if let index = indexByID[id] { filtered[index] = move } else { indexByID[id] = filtered.count; filtered.append(move) }
+            }
             for index in filtered.indices {
                 let p = filtered[index]
                 guard !RestructureRespect.isOrganized(p.oldPath, under: libraryRoot.path),

@@ -11,6 +11,7 @@ A final stage, `RestructureRespect`, now runs after every grouping pass:
 3. No move lands in a folder for another format (RAW / JPEG / video / photo folder roles from the folder name).
 4. New folder names never come from camera filename stems or tag identifiers.
 5. A RAW in a JPEG folder (or the reverse) moves to its sibling format folder inside the same event.
+7. Loose photos/videos not captured during an existing event are split into events by capture-time gaps (8 h); events of 5+ files get `Photos/<year>/<yyyy-mm-dd>` (or `<start> to <mm-dd>` for multi-day), smaller groups `Photos/<year>/<Month>`, in the machine's time zone.
 6. A loose file captured during an existing event (10th–90th percentile span, ±3 h, events ≤ 4 days) is filed into that event, in its matching format subfolder.
 
 Organized folders count as "Keep". On Adlon/Camera the plan is now 0 moves, 28 folders kept, in ~19 s (debug); the kNN is one blocked Accelerate matrix multiply. Kill switch: `FILEID_RESTRUCTURE_RESPECT=0`. The shared Rust engine (Windows, Linux, CLI, TUI) runs the same stage in `pipeline/restructure_respect.rs`.

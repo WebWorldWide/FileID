@@ -91,4 +91,27 @@ struct RestructureRespectTests {
         #expect(RestructureRespect.isUsableFolderName("Dogs"))
         #expect(RestructureRespect.isUsableFolderName("Lake Trip"))
     }
+
+    @Test func loosePhotosGroupIntoDatedEventsByCaptureGap() {
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(identifier: "UTC")!
+        let sep19: Double = 1_789_812_000   // 2026-09-19 10:00 UTC
+        let oct4 = sep19 + 15 * 86_400
+        var files = (0..<6).map { info(Int64($0), "Downloads/A\($0).JPG", t: sep19 + Double($0) * 900) }
+        files += (0..<5).map { info(Int64(10 + $0), "B\($0).JPG", t: oct4 + Double($0) * 1_800) }
+        files += [info(20, "Downloads/lonely.JPG", t: oct4 + 40 * 86_400),
+                  info(21, "Kyle Baseball Game 9-19-26/Photos/JPEGs/K.JPG", t: sep19)]
+        let out = RestructureRespect.looseEventDestinations(files: files, root: root, calendar: utc)
+        #expect(out[0]?.path == root + "/Photos/2026/2026-09-19/A0.JPG")
+        #expect(out[14]?.path == root + "/Photos/2026/2026-10-04/B4.JPG")
+        #expect(out[20]?.path == root + "/Photos/2026/November/lonely.JPG")
+        #expect(out[21] == nil, "files in named folders are not regrouped")
+    }
+
+    @Test func multiDayEventGetsARangeName() {
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(identifier: "UTC")!
+        let start: Double = 1_789_812_000
+        let files = (0..<6).map { info(Int64($0), "trip\($0).JPG", t: start + Double($0) * 5 * 3_600) }
+        let out = RestructureRespect.looseEventDestinations(files: files, root: root, calendar: utc)
+        #expect(out[0]?.path == root + "/Photos/2026/2026-09-19 to 09-20/trip0.JPG")
+    }
 }

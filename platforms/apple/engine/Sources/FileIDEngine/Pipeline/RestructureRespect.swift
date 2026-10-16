@@ -184,6 +184,61 @@ enum RestructureRespect {
         return out
     }
 
+    static func pathsMatch(_ a: String, _ b: String) -> Bool {
+        (a as NSString).standardizingPath == (b as NSString).standardizingPath
+    }
+
+    // MARK: - Loose photos → events
+
+    /// Loose photos and videos split into events wherever consecutive capture
+    /// times are more than `gap` apart. Events of at least `minFiles` get a
+    /// dated folder (`Photos/2026/2026-09-19`, or a range for multi-day
+    /// events); the rest go to `Photos/<year>/<Month>`. Day names use the
+    /// Mac's time zone so an evening photo isn't filed under the next day.
+    static func looseEventDestinations(
+        files: [FileInfo], root: String, gap: Double = 8 * 3_600, minFiles: Int = 5,
+        calendar: Calendar = .current
+    ) -> [Int64: (path: String, reason: String)] {
+        let loose = files
+            .filter { ($0.kind == "image" || $0.kind == "video") && !isOrganized($0.path, under: root) }
+            .compactMap { f -> (FileInfo, Double)? in (f.captureUnix ?? 0) > 0 ? (f, f.captureUnix!) : nil }
+            .sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.fileID < $1.0.fileID }
+        var groups: [[(FileInfo, Double)]] = []
+        for item in loose {
+            if let last = groups.last?.last, item.1 - last.1 <= gap { groups[groups.count - 1].append(item) }
+            else { groups.append([item]) }
+        }
+        let rootPrefix = root.hasSuffix("/") ? root : root + "/"
+        let day = DateFormatter(); day.calendar = calendar; day.timeZone = calendar.timeZone
+        day.locale = Locale(identifier: "en_US_POSIX"); day.dateFormat = "yyyy-MM-dd"
+        let shortDay = DateFormatter(); shortDay.calendar = calendar; shortDay.timeZone = calendar.timeZone
+        shortDay.locale = Locale(identifier: "en_US_POSIX"); shortDay.dateFormat = "MM-dd"
+        let spoken = DateFormatter(); spoken.calendar = calendar; spoken.timeZone = calendar.timeZone
+        spoken.locale = Locale(identifier: "en_US"); spoken.dateStyle = .medium; spoken.timeStyle = .none
+        let monthName = DateFormatter(); monthName.calendar = calendar; monthName.timeZone = calendar.timeZone
+        monthName.locale = Locale(identifier: "en_US_POSIX"); monthName.dateFormat = "MMMM"
+        var out: [Int64: (path: String, reason: String)] = [:]
+        for group in groups {
+            guard let first = group.first?.1, let last = group.last?.1 else { continue }
+            let start = Date(timeIntervalSince1970: first), end = Date(timeIntervalSince1970: last)
+            let year = calendar.component(.year, from: start)
+            let folder: String, reason: String
+            if group.count >= minFiles {
+                let sameDay = calendar.isDate(start, inSameDayAs: end)
+                let name = sameDay ? day.string(from: start) : "\(day.string(from: start)) to \(shortDay.string(from: end))"
+                folder = rootPrefix + "Photos/\(year)/\(name)"
+                reason = "One of \(group.count) photos taken \(sameDay ? "on " + spoken.string(from: start) : "from " + spoken.string(from: start) + " to " + spoken.string(from: end)); kept together as an event."
+            } else {
+                folder = rootPrefix + "Photos/\(year)/\(monthName.string(from: start))"
+                reason = "Taken in \(monthName.string(from: start)) \(year)."
+            }
+            for (file, _) in group {
+                out[file.fileID] = ((folder as NSString).appendingPathComponent((file.path as NSString).lastPathComponent), reason)
+            }
+        }
+        return out
+    }
+
     struct EventSpan: Sendable {
         let folder: String
         let start: Double

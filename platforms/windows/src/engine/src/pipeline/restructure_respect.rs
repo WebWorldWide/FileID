@@ -216,6 +216,68 @@ pub fn format_corrections(files: &[FileForClassify], root: &Path) -> Vec<Propose
     out
 }
 
+/// Loose photos and videos split into events wherever consecutive capture
+/// times are more than `gap` seconds apart. Events of at least `min_files` get
+/// a dated folder (`Photos/2026/2026-09-19`, or a range for multi-day events);
+/// the rest go to `Photos/<year>/<Month>`. Day names use `offset` (the machine's
+/// local offset in production) so an evening photo isn't filed under the next day.
+pub fn loose_event_destinations(
+    files: &[FileForClassify],
+    root: &Path,
+    gap: f64,
+    min_files: usize,
+    offset: chrono::FixedOffset,
+) -> HashMap<i64, (PathBuf, String)> {
+    use chrono::{Datelike, TimeZone};
+    let mut loose: Vec<(&FileForClassify, f64)> = files
+        .iter()
+        .filter(|f| matches!(f.kind, FileKind::Image | FileKind::Video) && !is_organized(&f.source, root))
+        .map(|f| (f, f.created_unix.unwrap_or(f.modified_unix)))
+        .filter(|(_, t)| *t > 0.0)
+        .collect();
+    loose.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.file_id.cmp(&b.0.file_id)));
+    let mut groups: Vec<Vec<(&FileForClassify, f64)>> = Vec::new();
+    for item in loose {
+        match groups.last_mut() {
+            Some(group) if item.1 - group.last().unwrap().1 <= gap => group.push(item),
+            _ => groups.push(vec![item]),
+        }
+    }
+    let local = |t: f64| offset.timestamp_opt(t as i64, 0).single();
+    let mut out = HashMap::new();
+    for group in groups {
+        let (Some(start), Some(end)) = (local(group[0].1), local(group[group.len() - 1].1)) else { continue };
+        let (folder, reason) = if group.len() >= min_files {
+            let same_day = start.date_naive() == end.date_naive();
+            let name = if same_day {
+                start.format("%Y-%m-%d").to_string()
+            } else {
+                format!("{} to {}", start.format("%Y-%m-%d"), end.format("%m-%d"))
+            };
+            let when = if same_day {
+                format!("on {}", start.format("%b %-d, %Y"))
+            } else {
+                format!("from {} to {}", start.format("%b %-d, %Y"), end.format("%b %-d, %Y"))
+            };
+            (
+                root.join("Photos").join(start.year().to_string()).join(name),
+                format!("One of {} photos taken {when}; kept together as an event.", group.len()),
+            )
+        } else {
+            (
+                root.join("Photos").join(start.year().to_string()).join(start.format("%B").to_string()),
+                format!("Taken in {} {}.", start.format("%B"), start.year()),
+            )
+        };
+        for (file, _) in group {
+            if let Some(name) = file.source.file_name() {
+                out.insert(file.file_id, (folder.join(name), reason.clone()));
+            }
+        }
+    }
+    out
+}
+
 pub struct EventSpan {
     pub folder: PathBuf,
     pub start: f64,
@@ -307,6 +369,38 @@ pub fn apply(proposed: Vec<ProposedMove>, files: &[FileForClassify], root: &Path
     for fix in format_corrections(files, root) {
         if planned.insert(fix.file_id) {
             kept.push(fix);
+        }
+    }
+    let unmatched: Vec<FileForClassify> =
+        files.iter().filter(|f| event_destination(f, &spans).is_none()).cloned().collect();
+    let offset = *chrono::Local::now().offset();
+    let loose = loose_event_destinations(&unmatched, root, 8.0 * 3_600.0, 5, offset);
+    let mut index_by_id: HashMap<i64, usize> = kept.iter().enumerate().map(|(i, m)| (m.file_id, i)).collect();
+    let mut loose_ids: Vec<&i64> = loose.keys().collect();
+    loose_ids.sort();
+    for id in loose_ids {
+        let (Some(file), Some((target, reason))) = (kinds.get(id), loose.get(id)) else { continue };
+        if file.source == *target {
+            continue;
+        }
+        let category = target
+            .parent()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let proposal = ProposedMove {
+            file_id: *id,
+            source: file.source.clone(),
+            destination: target.clone(),
+            category,
+            confidence: Confidence::Auto,
+            reason: Some(reason.clone()),
+        };
+        if let Some(&i) = index_by_id.get(id) {
+            kept[i] = proposal;
+        } else {
+            index_by_id.insert(*id, kept.len());
+            kept.push(proposal);
         }
     }
     for m in &mut kept {
@@ -425,6 +519,26 @@ mod tests {
         assert_eq!(event_destination(&loose, &spans), Some(Path::new(ROOT).join("Kyle Baseball Game 9-19-26/Photos/RAWs/D5.ARW")));
         let old = file(98, "Downloads/old.JPG", FileKind::Image, Some(day - 200.0 * 86_400.0));
         assert_eq!(event_destination(&old, &spans), None);
+    }
+
+    #[test]
+    fn loose_photos_group_into_dated_events() {
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        let sep19 = 1_789_812_000.0;
+        let oct4 = sep19 + 15.0 * 86_400.0;
+        let mut files: Vec<_> = (0..6).map(|i| file(i, &format!("Downloads/A{i}.JPG"), FileKind::Image, Some(sep19 + i as f64 * 900.0))).collect();
+        files.extend((0..5).map(|i| file(10 + i, &format!("B{i}.JPG"), FileKind::Image, Some(oct4 + i as f64 * 1_800.0))));
+        files.push(file(20, "Downloads/lonely.JPG", FileKind::Image, Some(oct4 + 40.0 * 86_400.0)));
+        files.push(file(21, "Kyle Baseball Game 9-19-26/Photos/JPEGs/K.JPG", FileKind::Image, Some(sep19)));
+        let out = loose_event_destinations(&files, Path::new(ROOT), 8.0 * 3_600.0, 5, utc);
+        let root = Path::new(ROOT);
+        assert_eq!(out[&0].0, root.join("Photos/2026/2026-09-19/A0.JPG"));
+        assert_eq!(out[&14].0, root.join("Photos/2026/2026-10-04/B4.JPG"));
+        assert_eq!(out[&20].0, root.join("Photos/2026/November/lonely.JPG"));
+        assert!(!out.contains_key(&21));
+        let trip: Vec<_> = (0..6).map(|i| file(30 + i, &format!("trip{i}.JPG"), FileKind::Image, Some(sep19 + i as f64 * 5.0 * 3_600.0))).collect();
+        let out = loose_event_destinations(&trip, root, 8.0 * 3_600.0, 5, utc);
+        assert_eq!(out[&30].0, root.join("Photos/2026/2026-09-19 to 09-20/trip0.JPG"));
     }
 
     #[test]
