@@ -652,10 +652,20 @@ fn open_preview(
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
+    // Videos and audio play in place (GTK's media backend) instead of
+    // launching another application.
+    let video = gtk::Video::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .autoplay(false)
+        .build();
+    let canvas = gtk::Stack::builder().hexpand(true).vexpand(true).build();
+    canvas.add_named(&pic, Some("image"));
+    canvas.add_named(&video, Some("media"));
     let body = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .build();
-    body.append(&pic);
+    body.append(&canvas);
     body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
     body.append(&meta_scroll);
 
@@ -669,6 +679,8 @@ fn open_preview(
         let engine = engine.clone();
         let model = model.clone();
         let pic = pic.clone();
+        let video = video.clone();
+        let canvas = canvas.clone();
         let meta_scroll = meta_scroll.clone();
         let counter = counter.clone();
         let dialog = dialog.clone();
@@ -687,9 +699,19 @@ fn open_preview(
             next_btn.set_sensitive(pos + 1 < model.n_items());
             meta_scroll.set_child(Some(&build_meta(&row)));
             pic.set_paintable(None::<&gtk::gdk::Texture>);
+            if let Some(stream) = video.media_stream() {
+                stream.pause();
+            }
             let generation = preview_generation.get().wrapping_add(1);
             preview_generation.set(generation);
-            load_preview_image(&engine, &pic, &row, preview_generation.clone(), generation);
+            if row.kind == "video" || row.kind == "audio" {
+                video.set_file(Some(&gio::File::for_path(&row.path)));
+                canvas.set_visible_child_name("media");
+            } else {
+                video.set_file(None::<&gio::File>);
+                canvas.set_visible_child_name("image");
+                load_preview_image(&engine, &pic, &row, preview_generation.clone(), generation);
+            }
         })
     };
 
@@ -752,6 +774,16 @@ fn open_preview(
     dialog.add_controller(keys);
 
     load();
+    dialog.connect_closed(clone!(
+        #[weak]
+        video,
+        move |_| {
+            if let Some(stream) = video.media_stream() {
+                stream.pause();
+            }
+            video.set_file(None::<&gio::File>);
+        }
+    ));
     dialog.present(Some(parent));
 
     // Springy fade-in of the body, on the shared brand spring.

@@ -77,15 +77,79 @@ fn open(hit: &CatalogHit, status: &gtk::Label) {
         status.set_label("File is unavailable offline or has moved.");
         return;
     }
+    let is_media = hit.kind != "page"
+        && matches!(
+            std::path::Path::new(&hit.path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some(
+                "mp4"
+                    | "mov"
+                    | "m4v"
+                    | "mkv"
+                    | "avi"
+                    | "webm"
+                    | "mp3"
+                    | "m4a"
+                    | "wav"
+                    | "flac"
+                    | "ogg"
+                    | "aac"
+            )
+        );
+    if is_media {
+        play_inline(&hit.path, hit.start_seconds, status);
+        return;
+    }
     let uri = gio::File::for_path(&hit.path).uri();
     match gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE) {
-        Ok(()) => status.set_label(if hit.start_seconds.is_some() {
-            "Opened file. Timestamp seeking/playback is unavailable in this Linux workbench."
-        } else {
-            "Opened in the local default application."
-        }),
+        Ok(()) => status.set_label("Opened in the local default application."),
         Err(e) => status.set_label(&format!("Could not open file: {e}")),
     }
+}
+
+/// Plays a matching video or audio file inside FileID, starting at the
+/// matched moment when there is one.
+fn play_inline(path: &str, start_seconds: Option<f64>, status: &gtk::Label) {
+    let media = gtk::MediaFile::for_filename(path);
+    if let Some(seconds) = start_seconds.filter(|s| s.is_finite() && *s > 0.0) {
+        let micros = (seconds * 1_000_000.0) as i64;
+        media.connect_prepared_notify(move |stream| {
+            if stream.is_prepared() && stream.is_seekable() {
+                stream.seek(micros);
+            }
+        });
+    }
+    let video = gtk::Video::builder()
+        .media_stream(&media)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    let dialog = adw::Dialog::builder()
+        .title(
+            std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+        .content_width(900)
+        .content_height(560)
+        .build();
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&video));
+    dialog.set_child(Some(&toolbar));
+    let on_close = media.clone();
+    dialog.connect_closed(move |_| on_close.pause());
+    dialog.present(Some(status));
+    media.play();
+    status.set_label(if start_seconds.is_some() {
+        "Playing from the matched moment."
+    } else {
+        "Playing in FileID."
+    });
 }
 
 struct CatalogUi {
