@@ -86,7 +86,6 @@ struct FileIDApp: App {
                 .toggleStyle(DSCheckboxToggleStyle())
                 .progressViewStyle(DSProgressViewStyle())
                 .buttonStyle(DSSecondaryButtonStyle())
-                .padding(20)
                 .background { LavaLampBackground().ignoresSafeArea() }
                 .preferredColorScheme(.dark)
                 .onAppear { startEngineIfNeeded() }
