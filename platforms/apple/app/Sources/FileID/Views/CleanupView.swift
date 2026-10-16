@@ -734,6 +734,7 @@ private struct CopyTile: View {
             .frame(width: 132)
         }
         .task(id: file.id) { thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 264) }
+        .onDisappear { thumb = nil }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])

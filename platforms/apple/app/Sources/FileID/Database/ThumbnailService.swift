@@ -117,7 +117,7 @@ public final class ThumbnailService {
         }.value
     }
 
-    static func cropFace(in image: NSImage, bbox: String, sourceOrientation: Int = 1) -> NSImage? {
+    nonisolated static func cropFace(in image: NSImage, bbox: String, sourceOrientation: Int = 1) -> NSImage? {
         guard let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let bounds = FaceBBox.parseNormalized(bbox, imageWidth: pixels.width,
                   imageHeight: pixels.height, sourceOrientation: sourceOrientation)

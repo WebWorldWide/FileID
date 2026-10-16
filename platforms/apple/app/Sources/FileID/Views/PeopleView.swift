@@ -807,7 +807,12 @@ private struct PersonCard: View {
             orientation = 1
         }
         guard !Task.isCancelled else { return }
-        thumbnail = ThumbnailService.cropFace(in: full, bbox: bbox, sourceOrientation: orientation) ?? full
+        let box = UncheckedImage(full)
+        let cropped = await Task.detached(priority: .userInitiated) {
+            ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation).map(UncheckedImage.init)
+        }.value
+        guard !Task.isCancelled else { return }
+        thumbnail = cropped?.image ?? full
     }
 
 }
@@ -1159,6 +1164,7 @@ private struct PersonFileTile: View {
         .task(id: file.id) {
             img = await ThumbnailService.shared.thumbnail(for: file.url, size: 240)
         }
+        .onDisappear { img = nil }
         .contextMenu {
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -1567,4 +1573,10 @@ private struct FaceModelInstallPanel: View {
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
         }
     }
+}
+
+/// Moves an NSImage across a task boundary; the image is never mutated.
+struct UncheckedImage: @unchecked Sendable {
+    let image: NSImage
+    init(_ image: NSImage) { self.image = image }
 }

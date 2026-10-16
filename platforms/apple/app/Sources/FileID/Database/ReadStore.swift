@@ -15,8 +15,8 @@ public final class ReadStore: @unchecked Sendable {
     // captures a strong `q` under the lock, so ARC keeps the connection
     // alive until the last in-flight read drains, even across `close()`.
     @ObservationIgnored private let connLock = NSLock()
-    @ObservationIgnored private var _queue: DatabasePool?
-    private var queue: DatabasePool? {
+    @ObservationIgnored private var _queue: (any DatabaseReader)?
+    private var queue: (any DatabaseReader)? {
         get { connLock.lock(); defer { connLock.unlock() }; return _queue }
         set { connLock.lock(); defer { connLock.unlock() }; _queue = newValue }
     }
@@ -80,7 +80,7 @@ public final class ReadStore: @unchecked Sendable {
         if queue == nil {
             do {
                 try ReadOnlyLocations.requireWritable(dbURL)
-                self.queue = try DatabasePool(path: dbURL.path, configuration: Self.readConfiguration())
+                self.queue = try Self.openReader(at: dbURL)
             } catch {
                 reportError("Could not open DB: \(error)")
                 return
@@ -1759,6 +1759,17 @@ public final class ReadStore: @unchecked Sendable {
     /// Concurrent read-only connections over the engine's WAL database: the
     /// grid, search, tags, people and counters no longer queue behind one
     /// another. Each reader gets a 32 MB page cache and memory-mapped I/O.
+    /// A pool of concurrent readers needs WAL (the engine's database always
+    /// is). Other journal modes get one connection, since there a reader's
+    /// shared lock would block a writer's commit.
+    nonisolated static func openReader(at url: URL) throws -> any DatabaseReader {
+        let probe = try DatabaseQueue(path: url.path, configuration: readConfiguration())
+        let mode = try probe.read { try String.fetchOne($0, sql: "PRAGMA journal_mode") } ?? ""
+        guard mode.lowercased() == "wal" else { return probe }
+        try probe.close()
+        return try DatabasePool(path: url.path, configuration: readConfiguration())
+    }
+
     nonisolated static func readConfiguration() -> Configuration {
         var config = Configuration()
         config.readonly = true
