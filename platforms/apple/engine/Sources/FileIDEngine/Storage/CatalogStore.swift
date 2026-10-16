@@ -101,14 +101,10 @@ public enum CatalogStore {
         guard !words.isEmpty else { return [] }
         let wordMatch = """
             EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.source IN ('auto','user','vlm')
-              AND (' ' || REPLACE(LOWER(t.tag), '_', ' ')) LIKE ? ESCAPE '\\')
+              AND (' ' || REPLACE(LOWER(t.tag), '_', ' ')) LIKE ?)
             """
         let score = words.map { _ in "(\(wordMatch))" }.joined(separator: " + ")
-        let likeArgs: [DatabaseValueConvertible] = words.map { word in
-            "% " + word.replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "%", with: "\\%")
-                .replacingOccurrences(of: "_", with: "\\_") + "%"
-        }
+        let likeArgs: [DatabaseValueConvertible] = words.map { "% \($0)%" }
         let rows = try Row.fetchAll(db, sql: """
             WITH scored AS (
               SELECT f.id, f.path_text, f.kind, \(score) AS score

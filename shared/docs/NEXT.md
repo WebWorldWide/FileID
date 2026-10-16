@@ -33,7 +33,8 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [ ] Compress AI memory further: free vision-encoder activations between passes; route tag/rename passes to a small model (Qwen3.5 0.8B peaks at 1.1 GB) when quality holds.
 - [x] Idle models are parked after 5 min (weights freed, model stays selected, reloads on next use): 3.1 GB → ~107 MB while idle, verified on Adlon files with Qwen3-VL 4B.
 - [x] Chat retrieval finds scanned tags (word-prefix, best-match files) so a scanned-but-not-analyzed library answers "grass"/"sunglasses" (was 0 hits; now 100/45 on the Adlon library). Evidence goes to the model as numbered lines instead of JSON: Qwen3.5 0.8B first token 1.07 → 0.58 s, Qwen3-VL 4B 2.2/2.0 → 2.1/1.75 s, and answers are sentences with [n] citations instead of bare citations.
-- [ ] Chat: prompt-cache reuse across turns (small further gain); port tag hits to the Rust portable chat search.
+- [x] Rust portable chat search (Windows/Linux) answers from scanned tags the same way.
+- [ ] Chat: prompt-cache reuse across turns (small further gain).
 - [x] Video moments: next window's frames extract while the model runs; revision check in-process (one helper spawn and one frame decode fewer per window).
 - [ ] Video analysis: keep one long-lived frame helper per job instead of a process per window; batch frames per model call; measure on Adlon clips.
 - [ ] Scan: overlap I/O with ML (read-ahead on USB/NAS); move RAM++ to the GPU the same way as CLIP once installed and measured.
