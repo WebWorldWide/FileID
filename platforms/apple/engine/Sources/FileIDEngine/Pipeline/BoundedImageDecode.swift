@@ -5,17 +5,20 @@ import ImageIO
 /// least two-thirds of the requested size (RAW files carry full-size JPEG
 /// previews; decoding those is 10–17× cheaper than demosaicing the sensor
 /// data), otherwise decodes the full image. Small EXIF thumbnails never pass.
+/// A preview up to a third larger than the target is used at its native size:
+/// resampling a 1616 px Sony preview down to 1536 px cost more than decoding it.
 func decodeBoundedImage(_ source: CGImageSource, maxPixelSize: Int) -> CGImage? {
     var options: [CFString: Any] = [
         kCGImageSourceShouldCacheImmediately: true,
         kCGImageSourceCreateThumbnailWithTransform: true,
-        kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        kCGImageSourceThumbnailMaxPixelSize: maxPixelSize * 4 / 3,
         kCGImageSourceCreateThumbnailFromImageIfAbsent: true
     ]
     if let preview = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
        max(preview.width, preview.height) * 3 >= maxPixelSize * 2 || !hasLargerImage(source, than: preview) {
         return preview
     }
+    options[kCGImageSourceThumbnailMaxPixelSize] = maxPixelSize
     options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
     options[kCGImageSourceCreateThumbnailFromImageAlways] = true
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)

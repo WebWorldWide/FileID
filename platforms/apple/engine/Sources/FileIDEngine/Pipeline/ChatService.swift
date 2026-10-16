@@ -117,6 +117,23 @@ actor ChatService {
         return String(format: "%d:%02d", total / 60, total % 60)
     }
 
+    /// Numbered one-line evidence instead of JSON: about a third fewer prompt
+    /// tokens (prefill dominates time to first word on 4B+ models), no empty
+    /// fields, and small models no longer echo the structure back.
+    static func evidencePrompt(request: String, hits: [CatalogHit], limit: Int = 8) -> String {
+        let shown = hits.prefix(limit)
+        var lines = ["Request: \(request)", "Matches found: \(hits.count)\(hits.count > shown.count ? " (showing \(shown.count))" : "")", "<evidence>"]
+        for (index, hit) in shown.enumerated() {
+            var where_: [String] = [hit.kind]
+            if let s = hit.startSeconds { where_.append(String(format: "at %.0f s", s)) }
+            if let page = hit.page { where_.append("page \(page)") }
+            let text = hit.text.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(400)
+            lines.append("[\(index + 1)] \(URL(fileURLWithPath: hit.path).lastPathComponent) (\(where_.joined(separator: ", "))): \(text)")
+        }
+        lines.append("</evidence>")
+        return lines.joined(separator: "\n")
+    }
+
     private func summarize(_ request: ChatRequest, hits: [CatalogHit], model: AIModelKind, fallback: String, database: Database, sink: IPCSink) async {
         guard active[request.conversationID] == request.requestID else { return }
         running = request.requestID
@@ -124,11 +141,8 @@ actor ChatService {
         var answer = fallback
         if case .ready(let current) = await DeepAnalyze.shared.loadState, current == model {
             await DeepAnalyze.shared.clearCancel()
-            let facts = hits.prefix(8).enumerated().map { index, hit in
-                ["number": String(index + 1), "file": URL(fileURLWithPath: hit.path).lastPathComponent, "kind": hit.kind, "evidence": String(hit.text.prefix(600)), "seconds": hit.startSeconds.map { String($0) } ?? "", "page": hit.page.map { String($0) } ?? ""]
-            }
-            if let data = try? JSONEncoder().encode(facts) {
-                let prompt = "Request: \(request.text ?? "")\nCatalog evidence JSON: " + String(decoding: data, as: UTF8.self)
+            let prompt = Self.evidencePrompt(request: request.text ?? "", hits: hits)
+            do {
                 let result = await DeepAnalyze.shared.runCancellableAnalysis {
                     do {
                         let text = try await DeepAnalyze.shared.answerCatalog(prompt: prompt) { chunk in

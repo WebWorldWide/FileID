@@ -15,7 +15,7 @@ namespace FileID.ViewModels;
 
 internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 {
-    private const int PageSize = 200;
+    private const int PageSize = 300;
     private static readonly TimeSpan DebounceWindow = TimeSpan.FromMilliseconds(200);
 
     private readonly ReadStore _store;
@@ -37,6 +37,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     // LAST one finishes (an earlier finally no longer clears it prematurely).
     private long _refreshGen;
     private int _activeLoads;
+    // Paging for the plain (unsearched) listing: rows loaded so far, whether
+    // the database has more, and a guard so only one page loads at a time.
+    private int _loadedRows;
+    private bool _hasMore;
+    private int _loadingMore;
     private string _query = string.Empty;
     private string _kindFilter = "all";
     private bool _isLoading;
@@ -295,6 +300,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             });
 
             IReadOnlyList<FileRow> rows;
+            bool pageable = false;
             if (string.IsNullOrWhiteSpace(_query))
             {
                 // Microsoft.Data.Sqlite is fake-async (the query runs inline on
@@ -304,7 +310,11 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 // first paint and stutter the grid; offload it like the sibling
                 // CleanupViewModel/PeopleViewModel. The search branch already
                 // yields via the IPC round-trip, so leave it as-is.
-                rows = await Task.Run(() => _store.RecentAsync(PageSize, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
+                // Keep every page already scrolled into, so a live-scan refresh
+                // doesn't snap the grid back to the first page.
+                int want = Math.Max(PageSize, Volatile.Read(ref _loadedRows));
+                rows = await Task.Run(() => _store.RecentAsync(want, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
+                pageable = rows.Count == want;
             }
             else
             {
@@ -322,7 +332,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 filtered.Add(FileTile.From(r));
             }
 
-            ApplyOnUi(filtered, myGen);
+            int loaded = rows.Count;
+            ApplyOnUi(filtered, myGen, pageable, loaded);
         }
         catch (OperationCanceledException)
         {
@@ -437,7 +448,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen)
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -446,6 +457,8 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
             ReplaceItems(next);
+            _hasMore = hasMore;
+            Volatile.Write(ref _loadedRows, hasMore || loadedRows > 0 ? loadedRows : 0);
         }
         if (_ui.HasThreadAccess)
         {
@@ -454,6 +467,38 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         else
         {
             _ui.TryEnqueue(Apply);
+        }
+    }
+
+    /// <summary>Appends the next page of the plain listing when the grid nears
+    /// its end. No-op while searching, showing similar files, or already loading.</summary>
+    public async Task LoadMoreAsync()
+    {
+        if (_disposed || !_hasMore || !string.IsNullOrWhiteSpace(_query)) return;
+        if (Interlocked.Exchange(ref _loadingMore, 1) == 1) return;
+        long gen = Interlocked.Read(ref _refreshGen);
+        int offset = Volatile.Read(ref _loadedRows);
+        string? kind = _kindFilter == "all" ? null : _kindFilter;
+        try
+        {
+            var token = _disposalCts.Token;
+            var rows = await Task.Run(() => _store.RecentAsync(PageSize, token, kind, offset), token).ConfigureAwait(false);
+            if (_disposed || token.IsCancellationRequested) return;
+            var page = new List<FileTile>(rows.Count);
+            foreach (var r in rows) page.Add(FileTile.From(r));
+            OnUi(() =>
+            {
+                if (Interlocked.Read(ref _refreshGen) != gen || Volatile.Read(ref _loadedRows) != offset) return;
+                Items.AppendRange(page);
+                Volatile.Write(ref _loadedRows, offset + rows.Count);
+                _hasMore = rows.Count == PageSize;
+            });
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        finally
+        {
+            Volatile.Write(ref _loadingMore, 0);
         }
     }
 

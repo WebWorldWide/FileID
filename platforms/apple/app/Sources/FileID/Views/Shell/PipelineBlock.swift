@@ -99,6 +99,7 @@ struct PipelineBlock: View {
                     }
                     .buttonStyle(.dsRow)
                     .help(showDetails ? "Hide scan details" : "Show scan details")
+                    .accessibilityLabel(showDetails ? "Hide scan details" : "Show scan details")
                 }
             }
             Text(s.sub).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)

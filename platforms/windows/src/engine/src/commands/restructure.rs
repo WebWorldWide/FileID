@@ -1505,6 +1505,15 @@ pub(crate) async fn handle_plan_restructure(
     // confidence into the emitted plan. (R3 → learn-your-style)
     restructure_feedback::boost(&db_for_boost, &mut proposed);
 
+    // Keep what the user already organized (RESTRUCTURE.md 2026-10-15).
+    let mut kept_organized_folders = std::collections::HashSet::new();
+    if !crate::pipeline::restructure_respect::kill_switch_off() {
+        let (kept, untouched) =
+            crate::pipeline::restructure_respect::apply(proposed, &files, library_root_path);
+        proposed = kept;
+        kept_organized_folders = untouched;
+    }
+
     // Engine-authoritative folder classification, computed on the FULL proposal
     // set so the Keep/Tidy/Reorganize tile counts stay accurate.
     let folder_class = restructure::classify_folders(&proposed, library_root_path);
@@ -1545,6 +1554,12 @@ pub(crate) async fn handle_plan_restructure(
             }
         };
         tier_by_folder.insert(f.source_folder.clone(), tier_label);
+    }
+    for folder in kept_organized_folders {
+        if let std::collections::hash_map::Entry::Vacant(slot) = tier_by_folder.entry(folder) {
+            slot.insert("Anchor");
+            anchor += 1;
+        }
     }
 
     // Anchor folders are well-organized with clear names; the macOS reference

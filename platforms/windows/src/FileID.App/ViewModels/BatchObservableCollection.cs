@@ -37,6 +37,27 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
         OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 
+    /// Appends a page with one Reset instead of one Add event per item.
+    public void AppendRange(IReadOnlyList<T> more)
+    {
+        if (more.Count == 0) return;
+        _suspend = true;
+        try
+        {
+            for (int i = 0; i < more.Count; i++)
+            {
+                Items.Add(more[i]);
+            }
+        }
+        finally
+        {
+            _suspend = false;
+        }
+        OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
+        OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+    }
+
     protected override void OnCollectionChanged(NotifyCollectionChangedEventArgs e)
     {
         if (_suspend) return;

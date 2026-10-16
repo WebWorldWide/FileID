@@ -253,7 +253,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     /// (or when CLIP isn't installed yet). scanned_at DESC puts freshly scanned
     /// files at the TOP (macOS parity); id DESC breaks sub-second ties.
     /// </summary>
-    public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct, string? kind = null)
+    public async Task<IReadOnlyList<FileRow>> RecentAsync(int limit, CancellationToken ct, string? kind = null, int offset = 0)
     {
         if (_connection == null) return Array.Empty<FileRow>();
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -273,9 +273,10 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                        (SELECT GROUP_CONCAT(tag, '|') FROM (SELECT tag FROM tags WHERE file_id = files.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, score DESC, rowid)) AS auto_tags,
                        vlm_proposed_name
                 FROM files WHERE failed = 0{kindClause}
-                ORDER BY scanned_at DESC, id DESC LIMIT $limit
+                ORDER BY scanned_at DESC, id DESC LIMIT $limit OFFSET $offset
                 """;
             cmd.Parameters.AddWithValue("$limit", limit);
+            cmd.Parameters.AddWithValue("$offset", Math.Max(0, offset));
             if (kindClause.Length > 0) cmd.Parameters.AddWithValue("$kind", kind!);
             using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await reader.ReadAsync(ct).ConfigureAwait(false))

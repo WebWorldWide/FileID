@@ -96,6 +96,7 @@ struct MainWindow: View {
             VStack(spacing: 0) {
                 TitleBar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL,
                          sidebarVisible: $sidebarVisible, chatPresented: $chatPresented, pickFolder: pickFolder)
+                    .background(TrafficLightAligner(barHeight: Theme.Metrics.titleBar))
                 GeometryReader { geometry in
                 HStack(spacing: 0) {
                     if sidebarVisible && (!chatPresented || geometry.size.width >= 1440) {

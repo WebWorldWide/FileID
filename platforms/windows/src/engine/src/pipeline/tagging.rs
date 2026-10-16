@@ -1670,6 +1670,15 @@ fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// Windows bitmap codecs. The fallback is still per-file and bounded, so a
 /// missing codec only marks that file as undecodable.
 fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let is_raw = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(super::raw_preview::is_raw_extension);
+    if is_raw {
+        if let Some(out) = decode_raw_preview(path, bytes) {
+            return Ok(out);
+        }
+    }
     let primary = decode_image_sync_imagecrate(path, bytes);
     if primary.is_ok() {
         return primary;
@@ -1704,6 +1713,37 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
         }
     }
     primary
+}
+
+/// Camera RAW: decode the largest embedded JPEG preview (≥ 1024 px) and apply
+/// the RAW container's orientation. None falls back to the full decoders.
+fn decode_raw_preview(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<(Vec<u8>, u32, u32)> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mmap;
+        let bytes: &[u8] = if let Some(pre_read) = bytes {
+            pre_read
+        } else {
+            let file = open_image_file(path).ok()?;
+            mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
+            &mmap
+        };
+        let jpeg = super::raw_preview::largest_embedded_jpeg(bytes)?;
+        let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg)
+            .into_dimensions()
+            .ok()?;
+        if w.max(h) < 1024 {
+            return None;
+        }
+        let orientation = exif_orientation(bytes);
+        let (buf, w, h) = decode_jpeg_scaled(jpeg).or_else(|| {
+            let rgb = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?.into_rgb8();
+            let (w, h) = rgb.dimensions();
+            Some((rgb.into_raw(), w, h))
+        })?;
+        apply_exif_orientation(buf, w, h, orientation).ok()
+    }))
+    .ok()
+    .flatten()
 }
 
 /// Conservative reservation for an image decoded from immutable pre-read

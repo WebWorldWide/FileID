@@ -1,5 +1,20 @@
 # FileID — State
 
+## 2026-10-15 (evening) — Library at scale, Restructure that respects folders, in-app playback, cross-platform engine
+
+Owner feedback drove this pass: scrolling was slow, the grid only ever showed the first 200 files, Restructure "sucks", videos opened in QuickTime, window buttons sat off-centre, and the engine and UI performance work had to reach Windows and Linux.
+
+macOS:
+- Library: pages the whole library as you scroll (verified 3,447 of 3,447 on Adlon); the grid is an NSCollectionView with reused cells, Core Animation text and one hover tracker. Flinging through every file: main thread 86% → 53% busy, memory 1.6 GB → 318 MB. Reads go through a pool of six read-only SQLite connections instead of one serial queue.
+- Title bar: window buttons vertically centred in the 48 pt bar, search centred, Browse/Analyze/Act moved into the sidebar. Preview sheet rebuilt: sharp ImageIO decode (Quick Look queued behind thumbnails and gave 640 px), cleaner toolbar and info panel, videos and audio play in place with AVKit; Chat, Moments and Best Takes play in their own players.
+- Restructure: a respect-your-organization stage. On Adlon/Camera the old plan moved 2,966 files (2,703 "sure") across events and formats into folders like "Dsc01548 Sunglasses"; now 0 moves, 28 folders kept. Planning took over 10 minutes (n² scalar kNN) and now takes ~19 s via one Accelerate matrix multiply.
+- AI memory: idle models are parked after 5 minutes (3.1 GB → ~107 MB) and reload on next use; MLX buffer cache capped; benchmark measures real process footprint. Accessibility: spoken names for icon buttons, Increase Contrast, Reduce Transparency.
+- Scan: CLIP and hashing overlap Vision; Vision warmed once; RAW previews used at native size. 382 warm Adlon RAWs: 55–56 files/s.
+
+Shared Rust engine (Windows, Linux, CLI, TUI): the same Restructure stage (`restructure_respect.rs`) and embedded-preview RAW decoding (`raw_preview.rs`; real Sony ARW full 7008×4672 preview in 72–92 ms, previously undecodable on Linux). Linux GTK Library pages past its 1,000 cap, reloads in one splice and decodes thumbnails on a small pool instead of a thread per tile. Windows WinUI Library pages past 200 and keeps loaded pages through live-scan refreshes (CI-verified only; no .NET SDK on the Mac).
+
+Verified: macOS Swift suite 609 tests pass; Rust engine strict Clippy clean, restructure and RAW tests pass (18 host-memory admission tests fail on this Mac depending on free memory, unchanged by this work); GTK Clippy clean, 54 tests pass; egress gate passes.
+
 ## 2026-10-15 — Rounder, calmer macOS shell; MLX benchmark; model gap research
 
 Design follow-up from owner feedback (simpler like the old UI, rounder, more readable, faster motion; cosmic-studio as reference). Corners are back as a small continuous radius scale (4/6/8/10) on cards, buttons, chips, segmented bars, selection rings and toggles; strokes follow their clip radius. UI text is Archivo with tabular digits; mono stays for paths and filenames. The sidebar is one list grouped Browse / Analyze / Act with 32 pt rows and quiet badges, ending in a compact scan card (step indicator, collapsible counters). Springs are faster and better damped; the lava renders at 30 fps without a per-frame blur. Pages were checked by background window captures on the Adlon library: Cleanup's headline no longer reads "0.0 MB reclaimable", Settings cards share one header style, and the Library kind filter no longer uses mono.
@@ -22,6 +37,8 @@ Performance: the scan decode now uses a RAW file's embedded full-size preview wh
 CLIP image embeddings now run on the GPU. The pinned ONNX export is built from dynamic-shape primitives (Shape/Gather/Concat/Reshape), so the CoreML provider placed nothing on the ANE/GPU in any mode tried (default, static shapes, CPU+GPU, ML Program) and CLIP cost ~190 ms per image under scan load. `CLIPVisionMLX` reads the same weights straight out of the installed ONNX file (a small protobuf reader; the exporter's 73 anonymous MatMul weights are named through the graph by the bias each one feeds) and runs ViT-B/32 in MLX float16; `CLIPGPUBatcher` gathers concurrent scan requests into one batch. Parity against ONNX Runtime is above 0.999 cosine, so stored embeddings and text search stay valid. Per image: 40 ms CPU uncontended / 190 ms under load → 21 ms single / 3.2 ms in a batch of 16. ONNX Runtime remains the fallback (`FILEID_CLIP_BACKEND=onnx`, or no Metal library beside the engine).
 
 End-to-end scan of 105 Sony ARW files on Adlon (warm cache, isolated database): previous engine 4.1 files/s and 1,090 MB peak → now 40–42 files/s and ~660 MB. The first scan after installing a new engine binary is slower while Metal compiles shaders.
+
+Accessibility (Apple HIG): icon-only buttons now carry spoken names instead of SF Symbol names, text-secondary and hairline tokens resolve per appearance and strengthen under Increase Contrast, and the LavaLamp is replaced by a solid background under Reduce Transparency.
 
 Test fix: the incremental-walk test seeded a placeholder CLIP model ID, so it failed on any Mac with CLIP installed; it now seeds the real ID. The media-worker tests need `FILEID_TEST_ENGINE_PATH`, as CI sets it. Verified: full Swift suite **597 tests** pass (174 shared, 46 app, 377 engine, including eight new benchmark tests).
 

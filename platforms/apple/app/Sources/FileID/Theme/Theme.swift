@@ -3,9 +3,10 @@ import AppKit
 import CoreText
 
 // MARK: - Theme (Prototype v3)
-// Square corners, 1 px hairlines, mono section labels, serif page titles.
+// Rounded continuous corners, 1 px hairlines, Archivo text, serif page titles.
 // Gold is the only action/selection accent; lavender means a model is
-// running, cyan is information, pink is "done".
+// running, cyan is information, pink is "done". Text and hairline tokens
+// strengthen automatically under Increase Contrast.
 
 enum Theme {
     static let gold    = Color(red: 1.0, green: 0.8, blue: 0.0)          // #FFCC00
@@ -23,8 +24,8 @@ enum Theme {
     static let bg0 = Color(hex: 0x070708)
     static let bg1 = Color(hex: 0x0B0B0C)
     static let text1 = Color(hex: 0xF0F1F2)
-    static let text2 = Color(hex: 0xCFD3D8)
-    static let text3 = Color(hex: 0xA6ACB3)
+    static let text2 = adaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
+    static let text3 = adaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let label = Color(hex: 0xAEB4BB)
     static let textOnPanel = Color(hex: 0xE2E5E8)
 
@@ -32,9 +33,17 @@ enum Theme {
     static let panelHeader    = Color.white.opacity(0.02)
     static let pane           = Color.white.opacity(0.015)
     static let well           = Color.black.opacity(0.3)
-    static let hairline       = Color.white.opacity(0.08)
-    static let hairlineSoft   = Color.white.opacity(0.06)
-    static let hairlineStrong = Color.white.opacity(0.14)
+    static let hairline       = adaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
+    static let hairlineSoft   = adaptive(normal: NSColor.white.withAlphaComponent(0.06), increased: NSColor.white.withAlphaComponent(0.26))
+    static let hairlineStrong = adaptive(normal: NSColor.white.withAlphaComponent(0.14), increased: NSColor.white.withAlphaComponent(0.5))
+
+    /// Resolves per appearance, so it follows System Settings ▸ Accessibility ▸ Increase Contrast live.
+    static func adaptive(normal: NSColor, increased: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua, .darkAqua, .aqua])
+                .map { $0.rawValue.contains("HighContrast") } == true ? increased : normal
+        })
+    }
     static let controlBorder  = Color.white.opacity(0.18)
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
@@ -115,6 +124,13 @@ enum BrandFonts {
     }
 }
 
+extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+}
+
 extension Color {
     init(hex: UInt32, opacity: Double = 1) {
         self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
@@ -122,7 +138,7 @@ extension Color {
     }
 }
 
-// MARK: - GlassCard → square hairline panel
+// MARK: - GlassCard → rounded hairline panel
 
 struct GlassCard<Content: View>: View {
     @ViewBuilder var content: Content

@@ -25,29 +25,58 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [x] Forced 448 px image size skipped for fixed-tile architectures (Idefics3, SmolVLM).
 - [x] Measure end-to-end scan files/s on Adlon: 4.1 → 40–42 files/s on 105 RAWs (decode preview + GPU CLIP), memory 1,090 → ~660 MB.
 - [x] CLIP on the GPU via MLX, weights read from the installed ONNX, batched (190 ms → 3.2 ms per image).
-- [ ] Reach ≥140 files/s. Measured now: 40–42 files/s warm (105 RAWs), 27.8 files/s on 382 uncached RAWs, ~94 ms engine CPU per file, peak 372–660 MB. A CPU sample shows most worker threads waiting (I/O, ANE/IOKit, semaphores); real CPU hot spots are CoreGraphics resampling for model inputs (CLIP/RAM++/dHash each rescale the 1536 px image separately) and JPEG decode. Next: resample once to a shared 224/384 px buffer with vImage, read ahead on USB/NAS, and measure Vision on a smaller image for classify while keeping 1536 px for faces.
-- [ ] Hash only once per image (content hash currently reads the file a second time after decode).
+- [x] Per-image overlap: CLIP (GPU) and the file hash (disk) run while Vision uses the Neural Engine; Vision is warmed once before workers start. Per-file 129 → ~115 ms.
+- [x] RAW previews up to a third larger than the target are used without resampling (decode 33 → 21 ms per Sony ARW); engine CPU for 382 RAWs 34.0 → 30.6 s.
+- [ ] Reach ≥140 files/s (BLOCKED on a quiet machine to measure; owner's Mac runs at load average ~14). Findings: worker count is not the limit (8–28 workers all 44±1 files/s on 382 RAWs under that load); the engine spends ~89 ms CPU per RAW, a ceiling of ~110 files/s on 10 cores; Adlon JPEG folders (22 MB files) are bound by the USB drive at ~317 MB/s (14 files/s). Next lever is CPU per file: Vision runs ~40–57 ms and ImageIO decode ~21 ms per RAW.
+- [x] Hash only once per image — measured instead: turning the content hash off entirely speeds a 339-JPEG Adlon scan by 3% (13.95 → 14.4 files/s), because large files are hashed from 2 MB of samples and the hash already runs beside Vision. Not worth a second read path.
 - [x] Compress AI memory: MLX buffer cache capped (Qwen3-VL 4B peak 4.33 → 3.92 GB, no speed loss); benchmark now reports real process footprint. KV quantization measured as negligible at current prompt sizes (see DECISIONS.md).
 - [ ] Compress AI memory further: free vision-encoder activations between passes; route tag/rename passes to a small model (Qwen3.5 0.8B peaks at 1.1 GB) when quality holds.
-- [ ] Unload idle models after a timeout; share one resident model between Deep Analyze, Chat and Moments.
-- [ ] Chat: stream first token faster (prompt cache reuse across turns, smaller retrieval context).
+- [x] Idle models are parked after 5 min (weights freed, model stays selected, reloads on next use): 3.1 GB → ~107 MB while idle, verified on Adlon files with Qwen3-VL 4B.
+- [x] Chat retrieval finds scanned tags (word-prefix, best-match files) so a scanned-but-not-analyzed library answers "grass"/"sunglasses" (was 0 hits; now 100/45 on the Adlon library). Evidence goes to the model as numbered lines instead of JSON: Qwen3.5 0.8B first token 1.07 → 0.58 s, Qwen3-VL 4B 2.2/2.0 → 2.1/1.75 s, and answers are sentences with [n] citations instead of bare citations.
+- [x] Rust portable chat search (Windows/Linux) answers from scanned tags the same way.
+- [ ] Chat: prompt-cache reuse across turns (small further gain).
 - [x] Video moments: next window's frames extract while the model runs; revision check in-process (one helper spawn and one frame decode fewer per window).
 - [ ] Video analysis: keep one long-lived frame helper per job instead of a process per window; batch frames per model call; measure on Adlon clips.
 - [ ] Scan: overlap I/O with ML (read-ahead on USB/NAS); move RAM++ to the GPU the same way as CLIP once installed and measured.
-- [ ] Size: audit bundle size (MLX metallib, ONNX Runtime, fonts) and strip unused architectures/resources.
+- [x] Size: macOS DMGs use LZMA (ULMO) instead of zlib-9: 110 → 63 MB for the same app (−43%), verified round-trip. Bundle breakdown (debug): MLX metallib 175 MB, engine 140 MB, app 65 MB. Shrinking the metallib needs MLX's JIT kernel mode, which the pinned mlx-swift package does not build; left as is.
 - [ ] Audit third-party packages for hot-path overhead (GRDB writes, swift-transformers tokenizer, ORT session setup) and replace or rewrite where measurably faster.
 - [x] Run `benchmarkModel` on Qwen3-VL 4B and Qwen3.5 0.8B (results in STATE.md and MODELS.md).
 - [x] Qwen3-VL adapter forwards per-token generation (every Qwen3-VL generation aborted the engine before).
 - [x] Free-memory admission uses the kernel availability level (refused a 0.8B model with 50% free).
 
+- [x] Test isolation: `DeepAnalyzeRunner.run` takes an injectable analyzer; the queued-cancel test uses its own instance instead of the shared cancel flag (6 of 6 parallel engine-suite runs pass).
+
+- [x] In-app playback (macOS): videos and audio play inside the preview sheet with AVKit controls; Chat results, Moments and Best Takes play in their own players instead of opening QuickTime.
+- [x] In-app playback on Linux: the preview dialog plays video/audio with GtkVideo; Search & Moments hits play in a FileID dialog from the matched moment instead of launching another app.
+- [x] In-app playback on Windows: the preview sheet already used MediaPlayerElement; Chat/Moments evidence now plays every video and audio hit in place (from the matched moment when there is one) instead of opening the default app. CI-verified only.
+
 UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against Apple's Human Interface Guidelines):
 - [x] Rounded geometry, Archivo text, simplified sidebar, compact scan card.
 - [x] Library Selected pane (single click), full preview on double-click, accessibility actions on tiles.
 - [x] Finder-style file sizes everywhere.
-- [ ] HIG pass: hit targets ≥ 28 pt on Mac controls, focus rings, keyboard navigation for every page, VoiceOver labels, Reduce Motion/Transparency, Increase Contrast, Dynamic Type-like scaling.
+- [x] HIG: icon-only buttons have spoken names (VoiceOver read "Gear Shape", "Split View Horizontally Left", "Conversation"); text and hairlines strengthen under Increase Contrast; the animated background becomes solid under Reduce Transparency; Reduce Motion already honored.
+- [x] HIG (Library): the grid takes keyboard focus on click; arrow keys move the selection by tile and by row, Return/Space open the preview, Escape clears; selection scrolls into view and pages in more files. Built and unit-tested; not yet exercised by keyboard on screen.
+- [ ] HIG: keyboard focus order and visible focus rings on the other pages with Full Keyboard Access; text-size setting for the content area.
 - [ ] Moments tracks, Takes/Tools/Chat panels, Restructure step cells in v3 layout.
-- [ ] Model browser "Speed on this Mac" panel checked on screen (results now exist for two models).
-- [ ] Title bar: rounded controls, consistent heights, toolbar spacing per HIG.
+- [x] Model browser "Speed on this Mac" checked on screen with a real in-app run (Qwen3-VL 4B: 4.3 s load, 165/26 tok/s, 5.1 s per image, 3.8 GB); metrics use the full width, the selected row stays in view, measured memory replaces the estimate.
+- [x] Title bar: window buttons vertically centred in the 48 pt bar (re-applied on resize/full screen), search centred, folder left, activity/chat/settings right; Browse/Analyze/Act moved to the top of the sidebar and filters its pages.
+- [x] Preview sheet: sharp ImageIO decode (Quick Look queued it behind grid thumbnails and showed 640 px), neutral backdrop, toolbar with arrows/Finder/Open/info toggle (⌘I)/close, info panel with details, people, description + smart name, tags, Finder tags, technical.
+- [x] Scrolling (Library): main-thread load while scrolling 75% → 28% — thumbnails decode to bitmaps off the main thread (NSImage(data:) decoded on first draw), no per-tile shimmer timeline, gradient layer or appear transitions; native view churn 53% → ~1% of main-thread work.
+- [ ] Scrolling: remaining cost is SwiftUI layout and per-tile hover tracking (~11%); consider an NSCollectionView-backed grid for 10k+ files, and apply the same fixes to People, Cleanup and Moments lists.
+- [x] Library shows every file: the grid paged at a hard 200; it now loads 300 at a time as you scroll (stable `scanned_at, id` order), verified to reach 3,447 of 3,447.
+- [x] App reads use a pool of 6 read-only connections (was one serial queue shared by grid, search, tags, people and counters), each with a 32 MB cache and memory-mapped I/O.
+- [x] Scroll memory: off-screen tiles drop their bitmap, thumbnails decode at 448 px (was 528), cache 256 MB: 1,542 → 843 MB after flinging through 3,447 files.
+- [x] Library grid on NSCollectionView with cell reuse, Core Animation text layers and one grid-wide hover tracker: flinging through 3,447 files (warm) main thread 86% → 53%, app memory 1,622 → 318 MB.
+- [x] People and Cleanup: face crops run off the main thread; file tiles release their bitmap when scrolled away (both grids were already lazy and inherit off-main thumbnail decoding). Not measured on screen: this library has no grouped faces or duplicates.
+- [x] ReadStore uses the six-connection read pool only for WAL databases (the engine's always is); other journal modes get one connection. Fixes an intermittent "database is locked" in the app tests (1 in ~4 runs → 0 in 10).
+- [x] Shared engine RAW decode: `pipeline/raw_preview.rs` extracts the largest viewable embedded JPEG from TIFF-based RAW (ARW/NEF/CR2/ORF/PEF/DNG/…) and RAF, skipping lossless-JPEG sensor data, and applies the RAW orientation. Real Adlon ARW: full 7008×4672 preview in 72–92 ms (Linux could not decode these at all; Windows demosaiced via WIC).
+- [x] Linux Library: pages in 600 at a time as the grid nears its end (was a hard 1,000 cap), reloads in one splice instead of one signal per row, thumbnails decode on a 2–6 thread pool and skip tiles already rebound (was one OS thread per tile).
+- [x] Windows Library: pages in 300 at a time from the ScrollViewer position (was a hard 200), appends in one collection Reset, and live-scan refreshes keep every loaded page; ReadStore paging test added. Compiled and tested by CI only (no .NET SDK on the Mac); interactive check on the Windows host still needed.
+- [x] Database at 100k files (synthetic copy of the Adlon library, 99,963 files, 833k tags): first page 0.9 ms, page at offset 99,000 36 ms, kind page 1 ms, tags for 300 tiles 2 ms, keyword search 66–130 ms (no-hit worst case), file counts 37 ms. Duplicate counter rewritten to group before counting: 251 → 54 ms at 100k, 6.9 → 1.5 ms on the real library, identical results.
+- [ ] Database at 1M files: keyword search would scale to ~1.3 s; add a trigram FTS index over path/description/tags (append-only migration in both engines) before libraries that large are a target.
+- [x] Restructure (macOS): respect-your-organization stage (see RESTRUCTURE.md); Adlon/Camera 2,966 shuffling moves → 0, 28 folders kept; planning >10 min → ~19 s; "Staying put" shows real file count; models banner offers Rescan when CLIP is installed but files were scanned before it.
+- [x] Restructure (shared Rust engine): `pipeline/restructure_respect.rs` ports the same rules and Keep accounting for Windows, Linux, CLI and TUI; 6 Rust tests mirror the Swift ones; strict Clippy clean.
+- [x] Restructure on a messy folder (42 Adlon photos from three events copied into one flat Downloads folder, CLIP present): before, 18 moves into date folders and tag-named groups ("Baseball_hat Hat") with 24 files left behind; now all 42 go to `Photos/2026/2026-09-19`, `…/2026-09-26`, `…/2026-10-04` — exactly the three source events. Loose photos are split into events by capture-time gaps (8 h, ≥5 files; smaller groups → `Photos/<year>/<Month>`), on macOS and in the shared Rust engine.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 

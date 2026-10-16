@@ -163,7 +163,7 @@ struct TakeWorkbench: View {
                                     if recommendation?.fileIDs.contains(take.fileID) == true {
                                         Image(systemName: "star.fill").foregroundStyle(Theme.gold)
                                     }
-                                    Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: take.path)) }
+                                    Button("Play") { player?.pause(); player = AVPlayer(url: URL(fileURLWithPath: take.path)) }
                                 }
                                 Text(take.stale ? "Needs review after source changed" : outcomeText(take))
                                     .font(Theme.Font.body(12)).foregroundStyle(.secondary)

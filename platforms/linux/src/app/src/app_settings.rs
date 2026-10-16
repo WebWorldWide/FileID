@@ -90,6 +90,21 @@ pub fn remember_active_tab(tab: &str) {
     set_entries(&[("activeTab", Value::String(tab.to_owned()))]);
 }
 
+/// Sidebar visibility across launches (Windows `sidebarVisible`).
+pub fn sidebar_visible() -> bool {
+    let Some(path) = settings_path() else {
+        return true;
+    };
+    load_map(&path)
+        .get("sidebarVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+pub fn remember_sidebar_visible(visible: bool) {
+    set_entries(&[("sidebarVisible", Value::Bool(visible))]);
+}
+
 /// Has the user dismissed the first-launch Welcome sheet? Mirrors the Windows
 /// `welcomeSheetSeen` key / macOS `@AppStorage("welcomeSheetSeen")`.
 pub fn welcome_sheet_seen() -> bool {

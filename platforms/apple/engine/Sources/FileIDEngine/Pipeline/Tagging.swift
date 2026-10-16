@@ -206,6 +206,21 @@ public enum Tagging {
                     }
                     let loadMs = (CFAbsoluteTimeGetCurrent() - loadStart) * 1000
 
+                    // CLIP runs on the GPU and the file hash on the disk while
+                    // Vision uses the Neural Engine below; join before building
+                    // the result. All three only read `cgImage`.
+                    let sideWork = DispatchGroup()
+                    let clipBox = ScanSideResult<(blob: Data?, ms: Double)>()
+                    let hashBox = ScanSideResult<Data?>()
+                    DispatchQueue.global(qos: .userInitiated).async(group: sideWork) {
+                        let clipStart = CFAbsoluteTimeGetCurrent()
+                        let blob = MobileCLIPService.shared.embedImage(cgImage).map { MobileCLIPService.embeddingToBlob($0) }
+                        clipBox.set((blob, (CFAbsoluteTimeGetCurrent() - clipStart) * 1000))
+                    }
+                    DispatchQueue.global(qos: .utility).async(group: sideWork) {
+                        hashBox.set(ContentHash.compute(url: url, size: UInt64(max(0, discovered.sizeBytes))))
+                    }
+
                     // Vision primary pass — bundled classify + faces + saliency.
                     let visionStart = CFAbsoluteTimeGetCurrent()
                     let pass = worker.runPrimaryPass(cgImage)
@@ -219,6 +234,7 @@ public enum Tagging {
                     // it failed (gates all stay false) so the next scan retries it,
                     // mirroring the Windows per-file-timeout row.
                     if !pass.didComplete {
+                        sideWork.wait()
                         JSONLog.shared.warn(ev: "vision_pass_timeout", path: redactPathForLog(url.path))
                         return TaggedFile(
                             url: url, kind: "image", extension: ext,
@@ -252,15 +268,7 @@ public enum Tagging {
                     // (item 1) — computed from the file bytes, lockstep in structure
                     // with the Windows engine's content_hash. nil on read error, in
                     // which case the file simply won't participate in dedup.
-                    let contentHash = ContentHash.compute(
-                        url: url, size: UInt64(max(0, discovered.sizeBytes)))
                     let aesthetic = lightweightAesthetic(cgImage: cgImage, fileSizeMB: sizeMB)
-
-                    // CLIP image embedding — internally bounded by inferenceSem.
-                    let clipStart = CFAbsoluteTimeGetCurrent()
-                    let clipBlob = MobileCLIPService.shared.embedImage(cgImage)
-                        .map { MobileCLIPService.embeddingToBlob($0) }
-                    let clipMs = (CFAbsoluteTimeGetCurrent() - clipStart) * 1000
 
                     // RAM++ primary tagger (4585-class, Apache-2.0) — the macOS
                     // lockstep mirror of the Windows stack. Falls back to the
@@ -305,6 +313,11 @@ public enum Tagging {
                         dedupedTags.append(tag)
                         if dedupedTags.count >= 16 { break }
                     }
+
+                    sideWork.wait()
+                    let contentHash = hashBox.get() ?? nil
+                    let clipBlob = clipBox.get()?.blob ?? nil
+                    let clipMs = clipBox.get()?.ms ?? 0
 
                     var tagged = TaggedFile(
                         url: url, kind: "image", extension: ext,
@@ -609,6 +622,13 @@ public enum Tagging {
     }
 
     // MARK: - Helpers
+
+    final class ScanSideResult<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: T?
+        func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
+        func get() -> T? { lock.lock(); defer { lock.unlock() }; return value }
+    }
 
     // EXIF is read from the SAME CGImageSource as the decode — a separate
     // CGImageSourceCreateWithURL re-opened and re-parsed every file, which

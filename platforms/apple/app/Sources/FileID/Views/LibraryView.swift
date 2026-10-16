@@ -1,6 +1,7 @@
 // Library: DB-backed thumbnail grid. FTS5 search (OCR + filename) +
 // kind filter; re-queries on each batchSummary event for live fill-in.
 import SwiftUI
+import AVKit
 import AppKit
 import PDFKit
 import FileIDShared
@@ -53,6 +54,14 @@ struct LibraryView: View {
     /// place — the sheet keeps identity instead of dismissing+re-presenting.
     @State private var previewSelectedID: Int64? = nil
     @State private var paneSelectedID: Int64? = nil
+    /// Keyword and plain listings page in from the database as the grid
+    /// nears its end; similarity and semantic results are one ranked list.
+    @State private var canLoadMore = false
+    @State private var loadingMore = false
+    private static let pageSize = 300
+    /// The tile about two screens before the end; the grid creates it lazily,
+    /// so its appearance means the user is approaching the last loaded row.
+    private var loadTriggerID: Int64? { rows.isEmpty ? nil : rows[max(0, rows.count - 24)].id }
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
@@ -471,6 +480,7 @@ struct LibraryView: View {
                         Button { searchText = "" } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.text3) }
                             .buttonStyle(.plain)
                             .help("Clear search")
+                            .accessibilityLabel("Clear search")
                     }
                 }
                 .padding(.horizontal, 10)
@@ -637,68 +647,23 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(rows) { row in
-                    FileTile(row: row, store: store,
-                             selectMode: selectMode,
-                             isChecked: checkedFiles[row.id] != nil,
-                             topTags: tagsByFile[row.id] ?? [],
-                             refreshToken: tileRefreshToken)
-                        .onTapGesture {
-                            if selectMode {
-                                if checkedFiles[row.id] != nil {
-                                    checkedFiles[row.id] = nil
-                                } else {
-                                    checkedFiles[row.id] = row
-                                }
-                            } else {
-                                paneSelectedID = row.id
-                            }
-                        }
-                        .simultaneousGesture(TapGesture(count: 2).onEnded {
-                            if !selectMode { openPreview(row) }
-                        })
-                        .accessibilityAction {
-                            if selectMode {
-                                checkedFiles[row.id] = checkedFiles[row.id] == nil ? row : nil
-                            } else {
-                                paneSelectedID = row.id
-                            }
-                        }
-                        .accessibilityAction(named: "Open preview") { openPreview(row) }
-                        .contextMenu {
-                            Button {
-                                similarSeed = row
-                            } label: {
-                                Label("Find similar photos", systemImage: "sparkle.magnifyingglass")
-                            }
-                            Button {
-                                NSWorkspace.shared.activateFileViewerSelecting([row.url])
-                            } label: {
-                                Label("Show in Finder", systemImage: "folder")
-                            }
-                        }
-                        .background(
-                            RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
-                                .stroke((paneSelectedID == row.id || previewSelectedID == row.id) && !selectMode
-                                        ? Theme.gold : Color.clear,
-                                        lineWidth: 2)
-                                .padding(-5)
-                        )
-                        // Tiles fade + scale in so the grid "fills
-                        // the room" during a live scan instead of
-                        // popping items.
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.96)),
-                            removal: .opacity
-                        ))
-                }
-            }
-            .padding(20)
-            // Animate on rows.count, not rows.map(\.id) — the map
-            // allocates a new array per render and adds up at 1000+ tiles.
-            .animation(.easeOut(duration: 0.30), value: rows.count)
+        LibraryCollectionGrid(
+            rows: rows,
+            tagsByFile: tagsByFile,
+            selectMode: selectMode,
+            checkedIDs: Set(checkedFiles.keys),
+            selectedID: paneSelectedID ?? previewSelectedID,
+            refreshToken: tileRefreshToken,
+            onSelect: { paneSelectedID = $0.id },
+            onOpen: { openPreview($0) },
+            onToggleCheck: { row in
+                if checkedFiles[row.id] != nil { checkedFiles[row.id] = nil } else { checkedFiles[row.id] = row }
+            },
+            onFindSimilar: { similarSeed = $0 },
+            onNearEnd: { loadMore() },
+            onClearSelection: { paneSelectedID = nil })
+        .overlay(alignment: .bottom) {
+            if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
         }
         // One stable sheet. `isPresented` stays true across navigation so the
         // sheet keeps identity; the displayed file is driven by selectedID.
@@ -785,13 +750,15 @@ struct LibraryView: View {
         reloadTask = Task { @MainActor in
             defer { if !Task.isCancelled { visualSearchPending = false } }
             var newRows: [FileRow]
+            var pageable = false
             if let seed {
                 visualSearchPending = true
                 if let response = await engine.searchCatalog(seedID: seed.id), response.status == "ok" {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                 } else { newRows = [] }
             } else {
-                newRows = await store.filesAsync(search: query, kindFilter: kind)
+                newRows = await store.filesAsync(limit: Self.pageSize, search: query, kindFilter: kind)
+                pageable = newRows.count == Self.pageSize
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count >= 3, encoderReady, let vector = await store.semanticVectorAsync(query: trimmed) {
                     guard !Task.isCancelled else { return }
@@ -799,6 +766,7 @@ struct LibraryView: View {
                     visualSearchPending = true
                     if let response = await engine.searchCatalog(query: trimmed, vector: vector), response.status == "ok" {
                         newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
+                        pageable = false
                     }
                 }
             }
@@ -812,273 +780,27 @@ struct LibraryView: View {
             guard !Task.isCancelled else { return }
             rows = newRows
             tagsByFile = tags
-        }
-    }
-}
-
-// MARK: - One tile
-
-struct FileTile: View {
-    let row: FileRow
-    let store: ReadStore
-    var selectMode: Bool = false
-    var isChecked: Bool = false
-    /// Top vision tags injected from the parent's batch query —
-    /// avoids N+1 SQL across visible tiles.
-    var topTags: [String] = []
-    /// Composite refresh id from the parent (scan-frozen counter epoch +
-    /// never-frozen edit epoch). Keys the tile's `.task` so a tag edit / undo
-    /// refreshes it — including mid-scan — while a live scan's per-second
-    /// counter bump alone does not re-task every visible tile.
-    var refreshToken: String = ""
-
-    @State private var thumb: NSImage?
-    @State private var hovering = false
-    @State private var finderTags: [String] = []
-
-    /// Shorten Vision's hierarchical labels for the chip ("animal_water_aquatic"
-    /// → "Aquatic", "Year_2024" → "2024"). Last underscore segment wins,
-    /// with first letter capitalized. Multi-word labels added by `extraTags`
-    /// like "Has Faces" pass through unchanged.
-    /// Hierarchical labels collapse to the same chip ("blue_sky" and "sky"
-    /// are both "Sky"), so dedupe after formatting.
-    private var displayTags: [String] {
-        var seen = Set<String>()
-        return Array(topTags.map(Self.formatTag).filter { seen.insert($0.lowercased()).inserted }.prefix(2))
-    }
-
-    private static func formatTag(_ raw: String) -> String {
-        if raw.contains(" ") { return raw }   // pre-formatted (Has Faces, etc.)
-        let last = raw.split(separator: "_").last.map(String.init) ?? raw
-        let withSpaces = last.replacingOccurrences(of: "-", with: " ")
-        guard let first = withSpaces.first else { return withSpaces }
-        return first.uppercased() + withSpaces.dropFirst()
-    }
-
-    private var kindColor: Color {
-        switch row.kind {
-        case "image": return Theme.gold
-        case "video": return Theme.ai
-        case "pdf":   return Theme.danger
-        case "doc":   return Theme.info
-        case "audio": return Theme.delight
-        default:      return .secondary
+            canLoadMore = pageable
         }
     }
 
-    // tagNamesKey carries names only (no colors, per the v1.0 decision),
-    // and String.hashValue is seeded per launch — FNV-1a keeps each tag's
-    // dot color stable across launches and tiles.
-    private static let dotPalette: [Color] = [Theme.gold, Theme.ai, Theme.info, Theme.delight]
-
-    private static func dotColor(for tag: String) -> Color {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in tag.lowercased().utf8 {
-            hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3
+    private func loadMore() {
+        guard canLoadMore, !loadingMore, similarSeed == nil else { return }
+        loadingMore = true
+        let offset = rows.count, query = searchText, kind = kindFilter
+        Task { @MainActor in
+            defer { loadingMore = false }
+            let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind)
+            guard query == searchText, kind == kindFilter, offset == rows.count else { return }
+            let ids = page.map(\.id)
+            let tags = await Task.detached(priority: .userInitiated) { [store] in
+                store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
+            }.value
+            let known = Set(rows.map(\.id))
+            rows.append(contentsOf: page.filter { !known.contains($0.id) })
+            tagsByFile.merge(tags) { _, new in new }
+            canLoadMore = page.count == Self.pageSize
         }
-        return dotPalette[Int(hash % UInt64(dotPalette.count))]
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // 1:1 carrier + overlay image so portrait/landscape
-            // sources stay aligned. Thumbs crossfade instead of
-            // popping; hover lifts via elevation.
-            Color.white.opacity(0.04)
-                .aspectRatio(4 / 3, contentMode: .fit)
-                .overlay(thumbContent)
-                .overlay(
-                    LinearGradient(stops: [.init(color: .white.opacity(0.07), location: 0), .init(color: .clear, location: 0.4), .init(color: .black.opacity(0.38), location: 1)],
-                                   startPoint: .top, endPoint: .bottom)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Color.white.opacity(hovering ? 0.28 : 0.08), lineWidth: 1))
-                .animation(.easeOut(duration: 0.18), value: hovering)
-                .animation(.easeOut(duration: 0.40), value: thumb != nil)
-                .onHover { hovering = $0 }
-                .overlay(badgeOverlay)
-                .overlay(selectionOverlay)
-
-            // Filename row. When a smart name exists we show
-            //   IMG_5512.jpg → Mia at Beach.jpg
-            // so the user sees both the current name and what Deep Analyze
-            // proposes as a single line. Click anywhere on the tile (existing
-            // behavior) opens the preview where Apply lives.
-            if let suggested = row.vlmProposedName, !suggested.isEmpty {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(row.url.lastPathComponent)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .strikethrough(true, color: .secondary.opacity(0.6))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 3) {
-                        Image(systemName: "wand.and.rays")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Theme.gold)
-                        Text("\(suggested).\(row.extension)")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.gold)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .help("Click to apply the smart name. Original name shown crossed out.")
-            } else {
-                Text(row.url.lastPathComponent)
-                    .font(Theme.Font.body(13, .medium))
-                    .foregroundStyle(Theme.text1)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            // Vision tag chips — at-a-glance content cues. Reserved 18pt height
-            // eliminates vertical grid popping when tags land asynchronously.
-            HStack(spacing: 3) {
-                if !displayTags.isEmpty {
-                    ForEach(displayTags, id: \.self) { label in
-                        TagChip(text: label)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            .frame(height: 18)
-            HStack(spacing: 4) {
-                MetaText(formatBytes(row.sizeBytes), size: 11)
-                Spacer()
-                if let date = row.displayDate {
-                    MetaText(date.formatted(date: .numeric, time: .omitted), size: 11)
-                }
-            }
-        }
-        // Keyed on refreshToken (counter epoch + never-frozen edit epoch) so
-        // tag edits / bulk undo refresh the Finder-tag dots in place — even
-        // mid-scan — but the per-second counter refresh during a live scan
-        // doesn't re-task every visible tile, re-reading thumbnails + Finder
-        // xattrs for files that didn't change. Thumbnail re-fetches are NSCache hits.
-        .task(id: "\(row.id)·\(refreshToken)") {
-            thumb = await ThumbnailService.shared.thumbnail(for: row.url, size: 264)
-            // Off-main like FinderTagsEditor — xattr reads can stall on
-            // slow / network volumes.
-            let url = row.url
-            let tags = await Task.detached { TagWriter.readTags(at: url) }.value
-            // The detached read doesn't inherit `.task` cancellation; if the
-            // refresh token changed mid-read (a tag edit bumps editEpoch), a slow
-            // stale read could land after the newer one and overwrite it. Drop it
-            // once superseded.
-            guard !Task.isCancelled else { return }
-            finderTags = tags
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityDescription)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Shows details. Double-click opens the preview.")
-    }
-
-    @ViewBuilder
-    private var selectionOverlay: some View {
-        if selectMode {
-            ZStack(alignment: .topLeading) {
-                if isChecked {
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.14)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 2))
-                }
-                DSCheck(on: isChecked).padding(8)
-            }
-        }
-    }
-
-    /// Spoken description for VoiceOver: filename, kind, optional date,
-    /// face indicator, OCR indicator, tag count.
-    private var accessibilityDescription: String {
-        var parts: [String] = []
-        parts.append(row.url.lastPathComponent)
-        parts.append(row.kind.capitalized)
-        if let date = row.displayDate {
-            parts.append(date.formatted(date: .abbreviated, time: .omitted))
-        }
-        if row.hasFaces { parts.append("contains faces") }
-        if row.hasText { parts.append("contains text") }
-        if !finderTags.isEmpty {
-            parts.append("\(finderTags.count) Finder tag\(finderTags.count == 1 ? "" : "s")")
-        }
-        return parts.joined(separator: ", ")
-    }
-
-    @ViewBuilder
-    private var thumbContent: some View {
-        if let thumb {
-            Image(nsImage: thumb)
-                .resizable()
-                .scaledToFill()
-                .transition(.opacity)
-        } else if row.kind == "image" {
-            // Show a shimmer while the thumbnail loads — feels more
-            // alive than a static placeholder, signals "something is
-            // arriving".
-            ShimmerView(cornerRadius: 0)
-        } else {
-            // Non-image kinds get the icon placeholder (no thumb pending).
-            VStack(spacing: 4) {
-                Image(systemName: kindIcon)
-                    .font(.system(size: 36))
-                    .foregroundStyle(kindColor.opacity(0.7))
-                Text(row.extension.uppercased())
-                    .font(Theme.Font.mono(10.5, .semibold))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var badgeOverlay: some View {
-        ZStack(alignment: .topLeading) {
-            // Kind badge top-left.
-            KindBadge(text: row.kind)
-                .padding(6)
-
-            // OCR-text / Finder-tag indicators top-right. (The "Faces"
-            // badge was removed for Windows/macOS lockstep — faces surface
-            // in the People tab; the badge read as noise on a Library tile.)
-            VStack(alignment: .trailing, spacing: 4) {
-                if row.hasText {
-                    Image(systemName: "text.viewfinder")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white, .black.opacity(0.6))
-                        .help("OCR text available")
-                }
-                if !finderTags.isEmpty {
-                    HStack(spacing: -3) {
-                        ForEach(finderTags.prefix(3), id: \.self) { tag in
-                            Circle()
-                                .fill(Self.dotColor(for: tag))
-                                .frame(width: 8, height: 8)
-                                .overlay(Circle().stroke(.black.opacity(0.5), lineWidth: 1))
-                        }
-                    }
-                    .help("Finder tags: \(finderTags.joined(separator: ", "))")
-                }
-            }
-            .padding(6)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        }
-        .allowsHitTesting(false)
-    }
-
-    private var kindIcon: String {
-        switch row.kind {
-        case "image": return "photo"
-        case "video": return "video"
-        case "pdf":   return "doc.richtext"
-        case "doc":   return "doc.text"
-        case "audio": return "music.note"
-        default:      return "doc"
-        }
-    }
-
-    private func formatBytes(_ b: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
     }
 }
 
@@ -1096,6 +818,8 @@ private struct FilePreviewSheet: View {
     @Environment(\.dismiss) var dismiss
     @State private var preview: NSImage?
     @State private var tags: [String] = []
+    @State private var people: [String] = []
+    @AppStorage("preview.showInfo") private var showInfo = true
     /// Holds key focus so the arrow-key handlers fire; the tag field's
     /// focus is tracked separately to suppress nav while the user types.
     @FocusState private var keyFocus: Bool
@@ -1126,214 +850,20 @@ private struct FilePreviewSheet: View {
     @ViewBuilder
     private func content(for file: FileRow) -> some View {
         VStack(spacing: 0) {
-            // Toolbar.
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(file.url.lastPathComponent)
-                        .font(Theme.Font.body(16, .semibold))
-                        .lineLimit(1).truncationMode(.middle)
-                    Text(file.url.deletingLastPathComponent().path)
-                        .font(Theme.Font.mono(11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.head)
-                }
-                Spacer()
-                if siblings.count > 1 {
-                    let idx = siblingIndex ?? 0
-                    Text("\(idx + 1) of \(siblings.count)")
-                        .font(Theme.Font.body(12).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 4) {
-                        Button { step(-1) } label: {
-                            Image(systemName: "chevron.left")
-                        }
-                        .buttonStyle(.dsSecondary)
-                        .disabled(idx <= 0)
-                        .help("Previous file")
-                        Button { step(1) } label: {
-                            Image(systemName: "chevron.right")
-                        }
-                        .buttonStyle(.dsSecondary)
-                        .disabled(idx >= siblings.count - 1)
-                        .help("Next file")
-                    }
-                }
-                if file.kind == "image" {
-                    DeepAnalyzeButton(engine: engine, file: file)
-                }
-                Button {
-                    NSWorkspace.shared.open(file.url)
-                } label: {
-                    Label("Open", systemImage: "arrow.up.right.square")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.dsSecondary)
-                .help("Open in the default app (Preview, QuickTime, etc.)")
-                Button {
-                    NSWorkspace.shared.activateFileViewerSelecting([file.url])
-                } label: {
-                    Label("Show in Finder", systemImage: "folder")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.dsSecondary)
-                .help("Reveal this file in Finder")
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 20))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white.opacity(0.7), .white.opacity(0.15))
-                }
-                .buttonStyle(.plain)
-                .keyboardShortcut(.escape)
-                .help("Close preview")
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
-
+            header(file)
             HStack(spacing: 0) {
-                // Preview canvas — kind-specific for fidelity, QLPreview as
-                // the universal fallback for any other file type.
-                Group {
-                    switch file.kind {
-                    case "video":
-                        VideoPreview(url: file.url)
-                    case "audio":
-                        AudioPreview(url: file.url)
-                    case "image":
-                        ZStack {
-                            Color.black.opacity(0.3)
-                            if let preview {
-                                Image(nsImage: preview)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .padding(20)
-                            } else {
-                                VStack {
-                                    ProgressView()
-                                    Text("Loading preview…")
-                                        .font(Theme.Font.body(12))
-                                        .foregroundStyle(.secondary)
-                                        .padding(.top, 8)
-                                }
-                            }
-                        }
-                    case "pdf":
-                        PDFPreview(url: file.url)
-                    default:
-                        // doc, archive, anything else — Quick Look thumbnail
-                        // rendered as static NSImage. Toolbar's "Open with
-                        // default app" hands off the live experience.
-                        UniversalPreview(url: file.url)
-                    }
+                canvas(file)
+                if showInfo {
+                    VHairline()
+                    infoPanel(file)
+                        .frame(width: 340)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Divider().opacity(0.3)
-
-                // Metadata panel.
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        GlassCard {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Metadata").font(Theme.Font.body(14, .semibold))
-                                Divider().opacity(0.3)
-                                row("Path",   file.pathText)
-                                row("Kind",   file.kind)
-                                row("Size",   ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
-                                if let d = file.displayDate {
-                                    row("Date", d.formatted(date: .long, time: .shortened))
-                                }
-                                if let cm = file.cameraModel {
-                                    row("Camera", cm)
-                                }
-                                if let lat = file.locationLat, let lon = file.locationLon {
-                                    row("GPS", String(format: "%.5f, %.5f", lat, lon))
-                                }
-                                if file.hasText  { row("Text",  "Detected (OCR)") }
-                                if let phash = file.phash {
-                                    row("pHash", String(phash, radix: 16))
-                                }
-                                if let aest = file.aesthetic {
-                                    row("Aesthetic", String(format: "%.2f", aest))
-                                }
-                            }
-                        }
-                        if let caption = file.vlmDescription, !caption.isEmpty {
-                            GlassCard {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack {
-                                        Text("Deep Analyze").font(Theme.Font.body(14, .semibold))
-                                        Spacer()
-                                        if let model = file.vlmModel,
-                                           let kind = AIModelKind(rawValue: model) {
-                                            BadgePill(label: kind.displayName, color: .secondary)
-                                        }
-                                    }
-                                    Text(caption).font(Theme.Font.body(13.5))
-                                    if let proposed = file.vlmProposedName, !proposed.isEmpty {
-                                        Divider().opacity(0.3)
-                                        HStack(spacing: 8) {
-                                            Image(systemName: "wand.and.rays")
-                                                .foregroundStyle(Theme.gold)
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text("Smart name")
-                                                    .font(Theme.Font.body(12, .semibold))
-                                                    .foregroundStyle(.secondary)
-                                                Text("\(proposed).\(file.extension)")
-                                                    .font(Theme.Font.mono(11))
-                                                    .foregroundStyle(Theme.gold)
-                                            }
-                                            Spacer()
-                                            Button("Apply") {
-                                                let oldPath = file.pathText
-                                                if let newURL = store.applyProposedName(file: file),
-                                                   newURL.path != oldPath {
-                                                    // Record the single-file rename so the
-                                                    // Library "Undo last rename" button can revert
-                                                    // it. Uses the same UserDefaults slot the
-                                                    // bulk-rename sheet writes to.
-                                                    let outcome = ReadStore.RenameOutcome(
-                                                        fileID: file.id,
-                                                        oldPath: oldPath,
-                                                        newPath: newURL.path
-                                                    )
-                                                    BulkRenameSheet.saveLastBatch([outcome])
-                                                    onEdit()
-                                                }
-                                                dismiss()
-                                            }
-                                            .buttonStyle(.dsSecondary)
-                                            .help("Renames the file on disk and updates the library row. Undo from the Library header if you change your mind.")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if !tags.isEmpty {
-                            GlassCard {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Tags").font(Theme.Font.body(14, .semibold))
-                                    FlowLayout(spacing: 6) {
-                                        ForEach(tags, id: \.self) { tag in
-                                            BadgePill(label: tag)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        FinderTagsEditor(file: file, store: store,
-                                         isFocused: $tagFieldFocused, onEdit: onEdit)
-                    }
-                    .padding(16)
-                }
-                .frame(width: 360)
             }
+            .animation(Theme.spring, value: showInfo)
         }
-        .frame(minWidth: 960, minHeight: 600)
-        .background(LavaLampBackground())
+        .frame(minWidth: 1040, idealWidth: 1280, minHeight: 680, idealHeight: 820)
+        .background(Color(hex: 0x0C0C0E), ignoresSafeAreaEdges: [])
         .preferredColorScheme(.dark)
         .focusable()
         .focusEffectDisabled()
@@ -1368,6 +898,7 @@ private struct FilePreviewSheet: View {
             // spinner shows and the prior preview never bleeds into the new state.
             preview = nil
             tags = []
+            people = []
             // Read DB tags off the main actor (detached read doesn't inherit
             // `.task` cancellation; drop it once `.task(id:)` superseded us — R7).
             let fileID = file.id
@@ -1376,7 +907,12 @@ private struct FilePreviewSheet: View {
             }.value
             guard !Task.isCancelled else { return }
             tags = loadedTags
-            let image = await ThumbnailService.shared.thumbnail(for: file.url, size: 640)
+            let loadedPeople = await Task.detached { [store] in store.personNames(forFileID: fileID) }.value
+            guard !Task.isCancelled else { return }
+            people = loadedPeople
+            let image = file.kind == "image"
+                ? await ThumbnailService.previewImage(for: file.url, maxPixelSize: 2400)
+                : await ThumbnailService.shared.thumbnail(for: file.url, size: 1600)
             // ThumbnailService doesn't honor Task cancellation, so a slow load for
             // the prior file (network volume) can resolve AFTER the user arrowed on;
             // drop it once `.task(id:)` superseded us, else it overwrites the current
@@ -1386,13 +922,178 @@ private struct FilePreviewSheet: View {
         }
     }
 
-    @ViewBuilder
-    private func row(_ k: String, _ v: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(k).font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary).frame(width: 70, alignment: .trailing)
-            Text(v).font(Theme.Font.mono(11)).textSelection(.enabled).lineLimit(3)
-            Spacer()
+    private func header(_ file: FileRow) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.url.lastPathComponent)
+                    .font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
+                    .lineLimit(1).truncationMode(.middle)
+                Text(file.url.deletingLastPathComponent().path)
+                    .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                    .lineLimit(1).truncationMode(.head)
+            }
+            Spacer(minLength: 12)
+            if siblings.count > 1, let index = siblingIndex {
+                HStack(spacing: 2) {
+                    iconButton("chevron.left", "Previous file (←)") { step(-1) }.disabled(index <= 0)
+                    Text("\(index + 1) of \(siblings.count)")
+                        .font(Theme.Font.body(12.5)).monospacedDigit().foregroundStyle(Theme.text2)
+                        .frame(minWidth: 70)
+                    iconButton("chevron.right", "Next file (→)") { step(1) }.disabled(index >= siblings.count - 1)
+                }
+            }
+            if file.kind == "image" { DeepAnalyzeButton(engine: engine, file: file) }
+            Button { NSWorkspace.shared.activateFileViewerSelecting([file.url]) } label: { Label("Finder", systemImage: "folder") }
+                .buttonStyle(DSSecondaryButtonStyle(height: 28)).help("Show in Finder")
+            Button { NSWorkspace.shared.open(file.url) } label: { Label("Open", systemImage: "arrow.up.right.square") }
+                .buttonStyle(DSSecondaryButtonStyle(height: 28)).help("Open in the default app")
+            iconButton("sidebar.right", showInfo ? "Hide info (⌘I)" : "Show info (⌘I)") { showInfo.toggle() }
+                .keyboardShortcut("i", modifiers: .command)
+            iconButton("xmark", "Close preview (Esc)") { dismiss() }
+                .keyboardShortcut(.escape, modifiers: [])
         }
+        .padding(.horizontal, 16)
+        .frame(height: 56)
+        .background(Theme.bg1, ignoresSafeAreaEdges: [])
+        .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    private func iconButton(_ symbol: String, _ help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text2)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.dsRow)
+        .help(help)
+        .accessibilityLabel(help.replacingOccurrences(of: #" \([^)]*\)$"#, with: "", options: .regularExpression))
+    }
+
+    @ViewBuilder
+    private func canvas(_ file: FileRow) -> some View {
+        Group {
+            switch file.kind {
+            case "video": VideoPreview(url: file.url)
+            case "audio": AudioPreview(url: file.url)
+            case "pdf": PDFPreview(url: file.url)
+            case "image":
+                ZStack {
+                    if let preview {
+                        Image(nsImage: preview)
+                            .resizable().interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                            .shadow(color: .black.opacity(0.5), radius: 20, y: 10)
+                            .padding(28)
+                            .transition(.opacity)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                .animation(Theme.quick, value: preview == nil)
+            default: UniversalPreview(url: file.url)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.4), ignoresSafeAreaEdges: [])
+    }
+
+    private func infoPanel(_ file: FileRow) -> some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 20) {
+                infoSection("Details") {
+                    detail("Kind", file.kind.capitalized + " · " + file.extension.uppercased())
+                    if let date = file.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
+                    detail("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
+                    if let camera = file.cameraModel, !camera.isEmpty { detail("Camera", camera) }
+                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
+                    if let lat = file.locationLat, let lon = file.locationLon { detail("Location", String(format: "%.4f, %.4f", lat, lon)) }
+                }
+                if let caption = file.vlmDescription, !caption.isEmpty {
+                    infoSection("Description") {
+                        Text(caption).font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                        if let model = file.vlmModel, let kind = AIModelKind(rawValue: model) {
+                            MetaText("Written by \(kind.displayName)", size: 11)
+                        }
+                        if let proposed = file.vlmProposedName, !proposed.isEmpty {
+                            HStack(spacing: 10) {
+                                Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Smart name").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+                                    Text("\(proposed).\(file.extension)").font(Theme.Font.mono(11.5)).foregroundStyle(Theme.gold)
+                                        .lineLimit(2).textSelection(.enabled)
+                                }
+                                Spacer(minLength: 6)
+                                Button("Apply") {
+                                    let oldPath = file.pathText
+                                    if let newURL = store.applyProposedName(file: file),
+                                       newURL.path != oldPath {
+                                        // Record the single-file rename so the
+                                        // Library "Undo last rename" button can revert
+                                        // it. Uses the same UserDefaults slot the
+                                        // bulk-rename sheet writes to.
+                                        let outcome = ReadStore.RenameOutcome(
+                                            fileID: file.id,
+                                            oldPath: oldPath,
+                                            newPath: newURL.path
+                                        )
+                                        BulkRenameSheet.saveLastBatch([outcome])
+                                        onEdit()
+                                    }
+                                    dismiss()
+                                }
+                                .buttonStyle(.dsSecondary)
+                                .help("Renames the file on disk and updates the library row. Undo from the Library header if you change your mind.")
+                            }
+                            .padding(10)
+                            .background(Theme.gold.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                        }
+                    }
+                }
+                if !tags.isEmpty {
+                    infoSection("Tags") {
+                        FlowLayout(spacing: 6) {
+                            ForEach(tags, id: \.self) { tag in
+                                Text(tag).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2).lineLimit(1)
+                                    .padding(.horizontal, 8).frame(height: 22)
+                                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                            }
+                        }
+                    }
+                }
+                FinderTagsEditor(file: file, store: store, isFocused: $tagFieldFocused, onEdit: onEdit)
+                DisclosureGroup {
+                    VStack(spacing: 0) {
+                        detail("Path", file.pathText)
+                        if file.hasText { detail("Text", "Detected (OCR)") }
+                        if let phash = file.phash { detail("pHash", String(phash, radix: 16)) }
+                        if let aesthetic = file.aesthetic { detail("Aesthetic", String(format: "%.2f", aesthetic)) }
+                    }
+                    .padding(.top, 6)
+                } label: {
+                    SectionLabel("Technical")
+                }
+            }
+            .padding(16)
+        }
+        .background(Theme.bg1.opacity(0.7), ignoresSafeAreaEdges: [])
+    }
+
+    private func infoSection<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionLabel(title)
+            VStack(alignment: .leading, spacing: 8) { content() }
+        }
+    }
+
+    private func detail(_ key: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
+            Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 5)
+        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 }
 
@@ -1425,19 +1126,14 @@ private struct FinderTagsEditor: View {
     @State private var displayedFileID: Int64?
 
     var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
-                    Image(systemName: "tag.fill")
-                        .foregroundStyle(Theme.gold)
-                    Text("Finder tags").font(Theme.Font.body(14, .semibold))
+                    SectionLabel("Finder tags")
                     Spacer()
-                    Text("(visible in Finder + Spotlight)")
-                        .font(Theme.Font.body(11))
-                        .foregroundStyle(.tertiary)
+                    MetaText("Shown in Finder and Spotlight", size: 11)
                 }
                 if tags.isEmpty {
-                    Text("None yet — add a tag below.")
+                    Text("No Finder tags yet.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(.secondary)
                 } else {
@@ -1449,13 +1145,11 @@ private struct FinderTagsEditor: View {
                 }
                 HStack(spacing: 6) {
                     TextField("Add tag…", text: $draft)
-                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
+                        .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                         .font(Theme.Font.body(12))
                         .focused(isFocused)
-                    Button("Apply tag", systemImage: "checkmark", action: addDraft)
-                        .buttonStyle(.dsPrimary)
-                        .tint(Theme.gold)
-                        .foregroundStyle(.black)
+                    Button("Add", action: addDraft)
+                        .buttonStyle(DSSecondaryButtonStyle(height: 30))
                         .keyboardShortcut(.defaultAction)
                     .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
@@ -1463,7 +1157,7 @@ private struct FinderTagsEditor: View {
                     Text(e).font(Theme.Font.body(11)).foregroundStyle(Theme.warning)
                 }
             }
-        }
+        
         .task(id: file.id) {
             // Record the now-displayed file so a still-in-flight tag write for the
             // prior file can detect that the user navigated away (see runTagEdit).
@@ -1541,6 +1235,7 @@ private struct FinderTagsEditor: View {
             }
             .buttonStyle(.plain)
             .help("Remove this tag")
+            .accessibilityLabel("Remove this tag")
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -1555,74 +1250,61 @@ private struct FinderTagsEditor: View {
 /// eager sheet-branch metadata init.
 private struct VideoPreview: View {
     let url: URL
-    @State private var poster: NSImage?
+    var body: some View { InlineMediaPlayer(url: url, isAudio: false) }
+}
 
+/// Audio plays in the sheet with the same native transport controls.
+private struct AudioPreview: View {
+    let url: URL
     var body: some View {
-        ZStack {
-            Color.black
-            if let poster {
-                Image(nsImage: poster)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(20)
-            }
-            VStack(spacing: 12) {
-                Button {
-                    NSWorkspace.shared.open(url)
-                } label: {
-                    ZStack {
-                        Circle().fill(.black.opacity(0.55))
-                            .frame(width: 96, height: 96)
-                        Circle().stroke(Theme.gold, lineWidth: 3)
-                            .frame(width: 96, height: 96)
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 44))
-                            .foregroundStyle(Theme.gold)
-                            .offset(x: 4)
-                    }
-                }
-                .buttonStyle(.plain)
-                .help("Play in QuickTime / default video app")
-                Text("Click to play")
-                    .font(Theme.Font.body(12, .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.black.opacity(0.55)))
-            }
+        VStack(spacing: 20) {
+            Image(systemName: "waveform.circle.fill")
+                .font(.system(size: 88, weight: .light))
+                .foregroundStyle(Theme.gold)
+            Text(url.lastPathComponent)
+                .font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                .lineLimit(1).truncationMode(.middle)
+            InlineMediaPlayer(url: url, isAudio: true)
+                .frame(maxWidth: 520, maxHeight: 64)
         }
-        .task(id: url) {
-            poster = await ThumbnailService.shared.thumbnail(for: url, size: 1024)
-        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-/// Audio: poster + Play button. Same NSViewRepresentable workaround as VideoPreview.
-private struct AudioPreview: View {
+/// Plays a file inside FileID with AVKit: starts paused on the first frame
+/// and stops when the sheet moves on.
+private struct InlineMediaPlayer: View {
     let url: URL
+    let isAudio: Bool
+    @State private var player: AVPlayer?
+    @State private var failed = false
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 96, weight: .light))
-                .foregroundStyle(Theme.gold)
-            Text(url.lastPathComponent)
-                .font(Theme.Font.body(14, .semibold))
-                .lineLimit(1).truncationMode(.middle)
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
-                Label("Play in default app", systemImage: "play.fill")
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
-                    .foregroundStyle(.black)
-                    .font(Theme.Font.body(13.5, .semibold))
+        ZStack {
+            if let player {
+                NativeVideoPlayer(player: player)
+                    .clipShape(RoundedRectangle(cornerRadius: isAudio ? Theme.Radius.m : 0, style: .continuous))
+            } else if failed {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle").font(.system(size: 28)).foregroundStyle(Theme.warning)
+                    Text("This file can't be played on this Mac.").font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
+                }
+            } else {
+                ProgressView().controlSize(.small)
             }
-            .buttonStyle(.plain)
-            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.4), ignoresSafeAreaEdges: [])
+        .task(id: url) {
+            player?.pause()
+            player = nil
+            failed = false
+            let asset = AVURLAsset(url: url)
+            let playable = (try? await asset.load(.isPlayable)) ?? false
+            guard !Task.isCancelled else { return }
+            if playable { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) } else { failed = true }
+        }
+        .onDisappear { player?.pause() }
     }
 }
 
@@ -1863,7 +1545,9 @@ private struct LibrarySelectedPane: View {
             guard !Task.isCancelled else { return }
             tags = loaded.0
             people = loaded.1
-            let image = await ThumbnailService.shared.thumbnail(for: row.url, size: 480)
+            let image = row.kind == "image"
+                ? await ThumbnailService.previewImage(for: row.url, maxPixelSize: 1024)
+                : await ThumbnailService.shared.thumbnail(for: row.url, size: 480)
             guard !Task.isCancelled else { return }
             thumbnail = image
         }

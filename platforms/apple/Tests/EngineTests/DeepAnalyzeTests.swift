@@ -599,13 +599,15 @@ struct DeepAnalyzeRunnerTests {
 
         // Cancel BEFORE run dispatches — mirrors a cancel pressed while the
         // job sat in the JobQueue.
-        await DeepAnalyze.shared.requestCancel()
-        defer { Task { await DeepAnalyze.shared.clearCancel() } }
+        // A private analyzer: the shared one's cancel flag is touched by other
+        // suites running in parallel.
+        let analyzer = DeepAnalyze()
+        await analyzer.requestCancel()
 
         await DeepAnalyzeRunner.run(
             database: db, sink: sink,
             scope: .wholeLibrary(skipExisting: false, excludedFolders: []),
-            modelKind: .qwen3VL4B)
+            modelKind: .qwen3VL4B, analyzer: analyzer)
         await cap.finish()
 
         let completeNeedle = Data("\"deepAnalyzeComplete\"".utf8)

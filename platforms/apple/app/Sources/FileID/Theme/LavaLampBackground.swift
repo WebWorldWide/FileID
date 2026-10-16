@@ -15,6 +15,7 @@ struct LavaLampBackground: View {
     var aiActive: Bool = false
     @AppStorage("lavaMode") private var modeRaw: String = LavaMode.full.rawValue
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var mode: LavaMode { LavaMode(rawValue: modeRaw) ?? .full }
 
@@ -33,6 +34,14 @@ struct LavaLampBackground: View {
     ]
 
     var body: some View {
+        if reduceTransparency {
+            Theme.bg1
+        } else {
+            atmosphere
+        }
+    }
+
+    private var atmosphere: some View {
         ZStack {
             LinearGradient(stops: [
                 .init(color: Theme.bg1, location: 0),
