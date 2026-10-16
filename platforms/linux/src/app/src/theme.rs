@@ -77,18 +77,20 @@ window {
 label, button, entry, headerbar, .nav-row, row, popover, gridview, listview {
     font-family: "Archivo", "Inter", "Roboto", "Noto Sans", "Cantarell", sans-serif;
 }
-/* Prototype v3: serif page titles, mono section labels, square geometry. */
+/* Prototype v3: serif page titles, Archivo section labels, mono for paths and shortcuts. */
 .title-1 { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 34px; font-weight: 400; letter-spacing: 0; }
 .title-2 { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 24px; font-weight: 400; letter-spacing: 0; }
 .title-3 { font-size: 14px; font-weight: 600; letter-spacing: 0; }
 .heading { font-weight: 600; letter-spacing: 0; }
 .caption { font-size: 11px; }
-.monospace, .section-label, .meta { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; }
-.section-label { font-size: 11px; font-weight: 600; letter-spacing: 1.5px; color: @fileid_label; }
+.monospace, .meta, .kbd { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; }
+.section-label { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; color: @fileid_label; }
 .meta { font-size: 11.5px; color: @fileid_text3; }
-button, entry, .card, .glass-card, .padded-card, .fileid-glass, popover > contents, .nav-row, check, radio, switch, switch > slider, progressbar > trough, progressbar > trough > progress, .pill, .chip {
-    border-radius: 0;
-}
+/* Corner scale xs 4 / s 6 / m 8 / l 10: controls s, cards and rows m, panels and floating cards l. */
+button, entry, .pill, .chip { border-radius: 6px; }
+.card, .glass-card, .padded-card, .fileid-glass, popover > contents { border-radius: 10px; }
+check { border-radius: 4px; }
+radio, switch, switch > slider, progressbar > trough, progressbar > trough > progress { border-radius: 99px; }
 
 /* ── Backgrounds: keep content transparent so the signature LavaLamp shows ── */
 .fileid-tab, viewstack, stack,
@@ -109,63 +111,56 @@ window { background-color: @fileid_base; }
 .glass-card, .padded-card {
     background-color: alpha(#18181B, 0.78);
     border: 1px solid alpha(#FFFFFF, 0.11);
-    border-radius: 0;
+    border-radius: 10px;
     padding: 14px;
     box-shadow: none;
 }
 .fileid-glass {
     background-color: alpha(#18181B, 0.78);
     border: 1px solid alpha(#FFFFFF, 0.11);
-    border-radius: 0;
+    border-radius: 10px;
 }
 
-/* ── Header bar floats over the LavaLamp like the macOS unified toolbar ───── */
+/* ── Title bar (Prototype v3): 48 px over bg1, bottom hairline ───────────── */
 headerbar, .fileid-headerbar {
     background: transparent;
     box-shadow: none;
     border: none;
     min-height: 40px;
 }
+headerbar.fileid-titlebar {
+    min-height: 48px;
+    padding: 0 8px 0 6px;
+    background-color: alpha(#0B0B0C, 0.62);
+    border-bottom: 1px solid alpha(#FFFFFF, 0.08);
+}
 headerbar windowcontrols button { background: transparent; border: none; box-shadow: none; }
 headerbar windowcontrols button:hover { background-color: alpha(#FFFFFF, 0.10); }
 
-/* ── Left sidebar nav (the macOS/Windows structure, not GNOME top tabs) ───── */
+/* ── Sidebar: area switcher, 32 px rows, quiet badges, scan card ─────────── */
 .fileid-sidebar {
-    background-color: alpha(#0B0B0C, 0.5);
+    background-color: alpha(#0B0B0C, 0.55);
     border-right: 1px solid alpha(#FFFFFF, 0.08);
     padding: 0;
-}
-.sidebar-heading {
-    color: @fileid_label;
-    font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    margin: 18px 16px 10px 16px;
 }
 .nav-row {
     background: transparent;
     border: none;
-    border-left: 3px solid transparent;
-    border-bottom: 1px solid alpha(#FFFFFF, 0.06);
-    border-radius: 0;
-    padding: 12px 14px 12px 11px;
-    color: alpha(#FFFFFF, 0.82);
-    font-weight: 500;
+    border-radius: 8px;
+    padding: 0 10px;
+    margin: 0 8px;
+    min-height: 32px;
+    color: @fileid_text1;
+    font-size: 13.5px;
+    font-weight: 400;
     box-shadow: none;
-    min-height: 0;
-    transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease;
+    transition: background-color 140ms ease-out, color 140ms ease-out;
 }
-.nav-row:hover { background-color: alpha(#FFFFFF, 0.06); }
-.nav-row.active {
-    background-color: alpha(@fileid_gold, 0.07);
-    border-left-color: @fileid_gold;
-    border-bottom-color: alpha(#FFFFFF, 0.06);
-    color: @fileid_gold;
-    font-weight: 600;
-}
-.nav-row image { color: alpha(#FFFFFF, 0.75); }
+.nav-row:hover { background-color: alpha(#FFFFFF, 0.05); border-color: transparent; }
+.nav-row.active { background-color: alpha(@fileid_gold, 0.12); color: @fileid_gold; font-weight: 600; }
+.nav-row image { color: @fileid_text2; }
 .nav-row.active image { color: @fileid_gold; }
+.nav-badge { font-size: 11.5px; font-weight: 500; font-feature-settings: "tnum"; }
 
 /* Settings / page section headings — readable uppercase divider. */
 .settings-heading {
@@ -180,7 +175,7 @@ button {
     background-color: alpha(#FFFFFF, 0.07);
     color: #FFFFFF;
     border: 1px solid alpha(#FFFFFF, 0.10);
-    border-radius: 9px;
+    border-radius: 6px;
     padding: 6px 14px;
     min-height: 20px;
     box-shadow: none;
@@ -228,7 +223,7 @@ check, radio {
     background-color: alpha(#FFFFFF, 0.06);
     border: 1px solid alpha(#FFFFFF, 0.22);
 }
-check { border-radius: 6px; }
+check { border-radius: 4px; }
 check:checked, radio:checked {
     background-color: @fileid_gold;
     border-color: @fileid_gold;
@@ -239,7 +234,7 @@ check:checked, radio:checked {
 entry, .fileid-search {
     background-color: alpha(#FFFFFF, 0.06);
     border: 1px solid alpha(#FFFFFF, 0.10);
-    border-radius: 18px;
+    border-radius: 6px;
     color: #FFFFFF;
     padding: 4px 10px;
     box-shadow: none;
@@ -252,7 +247,7 @@ entry image { color: alpha(#FFFFFF, 0.55); }
 .boxed-list > row {
     background-color: alpha(#FFFFFF, 0.05);
     border: 1px solid alpha(#FFFFFF, 0.07);
-    border-radius: 10px;
+    border-radius: 8px;
     margin: 3px 0;
 }
 .boxed-list > row:hover { background-color: alpha(#FFFFFF, 0.09); }
@@ -279,7 +274,7 @@ spinner { color: @fileid_gold; }
 .pill {
     background-color: alpha(#FFFFFF, 0.06);
     border: 1px solid transparent;
-    border-radius: 99px;
+    border-radius: 6px;
     padding: 4px 15px;
     color: alpha(#FFFFFF, 0.78);
     font-weight: 500;
@@ -304,19 +299,19 @@ spinner { color: @fileid_gold; }
 .file-tile {
     background-color: alpha(#FFFFFF, 0.05);
     border: 1px solid alpha(#FFFFFF, 0.08);
-    border-radius: 12px;
+    border-radius: 8px;
     padding: 8px;
     box-shadow: 0 2px 8px alpha(#000000, 0.30);
 }
 .file-tile:hover { border-color: alpha(#FFFFFF, 0.20); background-color: alpha(#FFFFFF, 0.08); }
 .file-tile-selected { border: 2px solid @fileid_gold; }
 
-.tile-thumb { background-color: alpha(#000000, 0.35); border-radius: 8px; }
+.tile-thumb { background-color: alpha(#000000, 0.35); border-radius: 6px; }
 
 .kind-badge {
     background-color: @fileid_gold;
     color: #000000;
-    border-radius: 99px;
+    border-radius: 4px;
     padding: 1px 7px;
     font-size: 8pt;
     font-weight: 700;
@@ -342,6 +337,157 @@ spinner { color: @fileid_gold; }
     background-color: alpha(#000000, 0.45);
     border-radius: 99px;
     padding: 8px;
+}
+
+/* ── Status tones: gold acts, lavender = a model runs, cyan = info, pink = done ── */
+.tone-gold { color: @fileid_gold; }
+.tone-ai { color: @fileid_lavender; }
+.tone-info { color: @fileid_cyan; }
+.tone-done { color: @fileid_pink; }
+.tone-danger { color: @fileid_danger; }
+.tone-warning { color: @fileid_warning; }
+.tone-muted, .tone-paused { color: @fileid_text3; }
+.tone-text2 { color: @fileid_text2; }
+progressbar.tone-gold > trough > progress { background-image: linear-gradient(to right, #FF8A1A, #FFB000, #FFCC00, #FFE9A3); }
+progressbar.tone-ai > trough > progress { background-image: linear-gradient(to right, #7462A6, #B19BCE, #DED2F2); }
+progressbar.tone-done > trough > progress { background-image: linear-gradient(to right, #FFB000, #FFCC00, #F2A6C0); }
+progressbar.tone-paused > trough > progress { background-image: linear-gradient(to right, alpha(#B9BEC4, 0.28), alpha(#B9BEC4, 0.55)); }
+progressbar.tone-info > trough > progress { background-image: linear-gradient(to right, alpha(#A0E2EA, 0.2), alpha(#A0E2EA, 0.55)); }
+progressbar.tone-muted > trough > progress, progressbar.tone-text2 > trough > progress { background-image: linear-gradient(to right, alpha(#D6DADE, 0.35), alpha(#D6DADE, 0.85)); }
+progressbar.tone-danger > trough > progress { background-image: none; background-color: @fileid_danger; }
+progressbar.grain-bar > trough { background-color: alpha(#FFFFFF, 0.07); }
+progressbar.mini > trough, progressbar.mini > trough > progress { min-height: 4px; }
+.tone-dot { min-width: 6px; min-height: 6px; border-radius: 99px; }
+.tone-dot.tone-gold { background-color: @fileid_gold; }
+.tone-dot.tone-ai { background-color: @fileid_lavender; }
+.tone-dot.tone-info { background-color: @fileid_cyan; }
+.tone-dot.tone-done { background-color: @fileid_pink; }
+.tone-dot.tone-muted, .tone-dot.tone-paused { background-color: @fileid_text3; }
+
+/* ── Title bar controls ──────────────────────────────────────────────────── */
+.tb-control, menubutton.tb-control > button {
+    min-height: 30px;
+    padding: 0 10px;
+    background-color: alpha(#000000, 0.28);
+    border: 1px solid alpha(#FFFFFF, 0.16);
+    border-radius: 6px;
+    box-shadow: none;
+    color: @fileid_text1;
+}
+.tb-control:hover, menubutton.tb-control > button:hover { background-color: alpha(#000000, 0.36); border-color: alpha(#FFFFFF, 0.24); }
+menubutton.tb-control > button:checked, .tb-control.open { background-color: alpha(#000000, 0.28); border-color: @fileid_gold; }
+.tb-icon { min-width: 30px; padding: 0; color: @fileid_text2; background-color: alpha(#000000, 0.32); }
+.tb-icon.active { background-color: alpha(@fileid_gold, 0.14); border-color: @fileid_gold; color: @fileid_gold; }
+button.tb-plain { background: transparent; border-color: transparent; min-width: 26px; min-height: 26px; padding: 0; color: @fileid_text2; }
+button.tb-plain:hover { background-color: alpha(#FFFFFF, 0.06); border-color: transparent; }
+.wordmark { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 18px; font-weight: 400; color: @fileid_text1; }
+.tb-folder { font-size: 13.5px; font-weight: 600; color: @fileid_text1; }
+.tb-folder.empty { color: @fileid_text3; }
+.tb-caret { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 11px; color: @fileid_text3; }
+.vrule { background-color: alpha(#FFFFFF, 0.18); min-width: 1px; min-height: 14px; }
+.tb-activity-label { font-size: 12.5px; font-weight: 500; color: @fileid_text1; }
+.tb-activity-pct { font-size: 12.5px; font-weight: 600; font-feature-settings: "tnum"; }
+.tb-search {
+    min-height: 30px;
+    padding: 0 6px 0 10px;
+    background-color: alpha(#000000, 0.32);
+    border: 1px solid alpha(#FFFFFF, 0.16);
+    border-radius: 6px;
+    font-size: 13.5px;
+    color: @fileid_text1;
+}
+.tb-search:focus-within { border-color: @fileid_gold; }
+.kbd { font-size: 11px; color: @fileid_text3; border: 1px solid alpha(#FFFFFF, 0.16); border-radius: 4px; padding: 1px 5px; }
+
+/* ── Popovers (folder switcher, search, activity) ────────────────────────── */
+popover.fileid-popover > contents {
+    background-color: #161618;
+    border: 1px solid alpha(#FFFFFF, 0.14);
+    border-radius: 10px;
+    padding: 0;
+}
+.pop-head { padding: 10px 12px 6px 12px; }
+.pop-row { padding: 9px 12px; border-top: 1px solid alpha(#FFFFFF, 0.06); }
+.pop-actions { padding: 10px; background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.14); }
+.pop-footer { padding: 8px 10px; border-top: 1px solid alpha(#FFFFFF, 0.06); }
+.pop-title { font-size: 14px; font-weight: 600; color: @fileid_text1; }
+.pop-meta { font-size: 12px; color: @fileid_text3; }
+button.result-row {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    min-height: 32px;
+    padding: 0 12px;
+    box-shadow: none;
+    font-size: 14px;
+}
+button.result-row:hover, button.result-row.first { background-color: alpha(@fileid_gold, 0.08); }
+button.ghost { background: transparent; border-color: transparent; color: @fileid_text2; padding: 0 8px; }
+button.ghost:hover { background-color: alpha(#FFFFFF, 0.06); border-color: transparent; }
+button.ghost.danger { color: @fileid_danger; }
+button.secondary { min-height: 28px; padding: 0 10px; background-color: alpha(#FFFFFF, 0.05); border: 1px solid alpha(#FFFFFF, 0.14); font-size: 13px; font-weight: 500; }
+button.secondary:hover { background-color: alpha(#FFFFFF, 0.09); border-color: alpha(#FFFFFF, 0.24); }
+button.small { min-height: 24px; padding: 0 8px; font-size: 12px; }
+button.gold-button.compact { min-height: 28px; padding: 0 12px; font-size: 13px; box-shadow: none; color: #141414; }
+
+/* ── Sidebar area switcher + scan card ───────────────────────────────────── */
+.area-switcher {
+    background-color: alpha(#000000, 0.28);
+    border: 1px solid alpha(#FFFFFF, 0.14);
+    border-radius: 8px;
+    padding: 3px;
+}
+.area-switcher button {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    min-height: 26px;
+    padding: 0;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: @fileid_text2;
+    transition: color 140ms ease-out;
+}
+.area-switcher button:hover { background: transparent; color: @fileid_text1; }
+.area-switcher button.on { color: #141414; font-weight: 600; }
+.scan-card {
+    background-color: alpha(#FFFFFF, 0.035);
+    border: 1px solid alpha(#FFFFFF, 0.08);
+    border-radius: 10px;
+    padding: 12px;
+}
+.scan-title { font-size: 13px; font-weight: 600; color: @fileid_text1; }
+.scan-pct { font-size: 12.5px; font-weight: 600; font-feature-settings: "tnum"; }
+.scan-step { font-size: 12px; color: @fileid_text2; }
+.scan-sub { font-size: 12px; color: @fileid_text3; }
+.step-seg { min-height: 3px; border-radius: 99px; background-color: alpha(#FFFFFF, 0.12); }
+.step-seg.past { background-color: alpha(#CFD3D8, 0.7); }
+.step-seg.current.tone-gold { background-color: @fileid_gold; }
+.step-seg.current.tone-ai { background-color: @fileid_lavender; }
+.step-seg.current.tone-done { background-color: @fileid_pink; }
+.step-seg.current.tone-danger { background-color: @fileid_danger; }
+.step-seg.current.tone-muted, .step-seg.current.tone-paused, .step-seg.current.tone-text2 { background-color: @fileid_text2; }
+.scan-stats { padding: 6px 0; border-top: 1px solid alpha(#FFFFFF, 0.06); border-bottom: 1px solid alpha(#FFFFFF, 0.06); }
+.stat-key { font-size: 12px; color: @fileid_text3; }
+.stat-value { font-size: 12px; font-weight: 500; color: @fileid_text1; font-feature-settings: "tnum"; }
+.stat-trailing { font-size: 11.5px; color: @fileid_text3; font-feature-settings: "tnum"; }
+.engine-note {
+    background-color: alpha(@fileid_warning, 0.08);
+    border: 1px solid alpha(@fileid_warning, 0.35);
+    border-radius: 8px;
+    padding: 8px;
+}
+.engine-note label { font-size: 11.5px; color: @fileid_text2; }
+
+/* ── Page area: crumb + serif title header over a frosted page ───────────── */
+.fileid-page { background-color: alpha(#0F0F11, 0.8); }
+.page-header { padding: 18px 26px 14px 26px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
+.page-meta { font-size: 12px; color: @fileid_text2; }
+.drop-zone {
+    margin: 14px;
+    border: 2px dashed @fileid_gold;
+    border-radius: 6px;
+    background-color: alpha(@fileid_gold, 0.08);
 }
 "#;
 
