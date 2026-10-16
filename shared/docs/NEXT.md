@@ -46,7 +46,7 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 
 - [x] In-app playback (macOS): videos and audio play inside the preview sheet with AVKit controls; Chat results, Moments and Best Takes play in their own players instead of opening QuickTime.
 - [x] In-app playback on Linux: the preview dialog plays video/audio with GtkVideo; Search & Moments hits play in a FileID dialog from the matched moment instead of launching another app.
-- [ ] In-app playback on Windows (MediaPlayerElement in FilePreviewSheet and the catalog workbench).
+- [x] In-app playback on Windows: the preview sheet already used MediaPlayerElement; Chat/Moments evidence now plays every video and audio hit in place (from the matched moment when there is one) instead of opening the default app. CI-verified only.
 
 UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against Apple's Human Interface Guidelines):
 - [x] Rounded geometry, Archivo text, simplified sidebar, compact scan card.
