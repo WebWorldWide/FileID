@@ -17,6 +17,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     var onToggleCheck: (FileRow) -> Void
     var onFindSimilar: (FileRow) -> Void
     var onNearEnd: () -> Void
+    var onClearSelection: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -38,6 +39,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         scroll.automaticallyAdjustsContentInsets = false
         scroll.contentView.drawsBackground = false
         context.coordinator.collection = collection
+        collection.onKey = { [weak coordinator = context.coordinator] key in coordinator?.handle(key) ?? false }
         context.coordinator.apply(self, force: true)
         return scroll
     }
@@ -85,6 +87,36 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastSelected = grid.selectedID
         }
 
+        func handle(_ key: TileCollectionView.TileKey) -> Bool {
+            guard let model, let collection, !model.rows.isEmpty else { return false }
+            let current = model.selectedID.flatMap { id in model.rows.firstIndex { $0.id == id } }
+            if key == .clear {
+                guard current != nil else { return false }
+                model.onClearSelection()
+                return true
+            }
+            if key == .open {
+                guard let current else { return false }
+                model.onOpen(model.rows[current])
+                return true
+            }
+            let columns = max(1, (collection.collectionViewLayout as? AdaptiveGridLayout)?.columnCount ?? 1)
+            let start = current ?? -1
+            let next: Int = switch key {
+            case .left: start - 1
+            case .right: start + 1
+            case .up: start - columns
+            case .down: start < 0 ? 0 : start + columns
+            default: start
+            }
+            let target = min(max(next, 0), model.rows.count - 1)
+            guard target != current else { return true }
+            model.onSelect(model.rows[target])
+            collection.scrollToItems(at: [IndexPath(item: target, section: 0)], scrollPosition: .nearestHorizontalEdge)
+            if target >= model.rows.count - 24 { model.onNearEnd() }
+            return true
+        }
+
         func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { ids.count }
 
         func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
@@ -123,6 +155,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
 
 /// Columns of 160–220 pt with 12 pt gaps and 20 pt insets, like the SwiftUI grid.
 final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
+    private(set) var columnCount = 1
     override init() {
         super.init()
         minimumInteritemSpacing = 12
@@ -135,6 +168,7 @@ final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
         if let width = collectionView?.enclosingScrollView?.contentView.bounds.width, width > 0 {
             let usable = width - sectionInset.left - sectionInset.right
             let columns = max(1, Int((usable + minimumInteritemSpacing) / (160 + minimumInteritemSpacing)))
+            columnCount = columns
             let itemWidth = floor((usable - CGFloat(columns - 1) * minimumInteritemSpacing) / CGFloat(columns))
             itemSize = NSSize(width: itemWidth, height: (itemWidth * 3 / 4).rounded() + LibraryTileItem.captionHeight)
         }
@@ -149,7 +183,31 @@ final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
 /// One tracking area for the whole grid; per-tile areas made AppKit rebuild
 /// window regions for every cell scrolled into view.
 final class TileCollectionView: NSCollectionView {
-    override var acceptsFirstResponder: Bool { false }
+    /// Arrow keys move the selection, Return/Space open it, Escape clears.
+    var onKey: ((TileKey) -> Bool)?
+    override var acceptsFirstResponder: Bool { true }
+    override var focusRingMaskBounds: NSRect { .zero }
+
+    enum TileKey { case left, right, up, down, open, clear }
+
+    override func keyDown(with event: NSEvent) {
+        let key: TileKey? = switch event.keyCode {
+        case 123: .left
+        case 124: .right
+        case 125: .down
+        case 126: .up
+        case 36, 76, 49: .open
+        case 53: .clear
+        default: nil
+        }
+        if let key, onKey?(key) == true { return }
+        super.keyDown(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
     private var hoverArea: NSTrackingArea?
     private weak var hovered: LibraryTileItem?
 
@@ -403,7 +461,10 @@ private final class TileView: NSView {
     var customActions: [NSAccessibilityCustomAction] = []
 
     override var isFlipped: Bool { false }
-    override func mouseDown(with event: NSEvent) { owner?.onClick?(event.clickCount) }
+    override func mouseDown(with event: NSEvent) {
+        if let grid = owner?.collectionView { window?.makeFirstResponder(grid) }
+        owner?.onClick?(event.clickCount)
+    }
     override func menu(for event: NSEvent) -> NSMenu? { owner?.contextMenu() }
     override func accessibilityPerformPress() -> Bool { owner?.onClick?(1); return true }
     override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? { customActions }

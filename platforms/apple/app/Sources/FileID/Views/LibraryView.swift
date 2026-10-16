@@ -660,7 +660,8 @@ struct LibraryView: View {
                 if checkedFiles[row.id] != nil { checkedFiles[row.id] = nil } else { checkedFiles[row.id] = row }
             },
             onFindSimilar: { similarSeed = $0 },
-            onNearEnd: { loadMore() })
+            onNearEnd: { loadMore() },
+            onClearSelection: { paneSelectedID = nil })
         .overlay(alignment: .bottom) {
             if loadingMore { ProgressView().controlSize(.small).padding(.bottom, 12) }
         }

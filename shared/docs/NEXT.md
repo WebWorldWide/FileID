@@ -53,7 +53,8 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Library Selected pane (single click), full preview on double-click, accessibility actions on tiles.
 - [x] Finder-style file sizes everywhere.
 - [x] HIG: icon-only buttons have spoken names (VoiceOver read "Gear Shape", "Split View Horizontally Left", "Conversation"); text and hairlines strengthen under Increase Contrast; the animated background becomes solid under Reduce Transparency; Reduce Motion already honored.
-- [ ] HIG: keyboard focus order and visible focus rings on every page with Full Keyboard Access; text-size setting for the content area.
+- [x] HIG (Library): the grid takes keyboard focus on click; arrow keys move the selection by tile and by row, Return/Space open the preview, Escape clears; selection scrolls into view and pages in more files. Built and unit-tested; not yet exercised by keyboard on screen.
+- [ ] HIG: keyboard focus order and visible focus rings on the other pages with Full Keyboard Access; text-size setting for the content area.
 - [ ] Moments tracks, Takes/Tools/Chat panels, Restructure step cells in v3 layout.
 - [x] Model browser "Speed on this Mac" checked on screen with a real in-app run (Qwen3-VL 4B: 4.3 s load, 165/26 tok/s, 5.1 s per image, 3.8 GB); metrics use the full width, the selected row stays in view, measured memory replaces the estimate.
 - [x] Title bar: window buttons vertically centred in the 48 pt bar (re-applied on resize/full screen), search centred, folder left, activity/chat/settings right; Browse/Analyze/Act moved to the top of the sidebar and filters its pages.
