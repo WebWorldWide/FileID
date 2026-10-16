@@ -36,7 +36,7 @@ Performance loop (goal from the owner: large multiples on speed, memory, CPU and
 - [x] Video moments: next window's frames extract while the model runs; revision check in-process (one helper spawn and one frame decode fewer per window).
 - [ ] Video analysis: keep one long-lived frame helper per job instead of a process per window; batch frames per model call; measure on Adlon clips.
 - [ ] Scan: overlap I/O with ML (read-ahead on USB/NAS); move RAM++ to the GPU the same way as CLIP once installed and measured.
-- [ ] Size: audit bundle size (MLX metallib, ONNX Runtime, fonts) and strip unused architectures/resources.
+- [x] Size: macOS DMGs use LZMA (ULMO) instead of zlib-9: 110 → 63 MB for the same app (−43%), verified round-trip. Bundle breakdown (debug): MLX metallib 175 MB, engine 140 MB, app 65 MB. Shrinking the metallib needs MLX's JIT kernel mode, which the pinned mlx-swift package does not build; left as is.
 - [ ] Audit third-party packages for hot-path overhead (GRDB writes, swift-transformers tokenizer, ORT session setup) and replace or rewrite where measurably faster.
 - [x] Run `benchmarkModel` on Qwen3-VL 4B and Qwen3.5 0.8B (results in STATE.md and MODELS.md).
 - [x] Qwen3-VL adapter forwards per-token generation (every Qwen3-VL generation aborted the engine before).

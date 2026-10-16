@@ -164,7 +164,7 @@ hdiutil create \
     "$DMG_RW" >/dev/null
 
 echo "📦 Compressing…"
-hdiutil convert "$DMG_RW" -format UDZO -imagekey zlib-level=9 -o "$DMG_OUT" >/dev/null
+hdiutil convert "$DMG_RW" -format ULMO -o "$DMG_OUT" >/dev/null
 rm -f "$DMG_RW"
 hdiutil verify "$DMG_OUT" >/dev/null
 
