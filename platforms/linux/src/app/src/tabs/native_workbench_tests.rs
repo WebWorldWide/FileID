@@ -112,7 +112,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .content(&stack)
         .build();
     window.present();
-    let _rx = engine.borrow_mut().spawn();
+    EngineClient::start(&engine);
     wait(|| engine.borrow().is_ready());
     wait(|| button(&tools, "Preview").is_sensitive());
 

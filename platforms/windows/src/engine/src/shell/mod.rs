@@ -664,6 +664,20 @@ pub mod thumbnail {
         })
     }
 
+    /// Scale a decoded RGB frame (a video keyframe) to fit `dim`.
+    pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>, dim: i32) -> Result<Thumbnail> {
+        let dim = u32::try_from(dim).ok().filter(|dim| *dim > 0)
+            .context("thumbnail dimension must be positive")?;
+        let image = image::RgbImage::from_raw(width, height, rgb)
+            .context("frame buffer does not match its dimensions")?;
+        let image = image::DynamicImage::ImageRgb8(image).thumbnail(dim, dim).into_rgba8();
+        Ok(Thumbnail {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw(),
+        })
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -685,6 +699,13 @@ pub mod thumbnail {
             assert_eq!(&thumb.rgba[0..4], &[200, 40, 60, 255]);
             assert!(render_at(&path, 0).is_err());
             std::fs::remove_dir_all(fixture).unwrap();
+        }
+
+        #[test]
+        fn video_frames_scale_to_fit_and_reject_short_buffers() {
+            let thumb = from_rgb(64, 32, vec![10; 64 * 32 * 3], 16).unwrap();
+            assert_eq!((thumb.width, thumb.height), (16, 8));
+            assert!(from_rgb(64, 32, vec![10; 10], 16).is_err());
         }
     }
 }
