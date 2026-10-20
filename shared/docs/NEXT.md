@@ -94,6 +94,7 @@ Baseline lines: shared Rust engine 84k (30k tests), WinUI app 38k, Swift engine 
 - [ ] macOS app becomes a read-only client: People, rename, trash and tag writes go through the engine commands it already implements (CI tests the engine path; the app's own writes differ).
 - [ ] Generate the Swift/C# (and Rust) IPC DTOs from ipc.schema.json (~2.5–3.5k lines) once the conformance suite is in.
 - [ ] Converge macOS onto the shared Rust engine subsystem by subsystem (People, rename/trash, restructure, catalog first), Apple ML behind in-process adapters; Swift engine retires last after conformance, catalog round-trip and Mac hardware measurements.
+- [ ] RAM++ is the scan bottleneck (measured 2026-10-20 on 8 and 300 real Sony JPEG/ARW copied to the internal SSD, full model set): ~1.3 s per image on the CoreML EP, serialized, first inference ~20 s; scans fall below 1 file/s vs 40–56 files/s without RAM++ (CLIP on MLX 16–200 ms, Vision 50–150 ms, decode 200–480 ms in the same run). Fix in progress (agent/ramplus-gpu): measure EP options, then port Swin-L + tag head to MLX like CLIP with an ONNX parity test.
 - [ ] Re-measure scan on Adlon with the full model set once the machine is quiet. Last run (Kyle Baseball Game 9-19-26: 382 ARW + 339 JPEG, no CLIP/RAM++ installed, load average ~14): 721 files in 28.4 s, 543 MB peak, 62 s CPU of which 29 s kernel; RAW load stage 400–550 ms per file vs ~25 ms for JPEG.
 
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
