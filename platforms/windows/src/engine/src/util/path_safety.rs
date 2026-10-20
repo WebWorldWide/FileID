@@ -179,7 +179,7 @@ pub(crate) fn to_extended_length(path: &Path) -> PathBuf {
 ///   `\\?\C:\a\b`              → `C:\a\b`
 ///   `\\?\UNC\server\share\x`  → `\\server\share\x`
 #[cfg(windows)]
-pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
+pub fn strip_extended_length(path: &Path) -> PathBuf {
     let s = path.as_os_str().to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));
@@ -191,7 +191,7 @@ pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn strip_extended_length(path: &Path) -> PathBuf {
+pub fn strip_extended_length(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 

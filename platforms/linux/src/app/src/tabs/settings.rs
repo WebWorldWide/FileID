@@ -300,7 +300,7 @@ fn build_model_row(
                 "{} · {} files · about {} · pinned downloads from huggingface.co",
                 kind,
                 model.files.len(),
-                super::util::file_size(bytes)
+                fileid_engine::util::display::file_size(bytes)
             )
         }
         None => format!("{kind} · model directory unavailable"),

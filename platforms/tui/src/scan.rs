@@ -19,24 +19,20 @@
 //! [`Stdio::null`], NOT inherited. The TUI holds the alternate screen in raw
 //! mode; inheriting engine log lines would scribble over the UI.
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, Command, Stdio};
+use std::process::{ChildStderr, Stdio};
 use std::sync::mpsc::SyncSender as Sender;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
-use fileid_engine::ipc::{
-    CommandPayload, Empty, EventPayload, IpcCommand, IpcEvent, ScanPhase, StartScanPayload,
-};
-use fileid_engine::models::registry::{self, LookupResult};
+use fileid_engine::client::{self, ScanOutcome};
+use fileid_engine::ipc::{EventPayload, ScanPhase};
+use fileid_engine::models::required::{missing_required, MissingModel};
+use fileid_engine::util::display::file_size;
 
 use crate::data::{self, short, LoadMsg};
-
-/// Models the engine's `startScan` pre-flight requires (mirror of the engine's
-/// `commands/scan.rs` gate, identical to the CLI's). `clip_text` is query-time
-/// only; RAM++ tags degrade to CLIP scene tags when absent, so neither is gated.
-const REQUIRED_MODELS: [&str; 2] = ["mobileclip_s2", "arcface"];
 
 /// Spawn the scan on a worker thread. Non-blocking; the UI keeps drawing and
 /// `q` keeps quitting. On success the thread reloads the DB and sends `Done`;
@@ -108,8 +104,9 @@ fn run_scan(
     //    rather than a cryptic engine error mid-scan. Resolves against the SAME
     //    dir the engine loads from (see `missing_models`), so this gate, the
     //    standing banner, and the engine all agree. ──
-    if !missing_models().is_empty() {
-        anyhow::bail!("{}", missing_models_message());
+    let missing = missing_required();
+    if !missing.is_empty() {
+        anyhow::bail!("{}", message_for_missing(&missing));
     }
 
     // ── Pre-flight 1.5 (macOS): ONNX Runtime installed? The engine's
@@ -122,11 +119,11 @@ fn run_scan(
     }
 
     // ── Pre-flight 2: engine binary located? ──
-    let Some(engine_bin) = locate_engine_binary() else {
+    let Some(engine_bin) = client::locate_engine() else {
         anyhow::bail!(
             "{} not found — set FILEID_ENGINE_BIN, put it on PATH/next to fileid-tui, or build \
              it (cargo build --release in platforms/windows/src/engine).",
-            engine_exe_name()
+            client::engine_exe_name()
         );
     };
 
@@ -141,12 +138,6 @@ fn run_scan(
     // separate thread into a bounded ring so that if the engine dies WITHOUT an
     // IPC `error` event (a crash/panic/dlopen failure), its tail still surfaces in
     // the abort message instead of a blank "exited before the scan completed".
-    let mut command = Command::new(&engine_bin);
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
     // In scratch mode, hand the engine the same data home the TUI resolved.
     // its `paths::root()` honors, so the scan writes `<home>/FileID/fileid.sqlite`
     // — exactly the scratch library the TUI opened and reloads. `prepare_scratch_dir`
@@ -155,11 +146,12 @@ fn run_scan(
         prepare_scratch_dir(home);
     }
     let (storage_env, storage_path) = engine_storage_env(db, engine_data_home);
-    command.env(storage_env, storage_path);
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawning engine binary {}", engine_bin.display()))?;
+    let mut child = client::spawn(
+        &engine_bin,
+        &[(storage_env, storage_path.as_os_str())],
+        Stdio::piped(),
+    )
+    .with_context(|| format!("spawning engine binary {}", engine_bin.display()))?;
 
     let mut stdin = child.stdin.take().context("engine stdin pipe")?;
     let stdout = child.stdout.take().context("engine stdout pipe")?;
@@ -167,53 +159,53 @@ fn run_scan(
     let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
     let stderr_reader = spawn_stderr_capture(stderr, Arc::clone(&stderr_tail));
 
-    let cmd = IpcCommand {
-        id: "fileid-tui-scan".to_string(),
-        payload: CommandPayload::StartScan(StartScanPayload {
-            root_path: root_abs.to_string_lossy().into_owned(),
-            root_bookmark: None,
-            root_display: None,
-            rescan: false,
-            excluded_paths: None,
-        }),
-    };
-    send_command(&mut stdin, &cmd).context("sending startScan to engine")?;
+    client::send_command(
+        &mut stdin,
+        &client::start_scan_command("fileid-tui-scan", &root_abs, false),
+    )
+    .context("sending startScan to engine")?;
 
-    let outcome = stream_events(tx, stdout, &mut stdin);
+    let outcome = client::drive_scan(stdout, &mut stdin, "fileid-tui-scan", |payload| {
+        if let Some(status) = scan_status(payload) {
+            let _ = tx.send(LoadMsg::Status(status));
+        }
+    });
 
     // EOF on stdin → the engine's parent-EOF watchdog exits; then reap it so we
     // don't leave a zombie. Bounded so a misbehaving engine can't wedge us.
     drop(stdin);
-    let _ = wait_briefly(&mut child);
+    let _ = client::wait_briefly(&mut child, Duration::from_secs(10));
     // stderr hits EOF once the engine exits (or is killed above), so the reader
     // thread finishes; join it before reading the captured tail.
     let _ = stderr_reader.join();
 
     match outcome {
-        ScanOutcome::Complete {
-            total,
-            processed,
-            failed,
-            seconds,
-            people,
-            faces,
-        } => Ok(ScanSummary {
-            message: if failed > 0 {
-                format!(
+        ScanOutcome::Complete { scan, clustering } => {
+            let (total, processed, failed, seconds) = (
+                scan.total_files,
+                scan.processed_files,
+                scan.failed_files,
+                scan.total_seconds,
+            );
+            let (people, faces) = (clustering.person_count, clustering.face_count);
+            Ok(ScanSummary {
+                message: if failed > 0 {
+                    format!(
                     "Scan partial: {processed}/{total} files, {failed} failed in {seconds:.1}s · {people} people from {faces} faces"
                 )
-            } else {
-                format!(
+                } else {
+                    format!(
                     "Scan complete: {processed}/{total} files in {seconds:.1}s · {people} people from {faces} faces"
                 )
-            },
-            failed,
-        }),
+                },
+                failed,
+            })
+        }
         // The engine's own `models_not_installed` (the pre-flight gate didn't
         // catch it — e.g. a pin bump) maps to the SAME actionable TUI message.
         ScanOutcome::Error { kind, message } => {
             if kind == "models_not_installed" {
-                anyhow::bail!("{}", missing_models_message())
+                anyhow::bail!("{}", message_for_missing(&missing_required()))
             }
             // The engine's macOS `runtime_not_installed` (the pre-flight didn't
             // catch it — e.g. the dylib vanished) maps to the one-time runtime
@@ -238,241 +230,49 @@ fn run_scan(
     }
 }
 
-enum ScanOutcome {
-    Complete {
-        total: u64,
-        processed: u64,
-        failed: u64,
-        seconds: f64,
-        people: u32,
-        faces: u64,
-    },
-    Error {
-        kind: String,
-        message: String,
-    },
-    Aborted,
-}
-
-#[derive(Clone, Copy)]
-struct ScanStats {
-    total: u64,
-    processed: u64,
-    failed: u64,
-    seconds: f64,
-}
-
-fn send_command<W: Write>(writer: &mut W, command: &IpcCommand) -> Result<()> {
-    let line = serde_json::to_string(command).context("serializing engine command")?;
-    writer
-        .write_all(line.as_bytes())
-        .and_then(|()| writer.write_all(b"\n"))
-        .and_then(|()| writer.flush())
-        .context("writing engine command")
-}
-
-/// Read engine events, stream progress, and cluster faces before completing.
-fn stream_events<R: std::io::Read, W: Write>(
-    tx: &Sender<LoadMsg>,
-    stdout: R,
-    stdin: &mut W,
-) -> ScanOutcome {
-    let reader = BufReader::new(stdout);
-    let mut scan: Option<ScanStats> = None;
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let event: IpcEvent = match serde_json::from_str(trimmed) {
-            Ok(e) => e,
-            Err(_) => continue, // tolerate non-event chatter on stdout
-        };
-        match event.payload {
-            EventPayload::Progress(w) => {
-                let p = w.inner;
-                let msg = if p.total > 0 {
-                    let failed = if p.failed > 0 {
-                        format!(" · {} failed", p.failed)
-                    } else {
-                        String::new()
-                    };
-                    format!(
-                        "Scanning [{:?}] {}/{} ({:.0} files/s){failed}",
-                        p.phase, p.processed, p.total, p.files_per_second
-                    )
+/// One status line per engine event worth showing. Terminal phases carry no
+/// standalone text: `Failed`/`Cancelled` would read as the last word when the
+/// real reason is the error outcome, and `Completed` is superseded by the
+/// summary.
+fn scan_status(payload: &EventPayload) -> Option<String> {
+    match payload {
+        EventPayload::Progress(w) => {
+            let p = &w.inner;
+            Some(if p.total > 0 {
+                let failed = if p.failed > 0 {
+                    format!(" · {} failed", p.failed)
                 } else {
-                    format!("Scanning [{:?}]…", p.phase)
+                    String::new()
                 };
-                let _ = tx.send(LoadMsg::Status(msg));
-            }
-            EventPayload::PhaseChanged(w) => {
-                // Only surface in-progress phases. The TERMINAL ones carry no
-                // useful standalone text: `Failed`/`Cancelled` would print a
-                // misleading bare "Scan phase: Failed" (looks like the last word
-                // when the real reason is the `Error` outcome below), and
-                // `Completed` is superseded by the `ScanComplete` summary.
-                match w.inner {
-                    ScanPhase::Discovering | ScanPhase::Tagging | ScanPhase::PostScan => {
-                        let _ = tx.send(LoadMsg::Status(format!("Scan phase: {:?}", w.inner)));
-                    }
-                    ScanPhase::Idle
-                    | ScanPhase::Completed
-                    | ScanPhase::Cancelled
-                    | ScanPhase::Failed => {}
-                }
-            }
-            EventPayload::DiscoveryComplete(d) => {
-                let _ = tx.send(LoadMsg::Status(format!(
-                    "Discovered {} files…",
-                    d.total_files
-                )));
-            }
-            EventPayload::ScanComplete(w) => {
-                let c = w.inner;
-                scan = Some(ScanStats {
-                    total: c.total_files,
-                    processed: c.processed_files,
-                    failed: c.failed_files,
-                    seconds: c.total_seconds,
-                });
-                let _ = tx.send(LoadMsg::Status("Grouping detected faces…".to_string()));
-                let command = IpcCommand {
-                    id: "fileid-tui-face-clustering".to_string(),
-                    payload: CommandPayload::RunFaceClustering(Empty {}),
-                };
-                if let Err(error) = send_command(stdin, &command) {
-                    return ScanOutcome::Error {
-                        kind: "face_clustering_start_failed".to_string(),
-                        message: error.to_string(),
-                    };
-                }
-            }
-            EventPayload::FaceClusteringComplete(w) => {
-                let Some(scan) = scan else {
-                    continue;
-                };
-                let result = w.inner;
-                return ScanOutcome::Complete {
-                    total: scan.total,
-                    processed: scan.processed,
-                    failed: scan.failed,
-                    seconds: scan.seconds,
-                    people: result.person_count,
-                    faces: result.face_count,
-                };
-            }
-            EventPayload::Error(w) => {
-                let e = w.inner;
-                return ScanOutcome::Error {
-                    kind: e.kind,
-                    message: e.message,
-                };
-            }
-            _ => {}
+                format!(
+                    "Scanning [{:?}] {}/{} ({:.0} files/s){failed}",
+                    p.phase, p.processed, p.total, p.files_per_second
+                )
+            } else {
+                format!("Scanning [{:?}]…", p.phase)
+            })
         }
-    }
-    match scan {
-        Some(_) => ScanOutcome::Error {
-            kind: "face_clustering_aborted".to_string(),
-            message: "engine exited before face clustering completed".to_string(),
+        EventPayload::PhaseChanged(w) => match w.inner {
+            ScanPhase::Discovering | ScanPhase::Tagging | ScanPhase::PostScan => {
+                Some(format!("Scan phase: {:?}", w.inner))
+            }
+            ScanPhase::Idle | ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed => {
+                None
+            }
         },
-        None => ScanOutcome::Aborted,
-    }
-}
-
-/// Wait for the engine to exit, but don't hang forever if it ignores EOF.
-fn wait_briefly(child: &mut Child) -> std::io::Result<()> {
-    use std::time::{Duration, Instant};
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match child.try_wait()? {
-            Some(_) => return Ok(()),
-            None if Instant::now() >= deadline => {
-                let _ = child.kill();
-                return child.wait().map(|_| ());
-            }
-            None => std::thread::sleep(Duration::from_millis(50)),
-        }
+        EventPayload::DiscoveryComplete(d) => Some(format!("Discovered {} files…", d.total_files)),
+        EventPayload::ScanComplete(_) => Some("Grouping detected faces…".to_string()),
+        _ => None,
     }
 }
 
 /// Display names of the required models that aren't installed (empty ⇒ all
-/// present). Thin public wrapper over [`missing_models`] so the UI's standing
-/// "models missing" banner reads the SAME gate the scan pre-flight enforces —
-/// the install check stays defined in exactly one place.
+/// present) — the same gate the engine's `startScan` enforces.
 pub fn missing_models_display() -> Vec<String> {
-    missing_models().into_iter().map(|(_, name)| name).collect()
-}
-
-/// Required models without an install sentinel, as `(kind, display_name)`.
-/// Resolved against the engine's OWN model root (see [`engine_model_root`]) — the
-/// exact dir the spawned engine loads from — so the pre-flight gate, the standing
-/// banner, and the engine never disagree.
-fn missing_models() -> Vec<(&'static str, String)> {
-    missing_models_in(engine_model_root().as_deref())
-}
-
-/// The model directory the ENGINE actually loads from for THIS process:
-/// `FILEID_MODELS_DIR` when the launcher pinned it (always, via
-/// `main::ensure_engine_models_dir`), else the engine's OWN writable
-/// [`engine_models_dir`](fileid_engine::paths::engine_models_dir)
-/// (`~/.local/share/FileID/Models` on a Mac).
-///
-/// Deliberately NOT `paths::models_dir()`: on macOS, with `FILEID_MODELS_DIR`
-/// unset, that PREFERS the desktop app's read-only CoreML dir
-/// (`~/Library/Application Support/FileID/Models`). Its CoreML sentinels would
-/// mask wiped ONNX weights in the engine dir, so the pre-flight would pass and a
-/// doomed scan would spawn only to fail (the bug). Resolving here keeps the gate
-/// honest on the dir that matters.
-fn engine_model_root() -> Option<PathBuf> {
-    match std::env::var_os("FILEID_MODELS_DIR") {
-        Some(v) if !v.is_empty() => Some(PathBuf::from(v)),
-        _ => fileid_engine::paths::engine_models_dir().ok(),
-    }
-}
-
-/// Pure core of [`missing_models`] against an explicit model root — so it is
-/// unit-testable without mutating the process environment or reading the user's
-/// real model dir. A required model counts as installed iff an
-/// `<id>-*.installed` sentinel exists under `<root>/.sentinels` (the engine's own
-/// revision-keyed install marker), resolved against the engine root we pass.
-fn missing_models_in(root: Option<&Path>) -> Vec<(&'static str, String)> {
-    REQUIRED_MODELS
-        .iter()
-        .filter_map(|kind| match registry::lookup_full(kind) {
-            LookupResult::Found(model) if sentinel_present(root, model.id) => None,
-            LookupResult::Found(model) => Some((*kind, model.display_name.to_string())),
-            LookupResult::Unknown => Some((*kind, (*kind).to_string())),
-        })
+    missing_required()
+        .into_iter()
+        .map(|missing| missing.display_name)
         .collect()
-}
-
-/// True iff an install sentinel for `model_id` exists under `<root>/.sentinels`.
-/// Matches on the `<id>-` prefix so it honors the engine's revision-keyed name
-/// (`<id>-<token>.installed`) without re-deriving the token (which would risk
-/// drift). The trailing `-` makes the prefix exact: `arcface-` never matches an
-/// unrelated id. Side-effect-free (a pure read), unlike `registry::sentinel_path`.
-fn sentinel_present(root: Option<&Path>, model_id: &str) -> bool {
-    let Some(root) = root else { return false };
-    let Ok(entries) = std::fs::read_dir(root.join(".sentinels")) else {
-        return false;
-    };
-    let prefix = format!("{model_id}-");
-    entries.flatten().any(|e| {
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        name.starts_with(&prefix) && name.ends_with(".installed")
-    })
-}
-
-/// One-line, user-facing "you need models" message shared by the scan pre-flight
-/// and the engine's `models_not_installed` mapping, so the banner, the gate, and
-/// a mid-scan engine error all say the same TUI-appropriate thing (press D, the
-/// real download size, the model kinds) — never the desktop app's welcome wording.
-fn missing_models_message() -> String {
-    message_for_missing(&missing_models())
 }
 
 /// One-line "ONNX Runtime not installed" message (macOS). Distinct from the
@@ -487,7 +287,7 @@ fn runtime_missing_message() -> String {
     )
 }
 
-fn message_for_missing(missing: &[(&'static str, String)]) -> String {
+fn message_for_missing(missing: &[MissingModel]) -> String {
     if missing.is_empty() {
         return "AI models not installed — press D on the Settings tab to download them, then \
                 press s again."
@@ -495,34 +295,15 @@ fn message_for_missing(missing: &[(&'static str, String)]) -> String {
     }
     let kinds = missing
         .iter()
-        .map(|(k, _)| *k)
+        .map(|missing| missing.kind)
         .collect::<Vec<_>>()
         .join(", ");
     format!(
         "AI models not installed — press D to download (~{} for the {} needed: {kinds}), then \
          press s again.",
-        approx_download_size(missing),
+        file_size(missing.iter().map(|missing| missing.approx_bytes).sum()),
         missing.len(),
     )
-}
-
-/// Rounded human size of the missing models' weights, summed from the registry's
-/// `approx_bytes` (nearest 10 MiB, e.g. `370 MB`). Derived, so it stays accurate
-/// if the gated model set ever changes.
-fn approx_download_size(missing: &[(&'static str, String)]) -> String {
-    let bytes: u64 = missing
-        .iter()
-        .filter_map(|(kind, _)| match registry::lookup_full(kind) {
-            LookupResult::Found(m) => Some(m.files.iter().map(|f| f.approx_bytes).sum::<u64>()),
-            LookupResult::Unknown => None,
-        })
-        .sum();
-    let mib = bytes as f64 / (1024.0 * 1024.0);
-    if mib >= 1024.0 {
-        format!("{:.1} GB", mib / 1024.0)
-    } else {
-        format!("{} MB", ((mib / 10.0).round() * 10.0) as u64)
-    }
 }
 
 /// Capture cap for the engine's stderr ring (last bytes only) — room for a panic
@@ -593,58 +374,6 @@ fn stderr_tail_summary(tail: &Arc<Mutex<Vec<u8>>>) -> String {
     }
 }
 
-fn engine_exe_name() -> &'static str {
-    if cfg!(windows) {
-        "FileIDEngine.exe"
-    } else {
-        "FileIDEngine"
-    }
-}
-
-/// Locate the `FileIDEngine` binary: explicit override → beside this exe → the
-/// dev-layout engine target dir → PATH. Mirrors the CLI's resolver.
-fn locate_engine_binary() -> Option<PathBuf> {
-    let exe = engine_exe_name();
-
-    if let Some(p) = std::env::var_os("FILEID_ENGINE_BIN") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-
-    if let Ok(cur) = std::env::current_exe() {
-        if let Some(dir) = cur.parent() {
-            let beside = dir.join(exe);
-            if beside.is_file() {
-                return Some(beside);
-            }
-            // Dev layout: .../platforms/tui/target/<profile>/fileid-tui →
-            // .../platforms/windows/src/engine/target/<profile>/FileIDEngine.
-            if let Some(platforms) = dir.ancestors().find(|a| a.ends_with("platforms")) {
-                for profile in ["release", "debug"] {
-                    let cand = platforms
-                        .join("windows/src/engine/target")
-                        .join(profile)
-                        .join(exe);
-                    if cand.is_file() {
-                        return Some(cand);
-                    }
-                }
-            }
-        }
-    }
-
-    which_on_path(exe)
-}
-
-fn which_on_path(exe: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(exe))
-        .find(|cand| cand.is_file())
-}
-
 fn engine_storage_env<'a>(db: &'a Path, data_home: Option<&'a Path>) -> (&'static str, &'a Path) {
     match data_home {
         Some(home) if cfg!(windows) => ("LOCALAPPDATA", home),
@@ -691,132 +420,20 @@ fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fileid_engine::ipc::{FaceClusteringResult, ScanComplete, Wrap};
-
-    #[test]
-    fn engine_exe_name_matches_platform() {
-        let name = engine_exe_name();
-        if cfg!(windows) {
-            assert_eq!(name, "FileIDEngine.exe");
-        } else {
-            assert_eq!(name, "FileIDEngine");
-        }
-    }
-
-    #[test]
-    fn scan_completion_triggers_face_clustering_before_success() {
-        let events = [
-            IpcEvent::now(EventPayload::ScanComplete(Wrap::new(ScanComplete {
-                session_id: "test".into(),
-                total_files: 5,
-                processed_files: 5,
-                failed_files: 0,
-                total_seconds: 1.2,
-            }))),
-            IpcEvent::now(EventPayload::FaceClusteringComplete(Wrap::new(
-                FaceClusteringResult {
-                    person_count: 2,
-                    face_count: 7,
-                    unmatched_faces: 1,
-                    duration_seconds: 0.3,
-                    deferred_faces: None,
-                },
-            ))),
-        ]
-        .into_iter()
-        .map(|event| serde_json::to_string(&event).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-        let (tx, _rx) = std::sync::mpsc::sync_channel(8);
-        let mut commands = Vec::new();
-
-        let outcome = stream_events(&tx, events.as_bytes(), &mut commands);
-        match outcome {
-            ScanOutcome::Complete { people, faces, .. } => {
-                assert_eq!((people, faces), (2, 7));
-            }
-            _ => panic!("scan must wait for face clustering"),
-        }
-        let command: IpcCommand = serde_json::from_slice(&commands).unwrap();
-        assert!(matches!(
-            command.payload,
-            CommandPayload::RunFaceClustering(_)
-        ));
-    }
-
-    #[test]
-    fn missing_or_unknown_models_listed_without_panicking() {
-        // In a model-less dev env this returns the two required sentinels; the
-        // point is the registry lookup + sentinel probe never panic.
-        let missing = missing_models();
-        assert!(missing.len() <= REQUIRED_MODELS.len());
-        for (kind, _name) in &missing {
-            assert!(REQUIRED_MODELS.contains(kind));
-        }
-    }
-
-    fn unique_tmp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fileid-tui-{}-{}-{}",
-            tag,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    /// The gate must report missing when the engine model root lacks the
-    /// sentinels — even if some other dir (the macOS app dir) has them. Resolving
-    /// against an explicit empty root proves the check reads the right place, and
-    /// flips to "installed" the moment the revision-keyed sentinels appear there.
-    #[test]
-    fn reports_missing_when_engine_dir_lacks_sentinels() {
-        let dir = unique_tmp_dir("models-empty");
-
-        let missing = missing_models_in(Some(&dir));
-        let kinds: Vec<&str> = missing.iter().map(|(k, _)| *k).collect();
-        assert!(
-            kinds.contains(&"mobileclip_s2"),
-            "mobileclip_s2 must be missing, got {kinds:?}"
-        );
-        assert!(
-            kinds.contains(&"arcface"),
-            "arcface must be missing, got {kinds:?}"
-        );
-        assert_eq!(missing.len(), REQUIRED_MODELS.len());
-
-        // Drop the engine's revision-keyed sentinels → the gate clears.
-        let sentinels = dir.join(".sentinels");
-        std::fs::create_dir_all(&sentinels).unwrap();
-        std::fs::write(
-            sentinels.join("mobileclip_s2-deadbeef00000000.installed"),
-            b"x",
-        )
-        .unwrap();
-        std::fs::write(sentinels.join("arcface-cafebabe00000000.installed"), b"x").unwrap();
-        assert!(
-            missing_models_in(Some(&dir)).is_empty(),
-            "both keyed sentinels present → nothing missing"
-        );
-
-        // A missing root (couldn't resolve) is treated as "nothing installed".
-        assert_eq!(missing_models_in(None).len(), REQUIRED_MODELS.len());
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
 
     /// The `models_not_installed` message is TUI-appropriate — press D, the
-    /// real ~370 MB size for the two gated models, their kinds, and NONE of the
+    /// download size for the gated models, their kinds, and NONE of the
     /// desktop-app "Welcome screen" wording.
     #[test]
     fn models_not_installed_message_is_tui_appropriate() {
+        let model = |kind, approx_bytes| MissingModel {
+            kind,
+            display_name: kind.to_string(),
+            approx_bytes,
+        };
         let missing = vec![
-            ("mobileclip_s2", "CLIP ViT-B/32 image encoder".to_string()),
-            ("arcface", "Face detection + recognition".to_string()),
+            model("mobileclip_s2", 350_000_000),
+            model("arcface", 38_000_000),
         ];
         let msg = message_for_missing(&missing);
         assert!(
@@ -828,8 +445,8 @@ mod tests {
             "must name the gated kinds: {msg}"
         );
         assert!(
-            msg.contains("370 MB"),
-            "must state the real ~370 MB size: {msg}"
+            msg.contains("~388.0 MB"),
+            "must state the download size: {msg}"
         );
         assert!(
             msg.contains("press s again"),

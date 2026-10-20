@@ -4,6 +4,7 @@
 // the hover bus shared by the map, tree, recommendations and Staying put.
 
 use std::cell::RefCell;
+use fileid_engine::util::display::plural;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
@@ -77,10 +78,6 @@ pub struct MapLayout {
     pub rollup_dests: Vec<String>,
 }
 
-fn plural(n: usize, noun: &str) -> String {
-    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
-}
-
 pub fn compute(items: &[MapItem]) -> MapLayout {
     if items.is_empty() {
         return MapLayout::default();
@@ -116,7 +113,7 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
     if !tail_sources.is_empty() {
         sources.push(Node {
             id: OTHER_SOURCE.into(),
-            label: format!("+ {} more", plural(tail_sources.len(), "folder")),
+            label: format!("+ {} more", plural(tail_sources.len() as u64, "folder")),
             key: OTHER_SOURCE.into(),
             count: tail_sources.iter().map(|s| s.1).sum(),
             tint: None,
@@ -140,7 +137,7 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
     if !tail_dests.is_empty() {
         dests.push(Node {
             id: OTHER_DEST.into(),
-            label: format!("+ {} more", plural(tail_dests.len(), "bucket")),
+            label: format!("+ {} more", plural(tail_dests.len() as u64, "bucket")),
             key: OTHER_DEST.into(),
             count: tail_dests.iter().map(|d| d.1).sum(),
             tint: None,

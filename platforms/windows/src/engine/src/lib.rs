@@ -12,6 +12,7 @@
 // are live; the library duplicate intentionally exposes only selected helpers.
 #![allow(dead_code)]
 
+pub mod client;
 pub mod commands;
 pub mod catalog_index;
 pub mod coordinator;
@@ -30,3 +31,5 @@ pub mod scan_session;
 pub mod resource_scheduler;
 pub mod shell;
 pub mod util;
+
+pub use db::read;

@@ -2,6 +2,7 @@ use fileid_engine::ipc::{
     CatalogRequest, ChatRequest, ChatResponse, ClipTextEmbedding, EmbedTextQueryPayload,
     ToolCapability, ToolRecipe,
 };
+use fileid_engine::models::clip_space;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -183,24 +184,13 @@ impl HybridSearch {
         self.pending = None;
         let mut request = catalog_request("search");
         request.query = Some(response.query.clone());
-        let identity = clip_embedding_model_id();
-        if !valid_clip_vector(&response.embedding) {
+        if !clip_space::valid(&response.embedding) {
             return Some((request, Some("Hybrid unavailable: CLIP text model/runtime returned no valid normalized 512-dimensional embedding. Using keyword search; no download started.".into())));
         }
-        match identity {
-            Ok(model) => {
-                request.search_mode = Some("hybrid".into());
-                request.query_vector = Some(response.embedding.clone());
-                request.embedding_model = Some(model);
-                Some((request, None))
-            }
-            Err(reason) => Some((
-                request,
-                Some(format!(
-                    "Hybrid unavailable: {reason}. Using keyword search."
-                )),
-            )),
-        }
+        request.search_mode = Some("hybrid".into());
+        request.query_vector = Some(response.embedding.clone());
+        request.embedding_model = Some(clip_space::model_id().to_owned());
+        Some((request, None))
     }
     pub fn timeout(&mut self, query_id: &str) -> Option<CatalogRequest> {
         if self.pending.as_ref()?.query_id != query_id {
@@ -212,72 +202,6 @@ impl HybridSearch {
         Some(request)
     }
 }
-pub fn valid_clip_vector(values: &[f32]) -> bool {
-    values.len() == 512
-        && values.iter().all(|v| v.is_finite())
-        && (values.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() - 1.0).abs() <= 0.02
-}
-
-pub fn clip_embedding_model_id() -> Result<String, String> {
-    use fileid_engine::models::registry::{lookup_full, LookupResult};
-    let manifest: serde_json::Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../../shared/models/manifest.json"
-    )))
-    .map_err(|_| "Shared CLIP pins are invalid".to_owned())?;
-    let artifacts = manifest["artifacts"]
-        .as_array()
-        .ok_or("Shared CLIP pins are missing")?;
-    let ids = [
-        "clip_vitb32_image",
-        "clip_vitb32_text",
-        "clip_bpe_vocab",
-        "clip_bpe_merges",
-    ];
-    let mut hashes = vec![];
-    for id in ids {
-        let hash = artifacts
-            .iter()
-            .find(|a| a["id"].as_str() == Some(id))
-            .and_then(|a| a["sha256"].as_str())
-            .ok_or("Shared CLIP artifact pin is missing")?;
-        if hash.len() != 64
-            || !hash
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err("Shared CLIP artifact pin is invalid".into());
-        }
-        hashes.push(hash);
-    }
-    let mut engine_hashes = vec![];
-    for kind in ["mobileclip_s2", "clip_text"] {
-        let LookupResult::Found(model) = lookup_full(kind) else {
-            return Err("Engine CLIP registry is unavailable".into());
-        };
-        engine_hashes.extend(
-            model
-                .files
-                .into_iter()
-                .map(|f| f.sha256.unwrap_or_default()),
-        );
-    }
-    if engine_hashes.iter().map(String::as_str).collect::<Vec<_>>() != hashes {
-        return Err("Engine and shared CLIP pins disagree".into());
-    }
-    let descriptor = std::iter::once("clip-rgb-stretch224-bpe77-l2-v1".to_owned())
-        .chain(
-            ids.iter()
-                .zip(hashes)
-                .map(|(id, hash)| format!("{id}:{hash}")),
-        )
-        .collect::<Vec<_>>()
-        .join("|");
-    let digest = glib::compute_checksum_for_data(glib::ChecksumType::Sha256, descriptor.as_bytes())
-        .ok_or("CLIP identity digest unavailable")?;
-    Ok(format!("clip-vitb32-openai-v1:{digest}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,7 +353,7 @@ mod tests {
     }
     #[test]
     fn hybrid_uses_exact_pinned_identity_and_rejects_late_query_or_invalid_vectors() {
-        assert_eq!(clip_embedding_model_id().unwrap(),"clip-vitb32-openai-v1:126bacbb4038a0820ca6582bd81f58d7892070deab8317b390e37d7632a53471");
+        assert_eq!(clip_space::model_id(),"clip-vitb32-openai-v1:126bacbb4038a0820ca6582bd81f58d7892070deab8317b390e37d7632a53471");
         let mut search = HybridSearch::default();
         let old = search.begin("old");
         let current = search.begin("current");
@@ -450,7 +374,7 @@ mod tests {
         assert_eq!(request.query_vector, Some(vector));
         assert_eq!(
             request.embedding_model,
-            Some(clip_embedding_model_id().unwrap())
+            Some(clip_space::model_id().to_owned())
         );
         let command = fileid_engine::ipc::IpcCommand {
             id: "hybrid-fixture".into(),
@@ -476,7 +400,7 @@ mod tests {
         };
         assert_eq!(
             payload.request.embedding_model,
-            Some(clip_embedding_model_id().unwrap())
+            Some(clip_space::model_id().to_owned())
         );
 
         for invalid in [

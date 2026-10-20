@@ -115,6 +115,19 @@ impl FileKind {
         }
     }
 
+    /// Inverse of [`FileKind::as_str`] for the stored `files.kind` column.
+    pub fn from_db_str(kind: &str) -> Self {
+        match kind {
+            "image" => FileKind::Image,
+            "video" => FileKind::Video,
+            "pdf" => FileKind::Pdf,
+            "doc" => FileKind::Doc,
+            "audio" => FileKind::Audio,
+            "model" => FileKind::Model,
+            _ => FileKind::Other,
+        }
+    }
+
     /// Lossy-but-fast classification by extension.
     pub fn from_extension(ext: &str) -> Self {
         let ext = ext.to_ascii_lowercase();

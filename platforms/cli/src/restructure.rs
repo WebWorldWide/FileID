@@ -13,14 +13,11 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-#[cfg(test)]
-use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use fileid_engine::ipc::{RestructureApplyResult, RestructureMove};
-use fileid_engine::pipeline::discovery::FileKind;
 use fileid_engine::pipeline::restructure::{
     classify, FileForClassify, PlannedIdentity, ProposedMove,
 };
@@ -30,17 +27,13 @@ use rusqlite::params;
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
 
-use crate::context::{display_path, print_json, strip_extended_length, terminal_text, Ctx};
+use fileid_engine::read::restructure::{library_root, plan_row_to_file, PLAN_FILES_SQL};
+use fileid_engine::util::path_safety::strip_extended_length;
+
+use crate::context::{display_path, print_json, terminal_text, Ctx};
 
 const MAX_PRINTED_MOVES: usize = 200;
 const CLASSIFY_CHUNK: usize = 4_096;
-
-const PLAN_FILES_SQL: &str = "\
-SELECT f.id, f.path_text, f.kind, f.modified_at, f.created_at, f.location_lat, f.location_lon, f.has_text,
-    (SELECT p.name FROM face_prints fp JOIN persons p ON p.id = fp.person_id
-     WHERE fp.file_id = f.id AND p.name IS NOT NULL AND TRIM(p.name) <> '' LIMIT 1) AS person_name,
-    f.vlm_proposed_name, f.content_hash, f.size_bytes, f.file_ref
-FROM files f WHERE f.failed = 0";
 
 #[derive(Debug)]
 struct PlanSpool {
@@ -206,9 +199,9 @@ pub fn run(
     let mut move_count = 0_u64;
     let mut chunk = Vec::with_capacity(CLASSIFY_CHUNK);
     let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
-    let mut rows = stmt.query(params![])?;
+    let mut rows = stmt.query(params!["", "", ""])?;
     while let Some(row) = rows.next()? {
-        chunk.push(row_to_file(row)?);
+        chunk.push(plan_row_to_file(row)?);
         if chunk.len() >= CLASSIFY_CHUNK {
             absorb_chunk(
                 &mut chunk,
@@ -322,31 +315,6 @@ pub fn run(
     Ok(())
 }
 
-fn row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
-    let kind_str: String = row.get(2)?;
-    Ok(FileForClassify {
-        file_id: row.get(0)?,
-        source: PathBuf::from(row.get::<_, String>(1)?),
-        kind: kind_from_str(&kind_str),
-        modified_unix: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-        created_unix: row.get(4)?,
-        person_name: row
-            .get::<_, Option<String>>(8)?
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-        location_lat: row.get(5)?,
-        location_lon: row.get(6)?,
-        has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
-        vlm_proposed: row.get(9)?,
-        identity: Some(PlannedIdentity {
-            content_hash: row.get::<_, Option<Vec<u8>>>(10)?.map(hex::encode),
-            size_bytes: row.get::<_, Option<u64>>(11)?.unwrap_or(0),
-            file_ref: row.get(12)?,
-            modified_at: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-        }),
-    })
-}
-
 fn absorb_chunk(
     files: &mut Vec<FileForClassify>,
     library_root: &Path,
@@ -389,28 +357,11 @@ fn absorb_chunk(
 
 fn resolve_library_root(conn: &rusqlite::Connection, root: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(root) = root {
-        let canon = std::fs::canonicalize(&root).unwrap_or(root);
-        return Ok(PathBuf::from(strip_extended_length(
-            &canon.to_string_lossy(),
-        )));
+        return Ok(strip_extended_length(
+            &std::fs::canonicalize(&root).unwrap_or(root),
+        ));
     }
-
-    let mut stmt = conn.prepare("SELECT path_text FROM files WHERE failed = 0")?;
-    let mut rows = stmt.query([])?;
-    let mut common: Option<PathBuf> = None;
-    let mut count = 0_u64;
-    while let Some(row) = rows.next()? {
-        let path = PathBuf::from(row.get::<_, String>(0)?);
-        count += 1;
-        common = Some(match common {
-            None => path,
-            Some(prefix) => common_prefix(&prefix, &path),
-        });
-    }
-    let mut common = common.context("library has no indexed files")?;
-    if count == 1 {
-        common = common.parent().map(Path::to_path_buf).unwrap_or(common);
-    }
+    let (common, _) = library_root(conn)?.context("library has no indexed files")?;
     if common.parent().is_none() {
         anyhow::bail!(
             "this library's files span multiple top-level locations with no \
@@ -421,17 +372,6 @@ fn resolve_library_root(conn: &rusqlite::Connection, root: Option<PathBuf>) -> R
     Ok(common)
 }
 
-fn common_prefix(a: &Path, b: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for (left, right) in a.components().zip(b.components()) {
-        if left != right {
-            break;
-        }
-        out.push(left.as_os_str());
-    }
-    out
-}
-
 fn write_json(value: &impl Serialize) -> Result<()> {
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
@@ -440,53 +380,10 @@ fn write_json(value: &impl Serialize) -> Result<()> {
     Ok(())
 }
 
-fn kind_from_str(s: &str) -> FileKind {
-    match s {
-        "image" => FileKind::Image,
-        "video" => FileKind::Video,
-        "pdf" => FileKind::Pdf,
-        "doc" => FileKind::Doc,
-        "audio" => FileKind::Audio,
-        "model" => FileKind::Model,
-        _ => FileKind::Other,
-    }
-}
-
 fn rel_to(root: &Path, dest: &Path) -> String {
     dest.strip_prefix(root)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| dest.to_string_lossy().into_owned())
-}
-
-/// Deepest directory containing every path. Returns the parent of a single
-/// file, or the common component prefix of many.
-#[cfg(test)]
-fn common_ancestor<'a>(paths: impl Iterator<Item = &'a Path>) -> Option<PathBuf> {
-    let mut prefix: Option<Vec<Component<'a>>> = None;
-    let mut count = 0usize;
-    for p in paths {
-        count += 1;
-        let comps: Vec<Component> = p.components().collect();
-        prefix = Some(match prefix {
-            None => comps,
-            Some(prev) => prev
-                .into_iter()
-                .zip(comps)
-                .take_while(|(a, b)| a == b)
-                .map(|(a, _)| a)
-                .collect(),
-        });
-    }
-    let comps = prefix?;
-    let mut out = PathBuf::new();
-    for c in comps {
-        out.push(c.as_os_str());
-    }
-    // A single path collapses to itself (a file); use its parent.
-    if count == 1 {
-        out = out.parent().map(Path::to_path_buf).unwrap_or(out);
-    }
-    Some(out)
 }
 
 // ---- apply -------------------------------------------------------------------
@@ -692,6 +589,7 @@ fn to_ipc_move(pm: &ProposedMove, identity: Option<&PlannedIdentity>) -> Restruc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fileid_engine::pipeline::discovery::FileKind;
     use fileid_engine::pipeline::restructure::Confidence;
     use std::path::{Path, PathBuf};
 
@@ -716,43 +614,6 @@ mod tests {
         assert_eq!(move_.size_bytes, Some(42));
         assert_eq!(move_.file_ref, Some(91));
         assert_eq!(move_.modified_at, Some(123.0));
-    }
-
-    fn ca(paths: &[&str]) -> Option<PathBuf> {
-        common_ancestor(paths.iter().map(Path::new))
-    }
-
-    // A meaningful shared folder has a parent → the caller organizes into it.
-    #[test]
-    fn shared_folder_has_a_parent() {
-        let a = ca(&["/home/u/Pics/2019/a.jpg", "/home/u/Pics/2020/b.jpg"]).unwrap();
-        assert_eq!(a, PathBuf::from("/home/u/Pics"));
-        assert!(
-            a.parent().is_some(),
-            "a real root must have a parent so apply proceeds"
-        );
-    }
-
-    // Disparate absolute paths share only the filesystem root, which has NO
-    // parent — the signal the apply path uses to refuse (else it would organize
-    // a split library straight into `/Photos`, `/Documents`, …).
-    #[test]
-    fn disparate_unix_paths_collapse_to_parentless_root() {
-        let a = ca(&["/home/u/Pictures/x.jpg", "/mnt/ext/Photos/y.jpg"]).unwrap();
-        assert_eq!(a, PathBuf::from("/"));
-        assert!(
-            a.parent().is_none(),
-            "'/' must be parentless so apply refuses"
-        );
-    }
-
-    // A single file collapses to its parent directory (unchanged behavior).
-    #[test]
-    fn single_file_uses_its_parent() {
-        assert_eq!(
-            ca(&["/home/u/Pics/only.jpg"]).unwrap(),
-            PathBuf::from("/home/u/Pics")
-        );
     }
 
     #[test]

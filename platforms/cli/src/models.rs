@@ -13,122 +13,52 @@
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write as _};
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use fileid_engine::downloader::{install_model_blocking, InstallFileProgress};
+use fileid_engine::models::license;
 use fileid_engine::models::registry::{self, LookupResult, Model};
+use fileid_engine::models::required::REQUIRED_SCAN_MODELS;
+use fileid_engine::util::display::{rate, size_pair};
 
-use crate::context::{display_path, human_size, print_json, terminal_text, truncate, Ctx};
+use crate::context::{display_path, file_size_i64, print_json, truncate, Ctx};
 
 /// One curated, cross-platform, commercial-clean model the engine uses. `kind`
 /// is the registry key passed to `lookup_full`; `license` + `category` are the
-/// `shared/docs/MODELS.md` facts the registry doesn't carry. `required` marks the
-/// two models the `scan --models` pre-flight gate demands.
-#[derive(Clone, Copy)]
-struct LicensePolicy {
-    key: &'static str,
-    display_name: &'static str,
-    terms_url: &'static str,
-    reviewed_at: &'static str,
-}
-
-const GEMMA_POLICY: LicensePolicy = LicensePolicy {
-    key: "Gemma",
-    display_name: "Google Gemma Terms of Use",
-    terms_url: "https://ai.google.dev/gemma/terms",
-    reviewed_at: "2026-07-16",
-};
-
+/// `shared/docs/MODELS.md` facts the registry doesn't carry.
 struct Catalog {
     name: &'static str,
     kind: &'static str,
     license: &'static str,
     category: &'static str,
-    /// Required by the `scan --models` gate (mirror of scan_models::REQUIRED_MODELS).
-    required: bool,
 }
 
-/// The models `fileid models` lists + downloads, in display order. The Windows
-/// accelerator runtime/EP packs (llama.cpp / cuDNN / ORT-CUDA / ORT-OpenVINO)
-/// are intentionally absent: they're platform-specific DLL bundles, not
-/// cross-platform model weights, and several aren't HuggingFace-hosted. Every
-/// entry here is permissively licensed (Apache-2.0 / MIT; Gemma under Google's
-/// commercially-usable Gemma Terms) per the commercial-clean posture.
-fn license_policy(kind: &str) -> Option<LicensePolicy> {
-    match kind {
-        "gemma_3_4b" => Some(GEMMA_POLICY),
-        _ => None,
-    }
-}
-
-fn acceptance_key(policy: LicensePolicy) -> String {
-    format!("ModelLicenseAccepted:{}:{}", policy.key, policy.reviewed_at)
-}
-
-fn acceptance_path() -> Result<PathBuf> {
-    let models = fileid_engine::paths::models_dir()?;
-    let root = models
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("models directory has no parent"))?;
-    Ok(root.join("model-licenses.json"))
-}
-
-fn load_acceptances(path: &Path) -> Result<std::collections::HashSet<String>> {
-    if !path.exists() {
-        return Ok(std::collections::HashSet::new());
-    }
-    let bytes = std::fs::read(path)?;
-    let entries: Vec<String> = serde_json::from_slice(&bytes)?;
-    Ok(entries.into_iter().collect())
-}
-
-fn record_acceptance(path: &Path, policy: LicensePolicy) -> Result<()> {
-    let mut accepted = load_acceptances(path)?;
-    accepted.insert(acceptance_key(policy));
-    let mut entries: Vec<_> = accepted.into_iter().collect();
-    entries.sort();
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("license acceptance path has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&temp, serde_json::to_vec(&entries)?)?;
-    match std::fs::rename(&temp, path) {
-        Ok(()) => Ok(()),
-        Err(_) if path.exists() => {
-            std::fs::remove_file(path)?;
-            std::fs::rename(temp, path)?;
-            Ok(())
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(temp);
-            Err(error.into())
-        }
+impl Catalog {
+    /// Required by the `scan --models` gate.
+    fn required(&self) -> bool {
+        REQUIRED_SCAN_MODELS.contains(&self.kind)
     }
 }
 
 fn ensure_license_acceptance(ctx: &Ctx, pending: &[&Resolved]) -> Result<()> {
-    let path = acceptance_path()?;
-    let mut accepted = load_acceptances(&path)?;
+    let state_root = fileid_engine::paths::root()?;
     let mut policies = Vec::new();
     for model in pending {
-        let Some(policy) = license_policy(model.cat.kind) else {
+        let Some(policy) = license::policy_for(model.cat.kind) else {
             continue;
         };
         if !policies
             .iter()
-            .any(|existing: &LicensePolicy| existing.key == policy.key)
+            .any(|existing: &license::LicensePolicy| existing.key == policy.key)
         {
             policies.push(policy);
         }
     }
 
     for policy in policies {
-        let key = acceptance_key(policy);
-        if accepted.contains(&key) {
+        if license::is_accepted(&state_root, &policy) {
             continue;
         }
         if ctx.json {
@@ -165,69 +95,66 @@ fn ensure_license_acceptance(ctx: &Ctx, pending: &[&Resolved]) -> Result<()> {
         if std::io::stdin().read_line(&mut response).is_err() || response.trim() != "I ACCEPT" {
             anyhow::bail!("license terms were not accepted; nothing was downloaded");
         }
-        record_acceptance(&path, policy)
+        license::record(&state_root, &policy)
             .with_context(|| format!("recording {} acceptance", policy.key))?;
-        accepted.insert(key);
     }
     Ok(())
 }
 
+/// The models `fileid models` lists + downloads, in display order. The Windows
+/// accelerator runtime/EP packs (llama.cpp / cuDNN / ORT-CUDA / ORT-OpenVINO)
+/// are intentionally absent: they're platform-specific DLL bundles, not
+/// cross-platform model weights, and several aren't HuggingFace-hosted. Every
+/// entry here is permissively licensed (Apache-2.0 / MIT; Gemma under Google's
+/// commercially-usable Gemma Terms) per the commercial-clean posture.
 const CATALOG: &[Catalog] = &[
     Catalog {
         name: "arcface",
         kind: "arcface",
         license: "MIT + Apache-2.0",
         category: "Faces (detect + embed)",
-        required: true,
     },
     Catalog {
         name: "mobileclip_s2",
         kind: "mobileclip_s2",
         license: "MIT",
         category: "Image search (CLIP)",
-        required: true,
     },
     Catalog {
         name: "clip_text",
         kind: "clip_text",
         license: "MIT",
         category: "Text→image search",
-        required: false,
     },
     Catalog {
         name: "ram_plus",
         kind: "ram_plus",
         license: "Apache-2.0",
         category: "Image tagging",
-        required: false,
     },
     Catalog {
         name: "bge_text",
         kind: "bge_text",
         license: "MIT",
         category: "Document search",
-        required: false,
     },
     Catalog {
         name: "mistral_small_3_2",
         kind: "mistral_small_3_2",
         license: "Apache-2.0",
         category: "Deep Analyze VLM",
-        required: false,
     },
     Catalog {
         name: "qwen2_5_vl_7b",
         kind: "qwen2_5_vl_7b",
         license: "Apache-2.0",
         category: "Deep Analyze VLM",
-        required: false,
     },
     Catalog {
         name: "gemma_3_4b",
         kind: "gemma_3_4b",
         license: "Gemma Terms",
         category: "Deep Analyze VLM",
-        required: false,
     },
 ];
 
@@ -387,13 +314,13 @@ pub fn list(ctx: &Ctx) -> Result<()> {
                     "name": r.cat.name,
                     "kind": r.model.id,
                     "installed": r.installed,
-                    "required": r.cat.required,
+                    "required": r.cat.required(),
                     "recommended": r.cat.kind == recommended_vlm,
                     "sizeBytes": r.size_bytes,
-                    "sizeHuman": human_size(r.size_bytes as i64),
+                    "sizeHuman": file_size_i64(r.size_bytes as i64),
                     "license": r.cat.license,
-                    "termsRequired": license_policy(r.cat.kind).is_some(),
-                    "termsUrl": license_policy(r.cat.kind).map(|policy| policy.terms_url),
+                    "termsRequired": license::policy_for(r.cat.kind).is_some(),
+                    "termsUrl": license::policy_for(r.cat.kind).map(|policy| policy.terms_url),
                     "externalRuntimeRequired": cfg!(target_os = "linux") && is_vlm_kind(r.cat.kind),
                     "category": r.cat.category,
                     "repo": r.repo,
@@ -437,7 +364,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     for r in &resolved {
         // Pad cells as plain text FIRST, then color — so the escape bytes never
         // skew the column widths.
-        let marker = if r.cat.required {
+        let marker = if r.cat.required() {
             "★"
         } else if r.cat.kind == recommended_vlm {
             "◆"
@@ -445,7 +372,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
             " "
         };
         let name_plain = format!("{marker} {:<17}", r.cat.name);
-        let name_cell = if r.cat.required {
+        let name_cell = if r.cat.required() {
             ctx.gold(&name_plain)
         } else {
             name_plain
@@ -463,14 +390,14 @@ pub fn list(ctx: &Ctx) -> Result<()> {
             ctx.dim(&status_cell)
         };
 
-        let license = if license_policy(r.cat.kind).is_some() {
+        let license = if license::policy_for(r.cat.kind).is_some() {
             format!("{} *", r.cat.license)
         } else {
             r.cat.license.to_string()
         };
         println!(
             "  {name_cell} {status_cell} {:>9}  {:<16} {}",
-            human_size(r.size_bytes as i64),
+            file_size_i64(r.size_bytes as i64),
             license,
             r.cat.category,
         );
@@ -478,7 +405,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
 
     if resolved
         .iter()
-        .any(|r| license_policy(r.cat.kind).is_some())
+        .any(|r| license::policy_for(r.cat.kind).is_some())
     {
         println!(
             "  {}",
@@ -500,12 +427,12 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     let tail = if missing.is_empty() {
         " — all installed".to_string()
     } else {
-        format!(" ({} to download)", human_size(missing_bytes as i64))
+        format!(" ({} to download)", file_size_i64(missing_bytes as i64))
     };
     println!(
         "  {} models · {} total · {} installed · {} missing{}",
         resolved.len(),
-        human_size(total as i64),
+        file_size_i64(total as i64),
         installed_count,
         missing.len(),
         tail,
@@ -519,7 +446,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
     if !missing.is_empty() {
         let req_missing: Vec<&str> = missing
             .iter()
-            .filter(|r| r.cat.required)
+            .filter(|r| r.cat.required())
             .map(|r| r.cat.name)
             .collect();
         if !req_missing.is_empty() {
@@ -542,17 +469,7 @@ pub fn list(ctx: &Ctx) -> Result<()> {
 
 /// `fileid models download [--all | <name>...] [--dry-run] [--yes]`.
 ///
-/// `porcelain` (the hidden `--porcelain-progress` flag) switches the live stderr
-/// bar for machine `PROGRESS\t{pct}\t{label}` lines on stdout — the contract the
-/// TUI's installer consumes. `--json` wins if both are set (porcelain ignored).
-pub fn download(
-    ctx: &Ctx,
-    all: bool,
-    dry_run: bool,
-    yes: bool,
-    porcelain: bool,
-    names: &[String],
-) -> Result<()> {
+pub fn download(ctx: &Ctx, all: bool, dry_run: bool, yes: bool, names: &[String]) -> Result<()> {
     crate::ensure_engine_models_dir();
 
     // Resolve the requested set of catalog entries.
@@ -592,11 +509,11 @@ pub fn download(
                         "kind": r.model.id,
                         "installed": r.installed,
                         "sizeBytes": r.size_bytes,
-                        "sizeHuman": human_size(r.size_bytes as i64),
+                        "sizeHuman": file_size_i64(r.size_bytes as i64),
                         "repo": r.repo,
                         "license": r.cat.license,
-                        "termsRequired": license_policy(r.cat.kind).is_some(),
-                        "termsUrl": license_policy(r.cat.kind).map(|policy| policy.terms_url),
+                        "termsRequired": license::policy_for(r.cat.kind).is_some(),
+                        "termsUrl": license::policy_for(r.cat.kind).map(|policy| policy.terms_url),
                         "externalRuntimeRequired": cfg!(target_os = "linux") && is_vlm_kind(r.cat.kind),
                         "files": r.model.files.iter().map(|f| f.url.clone()).collect::<Vec<_>>(),
                     })
@@ -607,7 +524,7 @@ pub fn download(
                 "action": "download",
                 "dryRun": true,
                 "totalBytes": pending_bytes,
-                "totalHuman": human_size(pending_bytes as i64),
+                "totalHuman": file_size_i64(pending_bytes as i64),
                 "pendingCount": pending.len(),
                 "models": arr,
             }));
@@ -618,14 +535,14 @@ pub fn download(
             let state = if r.installed {
                 ctx.dim("(installed)").to_string()
             } else {
-                human_size(r.size_bytes as i64)
+                file_size_i64(r.size_bytes as i64)
             };
             println!("  {:<18} {:>10}  {}", r.cat.name, state, ctx.dim(&r.repo));
         }
         println!(
             "  {} {} across {} model(s) from huggingface.co",
             ctx.bold("Would download:"),
-            human_size(pending_bytes as i64),
+            file_size_i64(pending_bytes as i64),
             pending.len(),
         );
         return Ok(());
@@ -640,10 +557,6 @@ pub fn download(
                 "message": "all selected models already installed",
             }));
         } else {
-            // Let the TUI gauge reach 100% even when there's nothing to fetch.
-            if porcelain {
-                println!("PROGRESS\t100\tdone");
-            }
             println!("{}", ctx.bold("All selected models are already installed."));
         }
         return Ok(());
@@ -658,7 +571,7 @@ pub fn download(
             &format!(
                 "Download {} model(s), ~{}, from huggingface.co?",
                 pending.len(),
-                human_size(pending_bytes as i64)
+                file_size_i64(pending_bytes as i64)
             ),
             yes,
         )
@@ -681,9 +594,9 @@ pub fn download(
     ensure_license_acceptance(ctx, &pending)?;
 
     // ── Download each pending model in turn, with overall progress. ──
-    // The bar/porcelain line spans ALL pending models: `pending_bytes` is the
+    // The bar spans ALL pending models: `pending_bytes` is the
     // denominator and `completed_bytes` accumulates as each finishes.
-    let ui = ProgressUi::resolve(ctx, porcelain, pending_bytes, pending.len());
+    let ui = ProgressUi::resolve(ctx, pending_bytes, pending.len());
     let mut installed_now: Vec<&str> = Vec::new();
     let mut completed_bytes: u64 = 0;
     for (i, r) in pending.iter().enumerate() {
@@ -693,7 +606,7 @@ pub fn download(
                 "{} {} ({}, {})",
                 ctx.bold("Downloading"),
                 r.cat.name,
-                human_size(r.size_bytes as i64),
+                file_size_i64(r.size_bytes as i64),
                 ctx.dim(&r.repo),
             ),
         );
@@ -701,15 +614,13 @@ pub fn download(
         let cb = ui.callback(i, r.cat.name, completed_bytes, r.size_bytes);
         if let Err(e) = install_model_blocking(&r.model, cancel, cb) {
             let e = e.context(format!("installing {}", r.cat.name));
-            ui.abort(&e);
+            ui.abort();
             return Err(e);
         }
         ui.model_done(ctx, r.cat.name);
         installed_now.push(r.cat.name);
         completed_bytes += r.size_bytes;
     }
-    // Guarantee the stream reaches 100% (porcelain) right before the summary.
-    ui.finish(ctx);
 
     if ctx.json {
         print_json(&serde_json::json!({
@@ -750,8 +661,6 @@ enum ProgressMode {
     /// `--json`/`--quiet`: no live bar; milestones still route via `ctx.progress`
     /// (so `--json` keeps its stderr chrome and `--quiet` stays silent).
     Plainish,
-    /// `--porcelain-progress`: machine `PROGRESS\t{pct}\t{label}` on stdout.
-    Porcelain,
     /// stderr is a TTY: live carriage-return bar on stderr.
     Bar,
     /// stderr is not a TTY: milestone lines only, no carriage-return spam.
@@ -772,10 +681,8 @@ struct ProgressUi {
 }
 
 impl ProgressUi {
-    fn resolve(ctx: &Ctx, porcelain: bool, pending_bytes: u64, model_count: usize) -> Self {
-        let mode = if porcelain && !ctx.json {
-            ProgressMode::Porcelain
-        } else if ctx.json || ctx.quiet {
+    fn resolve(ctx: &Ctx, pending_bytes: u64, model_count: usize) -> Self {
+        let mode = if ctx.json || ctx.quiet {
             ProgressMode::Plainish
         } else if std::io::stderr().is_terminal() {
             ProgressMode::Bar
@@ -794,25 +701,15 @@ impl ProgressUi {
 
     /// The "Downloading <name> (size, repo)" provenance line — human stderr only.
     fn pre_model(&self, ctx: &Ctx, msg: &str) {
-        match self.mode {
-            ProgressMode::Bar | ProgressMode::NonTty | ProgressMode::Plainish => ctx.progress(msg),
-            // Porcelain keeps stdout machine-clean; the PROGRESS label names the model.
-            ProgressMode::Porcelain => {}
-        }
+        ctx.progress(msg);
     }
 
-    /// `✓ <name> installed` milestone, routed per mode (stdout for porcelain).
+    /// `✓ <name> installed` milestone.
     fn model_done(&self, ctx: &Ctx, name: &str) {
-        match self.mode {
-            ProgressMode::Porcelain => emit_stdout(&format!("✓ {name} installed")),
-            ProgressMode::Bar => {
-                clear_bar_line();
-                ctx.progress(&format!("  {} {} installed", ctx.bold("✓"), name));
-            }
-            ProgressMode::NonTty | ProgressMode::Plainish => {
-                ctx.progress(&format!("  {} {} installed", ctx.bold("✓"), name));
-            }
+        if self.mode == ProgressMode::Bar {
+            clear_bar_line();
         }
+        ctx.progress(&format!("  {} {} installed", ctx.bold("✓"), name));
     }
 
     /// Build the per-model progress sink. Captures the model's slice of the
@@ -831,61 +728,32 @@ impl ProgressUi {
         let max_bp = Arc::clone(&self.max_bp);
         let name = model_name.to_string();
         Arc::new(move |p: InstallFileProgress| {
-            if matches!(mode, ProgressMode::Plainish | ProgressMode::NonTty) {
+            if mode != ProgressMode::Bar {
                 return;
             }
             let raw = overall_basis_points(completed_bytes, current_size, pending, &p);
             // fetch_max keeps the shared value monotonic across concurrent files.
             let bp = max_bp.fetch_max(raw, Ordering::Relaxed).max(raw);
-            match mode {
-                ProgressMode::Porcelain => {
-                    let label = progress_label(&name, model_index, count, &p);
-                    emit_stdout(&porcelain_line(bp_to_percent(bp), &label));
-                }
-                ProgressMode::Bar => {
-                    let remaining = pending.max(1) as f64 * (1.0 - bp as f64 / 10_000.0);
-                    let eta = if p.bytes_per_second > 0.0 {
-                        human_eta(remaining / p.bytes_per_second)
-                    } else {
-                        "—".to_string()
-                    };
-                    let line = render_bar(color, bp, &name, model_index, count, &p, &eta);
-                    let mut err = std::io::stderr().lock();
-                    let _ = write!(err, "\r{line}\x1b[K");
-                    let _ = err.flush();
-                }
-                _ => {}
-            }
+            let remaining = pending.max(1) as f64 * (1.0 - bp as f64 / 10_000.0);
+            let eta = if p.bytes_per_second > 0.0 {
+                human_eta(remaining / p.bytes_per_second)
+            } else {
+                "—".to_string()
+            };
+            let line = render_bar(color, bp, &name, model_index, count, &p, &eta);
+            let mut err = std::io::stderr().lock();
+            let _ = write!(err, "\r{line}\x1b[K");
+            let _ = err.flush();
         })
-    }
-
-    /// Close out the overall stream: reach 100% (porcelain). In Bar mode the
-    /// last `model_done` already cleared + newlined, so there's nothing to do.
-    fn finish(&self, _ctx: &Ctx) {
-        if self.mode == ProgressMode::Porcelain {
-            emit_stdout("PROGRESS\t100\tdone");
-        }
     }
 
     /// An install failed: surface it where the consumer is watching, and stop
     /// the bar from dangling. (`main` also prints the error to stderr + exits 1.)
-    fn abort(&self, e: &anyhow::Error) {
-        match self.mode {
-            ProgressMode::Porcelain => {
-                emit_stdout(&format!("error: {}", terminal_text(&format!("{e:#}"))))
-            }
-            ProgressMode::Bar => clear_bar_line(),
-            _ => {}
+    fn abort(&self) {
+        if self.mode == ProgressMode::Bar {
+            clear_bar_line();
         }
     }
-}
-
-/// Print one line to stdout and flush (locked, so concurrent callback threads
-/// can't interleave a line).
-fn emit_stdout(line: &str) {
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
 }
 
 /// Carriage-return to column 0 and clear to end of line, erasing the live bar.
@@ -928,31 +796,6 @@ fn overall_basis_points(
     ((done / denom).clamp(0.0, 1.0) * 10_000.0).round() as u64
 }
 
-/// The short label shared by the porcelain line and the human bar tail, e.g.
-/// `arcface · 182/271 MB · 3.4 MB/s · model 2/9`. Free of tabs/newlines.
-fn progress_label(
-    model_name: &str,
-    model_index: usize,
-    model_count: usize,
-    p: &InstallFileProgress,
-) -> String {
-    format!(
-        "{model_name} · {} · {} · model {}/{}",
-        size_pair(p.bytes_done, p.bytes_total),
-        human_rate(p.bytes_per_second),
-        model_index + 1,
-        model_count,
-    )
-}
-
-/// `PROGRESS\t{percent}\t{label}` — the exact contract line the TUI parses
-/// (`strip_prefix("PROGRESS\t")` → `splitn(2, '\t')`). The label is sanitized so
-/// a stray tab/newline can never break the framing.
-fn porcelain_line(percent: u64, label: &str) -> String {
-    let label = label.replace(['\t', '\n', '\r'], " ");
-    format!("PROGRESS\t{percent}\t{label}")
-}
-
 /// The live one-line human bar: `[████░░░░] 41% w600k.onnx · 182/271 MB · …`.
 fn render_bar(
     color: bool,
@@ -988,39 +831,11 @@ fn render_bar(
         "{bar} {pct_s}  {} · {} · {} · {} · model {}/{}",
         truncate(model_name, 20),
         size_pair(p.bytes_done, p.bytes_total),
-        human_rate(p.bytes_per_second),
+        rate(p.bytes_per_second),
         eta,
         model_index + 1,
         model_count,
     )
-}
-
-/// `182/271 MB` (both in the total's unit) or `182.0 MB` when the total is
-/// unknown. One decimal under 100 of the unit, else none — so `3.4/24.9 GB` and
-/// `182/271 MB` both read naturally.
-fn size_pair(done: u64, total: Option<u64>) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let Some(total) = total else {
-        return human_size(done as i64);
-    };
-    let mut unit = 0;
-    let mut div = 1.0_f64;
-    while total as f64 / div >= 1024.0 && unit < UNITS.len() - 1 {
-        div *= 1024.0;
-        unit += 1;
-    }
-    let t = total as f64 / div;
-    let d = done as f64 / div;
-    let dec: usize = usize::from(t < 100.0);
-    format!("{d:.dec$}/{t:.dec$} {}", UNITS[unit])
-}
-
-/// `3.4 MB/s` (reuses `human_size`); `—` when the rate is unknown.
-fn human_rate(bytes_per_second: f64) -> String {
-    if !bytes_per_second.is_finite() || bytes_per_second <= 0.0 {
-        return "—".to_string();
-    }
-    format!("{}/s", human_size(bytes_per_second as i64))
 }
 
 /// `~45s` / `~2m10s` / `~1h05m`; `—` when not estimable.
@@ -1041,40 +856,6 @@ fn human_eta(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn restricted_policy_acceptance_is_exact_and_versioned() {
-        let root = std::env::temp_dir().join(format!(
-            "fileid-cli-license-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("model-licenses.json");
-        let policy = license_policy("gemma_3_4b").expect("Gemma policy");
-
-        assert!(!load_acceptances(&path)
-            .unwrap()
-            .contains(&acceptance_key(policy)));
-        record_acceptance(&path, policy).unwrap();
-        assert!(load_acceptances(&path)
-            .unwrap()
-            .contains(&acceptance_key(policy)));
-
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&vec!["ModelLicenseAccepted:Gemma:2025-01-01"]).unwrap(),
-        )
-        .unwrap();
-        assert!(!load_acceptances(&path)
-            .unwrap()
-            .contains(&acceptance_key(policy)));
-        assert!(license_policy("qwen2_5_vl_7b").is_none());
-        let _ = std::fs::remove_dir_all(root);
-    }
 
     #[test]
     fn vlm_fit_keeps_a_system_ram_floor_even_with_large_vram() {
@@ -1138,41 +919,6 @@ mod tests {
     }
 
     const MB: u64 = 1024 * 1024;
-
-    /// The porcelain label + line match the TUI contract byte-for-byte:
-    /// `PROGRESS\t{pct}\t{name} · {done}/{total} {unit} · {rate} · model i/n`.
-    #[test]
-    fn porcelain_label_and_line_are_exact() {
-        // 182 of 271 MB, 3.4 MB/s, second of nine models.
-        let p = prog(0, 1, 182 * MB, Some(271 * MB), 3.4 * MB as f64);
-        let label = progress_label("arcface", 1, 9, &p);
-        assert_eq!(label, "arcface · 182/271 MB · 3.4 MB/s · model 2/9");
-        assert_eq!(
-            porcelain_line(62, &label),
-            "PROGRESS\t62\tarcface · 182/271 MB · 3.4 MB/s · model 2/9"
-        );
-    }
-
-    /// A tab/newline in the label can never break the `\t`-framed line.
-    #[test]
-    fn porcelain_line_sanitizes_separators() {
-        let line = porcelain_line(50, "a\tb\nc");
-        assert_eq!(line, "PROGRESS\t50\ta b c");
-        // Exactly two tabs total: the two field separators.
-        assert_eq!(line.matches('\t').count(), 2);
-    }
-
-    /// GB-scale totals keep a decimal; the unknown-total case shows just `done`.
-    #[test]
-    fn size_pair_picks_a_shared_unit() {
-        assert_eq!(size_pair(182 * MB, Some(271 * MB)), "182/271 MB");
-        let gb = 1024 * MB;
-        assert_eq!(
-            size_pair(3 * gb + gb / 2, Some(24 * gb + gb * 9 / 10)),
-            "3.5/24.9 GB"
-        );
-        assert_eq!(size_pair(5 * MB, None), "5.0 MB");
-    }
 
     /// The guarded overall fraction never decreases — even when bundle files
     /// report concurrently / out of order — and reaches 100% at completion.

@@ -117,9 +117,7 @@ fn event_loop(
     tx: &Sender<LoadMsg>,
     rx: &Receiver<LoadMsg>,
 ) -> Result<()> {
-    // Held across iterations so we can `kill()` an in-flight model download on
-    // quit — the `fileid` CLI has no parent-PID/EOF watchdog (unlike the scan
-    // engine), so without this it would keep downloading after the TUI exits.
+    // Held across iterations so quitting can cancel an in-flight model download.
     let mut download: Option<models::DownloadHandle> = None;
     // Redraw only when something changed — a key, a loader/scan/download message,
     // or a resize. A pure 100 ms poll-timeout tick with none of those leaves the
@@ -200,8 +198,6 @@ fn event_loop(
             ));
         }
         if app.should_quit {
-            // Kill (don't take) an in-flight download child so it can't keep
-            // running orphaned; the worker thread still reclaims + reaps it.
             if let Some(handle) = &download {
                 handle.cancel();
             }

@@ -23,7 +23,8 @@ use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
 use super::library_pane::SelectedPane;
-use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
+use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
     texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
     QUERY_MAX_ROWS,
@@ -643,7 +644,7 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     caption.set_text(&format!(
         "{} · {}",
         row.kind.to_uppercase(),
-        format_bytes(row.size_bytes)
+        file_size_i64(row.size_bytes)
     ));
 
     let is_video = row.kind == "video";
@@ -1058,7 +1059,7 @@ fn build_meta(row: &FileRow) -> gtk::Box {
         .build();
     meta.append(&meta_row("Path", &row.path));
     meta.append(&meta_row("Kind", &row.kind));
-    meta.append(&meta_row("Size", &format_bytes(row.size_bytes)));
+    meta.append(&meta_row("Size", &file_size_i64(row.size_bytes)));
     if let Some(d) = fmt_date(row.modified_at) {
         meta.append(&meta_row("Modified", &d));
     }
