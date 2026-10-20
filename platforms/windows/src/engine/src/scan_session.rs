@@ -239,6 +239,10 @@ impl ScanSession {
             // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
             // to backfill its rendered-shape CLIP vector (lockstep with macOS).
             let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
+            // Images catalogued while CLIP was missing stay in the pipeline once
+            // it is installed so a rescan backfills their embeddings (and faces,
+            // which run in the same pass) — lockstep with macOS Discovery.
+            let image_clip_gate = if clip_installed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
@@ -248,13 +252,13 @@ impl ScanSession {
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{text_embed_gate}"
                 )
             } else {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{text_embed_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
@@ -1030,6 +1034,18 @@ pub(crate) const SKIP_SET_MODEL_CLIP_GATE: &str =
     " AND NOT (kind = 'model' AND extension = 'obj' AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                       WHERE clip_embeddings.file_id = files.id))";
+
+/// macOS `DBWriter.skipSetClipBackfillExclusionSQL`: keep an image that still
+/// LACKS a `clip_embeddings` row OUT of the skip set while CLIP is installed, so a
+/// scan run before the model was installed is backfilled by the next rescan.
+pub(crate) const SKIP_SET_IMAGE_CLIP_GATE: &str =
+    " AND NOT (kind = 'image' AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
+                                            WHERE clip_embeddings.file_id = files.id))";
+
+fn clip_installed() -> bool {
+    crate::models::scene_vocab::ENABLE_CLIP
+        && crate::models::mobileclip::default_weights_path().is_ok_and(|p| p.exists())
+}
 
 /// True once the BGE document embedder's weights are on disk — the same probe the
 /// tagger uses to decide whether to build the embedder (tagging.rs). Gates
