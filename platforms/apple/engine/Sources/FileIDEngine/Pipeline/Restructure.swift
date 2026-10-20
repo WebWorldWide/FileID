@@ -439,7 +439,7 @@ public enum Restructure {
             while docEmbeddings.count < signalCap, let row = try dcursor.next() {
                 let id: Int64 = row["file_id"] ?? 0
                 if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
-                    docEmbeddings[id] = Self.floatsLE(data)
+                    docEmbeddings[id] = FloatBlob.decode(data)
                 }
             }
             return (rows, embeddings, tags, docEmbeddings)
@@ -960,20 +960,6 @@ public enum Restructure {
         c.timeZone = TimeZone(identifier: "UTC")!
         return c
     }()
-
-    /// Decode a little-endian Float32 blob (the CLIP-embedding storage format,
-    /// shared with the Windows engine) into `[Float]`. `loadUnaligned` reads
-    /// each value in host order — correct on Apple's little-endian targets.
-    private static func floatsLE(_ data: Data) -> [Float] {
-        let count = data.count / 4
-        return data.withUnsafeBytes { raw -> [Float] in
-            var out = [Float](repeating: 0, count: count)
-            for i in 0..<count {
-                out[i] = raw.loadUnaligned(fromByteOffset: i * 4, as: Float32.self)
-            }
-            return out
-        }
-    }
 
     /// Apply the user-selected proposals on disk + update the DB. For each move:
     /// re-reads the live `files.path_text` and requires it to still name the

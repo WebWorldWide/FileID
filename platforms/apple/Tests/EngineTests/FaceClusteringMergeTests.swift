@@ -43,7 +43,7 @@ struct FaceClusteringMergeTests {
                                  firstName, isUnknown ? 1 : 0])
             let pid = d.lastInsertedRowID
             let vector = embedding.count < 128 ? embedding + [Float](repeating: 0, count: 128 - embedding.count) : embedding
-            let blob = ArcFaceService.embeddingToBlob(vector)
+            let blob = FloatBlob.encode(vector)
             var faceIDs: [Int64] = []
             for k in 0..<faces {
                 let url = URL(fileURLWithPath: db.pool.path).deletingLastPathComponent().appendingPathComponent("p\(pid)_f\(k).jpg")
@@ -73,7 +73,7 @@ struct FaceClusteringMergeTests {
         let (db, dir) = try makeDB(); defer { try? FileManager.default.removeItem(at: dir) }
         let (person, faces) = try await insertPerson(db, firstName: "Confirmed", embedding: [1,0,0])
         try await db.pool.write { d in
-            try d.execute(sql: "UPDATE persons SET centroid=?,anchor_radius=0.8 WHERE id=?", arguments: [ArcFaceService.embeddingToBlob([Float](repeating: 1, count: 128)),person])
+            try d.execute(sql: "UPDATE persons SET centroid=?,anchor_radius=0.8 WHERE id=?", arguments: [FloatBlob.encode([Float](repeating: 1, count: 128)),person])
         }
         try await db.pool.read { d in
             let priors = try FaceClustering.priorAnchors(from: d)
@@ -98,7 +98,7 @@ struct FaceClusteringMergeTests {
                 case "processing": try d.execute(sql: "UPDATE face_prints SET processing_version='other-crops' WHERE id=?", arguments: [faces[0]])
                 case "legacy": try d.execute(sql: "UPDATE face_prints SET embedding_model=NULL WHERE id=?", arguments: [faces[0]])
                 case "revision": try d.execute(sql: "UPDATE face_prints SET source_revision='stale' WHERE id=?", arguments: [faces[0]])
-                default: try d.execute(sql: "UPDATE face_prints SET arcface_embedding=? WHERE id=?", arguments: [ArcFaceService.embeddingToBlob([Float](repeating: .nan, count: 128)), faces[0]])
+                default: try d.execute(sql: "UPDATE face_prints SET arcface_embedding=? WHERE id=?", arguments: [FloatBlob.encode([Float](repeating: .nan, count: 128)), faces[0]])
                 }
             }
             #expect(await FaceClustering.tightPairAutoMerge(database: db, expectedSpace: .init(model: "fixture-sface", processing: "fixture-align")) == 0)
@@ -391,7 +391,7 @@ struct FaceClusteringMergeTests {
                     VALUES (NULL, NULL, 5, ?, ?, ?, ?, 0)
                     """, arguments: [Date().timeIntervalSince1970, title, middle, suffix])
                 let pid = d.lastInsertedRowID
-                let blob = ArcFaceService.embeddingToBlob(v)
+                let blob = FloatBlob.encode(v)
                 try d.execute(sql: """
                     INSERT INTO files (path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension)
                     VALUES (?, ?, 1, 1, ?, 'image', 'jpg')

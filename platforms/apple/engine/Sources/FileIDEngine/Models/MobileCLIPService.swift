@@ -20,7 +20,6 @@ public final class MobileCLIPService: @unchecked Sendable {
     private let imageLoadLock = NSLock()
     /// Guarded by imageLoadLock; one warning per missing weight path instead of one per batch.
     private var missingWarnedPaths: Set<String> = []
-    private var env: ORTEnv?
     private var session: ORTSession?
     private var inputName: String?
     private var isImageLoaded = false
@@ -79,22 +78,15 @@ public final class MobileCLIPService: @unchecked Sendable {
             return false
         }
         do {
-            lock.lock()
-            let cachedEnv = self.env
-            lock.unlock()
-            let env = try cachedEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
-            let opts = try ORTSessionOptions()
             // CoreML EP for ANE acceleration; ORT falls back to CPU if it
             // can't place a node. Bare options = NeuralNetwork format with
             // MLComputeUnits = All. We deliberately do NOT use MLProgram: on
             // CLIP ViT-B/32 it fails to build the CoreML plan on-hardware
             // ("ios17.conv: output size is too small"), which throws at session
             // creation and would disable CLIP embeddings entirely.
-            try? opts.appendCoreMLExecutionProvider(with: ORTCoreMLExecutionProviderOptions())
-            let session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: opts)
+            let session = try ORTSessions.make(modelPath: modelURL.path).session
             let name = try session.inputNames().first
             lock.lock()
-            self.env = env
             self.session = session
             self.inputName = name
             self.isImageLoaded = true
@@ -224,22 +216,6 @@ public final class MobileCLIPService: @unchecked Sendable {
     private static func blankImage() -> CGImage? {
         CGContext(data: nil, width: 32, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
-    }
-
-    /// Raw little-endian Float32 bytes (length = dims * 4).
-    public static func embeddingToBlob(_ vec: [Float]) -> Data {
-        vec.withUnsafeBufferPointer { Data(buffer: $0) }
-    }
-
-    public static func blobToEmbedding(_ data: Data) -> [Float] {
-        let count = data.count / MemoryLayout<Float>.stride
-        // Guard the empty/corrupt blob — a nil baseAddress force-unwrap
-        // would crash the engine.
-        guard count > 0 else { return [] }
-        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
-            guard let base = raw.baseAddress?.assumingMemoryBound(to: Float.self) else { return [] }
-            return Array(UnsafeBufferPointer(start: base, count: count))
-        }
     }
 
     // MARK: - Internals

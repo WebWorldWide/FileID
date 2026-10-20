@@ -13,7 +13,7 @@ struct CatalogCastTests {
         try Data([1]).write(to: source)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970:1)], ofItemAtPath: source.path)
         let db = try FileIDEngine.Database(at: root.appendingPathComponent("test.sqlite"))
-        let blob = ArcFaceService.embeddingToBlob([Float(1)] + [Float](repeating:0,count:127))
+        let blob = FloatBlob.encode([Float(1)] + [Float](repeating:0,count:127))
         try await db.pool.write { d in
             try d.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?,1,1,1,1,'video','mov')", arguments:[source.path])
             try d.execute(sql: "INSERT INTO catalog_revisions VALUES(1,'1:4607182418800017408','file-stat-v1',1)")

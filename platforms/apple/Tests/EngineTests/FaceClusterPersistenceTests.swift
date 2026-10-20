@@ -1,11 +1,12 @@
 import Foundation
 import GRDB
 import Testing
+import FileIDShared
 @testable import FileIDEngine
 
 @Suite("Stable person persistence")
 struct FaceClusterPersistenceTests {
-    private var vector: Data { ArcFaceService.embeddingToBlob([1] + [Float](repeating: 0, count: 127)) }
+    private var vector: Data { FloatBlob.encode([1] + [Float](repeating: 0, count: 127)) }
 
     private func fixture() async throws -> (FileIDEngine.Database, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("fileid-stable-people-\(UUID().uuidString)")

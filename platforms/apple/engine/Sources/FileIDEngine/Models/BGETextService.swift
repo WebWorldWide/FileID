@@ -17,8 +17,8 @@ final class BGETextService: @unchecked Sendable {
 
     private let lock = NSLock()
     /// Serializes the heavy one-time session build (double-checked against `lock`) so
-    /// two racing first-callers don't each construct an ORTEnv+ORTSession and race the
-    /// `env` write. Mirrors MobileCLIPService.imageLoadLock.
+    /// two racing first-callers don't each construct an ORTSession and race the
+    /// `session` write. Mirrors MobileCLIPService.imageLoadLock.
     private let loadLock = NSLock()
     /// Bounds concurrent CoreML inferences so a doc-heavy scan (up to `workerCap` doc
     /// workers all calling `embed`) can't flood the ANE. Mirrors ArcFaceService /
@@ -28,7 +28,6 @@ final class BGETextService: @unchecked Sendable {
         ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
             .flatMap { Int($0) }.map { max(1, min(16, $0)) } ?? Hardware.defaultInferenceConcurrency
     private let inferenceSem = DispatchSemaphore(value: BGETextService.inferenceConcurrency)
-    private var env: ORTEnv?
     private var session: ORTSession?
     private var inputNames: [String] = []
     private var tokenizer: WordPieceTokenizer?
@@ -68,7 +67,7 @@ final class BGETextService: @unchecked Sendable {
 
         // Serialize the heavy build so concurrent first-callers construct the session
         // exactly once (double-checked under `lock`). Without this, racing doc workers
-        // each build an ORTEnv+ORTSession and race the `env`/`session` writes. Mirrors
+        // each build an ORTSession and race the `session` write. Mirrors
         // MobileCLIPService.loadImageEncoder.
         loadLock.lock()
         defer { loadLock.unlock() }
@@ -83,19 +82,12 @@ final class BGETextService: @unchecked Sendable {
             return false
         }
         do {
-            lock.lock()
-            let cachedEnv = self.env
-            lock.unlock()
-            let env = try cachedEnv ?? ORTEnv(loggingLevel: ORTLoggingLevel.warning)
-            let opts = try ORTSessionOptions()
-            let coreml = ORTCoreMLExecutionProviderOptions()
-            coreml.enableOnSubgraphs = true
-            coreml.useCPUAndGPU = true
-            try opts.appendCoreMLExecutionProvider(with: coreml)
-            let session = try ORTSession(env: env, modelPath: onnx.path, sessionOptions: opts)
+            let session = try ORTSessions.make(modelPath: onnx.path, coreML: .required) {
+                $0.enableOnSubgraphs = true
+                $0.useCPUAndGPU = true
+            }.session
             let names = try session.inputNames()
             lock.lock()
-            self.env = env
             self.session = session
             self.inputNames = names
             self.tokenizer = tok

@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import Testing
+import FileIDShared
 @testable import FileIDEngine
 
 private typealias Database = FileIDEngine.Database
@@ -29,7 +30,7 @@ struct ReassignFaceTests {
                 try d.execute(sql: """
                     INSERT INTO face_prints (file_id, person_id, print_data, bbox, arcface_embedding, face_quality)
                     VALUES (?, ?, ?, '0,0,1,1', ?, ?)
-                    """, arguments: [fileID, pid, Data(), ArcFaceService.embeddingToBlob([Float](repeating: 0.1, count: 128)), quality?[k] ?? 0.5])
+                    """, arguments: [fileID, pid, Data(), FloatBlob.encode([Float](repeating: 0.1, count: 128)), quality?[k] ?? 0.5])
                 faceIDs.append(d.lastInsertedRowID)
             }
             try d.execute(sql: "UPDATE persons SET representative_face_id = ? WHERE id = ?", arguments: [faceIDs.first, pid])
