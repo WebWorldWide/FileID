@@ -804,7 +804,7 @@ struct RestructureView: View {
         } label: {
             HStack(spacing: 10) {
                 DSCheck(on: on)
-                Image(systemName: Self.fileIcon(forFilename: filename))
+                Image(systemName: FileTypes.symbolName(forExtension: (filename as NSString).pathExtension))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text3)
                     .frame(width: 14, alignment: .center)
@@ -861,29 +861,6 @@ struct RestructureView: View {
                 .accessibilityLabel("Low confidence — ask")
         default:
             EmptyView()
-        }
-    }
-
-    /// SF Symbol for a filename based on its extension. Helps the user
-    /// scan a long file list — photos vs videos vs PDFs are visually
-    /// distinct without reading the extension.
-    private static func fileIcon(forFilename name: String) -> String {
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "jpg", "jpeg", "png", "heic", "heif", "gif", "tiff", "tif", "bmp", "webp", "raw", "dng":
-            return "photo"
-        case "mp4", "mov", "m4v", "avi", "mkv", "webm":
-            return "video"
-        case "pdf":
-            return "doc.richtext"
-        case "doc", "docx", "pages", "rtf", "txt", "md":
-            return "doc.text"
-        case "mp3", "m4a", "wav", "flac", "aac", "ogg":
-            return "waveform"
-        case "zip", "tar", "gz", "7z":
-            return "archivebox"
-        default:
-            return "doc"
         }
     }
 

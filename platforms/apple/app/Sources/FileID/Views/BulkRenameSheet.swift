@@ -276,7 +276,7 @@ private struct BulkRenameRow: View {
                     .fill(Color.secondary.opacity(0.10))
                     .frame(width: 64, height: 64)
                 AsyncThumbnail(url: file.url, size: 96) {
-                    Image(systemName: kindFallbackIcon(file.kind))
+                    Image(systemName: FileKind.symbolName(forKind: file.kind))
                         .font(Theme.Font.body(16, .semibold))
                         .foregroundStyle(Theme.text3)
                 }
@@ -314,16 +314,5 @@ private struct BulkRenameRow: View {
             RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(isSelected ? Theme.gold.opacity(0.05) : Color.clear)
         )
-    }
-
-    private func kindFallbackIcon(_ kind: String) -> String {
-        switch kind {
-        case "image": return "photo"
-        case "video": return "video"
-        case "pdf":   return "doc.richtext"
-        case "doc":   return "doc.text"
-        case "audio": return "waveform"
-        default:      return "doc"
-        }
     }
 }

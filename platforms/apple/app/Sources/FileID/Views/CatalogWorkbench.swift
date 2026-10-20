@@ -169,7 +169,7 @@ struct CatalogWorkbench: View {
 
     private func playerCard(_ hit: CatalogHit) -> some View {
         let url = URL(fileURLWithPath: hit.path)
-        let video = isVideo(hit.path)
+        let video = FileTypes.isVideo(path: hit.path)
         return Panel {
             PanelHeader("Player") {
                 MetaText(video && duration > 0 ? DurationText.clock(clock.seconds) + " / " + DurationText.clock(duration) : hitMeta(hit), size: 12)
@@ -440,7 +440,7 @@ struct CatalogWorkbench: View {
         player = nil
         unplayable = false
         clock.attach(nil)
-        guard isVideo(hit.path) else { return }
+        guard FileTypes.isVideo(path: hit.path) else { return }
         let id = hit.fileID
         Task {
             let asset = await MediaPlayback.playableAsset(URL(fileURLWithPath: hit.path))
@@ -457,7 +457,7 @@ struct CatalogWorkbench: View {
     private func loadTimeline() async {
         duration = 0
         tracks = .empty
-        guard let hit = selected, isVideo(hit.path) else { return }
+        guard let hit = selected, FileTypes.isVideo(path: hit.path) else { return }
         let id = hit.fileID
         if let store {
             let loaded = await Task.detached { store.timelineTracks(forFileID: id) }.value
@@ -553,7 +553,6 @@ struct CatalogWorkbench: View {
         }
     }
 
-    private func isVideo(_ path: String) -> Bool { ["mov","mp4","m4v","mkv","avi","mpg","mpeg","mts","m2ts","webm"].contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }
 }
 
 // MARK: - Playhead
@@ -749,8 +748,7 @@ struct CatalogJobRow: View {
 /// Hands back an asset only when AVFoundation can actually play it, so
 /// formats like MKV fall back to the default app instead of a blank player.
 enum MediaPlayback {
-    static let extensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "mpg", "mpeg", "mts", "m2ts", "webm", "3gp",
-                                          "mp3", "m4a", "wav", "aiff", "aac", "flac"]
+    static let extensions = FileTypes.videos.union(FileTypes.audio)
 
     static func playableAsset(_ url: URL) async -> AVURLAsset? {
         let asset = AVURLAsset(url: url)

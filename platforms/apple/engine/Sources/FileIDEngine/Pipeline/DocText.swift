@@ -4,6 +4,7 @@
 
 import Foundation
 import PDFKit
+import FileIDShared
 
 enum DocText {
     private static let maxBytes = 16_384

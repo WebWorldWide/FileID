@@ -1363,7 +1363,7 @@ private struct UniversalPreview: View {
             Color.black.opacity(0.3)
             AsyncThumbnail(url: url, size: 1024, contentMode: .fit) {
                 VStack(spacing: 10) {
-                    Image(systemName: iconForExtension(url.pathExtension))
+                    Image(systemName: FileTypes.symbolName(forExtension: url.pathExtension))
                         .font(.system(size: 96, weight: .light))
                         .foregroundStyle(Theme.text3)
                     Text(url.lastPathComponent)
@@ -1375,19 +1375,6 @@ private struct UniversalPreview: View {
                 }
             }
             .padding(20)
-        }
-    }
-
-    private func iconForExtension(_ ext: String) -> String {
-        switch ext.lowercased() {
-        case "zip", "tar", "gz", "rar", "7z": return "doc.zipper"
-        case "txt", "md", "rtf":                return "doc.text"
-        case "html", "htm":                     return "doc.richtext"
-        case "swift", "py", "js", "ts", "rs", "go", "java", "c", "cpp", "h":
-            return "chevron.left.forwardslash.chevron.right"
-        case "json", "yaml", "yml", "toml", "xml":
-            return "curlybraces.square"
-        default:                                return "doc"
         }
     }
 }
@@ -1461,7 +1448,7 @@ private struct LibrarySelectedPane: View {
                     if let thumbnail {
                         Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fit)
                     } else {
-                        Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
+                        Image(systemName: FileKind.symbolName(forKind: row.kind)).font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
                     }
                 }
                 .aspectRatio(16.0 / 10.0, contentMode: .fit)
@@ -1539,15 +1526,6 @@ private struct LibrarySelectedPane: View {
                 : await ThumbnailService.shared.thumbnail(for: row.url, size: 480)
             guard !Task.isCancelled else { return }
             thumbnail = image
-        }
-    }
-
-    private var icon: String {
-        switch row.kind {
-        case "video": return "film"
-        case "audio": return "waveform"
-        case "pdf": return "doc.richtext"
-        default: return "doc"
         }
     }
 

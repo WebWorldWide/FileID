@@ -4,6 +4,7 @@
 // descriptive name on either platform.
 import Testing
 import Foundation
+import FileIDShared
 @testable import FileIDEngine
 
 @Suite("Deep Analyze metadata naming (audio + 3D)")

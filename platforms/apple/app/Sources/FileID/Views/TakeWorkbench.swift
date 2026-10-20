@@ -30,8 +30,6 @@ struct TakeWorkbench: View {
     @State private var goalRequestedIDs: Set<Int64> = []
     @State private var previousJobIDs: Set<String> = []
 
-    private static let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "webm", "3gp", "mpeg", "mpg", "mts", "m2ts"]
-
     private var goalJob: CatalogJob? {
         engine.catalogJobs.first { $0.id == goalJobID && selectedEvent?.id == goalEventID }
     }
@@ -39,7 +37,7 @@ struct TakeWorkbench: View {
     private func canAnalyzeGoal(_ event: CatalogEvent) -> Bool {
         pendingID.isEmpty && goal.trimmingCharacters(in: .whitespacesAndNewlines) == event.goal
             && selectedIDs == Set(event.fileIDs) && takes.count == event.fileIDs.count
-            && takes.allSatisfy { Self.videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) }
+            && takes.allSatisfy { FileTypes.isVideo(path: $0.path) }
             && !["queued", "running", "paused"].contains(goalJob?.state ?? "")
     }
 
@@ -394,7 +392,7 @@ struct TakeWorkbench: View {
         }
         if action == "search" {
             var seen = Set(candidates.map(\.fileID))
-            foundClips = response.hits.filter { Self.videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) && seen.insert($0.fileID).inserted }
+            foundClips = response.hits.filter { FileTypes.isVideo(path: $0.path) && seen.insert($0.fileID).inserted }
             if foundClips.isEmpty { ToastCenter.shared.show("No videos matched “\(clipQuery)”") }
             return
         }
