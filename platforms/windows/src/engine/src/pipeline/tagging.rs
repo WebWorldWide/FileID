@@ -2356,7 +2356,11 @@ async fn process_file_predecoded(
                     let ram_started = Instant::now();
                     let tag_result: Option<anyhow::Result<Vec<(String, f32)>>> =
                         if let Some(ram_coord) = &models.ram_plus_batch {
-                            Some(ram_coord.tag(rgb.clone(), w, h).await)
+                            let side = crate::models::ram_plus::INPUT_SIZE;
+                            match crate::models::ram_plus::RamPlusTagger::resize_to_input(&rgb, w, h) {
+                                Ok(input) => Some(ram_coord.tag(input, side, side).await),
+                                Err(e) => Some(Err(e)),
+                            }
                         } else if let Some(ram_pool) = &models.ram_plus {
                             // Run the CPU preprocess (resize + ImageNet-normalize)
                             // BEFORE acquiring the GPU permit + session Mutex, so it
