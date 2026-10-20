@@ -22,7 +22,7 @@ struct SettingsTab: View {
 
                 // ─── User-facing settings (always visible) ───────────────
 
-                GlassCard {
+                Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Cleanup").font(Theme.Font.body(14, .semibold))
                         SettingToggleRow("Tag kept files after Cleanup",
@@ -31,7 +31,7 @@ struct SettingsTab: View {
                     }
                 }
 
-                GlassCard {
+                Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Restructure").font(Theme.Font.body(14, .semibold))
                         LabeledSegment("Folder granularity") {
@@ -59,7 +59,7 @@ struct SettingsTab: View {
                 // doesn't help a casual user choose anything; hiding it
                 // declutters the page.
 
-                GlassCard {
+                Panel(padding: 16) {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
                             Divider().opacity(0.3)
@@ -253,7 +253,7 @@ struct DeepAnalyzeExclusionsCard: View {
     @State private var message: (text: String, isError: Bool)?
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Deep Analyze exclusions").font(Theme.Font.body(14, .semibold))
                 Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
@@ -332,7 +332,7 @@ struct CLIPSemanticSearchCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — semantic search (CLIP)").font(Theme.Font.body(14, .semibold))
                 Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.")
@@ -546,7 +546,7 @@ struct RamPlusTaggerCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — image tagging").font(Theme.Font.body(14, .semibold))
                 Text("RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.")
@@ -632,7 +632,7 @@ struct BGEDocCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — document understanding").font(Theme.Font.body(14, .semibold))
                 Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
@@ -714,7 +714,7 @@ struct FaceEmbedderCard: View {
     @State private var confirmUninstall: FaceEmbedderKind?
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(Theme.Font.body(14, .semibold))
                 Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")
@@ -866,7 +866,7 @@ struct FaceEmbedderCard: View {
 struct AppearanceCard: View {
     @AppStorage("lavaMode") private var lavaMode: String = LavaMode.full.rawValue
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Appearance").font(Theme.Font.body(14, .semibold))
                 HStack(spacing: 12) {

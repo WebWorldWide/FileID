@@ -20,7 +20,7 @@ struct DeepAnalyzeModelPickerCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("AI models · Deep Analyze").font(Theme.Font.body(14, .semibold))
@@ -352,7 +352,7 @@ struct DeepAnalyzeView: View {
     // users don't conflate automatic in-scan tagging with the heavier, opt-in
     // Deep Analyze step. Dismissible.
     private var explainerCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "sparkles")
                     .font(Theme.Font.body(16, .semibold))
@@ -379,7 +379,7 @@ struct DeepAnalyzeView: View {
     // smartNamesCard above. Tag writes are additive (never clobber the user's
     // own Finder tags) and reversible by removing the tag.
     private var applyActionsCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     Image(systemName: "square.and.arrow.down.on.square")
@@ -506,7 +506,7 @@ struct DeepAnalyzeView: View {
     }
 
     private var smartNamesCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
@@ -534,7 +534,7 @@ struct DeepAnalyzeView: View {
     }
 
     private var unavailableCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(Theme.Font.body(20, .semibold))
@@ -563,7 +563,7 @@ struct DeepAnalyzeView: View {
     private var statusCard: some View {
         let totals = pendingTotals
         let pendingMins = Double(totals.pending) * settings.activeKind.secondsPerImage / 60.0
-        return GlassCard {
+        return Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Library status").font(Theme.Font.body(14, .semibold))
@@ -602,7 +602,7 @@ struct DeepAnalyzeView: View {
     private var actionsCard: some View {
         let activeFits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
         let canRun = engine.deepAnalyzeAvailable && activeFits && hasNamedAnyone
-        return GlassCard {
+        return Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Run Deep Analyze").font(Theme.Font.body(14, .semibold))
                 // Banner only when there's nothing in flight — once a
@@ -730,7 +730,7 @@ struct DeepAnalyzeView: View {
     /// through each phase.
     @ViewBuilder
     private var startingCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
                     ProgressView()
@@ -769,7 +769,7 @@ struct DeepAnalyzeView: View {
     @ViewBuilder
     private var progressCard: some View {
         if let p = engine.deepAnalyzeProgress {
-            GlassCard {
+            Panel(padding: 16) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Working…").font(Theme.Font.body(14, .semibold))
@@ -809,7 +809,7 @@ struct DeepAnalyzeView: View {
     }
 
     private func completionCard(_ c: DeepAnalyzeComplete) -> some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: c.cancelled ? "xmark.octagon" : "checkmark.seal.fill")
@@ -824,7 +824,7 @@ struct DeepAnalyzeView: View {
     }
 
     private func lastFileCard(_ d: DeepAnalyzeFileDone) -> some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Most recent caption").font(Theme.Font.body(14, .semibold))
                 Text(d.description).font(Theme.Font.body(13.5))
