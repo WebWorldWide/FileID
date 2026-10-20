@@ -9,31 +9,23 @@ import FileIDShared
 
 @MainActor
 @Observable
-public final class CLIPModelInstaller {
+final class CLIPModelInstaller: ModelInstalling {
 
-    public static let shared = CLIPModelInstaller()
+    static let shared = CLIPModelInstaller()
 
-    public enum Status: Equatable {
-        case unknown
-        case missing(reason: String)
-        case installed(sizeBytes: Int64)
-        case downloading(fraction: Double, message: String,
-                         bytesPerSecond: Double, etaSeconds: Double)
-        case extracting
-        case installFailed(String)
-    }
+    typealias Status = ModelInstaller.Status
 
-    public private(set) var status: Status = .unknown
+    private(set) var status: Status = .unknown
     /// On-disk presence of each required file, refreshed only on real disk
     /// transitions (appear / install / uninstall) via refreshStatus — never on
     /// download ticks. The Settings card reads this instead of calling
     /// FileManager.fileExists in its row builder, so an active download no longer
     /// fires a stat() syscall on the main thread on every progress tick.
-    public private(set) var presentFilePaths: Set<String> = []
+    private(set) var presentFilePaths: Set<String> = []
     /// Flips once the text encoder's ORT session finishes its
     /// multi-second build — Library observes it to drop the
     /// keyword-only hint and re-run the active search.
-    public private(set) var textEncoderReady = false
+    private(set) var textEncoderReady = false
     private var task: Task<Void, Never>?
     /// True only while a hub fetch is actively running. Progress ticks
     /// arrive as queued MainActor tasks and can be scheduled AFTER the
@@ -49,7 +41,7 @@ public final class CLIPModelInstaller {
 
     /// Files the installer must produce on disk for both the image
     /// embedder (engine) and the text encoder (app) to be usable.
-    public static var requiredFiles: [URL] {
+    static var requiredFiles: [URL] {
         let models = modelsRoot
         return [
             models.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx"),
@@ -59,9 +51,9 @@ public final class CLIPModelInstaller {
         ]
     }
 
-    public static var modelsRoot: URL { AppSupportPath.models }
+    static var modelsRoot: URL { AppSupportPath.models }
 
-    public static let approxDownloadBytes: Int64 = {
+    static let approxDownloadBytes: Int64 = {
         let ids = Set(["clip_vitb32_image", "clip_vitb32_text", "clip_bpe_vocab", "clip_bpe_merges"])
         return ModelManifest.artifacts
             .filter { ids.contains($0.id) }
@@ -99,11 +91,11 @@ public final class CLIPModelInstaller {
 
     // MARK: - Status
 
-    public func markTextEncoderReady() {
+    func markTextEncoderReady() {
         textEncoderReady = true
     }
 
-    public func refreshStatus() {
+    func refreshStatus() {
         recomputePresentFiles()
         var totalSize: Int64 = 0
         var firstMissing: String?
@@ -136,7 +128,7 @@ public final class CLIPModelInstaller {
 
     // MARK: - Install paths
 
-    public func install() {
+    func install() {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self] in
             await AppSleepActivity.run(reason: "Install CLIP models") {
@@ -148,7 +140,7 @@ public final class CLIPModelInstaller {
 
     /// Air-gapped fallback. Expects the same layout the hub fetch
     /// produces — mobileclip_image/… and clip_text/… at the top.
-    public func installFromLocalZip(_ zipURL: URL) {
+    func installFromLocalZip(_ zipURL: URL) {
         guard task == nil, !uninstalling else { return }
         task = Task { [weak self] in
             await AppSleepActivity.run(reason: "Install local CLIP models") {
@@ -158,11 +150,11 @@ public final class CLIPModelInstaller {
         }
     }
 
-    public func cancel() {
+    func cancel() {
         task?.cancel()
     }
 
-    public func uninstall() async {
+    func uninstall() async {
         guard (try? ReadOnlyLocations.requireWritable(Self.modelsRoot)) != nil else { status = .installFailed("This model location is protected example data."); return }
         guard !uninstalling else { return }
         uninstalling = true
@@ -199,7 +191,8 @@ public final class CLIPModelInstaller {
         defer { installing = false }
         Self.sweepOrphanedStagingRoots()
         let approxBytes = Self.approxDownloadBytes
-        if let free = freeDiskBytes(), free < approxBytes * 2 {
+        try? FileManager.default.createDirectory(at: Self.modelsRoot, withIntermediateDirectories: true)
+        if let free = ModelInstaller.freeDiskBytes(at: Self.modelsRoot), free < approxBytes * 2 {
             status = .installFailed("Not enough free space (need ~\(approxBytes * 2 / 1_048_576) MB).")
             return
         }
@@ -229,17 +222,8 @@ public final class CLIPModelInstaller {
                 // More than that and Cloudflare starts rate-limiting.
                 tracker: tracker, maxConcurrency: 2
             )
-        } catch is CancellationError {
-            status = .missing(reason: "Cancelled.")
-            return
-        } catch let StreamingDownloadError.http(code) {
-            status = .installFailed("Server returned HTTP \(code). Couldn't reach the model server.")
-            return
-        } catch StreamingDownloadError.checksumMismatch(let expected, let actual) {
-            status = .installFailed("Integrity check failed: a downloaded file's SHA-256 (\(actual.prefix(12))…) doesn't match the pinned manifest hash (\(expected.prefix(12))…). The file was discarded — try again; repeated failures may mean the download was tampered with.")
-            return
         } catch {
-            status = .installFailed("Download failed: \(error.localizedDescription)")
+            status = ModelInstaller.failureStatus(error)
             return
         }
 
@@ -350,13 +334,10 @@ public final class CLIPModelInstaller {
         let total = snap.totalBytes
         let written = snap.writtenBytes
         let frac = total > 0 ? min(1.0, Double(written) / Double(total)) : 0
-        let mb = Double(written) / 1_048_576.0
-        let totalMB = Double(total) / 1_048_576.0
         let activeCount = snap.activeFiles
-        let activeLabel = activeCount > 1 ? " (\(activeCount) files in parallel)" : ""
-        let msg = total > 0
-            ? String(format: "Downloading… %.0f / %.0f MB%@", mb, totalMB, activeLabel)
-            : String(format: "Downloading… %.0f MB%@", mb, activeLabel)
+        let msg = ModelInstaller.progressMessage(
+            written: written, total: total,
+            suffix: activeCount > 1 ? " (\(activeCount) files in parallel)" : "")
         status = .downloading(
             fraction: frac, message: msg,
             bytesPerSecond: snap.combinedBytesPerSec,
@@ -803,14 +784,6 @@ public final class CLIPModelInstaller {
     }
 
     // MARK: - Utilities
-
-    private func freeDiskBytes() -> Int64? {
-        let url = Self.modelsRoot
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-              let avail = values.volumeAvailableCapacityForImportantUsage else { return nil }
-        return avail
-    }
 
     private func directorySize(_ url: URL) -> Int64 {
         var total: Int64 = 0

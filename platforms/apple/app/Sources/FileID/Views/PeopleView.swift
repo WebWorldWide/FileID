@@ -1453,7 +1453,7 @@ private struct MergeTargetPickerSheet: View {
 private struct FaceModelInstallPanel: View {
     let engine: EngineClient
     let detectedFaces: Int
-    @State private var installer = ArcFaceModelInstaller.shared
+    @State private var installer = ModelInstaller.face
     private let kind = FaceEmbedderKind.defaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
 
     var body: some View {
@@ -1479,7 +1479,7 @@ private struct FaceModelInstallPanel: View {
 
     @ViewBuilder
     private var statusRow: some View {
-        switch installer.status[kind] ?? .unknown {
+        switch installer.status {
         case .downloading(let fraction, let message, _, _):
             VStack(alignment: .leading, spacing: 6) {
                 GrainProgressBar(progress: fraction, tone: .gold)
@@ -1496,17 +1496,17 @@ private struct FaceModelInstallPanel: View {
 
     @ViewBuilder
     private var actions: some View {
-        switch installer.status[kind] ?? .unknown {
+        switch installer.status {
         case .downloading:
-            Button("Cancel") { installer.cancel(kind) }.buttonStyle(DSSecondaryButtonStyle(height: 28))
+            Button("Cancel") { installer.cancel() }.buttonStyle(DSSecondaryButtonStyle(height: 28))
         case .installed:
             Button { engine.runFaceClustering() } label: { Label("Group faces", systemImage: "person.2") }
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
                 .disabled(engine.faceClusteringInFlight)
         case .installFailed:
-            Button("Retry") { installer.install(kind) }.buttonStyle(DSPrimaryButtonStyle(height: 28))
+            Button("Retry") { installer.install() }.buttonStyle(DSPrimaryButtonStyle(height: 28))
         default:
-            Button { installer.install(kind) } label: { Label("Install face model", systemImage: "arrow.down") }
+            Button { installer.install() } label: { Label("Install face model", systemImage: "arrow.down") }
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
         }
     }

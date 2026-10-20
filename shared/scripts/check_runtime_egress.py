@@ -132,7 +132,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/video_export.rs": "95af5b5609582a784c0234b2cfc5121fee4ca5a5cf6873b9fdf864db795131a9",
   "platforms/apple/app/Sources/FileID/Database/ThumbnailService.swift": "d4e484a6e72adfcce2758f8d120ff3aff381cb82b19c564a1dcae68e2a76bf57",
   "platforms/apple/app/Sources/FileID/EngineClient.swift": "fd6cd7540465f841b7d7e3e1588ff050f8c500751c554353f8c0ac397c472824",
-  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "a5b875ceb9c2e827778884c0f41dc1833eab00d1ee01d114ed89899556ce3482",
+  "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift": "f3aab36fc0df8cf19f9661dfcb29a410c7636a322ce20729a04b40d905b1e2fd",
   "platforms/apple/engine/Sources/FileIDEngine/Models/RamPlusService.swift": "576cd0cde651ba3154c833ce24b414c5dd9b0c85d5992783b9b42e608c35d819",
   "platforms/apple/engine/Sources/FileIDEngine/Models/WordPieceTokenizer.swift": "dc6292da096dbf4e75acf33394da13fe9811ec16067142a9582ab98fcd7b1668",
   "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DeepAnalyze.swift": "21ed3ffe6120c402f398caad35dbc59e2e03cc76a4341ff09b8efcd1316b098c",
@@ -188,10 +188,8 @@ SAFE_NETWORK_CALLER_FILES = {
     "platforms/cli/src/runtime.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
-    "platforms/apple/app/Sources/FileID/Services/ArcFaceModelInstaller.swift",
-    "platforms/apple/app/Sources/FileID/Services/BGEModelInstaller.swift",
     "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-    "platforms/apple/app/Sources/FileID/Services/RamPlusModelInstaller.swift",
+    "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
 }
 RAW_NETWORK_PATTERNS = {
     ".rs": re.compile(
