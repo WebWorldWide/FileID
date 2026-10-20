@@ -1,8 +1,9 @@
 ﻿// BatchObservableCollection — ObservableCollection<T> with an atomic
 // ReplaceAll that emits a single CollectionChanged(Reset) instead of
 // Clear+N Adds (which fires N+1 events and re-runs XAML layout each
-// time). Used by LibraryViewModel + others where a full-list refresh
-// is the common mutation.
+// time), and an AppendRange that emits one multi-item Add so an
+// ItemsRepeater keeps its realized elements (a Reset would clear and
+// reload every visible thumbnail). Used by LibraryViewModel + others.
 
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -37,10 +38,12 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
         OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
     }
 
-    /// Appends a page with one Reset instead of one Add event per item.
+    /// <summary>Appends a page with one multi-item Add event at the old end,
+    /// instead of one Add event per item. Realized elements are kept.</summary>
     public void AppendRange(IReadOnlyList<T> more)
     {
         if (more.Count == 0) return;
+        int start = Items.Count;
         _suspend = true;
         try
         {
@@ -55,7 +58,8 @@ internal sealed class BatchObservableCollection<T> : ObservableCollection<T>
         }
         OnPropertyChanged(new PropertyChangedEventArgs(nameof(Count)));
         OnPropertyChanged(new PropertyChangedEventArgs("Item[]"));
-        OnCollectionChanged(new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+        OnCollectionChanged(new NotifyCollectionChangedEventArgs(
+            NotifyCollectionChangedAction.Add, (System.Collections.IList)new List<T>(more), start));
     }
 
     protected override void OnCollectionChanged(NotifyCollectionChangedEventArgs e)

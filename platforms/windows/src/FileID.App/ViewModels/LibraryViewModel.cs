@@ -489,7 +489,10 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             OnUi(() =>
             {
                 if (Interlocked.Read(ref _refreshGen) != gen || Volatile.Read(ref _loadedRows) != offset) return;
-                Items.AppendRange(page);
+                // Rows the engine inserted since the last refresh shift the
+                // OFFSET window, so the page can repeat tiles already shown.
+                // _loadedRows still advances by the raw DB count.
+                Items.AppendRange(WithoutKnownIds(Items, page));
                 Volatile.Write(ref _loadedRows, offset + rows.Count);
                 _hasMore = rows.Count == PageSize;
             });
@@ -536,6 +539,22 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
         MergeById(Items, next);
+    }
+
+    /// <summary>The tiles of <paramref name="page"/> whose Id is not already in
+    /// <paramref name="items"/> (or earlier in the page), in page order.</summary>
+    internal static List<FileTile> WithoutKnownIds(
+        IReadOnlyCollection<FileTile> items,
+        IReadOnlyList<FileTile> page)
+    {
+        var known = new HashSet<long>(items.Count + page.Count);
+        foreach (var t in items) known.Add(t.Id);
+        var fresh = new List<FileTile>(page.Count);
+        foreach (var t in page)
+        {
+            if (known.Add(t.Id)) fresh.Add(t);
+        }
+        return fresh;
     }
 
     /// <summary>True when no Id in <paramref name="next"/> is already in
@@ -611,6 +630,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             int cur = IndexOfInstance(items, want, j);
             if (cur >= 0) items.RemoveAt(cur);
             items.Insert(j, want);
+        }
+
+        // 3) Anything left past the desired sequence is a stale duplicate
+        //    instance of an Id already placed above.
+        for (int i = items.Count - 1; i >= desired.Count; i--)
+        {
+            items.RemoveAt(i);
         }
     }
 

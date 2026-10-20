@@ -587,6 +587,35 @@ public class LibraryMergeTests
     }
 
     [Fact]
+    public void MergeById_DropsStaleDuplicateInstances()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3), Tile(2), Tile(3) };
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(3) });
+        Assert.Equal(new long[] { 1, 2, 3 }, items.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void WithoutKnownIds_SkipsTilesAlreadyShownAndRepeatsInPage()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3) };
+        var fresh = LibraryViewModel.WithoutKnownIds(items, new[] { Tile(2), Tile(3), Tile(4), Tile(4), Tile(5) });
+        Assert.Equal(new long[] { 4, 5 }, fresh.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void AppendRange_RaisesOneAddAtTheOldEnd()
+    {
+        var items = new BatchObservableCollection<FileTile> { Tile(1) };
+        var events = new List<NotifyCollectionChangedEventArgs>();
+        items.CollectionChanged += (_, e) => events.Add(e);
+        items.AppendRange(new[] { Tile(2), Tile(3) });
+        var only = Assert.Single(events);
+        Assert.Equal(NotifyCollectionChangedAction.Add, only.Action);
+        Assert.Equal(1, only.NewStartingIndex);
+        Assert.Equal(2, only.NewItems!.Count);
+    }
+
+    [Fact]
     public void MergeById_InsertsNewRows_AtTargetIndex()
     {
         var a = Tile(1);
