@@ -22,6 +22,7 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
+use super::library_pane::SelectedPane;
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use crate::engine_client::{
     texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
@@ -71,7 +72,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     });
 
-    let grid = gtk::GridView::new(Some(selection), Some(factory));
+    let grid = gtk::GridView::new(Some(selection.clone()), Some(factory));
     grid.set_min_columns(1);
     grid.set_max_columns(12);
     grid.set_enable_rubberband(false);
@@ -91,6 +92,66 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             }
         }
     ));
+
+    // Single click selects and fills the Selected pane; double-click/Enter
+    // opens the preview; Esc clears the selection.
+    let restoring = Rc::new(Cell::new(false));
+    let pane = {
+        let on_preview: Rc<dyn Fn()> = Rc::new(clone!(
+            #[strong]
+            engine,
+            #[strong]
+            search_text,
+            #[strong]
+            kind_filter,
+            #[strong]
+            selection,
+            #[weak]
+            grid,
+            move || {
+                let pos = selection.selected();
+                if pos == gtk::INVALID_LIST_POSITION {
+                    return;
+                }
+                let query = (search_text.borrow().clone(), kind_filter.borrow().clone());
+                open_preview(&engine, &grid, snapshot_rows(&selection), pos as usize, query);
+            }
+        ));
+        let on_close: Rc<dyn Fn()> = Rc::new(clone!(
+            #[strong]
+            selection,
+            move || selection.set_selected(gtk::INVALID_LIST_POSITION)
+        ));
+        SelectedPane::new(engine.clone(), on_preview, on_close)
+    };
+    selection.connect_selected_notify(clone!(
+        #[strong]
+        pane,
+        #[strong]
+        restoring,
+        move |selection| {
+            if restoring.get() {
+                return;
+            }
+            match selection.selected_item().and_downcast::<BoxedAnyObject>() {
+                Some(object) => pane.show(object.borrow::<FileRow>().clone()),
+                None => pane.hide(),
+            }
+        }
+    ));
+    let escape = gtk::EventControllerKey::new();
+    escape.connect_key_pressed(clone!(
+        #[strong]
+        selection,
+        move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape && selection.selected() != gtk::INVALID_LIST_POSITION {
+                selection.set_selected(gtk::INVALID_LIST_POSITION);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        }
+    ));
+    grid.add_controller(escape);
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -154,6 +215,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             loading_more: Rc::new(Cell::new(false)),
             total: Rc::new(Cell::new(0)),
             last_query: RefCell::new(None),
+            selection: selection.clone(),
+            pane: pane.clone(),
+            restoring: restoring.clone(),
         });
         let near_end = ctx.clone();
         scroller.vadjustment().connect_value_changed(move |adj| {
@@ -237,7 +301,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["fileid-tab"])
         .build();
     root.append(&header);
-    root.append(&content_stack);
+    let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content_row.append(&content_stack);
+    content_row.append(&pane.revealer);
+    root.append(&content_row);
     // Re-read on every tab switch: the startup read can race the engine's DB
     // open, and renames/deletes done from other tabs must show on return.
     {
@@ -300,6 +367,9 @@ struct ReloadCtx {
     loading_more: Rc<Cell<bool>>,
     total: Rc<Cell<i64>>,
     last_query: RefCell<Option<(String, Option<String>)>>,
+    selection: gtk::SingleSelection,
+    pane: Rc<SelectedPane>,
+    restoring: Rc<Cell<bool>>,
 }
 
 /// Rows to re-read on a refresh: the loaded pages when the query is the same
@@ -351,7 +421,17 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         };
         // One items-changed signal for the whole page instead of one per row.
         let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
+        // Keep the selection (and the pane) on the same file across a refresh.
+        let selected_id = ctx.pane.current_id();
+        ctx.restoring.set(true);
         ctx.model.splice(0, ctx.model.n_items(), &items);
+        let position = selected_id.and_then(|id| rows.iter().position(|row| row.id == id));
+        ctx.selection
+            .set_selected(position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32));
+        ctx.restoring.set(false);
+        if position.is_none() {
+            ctx.pane.hide();
+        }
         ctx.total.set(total);
         ctx.has_more.set(total > rows.len() as i64);
         if total > rows.len() as i64 {
@@ -927,7 +1007,7 @@ fn snapshot_rows(model: &impl IsA<gio::ListModel>) -> Vec<FileRow> {
     (0..model.n_items()).filter_map(|pos| row_at(model, pos)).collect()
 }
 
-fn open_default(widget: &impl IsA<gtk::Widget>, path: &str) {
+pub(super) fn open_default(widget: &impl IsA<gtk::Widget>, path: &str) {
     let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
     let window = widget.root().and_downcast::<gtk::Window>();
     launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
@@ -935,7 +1015,7 @@ fn open_default(widget: &impl IsA<gtk::Widget>, path: &str) {
 
 /// Show the file selected in the file manager (FileManager1.ShowItems through
 /// the portal-aware launcher), falling back to opening its folder.
-fn show_in_files(widget: &impl IsA<gtk::Widget>, path: &str) {
+pub(super) fn show_in_files(widget: &impl IsA<gtk::Widget>, path: &str) {
     let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
     let window = widget.root().and_downcast::<gtk::Window>();
     let folder = std::path::Path::new(path).parent().map(gio::File::for_path);
@@ -985,6 +1065,7 @@ fn build_meta(row: &FileRow) -> gtk::Box {
     if let Some(p) = row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
         meta.append(&meta_row("Smart name", &format!("{}.{}", p, row.extension)));
     }
+    super::library_pane::append_details(&meta, row.id);
     meta
 }
 

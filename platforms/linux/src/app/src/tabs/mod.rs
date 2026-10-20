@@ -3,6 +3,7 @@
 pub mod cleanup;
 pub mod deep_analyze;
 pub mod library;
+mod library_pane;
 mod model_catalog;
 pub mod people;
 pub mod restructure;

@@ -483,6 +483,20 @@ button.gold-button.compact { min-height: 28px; padding: 0 12px; font-size: 13px;
 .fileid-page { background-color: alpha(#0F0F11, 0.8); }
 .page-header { padding: 18px 26px 14px 26px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
 .page-meta { font-size: 12px; color: @fileid_text2; }
+
+/* ── Library Selected pane: key/value rows and tag chips ─────────────────── */
+.selected-pane { padding: 4px 14px 14px 14px; margin-left: 12px; border-left: 1px solid alpha(#FFFFFF, 0.08); }
+.kv-row { padding-bottom: 5px; border-bottom: 1px solid alpha(#FFFFFF, 0.06); }
+.kv-key { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; color: @fileid_label; }
+.kv-value { font-size: 13px; color: @fileid_text1; }
+.chip {
+    font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace;
+    font-size: 11px;
+    color: @fileid_text2;
+    padding: 1px 6px;
+    border: 1px solid alpha(#FFFFFF, 0.14);
+}
+.numeric { font-feature-settings: "tnum"; }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
