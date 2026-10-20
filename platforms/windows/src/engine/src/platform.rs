@@ -458,11 +458,47 @@ pub fn available_memory_mb() -> u64 {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn available_memory_mb() -> u64 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();
     sys.available_memory() / (1024 * 1024)
+}
+
+/// Matches the Swift engine: sysinfo's macOS figure subtracts compressor pages,
+/// so also credit the kernel's availability level (what `memory_pressure`
+/// reports), which counts compressible and file-backed memory the pager can
+/// reclaim.
+#[cfg(target_os = "macos")]
+pub fn available_memory_mb() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let mut level: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated and `level`/`size` describe a valid
+    // c_int buffer; sysctlbyname writes at most `size` bytes.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"kern.memorystatus_level".as_ptr(),
+            (&mut level as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    macos_available_mb(
+        sys.available_memory() / (1024 * 1024),
+        sys.total_memory() / (1024 * 1024),
+        read.then_some(level),
+    )
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_available_mb(counted_mb: u64, total_mb: u64, level: Option<i32>) -> u64 {
+    match level.and_then(|l| u64::try_from(l).ok()).filter(|l| (1..=100).contains(l)) {
+        Some(level) => counted_mb.max(total_mb * level / 100),
+        None => counted_mb,
+    }
 }
 
 /// Memory-pressure tier. On `Low` it additionally caps the tagging worker
@@ -1503,6 +1539,16 @@ pub fn suppress_hard_error_dialogs() {}
 #[cfg(test)]
 mod adaptive_tests {
     use super::*;
+
+    #[test]
+    fn macos_available_memory_credits_the_kernel_level() {
+        assert_eq!(macos_available_mb(4_000, 16_384, Some(50)), 8_192);
+        assert_eq!(macos_available_mb(9_000, 16_384, Some(50)), 9_000, "never below the counted pages");
+        assert_eq!(macos_available_mb(4_000, 16_384, None), 4_000);
+        assert_eq!(macos_available_mb(4_000, 16_384, Some(0)), 4_000);
+        assert_eq!(macos_available_mb(4_000, 16_384, Some(101)), 4_000);
+        assert_eq!(macos_available_mb(4_000, 16_384, Some(-3)), 4_000);
+    }
 
     #[test]
     fn worker_cap_non_hybrid_8c() {

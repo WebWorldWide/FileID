@@ -700,3 +700,108 @@ fn wav_header_sizes_are_rewritten_for_streamed_audio() {
     assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 10);
     assert!(video_export::fix_wav_sizes(&mut b"RIFF\0\0\0\0WAVEjunk".to_vec()).is_err());
 }
+
+struct OrderedModel {
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl FrameModel for OrderedModel {
+    fn caption(&self, _: &Path, _: &str, _: u32, _: Arc<AtomicBool>) -> impl Future<Output = Result<String>> + Send {
+        std::future::ready(Err(anyhow!("captions are not used in moments mode")))
+    }
+    fn sequence(
+        &self,
+        images: &[&Path],
+        _: &str,
+        _: u32,
+        _: Arc<AtomicBool>,
+    ) -> impl Future<Output = Result<String>> + Send {
+        let log = self.log.clone();
+        let first = images[0].file_stem().unwrap().to_string_lossy().into_owned();
+        async move {
+            log.lock().push(format!("infer-start {first}"));
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            log.lock().push(format!("infer-end {first}"));
+            Ok("{\"moments\":[{\"title\":\"Ball thrown\",\"summary\":\"\",\"firstFrame\":1,\"lastFrame\":2}]}".to_owned())
+        }
+    }
+}
+
+#[tokio::test]
+async fn next_moment_window_decodes_while_the_model_runs() {
+    let directory = std::env::temp_dir().join(format!("fileid-timeline-prefetch-{}", uuid::Uuid::new_v4()));
+    let frames = directory.join("frames");
+    std::fs::create_dir_all(&frames).unwrap();
+    let path = directory.join("clip.mp4");
+    std::fs::write(&path, b"fixture video bytes").unwrap();
+    let modified = std::fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let mut conn = Connection::open_in_memory().unwrap();
+    crate::db::migrations::apply(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,19,?2,0,'video','mp4')",
+        params![path.to_str().unwrap(), modified],
+    )
+    .unwrap();
+    let (id, _) = enqueue(
+        &mut conn,
+        &request(serde_json::json!({"requestID":"r","action":"enqueueTimeline","fileIDs":[1],"timelineMode":"moments"})),
+        Some("qwen3_vl_4b"),
+        true,
+    )
+    .unwrap();
+    start(&conn, &id).unwrap().unwrap();
+    let database = Arc::new(Mutex::new(conn));
+    let source = Source::load(&database.lock(), 1).unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let decode_log = log.clone();
+    let decoder = move |_: &Path, _: f64, size: (u32, u32), output: &Path, _: &AtomicBool| -> Result<()> {
+        decode_log.lock().push(format!("decode {}", output.file_stem().unwrap().to_string_lossy()));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_jpeg(output, vec![128; (size.0 * size.1 * 3) as usize], size.0, size.1)
+    };
+    let (sink, _events) = Sink::channel_for_test(1_024);
+    let model = OrderedModel { log: log.clone() };
+    let duration = 6.0;
+    let windows = analysis::windows(duration, &[]);
+    assert_eq!(windows.len(), 2);
+    analyze_moments(
+        &id,
+        1,
+        &source,
+        duration,
+        &[],
+        (4, 4),
+        "fixture",
+        (0, 1, 1.0),
+        &model,
+        &frames,
+        &Arc::new(AtomicBool::new(false)),
+        &sink,
+        &database,
+        decoder,
+    )
+    .await
+    .unwrap();
+
+    let log = log.lock().clone();
+    let second = format!("decode moment-{}-", analysis::millis(windows[1].start));
+    let first_second_decode = log.iter().position(|line| line.starts_with(&second)).expect("second window decoded");
+    let first_inference_end = log.iter().position(|line| line.starts_with("infer-end")).unwrap();
+    assert!(first_second_decode < first_inference_end, "{log:?}");
+    assert_eq!(log.iter().filter(|line| line.starts_with("infer-start")).count(), 2);
+    assert_eq!(
+        count(
+            &database,
+            "SELECT COUNT(*) FROM catalog_coverage WHERE file_id=1 AND id LIKE 'moment-window:%' AND status='sampled'"
+        ),
+        2
+    );
+    assert!(std::fs::read_dir(&frames).unwrap().next().is_none(), "temporary frames are removed");
+    std::fs::remove_dir_all(directory).unwrap();
+}
