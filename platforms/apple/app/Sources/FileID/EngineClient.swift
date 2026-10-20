@@ -37,18 +37,40 @@ public final class EngineClient {
             let request = CatalogRequest(requestID: id, action: "search", query: query, fileID: seedID,
                                          searchMode: seedID == nil ? "hybrid" : "semantic", queryVector: vector,
                                          embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID, limit: limit, resultScope: "files")
-            guard send(.catalogRequest(request: request)) else { return nil }
-            var received: CatalogResponse?
-            for _ in 0..<100 {
-                guard !Task.isCancelled else { return nil }
-                if let response = catalogResponses[id] { received = response; break }
-                do { try await Task.sleep(for: .milliseconds(100)) } catch { return nil }
-            }
-            guard let response = received else { return nil }
+            guard send(.catalogRequest(request: request)),
+                  let response = await catalogResponse(for: id, timeout: .seconds(10)) else { return nil }
             if response.status != "indexing" { return response }
             do { try await Task.sleep(for: .seconds(1)) } catch { return nil }
         }
         return nil
+    }
+
+    private var catalogWaiters: [String: CheckedContinuation<CatalogResponse?, Never>] = [:]
+
+    /// Resumes when the engine replies to `id`; nil on timeout or cancellation.
+    private func catalogResponse(for id: String, timeout: Duration) async -> CatalogResponse? {
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            self?.resumeCatalogWaiter(id, with: nil)
+        }
+        defer { timer.cancel() }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if let response = catalogResponses[id] {
+                    continuation.resume(returning: response)
+                } else if Task.isCancelled {
+                    continuation.resume(returning: nil)
+                } else {
+                    catalogWaiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.resumeCatalogWaiter(id, with: nil) }
+        }
+    }
+
+    private func resumeCatalogWaiter(_ id: String, with response: CatalogResponse?) {
+        catalogWaiters.removeValue(forKey: id)?.resume(returning: response)
     }
 
     func applyCatalogJobsSnapshot(_ jobs: [CatalogJob]) { catalogJobs = jobs }
@@ -551,6 +573,7 @@ public final class EngineClient {
                 catalogResponseOrder.append(response.requestID)
             }
             catalogResponses[response.requestID] = response
+            resumeCatalogWaiter(response.requestID, with: response)
             if !response.jobs.isEmpty { catalogJobs = response.jobs }
         case .ready(let info):
             state = .ready(info)
