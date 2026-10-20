@@ -83,6 +83,13 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Restructure (shared Rust engine): `pipeline/restructure_respect.rs` ports the same rules and Keep accounting for Windows, Linux, CLI and TUI; 6 Rust tests mirror the Swift ones; strict Clippy clean.
 - [x] Restructure on a messy folder (42 Adlon photos from three events copied into one flat Downloads folder, CLIP present): before, 18 moves into date folders and tag-named groups ("Baseball_hat Hat") with 24 files left behind; now all 42 go to `Photos/2026/2026-09-19`, `…/2026-09-26`, `…/2026-10-04` — exactly the three source events. Loose photos are split into events by capture-time gaps (8 h, ≥5 files; smaller groups → `Photos/<year>/<Month>`), on macOS and in the shared Rust engine.
 
+## Owner focus (2026-10-20 evening): usable by anyone, 50–200× faster AI, hardened core
+
+- [ ] Usability: every Mac page reviewed as a first-time user (jargon, unclear next step, empty states, disabled-without-reason, destructive actions, competing primary actions) and fixed, then ported to WinUI/GTK from a precise port list (agent/ux-firstrun).
+- [ ] Deep Analyze and video speed (agent/vlm-speed): baseline on 300 copied camera files and 5 copied clips (4K 10–75 s, one 1080×1350 export), then near-duplicate/burst reuse, skip-or-cheapen with existing tags/OCR, fewer image tokens, prompt KV reuse and tight outputs, batched or pipelined generation, scene-change frame selection with CLIP propagation and low-res hardware decode for video, small-model routing where quality holds. Report effective throughput per library and per video minute.
+- [ ] Rust core hardening, crash-proofing (agent/harden-core): panic audit with panic containment, IPC bounds plus an in-process randomized fuzzer, decoder fuzzing (RAW/CR3/RAF, zip/docx/epub, PDF, audio tags, EXIF), SQLite busy/corrupt/newer-schema/read-only/disk-full paths, concurrency.
+- [ ] Rust core hardening, OS (agent/harden-os): Windows long/UNC/device paths, case collisions, junctions, locked files, cross-volume moves; NFC/NFD and non-UTF-8 names; symlink loops, vanishing files, no-inode volumes; crash-safe rename/move/trash journals; engine/CLI/TUI tests and the conformance suite on macOS, Linux and Windows CI; cfg-gated code clippy'd on every OS (an unused macOS-only import broke Linux/Windows CI on 2026-10-20).
+
 ## Lean, fast, one engine (owner request 2026-10-20: less code, more speed, better multi-platform architecture)
 
 Baseline lines: shared Rust engine 84k (30k tests), WinUI app 38k, Swift engine 25k, macOS app 22k, GTK app 23k, CLI 8k, TUI 8k. Two read-only audits ranked the cuts; the path follows the 2026-10-11 decision (one Rust engine, native adapters, presentation-only apps).
