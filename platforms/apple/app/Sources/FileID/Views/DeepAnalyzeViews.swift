@@ -366,17 +366,9 @@ struct DeepAnalyzeView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        hideExplainer = true
-                    }
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
+                DSIconButton("Hide this explanation", systemImage: "xmark", tint: Theme.text3) {
+                    withAnimation(Theme.springStandard) { hideExplainer = true }
                 }
-                .buttonStyle(.plain)
-                .help("Hide this explanation")
-                .accessibilityLabel("Hide this explanation")
             }
         }
     }

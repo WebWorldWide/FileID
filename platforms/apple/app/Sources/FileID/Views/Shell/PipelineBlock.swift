@@ -95,7 +95,7 @@ struct PipelineBlock: View {
                         Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold))
                             .rotationEffect(.degrees(showDetails ? 180 : 0))
                             .foregroundStyle(Theme.text3)
-                            .frame(width: 20, height: 20)
+                            .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget)
                     }
                     .buttonStyle(.dsRow)
                     .help(showDetails ? "Hide scan details" : "Show scan details")

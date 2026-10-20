@@ -60,9 +60,9 @@ struct TitleBar: View {
                 withAnimation(.easeInOut(duration: 0.2)) { sidebarVisible.toggle() }
             } label: {
                 Image(systemName: "sidebar.left").font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text2)
-                    .frame(width: 26, height: 26).contentShape(Rectangle())
+                    .frame(width: Theme.Metrics.hitTarget, height: Theme.Metrics.hitTarget).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
             .help(sidebarVisible ? "Hide sidebar (⌃⌘S)" : "Show sidebar (⌃⌘S)")
             .accessibilityLabel(sidebarVisible ? "Hide sidebar" : "Show sidebar")
             .keyboardShortcut("s", modifiers: [.control, .command])
@@ -147,9 +147,10 @@ struct TitleBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(chatPresented ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help(chatPresented ? "Close chat (⌘⇧K)" : "Open chat beside this page (⌘⇧K)")
             .accessibilityLabel(chatPresented ? "Close chat" : "Open chat beside this page")
+            .accessibilityAddTraits(chatPresented ? .isSelected : [])
             .keyboardShortcut("k", modifiers: [.command, .shift])
             .disabled(activeTab == .chat)
             Button { activeTab = .settings } label: {
@@ -159,9 +160,10 @@ struct TitleBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(activeTab == .settings ? Theme.gold : Color.white.opacity(0.16), lineWidth: 1))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
             .help("Settings (⌘,)")
             .accessibilityLabel("Settings")
+            .accessibilityAddTraits(activeTab == .settings ? .isSelected : [])
             .keyboardShortcut(",", modifiers: .command)
         }
     }

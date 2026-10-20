@@ -33,8 +33,8 @@ struct ModelCatalogBrowser: View {
                         .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.plain).help("Close model browser").accessibilityLabel("Close model browser")
+                DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)

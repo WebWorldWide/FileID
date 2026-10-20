@@ -17,6 +17,7 @@ struct EmptyStateView: View {
             Image(systemName: icon)
                 .font(.system(size: 56, weight: .light))
                 .foregroundStyle(Theme.gold.opacity(0.55))
+                .accessibilityHidden(true)
             Text(title)
                 .font(Theme.Font.body(20, .semibold))
             Text(message)
@@ -34,15 +35,9 @@ struct EmptyStateView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let action = primaryAction {
-                Button(action: action.run) {
-                    Text(action.label)
-                        .font(Theme.Font.body(13.5, .semibold))
-                        .padding(.horizontal, 18).padding(.vertical, 10)
-                        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
-                        .foregroundStyle(.black)
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 6)
+                Button(action.label, action: action.run)
+                    .buttonStyle(DSPrimaryButtonStyle(height: 32))
+                    .padding(.top, 6)
             }
         }
         .padding(.horizontal, 40)
