@@ -298,13 +298,20 @@ struct TakeWorkbench: View {
     }
 
     private func play(_ take: CatalogTake) {
-        player?.pause()
-        let next = AVPlayer(url: URL(fileURLWithPath: take.path))
-        withAnimation(Theme.springStandard) {
-            selectedTakeID = take.fileID
-            player = next
+        let url = URL(fileURLWithPath: take.path)
+        Task {
+            guard let asset = await MediaPlayback.playableAsset(url) else {
+                NSWorkspace.shared.open(url)
+                return
+            }
+            player?.pause()
+            let next = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            withAnimation(Theme.springStandard) {
+                selectedTakeID = take.fileID
+                player = next
+            }
+            next.play()
         }
-        next.play()
     }
 
     private func newGroup() {

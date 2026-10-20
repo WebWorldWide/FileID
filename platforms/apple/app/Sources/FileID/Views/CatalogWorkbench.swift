@@ -21,6 +21,7 @@ struct CatalogWorkbench: View {
     @State private var start = 0.0
     @State private var end = 0.0
     @State private var player: AVPlayer?
+    @State private var unplayable = false
     @State private var clock = PlayheadClock()
     @State private var duration = 0.0
     @State private var tracks = ReadStore.TimelineTracks.empty
@@ -190,6 +191,16 @@ struct CatalogWorkbench: View {
                         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
                         .accessibilityLabel("Video player")
                 }
+                if unplayable {
+                    HStack(spacing: 10) {
+                        MetaText("FileID can't play this format here. Open it in its default app instead.", color: Theme.text2)
+                        Spacer(minLength: 8)
+                        Button("Open") { NSWorkspace.shared.open(url) }
+                            .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                    }
+                    .padding(12)
+                    .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                }
                 if video {
                     MomentTimeline(duration: timelineDuration, examined: tracks.examined, chapters: chapters,
                                    speech: tracks.speech, playhead: clock.seconds, onSeek: seek)
@@ -207,7 +218,7 @@ struct CatalogWorkbench: View {
                     .help("Queue this video for timeline analysis. Load a model in Deep Analyze first.")
                 }
                 Spacer(minLength: 8)
-                if video {
+                if video && player != nil {
                     Button("Play from start") { seek(0); player?.play() }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                 }
@@ -425,14 +436,21 @@ struct CatalogWorkbench: View {
         end = start
         send(CatalogRequest(requestID: UUID().uuidString, action: "detail", fileID: hit.fileID))
         player?.pause()
-        if isVideo(hit.path) {
-            let next = AVPlayer(url: URL(fileURLWithPath: hit.path))
-            next.seek(to: CMTime(seconds: hit.startSeconds ?? 0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player = nil
+        unplayable = false
+        clock.attach(nil)
+        guard isVideo(hit.path) else { return }
+        let id = hit.fileID
+        Task {
+            let asset = await MediaPlayback.playableAsset(URL(fileURLWithPath: hit.path))
+            guard selected?.fileID == id else { return }
+            guard let asset else { unplayable = true; return }
+            let next = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            await next.seek(to: CMTime(seconds: hit.startSeconds ?? 0, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            guard selected?.fileID == id else { return }
             player = next
-        } else {
-            player = nil
+            clock.attach(next)
         }
-        clock.attach(player)
     }
 
     private func loadTimeline() async {
@@ -711,6 +729,18 @@ struct CatalogJobRow: View {
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(title), \(job.state)")
+    }
+}
+
+/// Hands back an asset only when AVFoundation can actually play it, so
+/// formats like MKV fall back to the default app instead of a blank player.
+enum MediaPlayback {
+    static let extensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "mpg", "mpeg", "mts", "m2ts", "webm", "3gp",
+                                          "mp3", "m4a", "wav", "aiff", "aac", "flac"]
+
+    static func playableAsset(_ url: URL) async -> AVURLAsset? {
+        let asset = AVURLAsset(url: url)
+        return (try? await asset.load(.isPlayable)) == true ? asset : nil
     }
 }
 

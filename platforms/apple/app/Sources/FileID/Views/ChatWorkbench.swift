@@ -309,15 +309,22 @@ struct ChatWorkbench: View {
             return
         }
         openedSource = index
-        if ["mov", "mp4", "m4v", "mkv", "avi", "mp3", "m4a", "wav", "aiff", "aac"].contains(url.pathExtension.lowercased()) {
-            let next = AVPlayer(url: url)
-            if let seconds = hit.startSeconds {
-                next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        guard MediaPlayback.extensions.contains(url.pathExtension.lowercased()) else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        Task {
+            guard let asset = await MediaPlayback.playableAsset(url) else {
+                NSWorkspace.shared.open(url)
+                return
             }
+            let next = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            if let seconds = hit.startSeconds {
+                await next.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            guard openedSource == index else { return }
             player?.pause()
             withAnimation(Theme.springStandard) { player = next; sourcesExpanded = true }
-        } else {
-            NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
 
@@ -371,6 +378,7 @@ private struct CitationChip: View {
         }
         .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .help(hit.path)
+        .contextMenu { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hit.path)]) } }
         .accessibilityLabel("Source \(index): \(name)\(meta.isEmpty ? "" : ", " + meta)")
         .accessibilityHint("Opens the file")
     }
@@ -400,7 +408,8 @@ private struct SourceRow: View {
             .padding(.vertical, 7)
         }
         .help(hit.path)
+        .contextMenu { Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: hit.path)]) } }
         .accessibilityLabel("Source \(index): \(name)\(meta.isEmpty ? "" : ", " + meta)")
-        .accessibilityHint(hit.text)
+        .accessibilityHint("Opens the file. \(hit.text)")
     }
 }
