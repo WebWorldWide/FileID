@@ -15,6 +15,7 @@ struct PeopleView: View {
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
+    @State private var reloadTask: Task<Void, Never>?
 
     /// Cards become checkboxes; "Merge selected" picks a target.
     @State private var mergeMode: Bool = false
@@ -560,16 +561,24 @@ struct PeopleView: View {
     // MARK: - Reload
 
     private func reload() {
-        totalFacePrints = store.totalFacePrints()
-        // Drop emptied clusters: moving every face out of a person leaves a
-        // 0-face row whose stale representative_face_id now points at the
-        // target's face — a ghost card showing the wrong person. Hide it.
-        let rows = store.persons(includeUnknown: showHiddenUnknowns)
-            .filter { $0.faceCount > 0 }
-        persons = rows
-        hiddenUnknownCount = store.hiddenUnknownCount()
-        // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
-        personByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
+        let includeUnknown = showHiddenUnknowns
+        reloadTask?.cancel()
+        reloadTask = Task {
+            // Drop emptied clusters: moving every face out of a person leaves a
+            // 0-face row whose stale representative_face_id now points at the
+            // target's face — a ghost card showing the wrong person. Hide it.
+            let loaded = await Task.detached(priority: .userInitiated) { [store] in
+                (faces: store.totalFacePrints(),
+                 rows: store.persons(includeUnknown: includeUnknown).filter { $0.faceCount > 0 },
+                 hidden: store.hiddenUnknownCount())
+            }.value
+            guard !Task.isCancelled else { return }
+            totalFacePrints = loaded.faces
+            persons = loaded.rows
+            hiddenUnknownCount = loaded.hidden
+            // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
+            personByID = Dictionary(loaded.rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
+        }
     }
 
     /// Named cluster wins (so a typed name sticks); else the larger count.
@@ -762,6 +771,13 @@ private struct PersonDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var files: [FileRow] = []
+
+    private func loadFiles() {
+        let id = person.id
+        Task {
+            files = await Task.detached(priority: .userInitiated) { [store] in store.files(forPersonID: id) }.value
+        }
+    }
     @State private var title: String = ""
     @State private var firstName: String = ""
     @State private var middleName: String = ""
@@ -905,13 +921,13 @@ private struct PersonDetailSheet: View {
                     moveStatus = "Moved \(count) photo\(count == 1 ? "" : "s") to \(targetName)."
                     selectMode = false
                     checked.removeAll()
-                    files = store.files(forPersonID: person.id)
+                    loadFiles()
                 }
             )
         }
         .frame(minWidth: 720, minHeight: 520)
         .onAppear {
-            files = store.files(forPersonID: person.id)
+            loadFiles()
             title = person.title ?? ""
             firstName = person.firstName ?? person.name ?? ""
             middleName = person.middleName ?? ""
@@ -1195,7 +1211,12 @@ private struct MovePhotosTargetPicker: View {
         }
         .frame(minWidth: 640, minHeight: 480)
         .onAppear {
-            candidates = store.persons().filter { $0.id != sourcePerson.id }
+            let sourceID = sourcePerson.id
+            Task {
+                candidates = await Task.detached(priority: .userInitiated) { [store] in
+                    store.persons().filter { $0.id != sourceID }
+                }.value
+            }
         }
     }
 }

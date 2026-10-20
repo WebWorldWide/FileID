@@ -313,7 +313,11 @@ struct DeepAnalyzeView: View {
     }
 
     private func refreshPendingRenameCount() {
-        pendingRenameCount = store.countFilesWithProposedNames()
+        Task {
+            pendingRenameCount = await Task.detached(priority: .userInitiated) { [store] in
+                store.countFilesWithProposedNames()
+            }.value
+        }
     }
 
     /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
@@ -344,8 +348,14 @@ struct DeepAnalyzeView: View {
 
     // Refresh the cached status counts off the 4 Hz body-eval path.
     private func refreshStatusCounts() {
-        pendingTotals = store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
-        hasNamedAnyone = store.namedPersonCount() > 0
+        let modelKey = settings.activeKind.rawValue
+        Task {
+            let counts = await Task.detached(priority: .userInitiated) { [store] in
+                (store.deepAnalyzePending(modelKey: modelKey), store.namedPersonCount() > 0)
+            }.value
+            pendingTotals = counts.0
+            hasNamedAnyone = counts.1
+        }
     }
 
     // Item 4: plain-language explanation of the two AI passes so non-technical
