@@ -16,7 +16,8 @@ struct TakeWorkbench: View {
     @State private var recommendation: CatalogTakeRecommendation?
     @State private var title = ""
     @State private var goal = ""
-    @State private var eventQuery = ""
+    @State private var clipQuery = ""
+    @State private var foundClips: [CatalogHit] = []
     @State private var selectedIDs: Set<Int64> = []
     @State private var selectedTakeID: Int64?
     @State private var lastDeletedEventID: String?
@@ -29,184 +30,297 @@ struct TakeWorkbench: View {
     @State private var goalRequestedIDs: Set<Int64> = []
     @State private var previousJobIDs: Set<String> = []
 
+    private static let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "webm", "3gp", "mpeg", "mpg", "mts", "m2ts"]
+
     private var goalJob: CatalogJob? {
         engine.catalogJobs.first { $0.id == goalJobID && selectedEvent?.id == goalEventID }
     }
 
     private func canAnalyzeGoal(_ event: CatalogEvent) -> Bool {
-        let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "webm", "3gp", "mpeg", "mpg", "mts", "m2ts"]
-        return pendingID.isEmpty && goal.trimmingCharacters(in: .whitespacesAndNewlines) == event.goal
+        pendingID.isEmpty && goal.trimmingCharacters(in: .whitespacesAndNewlines) == event.goal
             && selectedIDs == Set(event.fileIDs) && takes.count == event.fileIDs.count
-            && takes.allSatisfy { videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) }
+            && takes.allSatisfy { Self.videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) }
             && !["queued", "running", "paused"].contains(goalJob?.state ?? "")
     }
 
-    private var uniqueCandidates: [CatalogHit] {
+    private var pool: [CatalogHit] {
         var seen = Set<Int64>()
-        return candidates.filter { seen.insert($0.fileID).inserted }
+        return (candidates + foundClips).filter { seen.insert($0.fileID).inserted }
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && selectedIDs.count >= 2
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                MetaText("Group related attempts, state the goal, and let the evidence pick the best take.", color: Theme.text2)
-                Spacer()
-                Button("Find related takes") {
-                    send("suggestTakeGroups", fileIDs: uniqueCandidates.map(\.fileID))
+        VStack(spacing: 0) {
+            if !inline {
+                HStack {
+                    Text("Best Takes").font(Theme.Font.display(24)).foregroundStyle(Theme.text1)
+                    Spacer()
+                    Button("Done") { dismiss() }.buttonStyle(.dsSecondary).keyboardShortcut(.cancelAction)
                 }
-                .disabled(uniqueCandidates.count < 2)
-                Button("New group") { newGroup() }
-                if let lastDeletedEventID {
-                    Button("Undo delete") { send("undoEventEdit", eventID: lastDeletedEventID) }
-                }
-                if !inline { Button("Done") { dismiss() } }
+                .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
+                .overlay(alignment: .bottom) { Hairline() }
             }
-            Text("Group related clips, describe the result you want, and review each outcome. FileID only recommends a winner when the evidence supports it.")
-                .font(Theme.Font.body(12.5)).foregroundStyle(.secondary)
-            HSplitView {
-                VStack {
-                    HStack {
-                        TextField("Find group", text: $eventQuery)
-                            .onSubmit { send("listEvents", query: eventQuery) }
-                        Button("Find") { send("listEvents", query: eventQuery) }
-                    }
-                    List(events, id: \.id) { event in
-                        Button {
-                            selectedEvent = event
-                            lastDeletedEventID = nil
-                            title = event.title
-                            goal = event.goal
-                            selectedIDs = Set(event.fileIDs)
-                            load(event.id)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(event.title).font(Theme.Font.body(14, .semibold))
-                                Text("\(event.fileIDs.count) files · \(event.goal)").font(Theme.Font.body(12)).foregroundStyle(.secondary).lineLimit(2)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }.dsList(empty: events.isEmpty ? "No groups yet. Find related takes or make a new group." : nil)
-                }
-                .frame(minWidth: 220)
-
+            HStack(spacing: 0) {
+                groupsPane
+                    .frame(width: 260)
+                    .background(Theme.pane, ignoresSafeAreaEdges: [])
+                    .focusSection()
+                VHairline()
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        TextField("Group name", text: $title)
-                        TextField("Desired outcome, e.g. Alex gets a hit", text: $goal)
-                        HStack {
-                            Button("Save group") { saveGroup() }
-                                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedIDs.count < 2)
-                            if let event = selectedEvent {
-                                Button("Analyze goal") { analyzeGoal(event) }.disabled(!canAnalyzeGoal(event))
-                                Button("Refresh scores") { load(event.id) }
-                                Button("Undo group edit") { send("undoEventEdit", eventID: event.id) }
-                                Button("Delete group") {
-                                    lastDeletedEventID = event.id
-                                    send("deleteEvent", eventID: event.id)
-                                }
-                            }
-                        }
-                        if let job = goalJob {
-                            HStack {
-                                ProgressView(value: job.progress).frame(width: 130)
-                                Text("Goal analysis: " + job.state).font(Theme.Font.body(12))
-                                if ["running", "queued"].contains(job.state) {
-                                    Button("Pause") { send("pauseJob", jobID: job.id) }
-                                }
-                                if job.state == "paused" { Button("Resume") { send("resumeJob", jobID: job.id) } }
-                                if ["running", "queued", "paused"].contains(job.state) {
-                                    Button("Cancel") { send("cancelJob", jobID: job.id) }
-                                }
-                            }
-                        }
-                        Text("Save the goal before analyzing a video group. Load a visual model in Deep Analyze first. Automatic scores are drafts from sampled frames; hidden outcomes and unknown identities require review.")
-                            .font(Theme.Font.body(12)).foregroundStyle(.secondary)
-                        Text("Select at least two files from the search results to make a group. Originals are never changed.")
-                            .font(Theme.Font.body(12)).foregroundStyle(.secondary)
-                        if !suggestedGroups.isEmpty {
-                            Text("Possible groups from visual similarity and file dates. Check the files; this does not detect the desired outcome.")
-                                .font(Theme.Font.body(12)).foregroundStyle(.secondary)
-                            ForEach(suggestedGroups.indices, id: \.self) { index in
-                                let suggestion = suggestedGroups[index]
-                                RelatedTakeSuggestionRow(suggestion: suggestion) {
-                                    newGroup()
-                                    selectedIDs = Set(suggestion.members.map(\.fileID))
-                                    message = "Name this group and describe the outcome before saving."
-                                }
-                            }
-                        }
-                        ForEach(uniqueCandidates, id: \.fileID) { hit in
-                            Toggle(isOn: Binding(
-                                get: { selectedIDs.contains(hit.fileID) },
-                                set: { enabled in
-                                    if enabled { selectedIDs.insert(hit.fileID) }
-                                    else { selectedIDs.remove(hit.fileID) }
-                                }
-                            )) {
-                                Text(URL(fileURLWithPath: hit.path).lastPathComponent).lineLimit(1)
-                            }
-                        }
-                        Divider()
-                        if let recommendation {
-                            Text("Recommendation: \(recommendation.status.capitalized)").font(Theme.Font.body(14, .semibold))
-                            Text(recommendation.reason).font(Theme.Font.body(12.5)).foregroundStyle(.secondary)
-                        }
-                        ForEach(takes, id: \.fileID) { take in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Button(URL(fileURLWithPath: take.path).lastPathComponent) {
-                                        selectedTakeID = take.fileID
-                                        player = AVPlayer(url: URL(fileURLWithPath: take.path))
-                                    }
-                                    .buttonStyle(.plain).font(Theme.Font.body(14, .semibold))
-                                    Spacer()
-                                    if recommendation?.fileIDs.contains(take.fileID) == true {
-                                        Image(systemName: "star.fill").foregroundStyle(Theme.gold)
-                                    }
-                                    Button("Play") { player?.pause(); player = AVPlayer(url: URL(fileURLWithPath: take.path)) }
-                                }
-                                Text(take.stale ? "Needs review after source changed" : outcomeText(take))
-                                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
-                                if let event = selectedEvent {
-                                    HStack {
-                                        Button("Goal met") { feedback(event.id, take, outcome: 1) }
-                                        Button("Not met") { feedback(event.id, take, outcome: 0) }
-                                        Button("Unclear") { feedback(event.id, take, outcome: nil) }
-                                        Button(take.preferred ? "Unmark preferred" : "Prefer") {
-                                            send("setTakeFeedback", feedback: CatalogTakeFeedback(eventID: event.id, fileID: take.fileID, outcomeScore: take.outcomeScore, preferred: !take.preferred))
-                                        }
-                                        Button("Undo") { send("undoTakeFeedback", fileID: take.fileID, eventID: event.id) }
-                                    }.buttonStyle(.dsSecondary)
-                                }
-                                if selectedTakeID == take.fileID, let player {
-                                    NativeVideoPlayer(player: player).frame(height: 180)
-                                }
-                            }
-                            .padding(10)
-                            .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+                    VStack(alignment: .leading, spacing: 16) {
+                        groupPanel
+                        if let job = goalJob { goalJobRow(job) }
+                        if let recommendation { recommendationRow(recommendation) }
+                        if !takes.isEmpty { takeGrid }
+                        else if selectedEvent == nil {
+                            DashedNotice(title: "Pick the best take", subtitle: "Group two or more attempts at the same moment, say what should happen, and FileID scores each one against that goal.")
                         }
                     }
+                    .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
                 }
-                .frame(minWidth: 560)
+                .focusSection()
             }
-            if !message.isEmpty { Text(message).font(Theme.Font.body(12)).foregroundStyle(.secondary) }
         }
-        .padding(20)
-        .frame(minWidth: 900, minHeight: 650)
+        .frame(minWidth: inline ? nil : 960, minHeight: inline ? nil : 680)
         .tint(Theme.gold)
         .task { send("listEvents") }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
         .onChange(of: engine.catalogJobs) { _, _ in refreshGoalJob() }
+        .onDisappear { player?.pause() }
     }
 
-    private func outcomeText(_ take: CatalogTake) -> String {
-        if take.preferred { return "Preferred by you" }
-        guard let score = take.outcomeScore else { return take.modelVersion?.hasPrefix("take-outcome-sequence-v1/") == true ? "Insufficient sampled evidence" : "Outcome not reviewed" }
-        let draft = take.modelVersion?.hasPrefix("take-outcome-sequence-v1/") == true ? "Draft · " : ""
-        if score >= 0.5 { return draft + "Goal met · \(take.explanation ?? "")" }
-        return draft + "Goal not met · \(take.explanation ?? "")"
+    // MARK: - Groups pane
+
+    private var groupsPane: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 10) {
+                DSTextField(placeholder: "Find clips to group", text: $clipQuery, icon: "magnifyingglass") {
+                    guard !clipQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    send("search", query: clipQuery)
+                }
+                HStack(spacing: 6) {
+                    Button("Find related") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
+                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                        .disabled(pool.count < 2)
+                        .help("Suggest groups of clips that look alike and were taken close together")
+                    Button { newGroup() } label: { Label("New group", systemImage: "plus") }
+                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                }
+            }
+            .padding(14)
+            Hairline()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    if !suggestedGroups.isEmpty {
+                        SectionLabel("Possible groups", color: Theme.ai).padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
+                        ForEach(suggestedGroups.indices, id: \.self) { index in
+                            SuggestionRow(suggestion: suggestedGroups[index]) {
+                                newGroup()
+                                foundClips.append(contentsOf: suggestedGroups[index].members.map {
+                                    CatalogHit(fileID: $0.fileID, path: $0.path, kind: "video", text: "")
+                                })
+                                selectedIDs = Set(suggestedGroups[index].members.map(\.fileID))
+                                ToastCenter.shared.show("Name the group and describe the outcome, then save")
+                            }
+                        }
+                        MetaText("From visual similarity and file dates. It does not know whether the goal happened.", size: 11.5)
+                            .padding(.horizontal, 14).padding(.vertical, 6)
+                        Hairline(color: Theme.hairlineSoft).padding(.vertical, 4)
+                    }
+                    SectionLabel("Groups · \(events.count)").padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
+                    ForEach(events, id: \.id) { event in
+                        RailRow(selected: selectedEvent?.id == event.id, action: { open(event) }) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(event.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
+                                Text("\(event.fileIDs.count) clips · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
+                            }
+                            .padding(.vertical, 7)
+                        }
+                        .accessibilityLabel("\(event.title), \(event.fileIDs.count) clips, goal: \(event.goal)")
+                    }
+                    if events.isEmpty {
+                        MetaText("No groups yet. Find clips above, then make a group.").padding(.horizontal, 14).padding(.vertical, 8)
+                    }
+                }
+                .padding(.bottom, 10)
+            }
+            if let lastDeletedEventID {
+                Hairline()
+                HStack {
+                    MetaText("Group deleted", size: 12)
+                    Spacer()
+                    Button("Undo") { send("undoEventEdit", eventID: lastDeletedEventID) }
+                        .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+            }
+        }
+    }
+
+    // MARK: - Group editor
+
+    private var groupPanel: some View {
+        Panel {
+            PanelHeader(selectedEvent == nil ? "New group" : "Group") {
+                if pendingID.isEmpty == false { IndeterminateBar().frame(width: 60) }
+                if let event = selectedEvent {
+                    Button("Undo edit") { send("undoEventEdit", eventID: event.id) }.buttonStyle(.dsGhost)
+                    Button("Delete") {
+                        lastDeletedEventID = event.id
+                        send("deleteEvent", eventID: event.id)
+                    }
+                    .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
+                }
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                fieldRow("Name") { DSTextField(placeholder: "Group name, e.g. Alex at bat", text: $title, height: Theme.Metrics.control) }
+                fieldRow("Goal") { DSTextField(placeholder: "What should happen, e.g. Alex gets a hit", text: $goal, height: Theme.Metrics.control) }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 12)
+            if !pool.isEmpty {
+                Hairline()
+                HStack {
+                    SectionLabel("Clips · \(selectedIDs.count) of \(pool.count) chosen")
+                    Spacer()
+                    Button(selectedIDs.count == pool.count ? "Choose none" : "Choose all") {
+                        selectedIDs = selectedIDs.count == pool.count ? [] : Set(pool.map(\.fileID))
+                    }
+                    .buttonStyle(.dsGhost)
+                }
+                .padding(.horizontal, 14).padding(.top, 6)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(pool, id: \.fileID) { hit in
+                        Toggle(isOn: Binding(
+                            get: { selectedIDs.contains(hit.fileID) },
+                            set: { on in if on { selectedIDs.insert(hit.fileID) } else { selectedIDs.remove(hit.fileID) } }
+                        )) {
+                            Text(URL(fileURLWithPath: hit.path).lastPathComponent).font(Theme.Font.mono(12)).foregroundStyle(Theme.text1)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                        .toggleStyle(DSCheckboxToggleStyle())
+                        .padding(.horizontal, 14)
+                        .help(hit.path)
+                    }
+                }
+                .padding(.bottom, 6)
+            }
+            PanelFooter {
+                Button("Save group") { saveGroup() }
+                    .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
+                    .disabled(!canSave)
+                    .keyboardShortcut("s", modifiers: .command)
+                    .help(canSave ? "Save (⌘S)" : "Needs a name, a goal and at least two clips")
+                if let event = selectedEvent {
+                    Button("Analyze goal") { analyzeGoal(event) }
+                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                        .disabled(!canAnalyzeGoal(event))
+                        .help("Score every clip against the saved goal. Needs videos and a visual model loaded in Deep Analyze.")
+                    Button("Refresh scores") { load(event.id) }.buttonStyle(.dsGhost)
+                }
+                Spacer(minLength: 8)
+                MetaText(pool.isEmpty ? "Find clips on the left to add them." : "Scores are drafts from sampled frames. Originals are never changed.", size: 11.5)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    private func fieldRow<Field: View>(_ label: String, @ViewBuilder field: () -> Field) -> some View {
+        HStack(spacing: 12) {
+            Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
+                .frame(width: 44, alignment: .leading)
+                .accessibilityHidden(true)
+            field()
+        }
+    }
+
+    private func goalJobRow(_ job: CatalogJob) -> some View {
+        Panel {
+            CatalogJobRow(job: job) { action in send(action, jobID: job.id) }
+        }
+    }
+
+    // MARK: - Recommendation
+
+    private func recommendationRow(_ recommendation: CatalogTakeRecommendation) -> some View {
+        let tone: Color
+        switch recommendation.status.lowercased() {
+        case "ranked", "preferred": tone = Theme.gold
+        case "tie": tone = Theme.ai
+        default: tone = Theme.text3
+        }
+        return HStack(alignment: .top, spacing: 12) {
+            Rectangle().fill(tone).frame(width: 3).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                SectionLabel("Recommendation · \(recommendation.status.capitalized)", color: tone)
+                Text(recommendation.reason).font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 12)
+            Spacer(minLength: 0)
+        }
+        .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Takes
+
+    private var takeGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 260, maximum: 420), spacing: 12)], alignment: .leading, spacing: 12) {
+            ForEach(Array(takes.enumerated()), id: \.element.fileID) { index, take in
+                TakeCard(
+                    index: index + 1,
+                    take: take,
+                    recommended: recommendation?.fileIDs.contains(take.fileID) == true,
+                    playing: selectedTakeID == take.fileID ? player : nil,
+                    canReview: selectedEvent != nil,
+                    onPlay: { play(take) },
+                    onOutcome: { outcome in if let event = selectedEvent { feedback(event.id, take, outcome: outcome) } },
+                    onPrefer: {
+                        guard let event = selectedEvent else { return }
+                        send("setTakeFeedback", feedback: CatalogTakeFeedback(eventID: event.id, fileID: take.fileID, outcomeScore: take.outcomeScore, preferred: !take.preferred))
+                    },
+                    onUndo: { if let event = selectedEvent { send("undoTakeFeedback", fileID: take.fileID, eventID: event.id) } }
+                )
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func open(_ event: CatalogEvent) {
+        selectedEvent = event
+        lastDeletedEventID = nil
+        title = event.title
+        goal = event.goal
+        selectedIDs = Set(event.fileIDs)
+        player?.pause()
+        player = nil
+        selectedTakeID = nil
+        load(event.id)
+    }
+
+    private func play(_ take: CatalogTake) {
+        let url = URL(fileURLWithPath: take.path)
+        Task {
+            guard let asset = await MediaPlayback.playableAsset(url) else {
+                NSWorkspace.shared.open(url)
+                return
+            }
+            player?.pause()
+            let next = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            withAnimation(Theme.springStandard) {
+                selectedTakeID = take.fileID
+                player = next
+            }
+            next.play()
+        }
     }
 
     private func newGroup() {
@@ -217,10 +331,12 @@ struct TakeWorkbench: View {
         goal = ""
         selectedIDs = []
         selectedTakeID = nil
+        player?.pause()
         player = nil
     }
 
     private func saveGroup() {
+        guard canSave else { return }
         lastDeletedEventID = nil
         let event = CatalogEvent(id: selectedEvent?.id ?? UUID().uuidString, title: title, goal: goal,
                                  fileIDs: Array(selectedIDs).sorted())
@@ -257,8 +373,12 @@ struct TakeWorkbench: View {
                                      jobID: jobID, fileIDs: fileIDs, timelineMode: timelineMode, event: event, eventID: eventID, takeFeedback: feedback)
         pendingID = request.requestID
         pendingAction = action
-        message = "Working…"
-        if !engine.send(.catalogRequest(request: request)) { message = "The engine is unavailable." }
+        message = ""
+        if !engine.send(.catalogRequest(request: request)) {
+            pendingID = ""
+            pendingAction = ""
+            ToastCenter.shared.show("The engine is unavailable.")
+        }
     }
 
     private func consume() {
@@ -267,19 +387,27 @@ struct TakeWorkbench: View {
         pendingID = ""
         pendingAction = ""
         message = response.message ?? (response.status == "ok" ? "" : "The request failed.")
+        if !message.isEmpty { ToastCenter.shared.show(message) }
         guard response.status == "ok" else {
             if action == "deleteEvent" { lastDeletedEventID = nil }
             return
         }
+        if action == "search" {
+            var seen = Set(candidates.map(\.fileID))
+            foundClips = response.hits.filter { Self.videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) && seen.insert($0.fileID).inserted }
+            if foundClips.isEmpty { ToastCenter.shared.show("No videos matched “\(clipQuery)”") }
+            return
+        }
         if action == "suggestTakeGroups" {
-            suggestedGroups = response.suggestedTakeGroups ?? []
+            withAnimation(Theme.springStandard) { suggestedGroups = response.suggestedTakeGroups ?? [] }
+            if suggestedGroups.isEmpty { ToastCenter.shared.show("No related takes found in these clips") }
         }
         if action == "enqueueTimeline" {
             goalJobID = response.jobs.first { $0.kind == "timelineSample" && Set($0.fileIDs) == goalRequestedIDs && !previousJobIDs.contains($0.id) }?.id
             refreshGoalJob()
         }
         if let events = response.events {
-            if action == "takeGroup" || action == "saveEvent" || action == "setTakeFeedback" || action == "undoTakeFeedback" {
+            if ["takeGroup", "saveEvent", "setTakeFeedback", "undoTakeFeedback"].contains(action) {
                 if let event = events.first {
                     selectedEvent = event
                     title = event.title
@@ -292,33 +420,176 @@ struct TakeWorkbench: View {
             }
         }
         if let takes = response.takes {
-            self.takes = takes
-            recommendation = response.recommendation
+            withAnimation(Theme.springStandard) {
+                self.takes = takes
+                recommendation = response.recommendation
+            }
         }
-        if action == "saveEvent" || action == "deleteEvent" || action == "undoEventEdit" {
+        if ["saveEvent", "deleteEvent", "undoEventEdit"].contains(action) {
             if action == "undoEventEdit" { lastDeletedEventID = nil }
-            send("listEvents", query: eventQuery)
+            send("listEvents")
         }
     }
 }
 
-private struct RelatedTakeSuggestionRow: View {
+// MARK: - Suggestion row
+
+private struct SuggestionRow: View {
     let suggestion: CatalogTakeGroupSuggestion
     let onReview: () -> Void
 
     var body: some View {
-        let names = suggestion.members.map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: ", ")
-        let similarity = String(format: "%.2f", suggestion.similarity)
-        return HStack {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(names).lineLimit(2)
-                Text("Visual similarity \(similarity) · \(suggestion.reason)")
-                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+        let names = suggestion.members.map { URL(fileURLWithPath: $0.path).lastPathComponent }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(names.joined(separator: ", ")).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text1).lineLimit(2)
+            HStack(spacing: 8) {
+                Text("\(names.count) clips · similarity \(String(format: "%.2f", suggestion.similarity))")
+                    .font(Theme.Font.body(11.5)).foregroundStyle(Theme.ai)
+                Spacer(minLength: 4)
+                Button("Review", action: onReview)
+                    .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
+                    .help(suggestion.reason)
             }
-            Spacer()
-            Button("Review group", action: onReview)
         }
-        .padding(8)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(Theme.ai.opacity(0.08), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.ai.opacity(0.3), lineWidth: 1))
+        .padding(.horizontal, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Possible group: \(names.joined(separator: ", "))")
+    }
+}
+
+// MARK: - Take card
+
+private struct TakeCard: View {
+    let index: Int
+    let take: CatalogTake
+    let recommended: Bool
+    let playing: AVPlayer?
+    let canReview: Bool
+    let onPlay: () -> Void
+    let onOutcome: (Double?) -> Void
+    let onPrefer: () -> Void
+    let onUndo: () -> Void
+    @State private var thumbnail: NSImage?
+
+    private var url: URL { URL(fileURLWithPath: take.path) }
+    private var isDraft: Bool { take.modelVersion?.hasPrefix("take-outcome-sequence-v1/") == true }
+    private var reviewedByUser: Bool { take.modelVersion == "user" }
+
+    private var outcome: (String, Color) {
+        if take.stale { return ("Needs review: the file changed", Theme.warning) }
+        guard let score = take.outcomeScore else {
+            if reviewedByUser { return ("Unclear", Theme.text2) }
+            return (isDraft ? "Not enough evidence" : "Not reviewed", Theme.text3)
+        }
+        let prefix = isDraft ? "Draft · " : ""
+        return score >= 0.5 ? (prefix + "Goal met", Theme.delight) : (prefix + "Goal missed", Theme.danger)
+    }
+
+    private var selectedOutcome: Double?? {
+        guard reviewedByUser else { return nil }
+        guard let score = take.outcomeScore else { return .some(nil) }
+        return .some(score >= 0.5 ? 1 : 0)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                SectionLabel("Take \(index)", color: recommended ? Theme.gold : Theme.label)
+                if recommended {
+                    Image(systemName: "star.fill").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.gold)
+                        .accessibilityLabel("Recommended")
+                }
+                Spacer(minLength: 4)
+                Circle().fill(reviewedByUser ? Theme.gold : (isDraft ? Theme.ai : Theme.text3)).frame(width: 7, height: 7)
+                    .help(reviewedByUser ? "Reviewed by you" : (isDraft ? "Scored by the model from sampled frames" : "No score yet"))
+                    .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "Model draft" : "No score"))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .overlay(alignment: .bottom) { Hairline() }
+
+            ZStack {
+                Color.black.opacity(0.35)
+                if let playing {
+                    NativeVideoPlayer(player: playing).accessibilityLabel("Video player")
+                } else {
+                    if let thumbnail {
+                        Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fill)
+                    }
+                    Button(action: onPlay) {
+                        Image(systemName: "play.fill").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.onGold)
+                            .frame(width: 36, height: 36).background(Theme.gold.opacity(0.92), in: Circle())
+                    }
+                    .buttonStyle(DSBareButtonStyle(radius: 18))
+                    .help("Play take \(index)")
+                    .accessibilityLabel("Play take \(index)")
+                }
+            }
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .clipped()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(url.lastPathComponent).font(Theme.Font.mono(12, .medium)).foregroundStyle(Theme.text1)
+                    .lineLimit(1).truncationMode(.middle).help(take.path)
+                Text(take.preferred ? "Preferred by you" : outcome.0).font(Theme.Font.body(13, .semibold))
+                    .foregroundStyle(take.preferred ? Theme.gold : outcome.1)
+                if let why = take.explanation, !why.isEmpty {
+                    Text(why).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let quality = take.qualityScore {
+                    HStack(spacing: 8) {
+                        Text("Sharpness").font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
+                        GrainProgressBar(progress: quality, tone: .neutral, height: 4)
+                        Text("\(Int((quality * 100).rounded()))").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3).frame(width: 26, alignment: .trailing)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Sharpness")
+                    .accessibilityValue("\(Int((quality * 100).rounded())) percent")
+                }
+            }
+            .padding(12)
+
+            if canReview {
+                HStack(spacing: 6) {
+                    outcomeButton("Met", value: 1)
+                    outcomeButton("Missed", value: 0)
+                    outcomeButton("Unclear", value: nil)
+                    Spacer(minLength: 4)
+                    Button { onPrefer() } label: {
+                        Label("Prefer", systemImage: take.preferred ? "star.fill" : "star")
+                    }
+                    .buttonStyle(DSAccentOutlineButtonStyle(color: take.preferred ? Theme.gold : Theme.text2, height: Theme.Metrics.hitTarget))
+                    .accessibilityLabel(take.preferred ? "Preferred" : "Prefer this take")
+                    .accessibilityAddTraits(take.preferred ? .isSelected : [])
+                    DSIconButton("Undo review", systemImage: "arrow.uturn.backward", tint: Theme.text3, action: onUndo)
+                }
+                .padding(.horizontal, 10).padding(.vertical, 8)
+                .background(Theme.panelHeader, ignoresSafeAreaEdges: [])
+                .overlay(alignment: .top) { Hairline() }
+            }
+        }
+        .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous)
+            .stroke(recommended ? Theme.gold : Theme.hairlineStrong.opacity(0.8), lineWidth: recommended ? 2 : 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Take \(index), \(url.lastPathComponent)\(recommended ? ", recommended" : "")")
+        .task(id: take.path) {
+            thumbnail = await ThumbnailService.shared.thumbnail(for: url, size: 480)
+        }
+    }
+
+    private func outcomeButton(_ label: String, value: Double?) -> some View {
+        let on: Bool = {
+            guard let selected = selectedOutcome else { return false }
+            return selected == value
+        }()
+        return Button(label) { onOutcome(value) }
+            .buttonStyle(on ? AnyButtonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget)) : AnyButtonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget)))
+            .accessibilityLabel("Goal \(label.lowercased())")
+            .accessibilityAddTraits(on ? .isSelected : [])
     }
 }

@@ -529,6 +529,38 @@ public final class ReadStore: @unchecked Sendable {
         return Self.uniqueDisplayTags(tags)
     }
 
+    public struct TimelineSpan: Sendable, Hashable {
+        public let start: Double
+        public let end: Double
+        public let text: String
+    }
+
+    public struct TimelineTracks: Sendable, Equatable {
+        public var examined: [TimelineSpan] = []
+        public var speech: [TimelineSpan] = []
+        public static let empty = TimelineTracks()
+    }
+
+    /// What the timeline analysis has looked at in a video: sampled frame
+    /// times (Examined) and transcribed speech passages (Speech). Stale rows
+    /// from an older revision of the file are left out.
+    public func timelineTracks(forFileID id: Int64) -> TimelineTracks {
+        guard let q = queue else { return .empty }
+        return (try? q.read { db -> TimelineTracks in
+            let examined = try Row.fetchAll(db, sql: """
+                SELECT start_seconds, end_seconds FROM catalog_coverage
+                WHERE file_id = ? AND status IN ('sampled', 'verified') AND model_version NOT LIKE 'apple-speech-%'
+                ORDER BY start_seconds LIMIT 4000
+                """, arguments: [id]).map { TimelineSpan(start: $0["start_seconds"], end: $0["end_seconds"], text: "") }
+            let speech = try Row.fetchAll(db, sql: """
+                SELECT start_seconds, COALESCE(end_seconds, start_seconds) AS end_seconds, text FROM catalog_passages
+                WHERE file_id = ? AND stale = 0 AND start_seconds IS NOT NULL AND id LIKE 'speech:%'
+                ORDER BY start_seconds LIMIT 4000
+                """, arguments: [id]).map { TimelineSpan(start: $0["start_seconds"], end: $0["end_seconds"], text: $0["text"]) }
+            return TimelineTracks(examined: examined, speech: speech)
+        }) ?? .empty
+    }
+
     /// Named people whose faces appear in the file; unnamed clusters are skipped.
     public func personNames(forFileID id: Int64) -> [String] {
         guard let q = queue else { return [] }

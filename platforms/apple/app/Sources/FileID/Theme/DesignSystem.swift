@@ -127,6 +127,37 @@ struct KeyValueRow: View {
     }
 }
 
+// MARK: - Focus
+
+/// Full Keyboard Access ring: 2 pt gold stroke 3 pt outside the control,
+/// following its corner radius. Every DS control draws its own ring and
+/// turns the system one off so a control never shows two.
+struct DSFocusRing: ViewModifier {
+    var radius: CGFloat
+    @Environment(\.isFocused) private var focused
+    func body(content: Content) -> some View {
+        content.overlay {
+            if focused {
+                rounded(radius + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+extension View {
+    func dsFocusRing(radius: CGFloat = Theme.Radius.s) -> some View { modifier(DSFocusRing(radius: radius)) }
+}
+
+/// Hosts a visual ButtonStyle inside a real Button so the face can read
+/// focus, and so keyboard shortcuts, roles and disabled state pass through.
+private struct FocusHostedButton<Face: ButtonStyle>: View {
+    let configuration: PrimitiveButtonStyleConfiguration
+    let face: Face
+    var body: some View {
+        Button(configuration).buttonStyle(face).focusEffectDisabled()
+    }
+}
+
 // MARK: - Buttons
 
 /// Hover is tracked per button so every control shows it is clickable before
@@ -147,11 +178,15 @@ private func resolvedHeight(_ explicit: CGFloat?, _ size: ControlSize, regular: 
     }
 }
 
-struct DSPrimaryButtonStyle: ButtonStyle {
+struct DSPrimaryButtonStyle: PrimitiveButtonStyle {
     var height: CGFloat? = nil
-    func makeBody(configuration: Configuration) -> some View { DSPrimaryFace(configuration: configuration, height: height) }
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(height: height)) }
+    struct Face: ButtonStyle {
+        let height: CGFloat?
+        func makeBody(configuration: Configuration) -> some View { DSPrimaryFace(configuration: configuration, height: height) }
+    }
     fileprivate struct DSPrimaryFace: View {
-        let configuration: Configuration
+        let configuration: ButtonStyleConfiguration
         let height: CGFloat?
         @Environment(\.isEnabled) private var isEnabled
         @Environment(\.controlSize) private var controlSize
@@ -167,17 +202,22 @@ struct DSPrimaryButtonStyle: ButtonStyle {
                 .opacity(isEnabled ? 1 : 0.4)
                 .scaleEffect(configuration.isPressed ? 0.98 : 1)
                 .contentShape(rounded(Theme.Radius.s))
+                .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
                 .animation(Theme.quick, value: configuration.isPressed)
         }
     }
 }
 
-struct DSSecondaryButtonStyle: ButtonStyle {
+struct DSSecondaryButtonStyle: PrimitiveButtonStyle {
     var height: CGFloat? = nil
-    func makeBody(configuration: Configuration) -> some View { DSSecondaryFace(configuration: configuration, height: height) }
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(height: height)) }
+    struct Face: ButtonStyle {
+        let height: CGFloat?
+        func makeBody(configuration: Configuration) -> some View { DSSecondaryFace(configuration: configuration, height: height) }
+    }
     fileprivate struct DSSecondaryFace: View {
-        let configuration: Configuration
+        let configuration: ButtonStyleConfiguration
         let height: CGFloat?
         @Environment(\.isEnabled) private var isEnabled
         @Environment(\.controlSize) private var controlSize
@@ -190,42 +230,59 @@ struct DSSecondaryButtonStyle: ButtonStyle {
                 .padding(.horizontal, small ? 9 : 12)
                 .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.control))
                 .background(Color.white.opacity(configuration.isPressed ? 0.14 : (hovering && isEnabled ? 0.09 : 0.05)), in: rounded(Theme.Radius.s))
-                .overlay(rounded(Theme.Radius.s).stroke(Color.white.opacity(hovering && isEnabled ? 0.24 : 0.14), lineWidth: 1))
+                .overlay(rounded(Theme.Radius.s).stroke(hovering && isEnabled ? Theme.controlBorderHover : Theme.hairlineStrong, lineWidth: 1))
                 .opacity(isEnabled ? 1 : 0.4)
                 .contentShape(rounded(Theme.Radius.s))
+                .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
                 .animation(Theme.quick, value: configuration.isPressed)
         }
     }
 }
 
-struct DSGhostButtonStyle: ButtonStyle {
+/// Text-only button. The frame keeps a 28 pt hit target even though only
+/// the label is drawn.
+struct DSGhostButtonStyle: PrimitiveButtonStyle {
     var color: Color = Theme.text3
-    func makeBody(configuration: Configuration) -> some View { DSGhostFace(configuration: configuration, color: color) }
-    fileprivate struct DSGhostFace: View {
-        let configuration: Configuration
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(color: color)) }
+    struct Face: ButtonStyle {
         let color: Color
+        func makeBody(configuration: Configuration) -> some View { DSGhostFace(configuration: configuration, color: color) }
+    }
+    fileprivate struct DSGhostFace: View {
+        let configuration: ButtonStyleConfiguration
+        let color: Color
+        @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
             configuration.label
                 .font(Theme.Font.body(12.5, .medium))
-                .foregroundStyle(configuration.isPressed || hovering ? Theme.text1 : color)
-                .padding(.horizontal, 6).padding(.vertical, 3)
-                .background(Color.white.opacity(hovering ? 0.06 : 0), in: rounded(Theme.Radius.xs))
+                .foregroundStyle((configuration.isPressed || hovering) && isEnabled ? Theme.text1 : color)
+                .padding(.horizontal, 6)
+                .frame(minHeight: Theme.Metrics.hitTarget)
+                .background(Color.white.opacity(hovering && isEnabled ? 0.06 : 0), in: rounded(Theme.Radius.xs))
+                .opacity(isEnabled ? 1 : 0.4)
                 .contentShape(rounded(Theme.Radius.xs))
+                .dsFocusRing(radius: Theme.Radius.xs)
                 .modifier(HoverTracking(hovering: $hovering))
         }
     }
 }
 
-struct DSAccentOutlineButtonStyle: ButtonStyle {
+struct DSAccentOutlineButtonStyle: PrimitiveButtonStyle {
     var color: Color = Theme.gold
-    var height: CGFloat = Theme.Metrics.controlSmall
-    func makeBody(configuration: Configuration) -> some View { DSAccentOutlineFace(configuration: configuration, color: color, height: height) }
-    fileprivate struct DSAccentOutlineFace: View {
-        let configuration: Configuration
+    var height: CGFloat = Theme.Metrics.control
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(color: color, height: height)) }
+    struct Face: ButtonStyle {
         let color: Color
         let height: CGFloat
+        func makeBody(configuration: Configuration) -> some View { DSAccentOutlineFace(configuration: configuration, color: color, height: height) }
+    }
+    fileprivate struct DSAccentOutlineFace: View {
+        let configuration: ButtonStyleConfiguration
+        let color: Color
+        let height: CGFloat
+        @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
             configuration.label
@@ -233,29 +290,41 @@ struct DSAccentOutlineButtonStyle: ButtonStyle {
                 .foregroundStyle(color)
                 .padding(.horizontal, 10)
                 .frame(height: height)
-                .background(color.opacity(configuration.isPressed ? 0.24 : (hovering ? 0.16 : 0.1)), in: rounded(Theme.Radius.s))
-                .overlay(rounded(Theme.Radius.s).stroke(color.opacity(0.5), lineWidth: 1))
+                .background(color.opacity(configuration.isPressed ? 0.24 : (hovering && isEnabled ? 0.16 : 0.1)), in: rounded(Theme.Radius.s))
+                .overlay(rounded(Theme.Radius.s).stroke(color.opacity(0.6), lineWidth: 1))
+                .opacity(isEnabled ? 1 : 0.4)
                 .contentShape(rounded(Theme.Radius.s))
+                .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
         }
     }
 }
 
-struct DSDangerButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View { DSDangerFace(configuration: configuration) }
+struct DSDangerButtonStyle: PrimitiveButtonStyle {
+    var height: CGFloat = Theme.Metrics.controlLarge
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(height: height)) }
+    struct Face: ButtonStyle {
+        let height: CGFloat
+        func makeBody(configuration: Configuration) -> some View { DSDangerFace(configuration: configuration, height: height) }
+    }
     fileprivate struct DSDangerFace: View {
-        let configuration: Configuration
+        let configuration: ButtonStyleConfiguration
+        let height: CGFloat
+        @Environment(\.isEnabled) private var isEnabled
         @State private var hovering = false
         var body: some View {
             let red = Color(hex: 0xE8433A)
+            let active = (configuration.isPressed || hovering) && isEnabled
             configuration.label
                 .font(Theme.Font.body(13, .semibold))
-                .foregroundStyle(configuration.isPressed || hovering ? .white : Theme.danger)
+                .foregroundStyle(active ? .white : Theme.danger)
                 .padding(.horizontal, 12)
-                .frame(height: Theme.Metrics.controlLarge)
-                .background(configuration.isPressed ? red : red.opacity(hovering ? 0.85 : 0.12), in: rounded(Theme.Radius.s))
+                .frame(height: height)
+                .background(configuration.isPressed ? red : red.opacity(hovering && isEnabled ? 0.85 : 0.12), in: rounded(Theme.Radius.s))
                 .overlay(rounded(Theme.Radius.s).stroke(red.opacity(0.5), lineWidth: 1))
+                .opacity(isEnabled ? 1 : 0.4)
                 .contentShape(rounded(Theme.Radius.s))
+                .dsFocusRing()
                 .modifier(HoverTracking(hovering: $hovering))
         }
     }
@@ -263,28 +332,71 @@ struct DSDangerButtonStyle: ButtonStyle {
 
 /// Plain clickable rows and tiles: whole frame is the hit area, with a soft
 /// hover wash so it reads as clickable.
-struct DSRowButtonStyle: ButtonStyle {
+struct DSRowButtonStyle: PrimitiveButtonStyle {
     var radius: CGFloat = Theme.Radius.m
-    func makeBody(configuration: Configuration) -> some View { DSRowFace(configuration: configuration, radius: radius) }
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(radius: radius)) }
+    struct Face: ButtonStyle {
+        let radius: CGFloat
+        func makeBody(configuration: Configuration) -> some View { DSRowFace(configuration: configuration, radius: radius) }
+    }
     fileprivate struct DSRowFace: View {
-        let configuration: Configuration
+        let configuration: ButtonStyleConfiguration
         let radius: CGFloat
         @State private var hovering = false
         var body: some View {
             configuration.label
                 .contentShape(rounded(radius))
                 .background(Color.white.opacity(configuration.isPressed ? 0.08 : (hovering ? 0.045 : 0)), in: rounded(radius))
+                .dsFocusRing(radius: radius)
                 .modifier(HoverTracking(hovering: $hovering))
         }
     }
 }
 
-extension ButtonStyle where Self == DSPrimaryButtonStyle { static var dsPrimary: DSPrimaryButtonStyle { .init() } }
-extension ButtonStyle where Self == DSSecondaryButtonStyle { static var dsSecondary: DSSecondaryButtonStyle { .init() } }
-extension ButtonStyle where Self == DSGhostButtonStyle { static var dsGhost: DSGhostButtonStyle { .init() } }
-extension ButtonStyle where Self == DSAccentOutlineButtonStyle { static var dsAccentOutline: DSAccentOutlineButtonStyle { .init() } }
-extension ButtonStyle where Self == DSDangerButtonStyle { static var dsDanger: DSDangerButtonStyle { .init() } }
-extension ButtonStyle where Self == DSRowButtonStyle { static var dsRow: DSRowButtonStyle { .init() } }
+/// No chrome, only the focus ring: for controls that draw their own face
+/// (toggles, checkboxes, segments, tiles).
+struct DSBareButtonStyle: PrimitiveButtonStyle {
+    var radius: CGFloat = Theme.Radius.s
+    func makeBody(configuration: Configuration) -> some View { FocusHostedButton(configuration: configuration, face: Face(radius: radius)) }
+    struct Face: ButtonStyle {
+        let radius: CGFloat
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label.contentShape(rounded(radius)).dsFocusRing(radius: radius)
+        }
+    }
+}
+
+/// Square icon-only button with a 28 pt hit target. The label is both the
+/// tooltip and the VoiceOver name.
+struct DSIconButton: View {
+    let label: String
+    let systemImage: String
+    var size: CGFloat
+    var tint: Color
+    let action: () -> Void
+    init(_ label: String, systemImage: String, size: CGFloat = Theme.Metrics.hitTarget, tint: Color = Theme.text2, action: @escaping () -> Void) {
+        self.label = label; self.systemImage = systemImage; self.size = size; self.tint = tint; self.action = action
+    }
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: size, height: size)
+        }
+        .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
+        .help(label)
+        .accessibilityLabel(label)
+    }
+}
+
+extension PrimitiveButtonStyle where Self == DSPrimaryButtonStyle { static var dsPrimary: DSPrimaryButtonStyle { .init() } }
+extension PrimitiveButtonStyle where Self == DSSecondaryButtonStyle { static var dsSecondary: DSSecondaryButtonStyle { .init() } }
+extension PrimitiveButtonStyle where Self == DSGhostButtonStyle { static var dsGhost: DSGhostButtonStyle { .init() } }
+extension PrimitiveButtonStyle where Self == DSAccentOutlineButtonStyle { static var dsAccentOutline: DSAccentOutlineButtonStyle { .init() } }
+extension PrimitiveButtonStyle where Self == DSDangerButtonStyle { static var dsDanger: DSDangerButtonStyle { .init() } }
+extension PrimitiveButtonStyle where Self == DSRowButtonStyle { static var dsRow: DSRowButtonStyle { .init() } }
+extension PrimitiveButtonStyle where Self == DSBareButtonStyle { static var dsBare: DSBareButtonStyle { .init() } }
 
 // MARK: - Toggle / radio / check
 
@@ -300,10 +412,11 @@ struct DSToggleStyle: ToggleStyle {
                 .animation(Theme.spring, value: configuration.isOn)
                 configuration.label
             }
+            .frame(minHeight: Theme.Metrics.hitTarget)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
+        .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label } }
     }
 }
 
@@ -315,6 +428,7 @@ struct DSRadio: View {
             if on { Circle().fill(Theme.gold).frame(width: 7, height: 7) }
         }
         .frame(width: 15, height: 15)
+        .accessibilityHidden(true)
     }
 }
 
@@ -327,18 +441,21 @@ struct DSCheck: View {
             if on { Image(systemName: "checkmark").font(.system(size: 9, weight: .heavy)).foregroundStyle(Theme.onGold) }
         }
         .animation(Theme.quick, value: on)
+        .accessibilityHidden(true)
     }
 }
 
 // MARK: - Segmented bar (generic)
 
+/// Each segment's hit area is the full bar height (28 pt by default); the
+/// gold pill is drawn 2 pt inside it.
 struct SegmentedBar<T: Hashable>: View {
     @Binding var selection: T
     let options: [(T, String)]
-    var height: CGFloat = 26
+    var height: CGFloat = Theme.Metrics.hitTarget
     @Namespace private var pill
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(options, id: \.0) { option in
                 let on = selection == option.0
                 Button { withAnimation(Theme.spring) { selection = option.0 } } label: {
@@ -346,20 +463,19 @@ struct SegmentedBar<T: Hashable>: View {
                         .font(Theme.Font.body(12.5, on ? .semibold : .medium))
                         .foregroundStyle(on ? Theme.onGold : Theme.text2)
                         .lineLimit(1).fixedSize()
-                        .padding(.horizontal, 10)
-                        .frame(height: height - 4)
+                        .padding(.horizontal, 12)
+                        .frame(height: height)
                         .background {
-                            if on { rounded(Theme.Radius.xs).fill(Theme.gold).matchedGeometryEffect(id: "pill", in: pill) }
+                            if on { rounded(Theme.Radius.xs).fill(Theme.gold).padding(2).matchedGeometryEffect(id: "pill", in: pill) }
                         }
-                        .contentShape(rounded(Theme.Radius.xs))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.xs))
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }
-        .padding(2)
         .background(Color.black.opacity(0.28), in: rounded(Theme.Radius.s))
         .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -464,11 +580,13 @@ struct RailRow<Content: View>: View {
             }
             .padding(.horizontal, 10)
             .frame(height: height)
+            .frame(minHeight: Theme.Metrics.hitTarget)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(selected ? Theme.gold.opacity(0.12) : Color.clear, in: rounded(Theme.Radius.m))
             .overlay(rounded(Theme.Radius.m).stroke(selected ? Theme.gold.opacity(0.45) : Color.clear, lineWidth: 1))
         }
         .buttonStyle(.dsRow)
+        .accessibilityAddTraits(selected ? .isSelected : [])
         .padding(.horizontal, 6)
     }
 }
@@ -499,21 +617,61 @@ struct KindBadge: View {
 
 // MARK: - Inputs
 
+/// Text field on a dark well. Keyboard focus draws the same gold ring as
+/// the buttons; `mono` is for paths, numbers and timecodes.
 struct DSTextField: View {
     let placeholder: String
     @Binding var text: String
     var icon: String? = nil
     var height: CGFloat = Theme.Metrics.controlLarge
+    var mono = false
     var onSubmit: () -> Void = {}
+    @FocusState private var focused: Bool
     var body: some View {
         HStack(spacing: 8) {
-            if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3) }
-            TextField(placeholder, text: $text).textFieldStyle(.plain).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1).onSubmit(onSubmit)
+            if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3).accessibilityHidden(true) }
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(mono ? Theme.Font.mono(12.5) : Theme.Font.body(13.5))
+                .foregroundStyle(Theme.text1)
+                .focused($focused)
+                .onSubmit(onSubmit)
+                .accessibilityLabel(placeholder)
+            if !text.isEmpty && icon == "magnifyingglass" {
+                DSIconButton("Clear", systemImage: "xmark", size: 20, tint: Theme.text3) { text = "" }
+            }
         }
         .padding(.horizontal, 10)
         .frame(height: height)
         .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
         .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
+        .overlay { if focused { rounded(Theme.Radius.s + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
+        .contentShape(rounded(Theme.Radius.s))
+        .onTapGesture { focused = true }
+        .animation(Theme.quick, value: focused)
+    }
+}
+
+/// Numeric twin of `DSTextField` for seconds, pixels and similar values.
+struct DSNumberField<F: ParseableFormatStyle>: View where F.FormatOutput == String {
+    let placeholder: String
+    @Binding var value: F.FormatInput
+    let format: F
+    var width: CGFloat = 96
+    var height: CGFloat = Theme.Metrics.control
+    @FocusState private var focused: Bool
+    var body: some View {
+        TextField(placeholder, value: $value, format: format)
+            .textFieldStyle(.plain)
+            .font(Theme.Font.mono(12.5))
+            .foregroundStyle(Theme.text1)
+            .focused($focused)
+            .accessibilityLabel(placeholder)
+            .padding(.horizontal, 8)
+            .frame(width: width, height: height)
+            .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
+            .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
+            .overlay { if focused { rounded(Theme.Radius.s + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
     }
 }
 
@@ -573,9 +731,9 @@ struct ToastView: View {
 }
 
 /// Type-erased button style for call sites that choose a style at runtime.
-struct AnyButtonStyle: ButtonStyle {
+struct AnyButtonStyle: PrimitiveButtonStyle {
     private let make: (Configuration) -> AnyView
-    init<S: ButtonStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
+    init<S: PrimitiveButtonStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
     func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }
 
@@ -590,11 +748,12 @@ struct DSCheckboxToggleStyle: ToggleStyle {
                 DSCheck(on: configuration.isOn)
                 configuration.label.font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
             }
+            .frame(minHeight: Theme.Metrics.hitTarget)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.xs))
         .opacity(isEnabled ? 1 : 0.4)
-        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+        .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label } }
     }
 }
 

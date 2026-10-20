@@ -1,41 +1,30 @@
 import SwiftUI
 
-/// Three big-number tiles above the Sankey: Staying / Tidying /
-/// Reorganizing. Hovering a tile cross-highlights the matching ribbons
-/// + recommendation cards via the shared hover bus.
+/// Metric row above the map: Staying put / Tidying / Reorganizing. Hovering
+/// a cell cross-highlights the matching ribbons and recommendation rows.
 struct RestructureStatHero: View {
     let summary: RestructureView.AssistantSummary
     var hoverBus: RestructureHoverBus
 
     var body: some View {
-        HStack(spacing: 12) {
-            StatTile(
-                outcome: .keep,
-                value: summary.staysPutFiles,
-                label: "Staying put",
-                hint: "\(summary.anchorFolders) anchored \(summary.anchorFolders == 1 ? "folder" : "folders")",
-                hoverBus: hoverBus
-            )
-            StatTile(
-                outcome: .tidy,
-                value: summary.movedOutFiles,
-                label: "Tidying",
-                hint: "\(summary.mixedFolders) mixed \(summary.mixedFolders == 1 ? "folder" : "folders")",
-                hoverBus: hoverBus
-            )
-            StatTile(
-                outcome: .reorganize,
-                value: summary.dissolvedFiles,
-                label: "Reorganizing",
-                hint: "\(summary.junkFolders) generic \(summary.junkFolders == 1 ? "folder" : "folders")",
-                hoverBus: hoverBus
-            )
+        HStack(spacing: 0) {
+            StatCell(outcome: .keep, value: summary.staysPutFiles, label: "Staying put",
+                     hint: "\(summary.anchorFolders) kept \(summary.anchorFolders == 1 ? "folder" : "folders")", hoverBus: hoverBus)
+            VHairline()
+            StatCell(outcome: .tidy, value: summary.movedOutFiles, label: "Tidying",
+                     hint: "\(summary.mixedFolders) mixed \(summary.mixedFolders == 1 ? "folder" : "folders")", hoverBus: hoverBus)
+            VHairline()
+            StatCell(outcome: .reorganize, value: summary.dissolvedFiles, label: "Reorganizing",
+                     hint: "\(summary.junkFolders) generic \(summary.junkFolders == 1 ? "folder" : "folders")", hoverBus: hoverBus)
         }
-        .frame(maxWidth: .infinity)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
     }
 }
 
-private struct StatTile: View {
+private struct StatCell: View {
     let outcome: RestructureOutcome
     let value: Int
     let label: String
@@ -46,48 +35,31 @@ private struct StatTile: View {
 
     var body: some View {
         let isActive = hoverBus.touchesOutcome(outcome)
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Image(systemName: outcome.icon)
-                    .font(Theme.Font.body(12))
-                    .foregroundStyle(outcome.tint)
-                Text(label.uppercased())
-                    .font(.system(size: 10, weight: .semibold).monospaced())
-                    .tracking(0.6)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
+                Circle().fill(outcome.tint).frame(width: 7, height: 7)
+                SectionLabel(label)
             }
-            Text("\(value)")
-                .font(.system(size: 36, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(isActive ? outcome.tint : Color.primary)
-            Text(hint).font(Theme.Font.body(11)).foregroundStyle(.tertiary)
+            Text(value.formatted())
+                .font(Theme.Font.mono(20, .semibold))
+                .foregroundStyle(isActive ? outcome.tint : Theme.text1)
+                .contentTransition(.numericText())
+            MetaText(hint, size: 11.5)
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
+        .padding(.horizontal, 14).padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.ultraThinMaterial))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .stroke(
-                    isActive ? outcome.tint.opacity(0.7) : Color.white.opacity(0.06),
-                    lineWidth: isActive ? 1.5 : 1
-                )
-        )
-        .shadow(
-            color: isActive ? outcome.tint.opacity(0.30) : .black.opacity(0.16),
-            radius: isActive ? 16 : 5,
-            y: isActive ? 5 : 2
-        )
-        .scaleEffect(isActive ? 1.012 : 1.0)
+        .background(outcome.tint.opacity(isActive ? 0.07 : 0), ignoresSafeAreaEdges: [])
         .contentShape(Rectangle())
         .onHover { hovering in
-            // Edge-only forwarding to the bus — AppKit can fire
-            // duplicate hover events during resize / focus change.
+            // Edge-only forwarding: AppKit can repeat hover events on resize.
             if hovering != isHovered {
                 isHovered = hovering
                 hoverBus.set(hovering ? .outcome(outcome) : nil)
             }
         }
-        .animation(.easeInOut(duration: 0.18), value: isActive)
+        .animation(Theme.spring, value: isActive)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue("\(value) files, \(hint)")
     }
 }

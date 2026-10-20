@@ -189,8 +189,7 @@ struct Sidebar: View {
                 Text(err.message).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
             }
             Spacer(minLength: 4)
-            Button { engine.clearLastError() } label: { Image(systemName: "xmark").foregroundStyle(Theme.text3) }
-                .buttonStyle(.plain).help("Dismiss").accessibilityLabel("Dismiss")
+            DSIconButton("Dismiss error", systemImage: "xmark", tint: Theme.text3) { engine.clearLastError() }
         }
         .padding(8)
         .background(Theme.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))

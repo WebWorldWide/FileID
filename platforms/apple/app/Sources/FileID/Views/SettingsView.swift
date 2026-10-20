@@ -291,15 +291,9 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            Button {
+                            DSIconButton("Stop excluding \(folder) from Deep Analyze", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
                             }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.secondary)
-                            .help("Stop excluding \(folder) from Deep Analyze")
-                            .accessibilityLabel("Stop excluding \(folder) from Deep Analyze")
                         }
                     }
                 }

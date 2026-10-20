@@ -52,6 +52,8 @@ enum Theme {
     static let nsHairline = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
     static let nsHairlineHover = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.28), increased: NSColor.white.withAlphaComponent(0.6))
     static let controlBorder  = Color.white.opacity(0.18)
+    static let controlBorderHover = adaptive(normal: NSColor.white.withAlphaComponent(0.24), increased: NSColor.white.withAlphaComponent(0.6))
+    static let focusRing      = gold.opacity(0.9)
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
 
@@ -82,6 +84,8 @@ enum Theme {
         static let control: CGFloat = 28
         static let controlSmall: CGFloat = 24
         static let controlLarge: CGFloat = 30
+        /// Smallest click/tap target on any control (HIG, macOS).
+        static let hitTarget: CGFloat = 28
         static let pageInsetX: CGFloat = 26
         static let pageInsetY: CGFloat = 20
         static let sidePane: CGFloat = 300
@@ -102,9 +106,14 @@ enum Theme {
         static var pageTitle: SwiftUI.Font { display(34) }
     }
 
-    /// One quick, well-damped spring for every state change; nothing bounces.
-    static let spring = Animation.spring(response: 0.24, dampingFraction: 0.9)
+    /// Tight spring (0.35 / 0.78) for control state: segments, toggles,
+    /// chips, selection. Nil under Reduce Motion, so changes land instantly.
+    @MainActor static var spring: Animation? { reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.78) }
+    /// Standard spring (0.40 / 0.80) for layout: panes, panels, rows
+    /// appearing. Under Reduce Motion it becomes a short cross-fade.
+    @MainActor static var springStandard: Animation { reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.4, dampingFraction: 0.8) }
     static let quick = Animation.easeOut(duration: 0.14)
+    @MainActor static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 }
 
 /// Registers the bundled brand fonts once per process. The resource bundle

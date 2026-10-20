@@ -70,7 +70,7 @@ struct Detail: View {
             switch activeTab {
             case .library:     LibraryView(engine: engine, store: store)
             case .people:      PeopleView(engine: engine, store: store, onSwitchTab: onSwitchTab)
-            case .moments:     CatalogWorkbench(engine: engine, inline: true)
+            case .moments:     CatalogWorkbench(engine: engine, store: store, inline: true)
             case .deep:        DeepAnalyzeView(engine: engine, store: store, onSwitchTab: onSwitchTab)
             case .chat:        ChatWorkbench(engine: engine)
             case .takes:       TakeWorkbench(engine: engine, candidates: [], inline: true)
