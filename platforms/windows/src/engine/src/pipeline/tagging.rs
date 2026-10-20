@@ -665,22 +665,11 @@ impl ModelStack {
         );
 
         // The scene labeler matrix is loaded from precomputed embeddings
-        // (scene_embeddings_precomputed.rs) and is the canonical auto-tagger.
-        // The per-file CLIP embedding for semantic search uses the same
-        // image encoder; if ENABLE_CLIP_SCENE_TAGS is off, the labeler is skipped.
-        let scene_labeler = if crate::models::scene_vocab::ENABLE_CLIP
-            && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS
-        {
-            Some(crate::models::scene_vocab::shared_scene_labeler())
-        } else {
-            None
-        };
+        // (scene_embeddings_precomputed.rs); the per-file CLIP embedding for
+        // semantic search uses the same image encoder.
+        let scene_labeler = Some(crate::models::scene_vocab::shared_scene_labeler());
 
-        let (mobileclip_pool, mobileclip_batch) = if !crate::models::scene_vocab::ENABLE_CLIP {
-            // CLIP fully off — no MobileCLIP image encoder, so no per-file
-            // embedding and no semantic search.
-            (None, None)
-        } else if use_batch {
+        let (mobileclip_pool, mobileclip_batch) = if use_batch {
             // Batch-coordinator path (default for DirectML; opt in on CUDA/TensorRT with FILEID_CLIP_USE_BATCH=1).
             let coord = match crate::models::mobileclip::default_weights_path() {
                 Ok(p) if p.exists() => match MobileClipImage::load(p.clone()) {
@@ -2455,13 +2444,11 @@ async fn process_file_predecoded(
                 // chips and the threshold can be tuned against persisted
                 // scores. Skips silently when the labeler isn't built (CLIP
                 // text model not installed) or the embedding is missing.
-                // Gated by ENABLE_CLIP_SCENE_TAGS — flip that const to false to
-                // drop CLIP scan-time tagging and rely solely on VLM tags.
                 // CLIP zero-shot scene tags are the FALLBACK tagger — only run
                 // when RAM++ didn't (not installed / device-dead / errored), so
                 // a RAM++-tagged file isn't double-tagged with noisier CLIP
                 // scene guesses.
-                if !ram_plus_ran && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS {
+                if !ram_plus_ran {
                     let redacted = crate::platform::redact_path_for_log(&file.path);
                     if let (Some(labeler), Some(emb)) = (&models.scene_labeler, &tagged.clip_embedding) {
                         let scene_started = Instant::now();
@@ -2598,9 +2585,7 @@ async fn process_file_predecoded(
     // setting tags_evaluated would make the dbwriter delete-then-reinsert wipe
     // the file's previously-persisted content tags. (audit R3-19)
     let visual_tagger_ran = ram_plus_ran
-        || (models.scene_labeler.is_some()
-            && tagged.clip_embedding.is_some()
-            && crate::models::scene_vocab::ENABLE_CLIP_SCENE_TAGS);
+        || (models.scene_labeler.is_some() && tagged.clip_embedding.is_some());
     tagged.tags_evaluated = !coord.is_gpu_dead()
         && !tagged.failed
         && !file.online_only

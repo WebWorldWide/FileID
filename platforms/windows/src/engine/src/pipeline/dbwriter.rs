@@ -741,56 +741,6 @@ fn percentile(values: &mut [f64], p: f64) -> f64 {
     values[idx]
 }
 
-/// Bare INSERT (no RETURNING) — retained for test fixtures that don't
-/// need the id. The hot-path writer uses `INSERT_FILE_RETURNING_ID_SQL`
-/// below, which is identical plus a `RETURNING id` suffix.
-/// `path_search` (?20) is bound the NFC-normalized path (`nfc_path_search`),
-/// NOT the verbatim `path_text` (?1) — the v16 contract, so NFD filenames are
-/// found by the app's NFC query.
-#[cfg(test)] // the bin path uses the RETURNING variant
-const INSERT_FILE_SQL: &str = r#"
-    INSERT INTO files (
-        path_text, path_hash, size_bytes,
-        created_at, modified_at, scanned_at,
-        kind, extension,
-        phash, aesthetic,
-        has_faces, has_text,
-        camera_model, location_lat, location_lon,
-        failed, error_message,
-        content_hash, file_ref, path_search
-    )
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-    ON CONFLICT(path_text) DO UPDATE SET
-        path_hash    = excluded.path_hash,
-        path_search  = excluded.path_search,
-        size_bytes   = excluded.size_bytes,
-        modified_at  = excluded.modified_at,
-        scanned_at   = excluded.scanned_at,
-        kind         = excluded.kind,
-        extension    = excluded.extension,
-        -- Preserve previously-computed vision/EXIF metadata when this re-scan
-        -- produced no value (decode failed, file lock, mid-scan GPU TDR, or an
-        -- online-only/dehydrated placeholder leaves these NULL). A genuine
-        -- content change bumps modified_at and the successful re-decode supplies
-        -- a fresh Some(_) that COALESCE picks instead. Mirrors content_hash.
-        phash        = COALESCE(excluded.phash, phash),
-        aesthetic    = COALESCE(excluded.aesthetic, aesthetic),
-        camera_model = COALESCE(excluded.camera_model, camera_model),
-        location_lat = COALESCE(excluded.location_lat, location_lat),
-        location_lon = COALESCE(excluded.location_lon, location_lon),
-        -- has_faces/has_text are NOT NULL 0/1, so COALESCE can't protect them.
-        -- Only overwrite when the producing stage actually ran this session
-        -- (?21 = faces_evaluated, ?22 = ocr/doc text stage ran) — keeps the
-        -- files row consistent with its still-present face_prints/ocr_text
-        -- children on a models-missing / GPU-dead / online-only re-scan.
-        has_faces    = CASE WHEN ?21 THEN excluded.has_faces ELSE has_faces END,
-        has_text     = CASE WHEN ?22 THEN excluded.has_text  ELSE has_text  END,
-        failed       = excluded.failed,
-        error_message= excluded.error_message,
-        content_hash = COALESCE(excluded.content_hash, content_hash),
-        file_ref     = COALESCE(excluded.file_ref, file_ref)
-"#;
-
 /// Hot-path INSERT. Returns `id` whether the row was freshly inserted or
 /// updated via the ON CONFLICT DO UPDATE branch — SQLite 3.35+ guarantees
 /// RETURNING fires on both paths. Eliminates the per-row SELECT round
@@ -1105,33 +1055,21 @@ mod tests {
         assert!(writer.rename_heal_enabled);
     }
 
-    /// Minimal mirror of the per-file body in `flush`. Exercises the
-    /// real INSERT_FILE_SQL constant under test so any drift in the
-    /// ON CONFLICT clause shows up here. Skips the embedding/face/ocr
-    /// branches — they have their own contracts; this asserts the
-    /// files-table de-dup contract specifically.
+    /// The files-table upsert alone (no heal, no child rows), via the real
+    /// INSERT_FILE_RETURNING_ID_SQL so drift in its ON CONFLICT clause shows up.
     fn insert_one(conn: &Connection, f: &TaggedFile) -> Result<()> {
         let path_text = f.path.to_string_lossy();
-        let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
-        // Mirror the production `flush`: path_search (?20) is the NFC form.
-        let path_search = nfc_path_search(&path_text);
-        let extension = f
-            .path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        conn.execute(
-            INSERT_FILE_SQL,
+        conn.query_row(
+            INSERT_FILE_RETURNING_ID_SQL,
             params![
                 path_text,
-                path_hash,
+                crate::util::path_safety::stable_path_hash(&path_text),
                 f.size_bytes as i64,
                 None::<f64>,
                 f.modified_unix,
                 f.scanned_unix,
                 f.kind.as_str(),
-                extension,
+                f.path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase(),
                 f.phash,
                 f.aesthetic,
                 f.has_faces as i64,
@@ -1143,10 +1081,11 @@ mod tests {
                 f.error_message,
                 f.content_hash.as_ref().map(|h| h.as_slice()),
                 f.file_ref.map(|r| r as i64),
-                path_search,
+                nfc_path_search(&path_text),
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
             ],
+            |row| row.get::<_, i64>(0),
         )?;
         Ok(())
     }

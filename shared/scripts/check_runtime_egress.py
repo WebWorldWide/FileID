@@ -174,7 +174,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "f2df458226b36379c7368d67f254475c5a20f2b3c7006db902a91f54874a2bbf",
   "platforms/windows/src/engine/src/platform.rs": "f953f532d035a0bb80e1837dd59a6a1434ad99d433e0c5e8a6e58fcbec728a26",
   "platforms/windows/src/engine/src/shell/heic.rs": "9e21d1bb73da451e67f410aa18dcf034316bc3b88ca4f2c732c32c06fe1171cf",
-  "platforms/windows/src/engine/src/shell/mod.rs": "0f3c6553329db4248285c1bc50e115cb3f754d57a8a7ba8d934681529bedcf6d",
+  "platforms/windows/src/engine/src/shell/mod.rs": "9dc20acb6c1a3830e7eb10e3b91387398012b83fcca80bc90d8869822d7af241",
   "platforms/windows/src/engine/src/shell/ocr.rs": "5983864f1b2f13c48d4df884ac210e69df7ce781cb69ca132ff44a7f8098259e",
   "platforms/windows/src/engine/src/shell/tags.rs": "e3173acbbbae07939168102cbcb8a082e48e15bb92b0c82bd0eb4ffec527816a",
   "platforms/windows/src/engine/src/shell/trash.rs": "81e1cf3e11a4d3a839fa439e014199655f8cdd91c3a09f79f1139e21b21acc99",
