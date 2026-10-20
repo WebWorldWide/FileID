@@ -718,6 +718,12 @@ button.v3-map-node:hover, button.v3-map-node.lit { border-color: alpha(@fileid_g
 .v3-tree-row, button.v3-tree-row { color: @fileid_text1; }
 .v3-rec.lit { background-color: alpha(#FFFFFF, 0.06); box-shadow: inset 3px 0 alpha(@fileid_gold, 0.8); }
 .v3-staying-row.lit { background-color: alpha(@fileid_pink, 0.08); }
+.v3-inspector { background-color: alpha(#0F0F11, 0.86); border-left: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-inspector-header { padding: 12px 16px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-inspector-pad { padding: 16px; }
+.v3-composer-box.inspector { padding: 12px 16px; }
+button.v3-sources-toggle { min-height: 34px; padding: 0 16px; border: none; border-radius: 0; box-shadow: none; background: transparent; }
+button.v3-sources-toggle:hover { background-color: alpha(#FFFFFF, 0.04); }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;

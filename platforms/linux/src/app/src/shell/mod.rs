@@ -25,6 +25,7 @@ pub enum Action {
     AskChat(String),
     LibraryQuery(String),
     FocusSearch,
+    ToggleChat,
     DismissNote,
 }
 

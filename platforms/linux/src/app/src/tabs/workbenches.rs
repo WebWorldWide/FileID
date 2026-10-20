@@ -72,6 +72,10 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     super::chat::chat(engine)
 }
 
+pub fn chat_inspector(engine: Engine, on_close: Rc<dyn Fn()>) -> gtk::Widget {
+    super::chat::inspector(engine, on_close)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

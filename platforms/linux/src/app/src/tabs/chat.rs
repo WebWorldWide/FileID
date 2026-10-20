@@ -314,21 +314,40 @@ fn send_request(
 }
 
 pub fn chat(engine: Engine) -> gtk::Widget {
+    build(engine, None)
+}
+
+/// Chat beside the current page (DESIGN_V3_PORT "Chat", inspector variant):
+/// 380 px, three chips, a close button (Esc) and the sources folded into a
+/// "SOURCES · N" row whose chevron turns on the standard spring.
+pub fn inspector(engine: Engine, on_close: Rc<dyn Fn()>) -> gtk::Widget {
+    build(engine, Some(on_close))
+}
+
+fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
+    let compact = inspector.is_some();
     // ── Conversation column ────────────────────────────────────────────────
     let column = v3::vbox(0);
     column.set_hexpand(true);
+    column.set_vexpand(true);
     let header = v3::hbox(12);
-    header.add_css_class("v3-chat-header");
+    header.add_css_class(if compact { "v3-inspector-header" } else { "v3-chat-header" });
     let looking = v3::vbox(6);
     looking.set_hexpand(true);
     looking.append(&v3::section("Looking in"));
     let chips = v3::hbox(6);
-    for chip in ["Names", "Tags", "Captions", "Chapters", "Text in files"] {
+    let (names, spoken): (&[&str], &str) = if compact {
+        (&["Names", "Tags", "Captions"], "Looking in names, tags and captions")
+    } else {
+        (
+            &["Names", "Tags", "Captions", "Chapters", "Text in files"],
+            "Looking in names, tags, captions, chapters and text in files",
+        )
+    };
+    for chip in names {
         chips.append(&v3::label(chip, &["v3-chip"]));
     }
-    chips.update_property(&[gtk::accessible::Property::Label(
-        "Looking in names, tags, captions, chapters and text in files",
-    )]);
+    chips.update_property(&[gtk::accessible::Property::Label(spoken)]);
     looking.append(&chips);
     header.append(&looking);
     let clear = v3::ghost("Clear");
@@ -336,6 +355,12 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     clear.set_sensitive(false);
     clear.set_valign(gtk::Align::Center);
     header.append(&clear);
+    if let Some(on_close) = inspector.clone() {
+        let close = v3::icon_button("window-close-symbolic", "Close chat (Esc)");
+        close.set_valign(gtk::Align::Center);
+        close.connect_clicked(move |_| on_close());
+        header.append(&close);
+    }
     column.append(&header);
 
     let messages = v3::vbox(20);
@@ -358,7 +383,7 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     ));
     busy.set_visible(false);
     let thread = v3::vbox(20);
-    thread.add_css_class("v3-page-pad");
+    thread.add_css_class(if compact { "v3-inspector-pad" } else { "v3-page-pad" });
     thread.append(&empty);
     thread.append(&messages);
     thread.append(&busy);
@@ -376,6 +401,9 @@ pub fn chat(engine: Engine) -> gtk::Widget {
 
     let composer_box = v3::vbox(8);
     composer_box.add_css_class("v3-composer-box");
+    if compact {
+        composer_box.add_css_class("inspector");
+    }
     let input_row = v3::hbox(8);
     let composer = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
@@ -436,16 +464,21 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     // ── Sources pane ───────────────────────────────────────────────────────
     let pane = v3::vbox(0);
     pane.add_css_class("v3-pane");
-    pane.set_size_request(300, -1);
-    let pane_header = v3::hbox(8);
-    pane_header.add_css_class("v3-sources-header");
-    let pane_title = v3::section("Sources");
-    pane_title.set_hexpand(true);
-    pane_header.append(&pane_title);
     let sources_count = v3::meta("0");
     sources_count.add_css_class("numeric");
-    pane_header.append(&sources_count);
-    pane.append(&pane_header);
+    let pane_header = v3::hbox(8);
+    let pane_title = v3::section(if compact { "Sources ·" } else { "Sources" });
+    if compact {
+        pane_header.append(&pane_title);
+        pane_header.append(&sources_count);
+    } else {
+        pane.set_size_request(300, -1);
+        pane_header.add_css_class("v3-sources-header");
+        pane_title.set_hexpand(true);
+        pane_header.append(&pane_title);
+        pane_header.append(&sources_count);
+        pane.append(&pane_header);
+    }
     let video = gtk::Video::builder()
         .autoplay(false)
         .css_classes(["v3-black"])
@@ -464,15 +497,28 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     let sources = v3::vbox(2);
     let sources_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
+        .vexpand(!compact)
         .child(&sources)
         .build();
     pane.append(&sources_scroll);
 
-    let root = v3::hbox(0);
-    root.append(&column);
-    root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    root.append(&pane);
+    let root = if compact {
+        let root = v3::vbox(0);
+        root.add_css_class("v3-inspector");
+        root.set_size_request(380, -1);
+        root.append(&column);
+        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        sources_scroll.set_max_content_height(200);
+        sources_scroll.set_propagate_natural_height(true);
+        root.append(&collapsible_sources(&pane_header, &pane));
+        root
+    } else {
+        let root = v3::hbox(0);
+        root.append(&column);
+        root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        root.append(&pane);
+        root
+    };
 
     let ui = Rc::new(ChatUi {
         engine: engine.clone(),
@@ -505,7 +551,9 @@ pub fn chat(engine: Engine) -> gtk::Widget {
             .child(&content)
             .css_classes(["v3-suggestion"])
             .build();
-        suggestion.set_size_request(460, -1);
+        if !compact {
+            suggestion.set_size_request(460, -1);
+        }
         let weak = Rc::downgrade(&ui);
         suggestion.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
@@ -514,11 +562,89 @@ pub fn chat(engine: Engine) -> gtk::Widget {
         });
         suggestions.append(&suggestion);
     }
-    wire(&ui, &root);
+    wire(&ui, &root, inspector);
     root.upcast()
 }
 
-fn wire(ui: &Rc<ChatUi>, root: &gtk::Box) {
+/// The inspector's 34 px "SOURCES · N" row: a chevron that turns 90° on the
+/// standard spring and a revealer holding the player and the list.
+fn collapsible_sources(header: &gtk::Box, pane: &gtk::Box) -> gtk::Box {
+    let section = v3::vbox(0);
+    let angle = Rc::new(Cell::new(0.0_f64));
+    let chevron = gtk::DrawingArea::builder()
+        .content_width(12)
+        .content_height(12)
+        .valign(gtk::Align::Center)
+        .build();
+    let draw_angle = angle.clone();
+    chevron.set_draw_func(move |_, cr, w, h| {
+        let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+        cr.translate(cx, cy);
+        cr.rotate(draw_angle.get().to_radians());
+        cr.move_to(-2.0, -4.0);
+        cr.line_to(2.0, 0.0);
+        cr.line_to(-2.0, 4.0);
+        cr.set_source_rgb(0.651, 0.675, 0.702);
+        cr.set_line_width(1.5);
+        let _ = cr.stroke();
+    });
+    let row = v3::hbox(8);
+    row.append(&chevron);
+    row.append(header);
+    let toggle = gtk::Button::builder()
+        .child(&row)
+        .css_classes(["v3-sources-toggle"])
+        .build();
+    toggle.update_property(&[gtk::accessible::Property::Label("Sources")]);
+    toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
+    section.append(&toggle);
+    let revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideUp)
+        .transition_duration(if crate::spring::animations_enabled() { 220 } else { 0 })
+        .child(pane)
+        .build();
+    section.append(&revealer);
+    let animation: Rc<RefCell<Option<adw::SpringAnimation>>> = Rc::new(RefCell::new(None));
+    toggle.connect_clicked(move |toggle| {
+        let open = !revealer.reveals_child();
+        revealer.set_reveal_child(open);
+        toggle.update_state(&[gtk::accessible::State::Expanded(Some(open))]);
+        if let Some(previous) = animation.take() {
+            previous.pause();
+        }
+        let target = angle.clone();
+        let area = chevron.clone();
+        let next = crate::spring::animate(&chevron, angle.get(), if open { 90.0 } else { 0.0 }, move |value| {
+            target.set(value);
+            area.queue_draw();
+        });
+        animation.replace(Some(next));
+    });
+    section
+}
+
+fn wire(ui: &Rc<ChatUi>, root: &gtk::Box, inspector: Option<Rc<dyn Fn()>>) {
+    if let Some(on_close) = inspector {
+        let escape = gtk::EventControllerKey::new();
+        escape.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                on_close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        root.add_controller(escape);
+    }
+    // The page and the inspector share one conversation; whichever appears
+    // reloads it so both show what the other added.
+    let weak = Rc::downgrade(ui);
+    root.connect_map(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            if ui.engine.borrow().is_ready() && !ui.stop.is_visible() {
+                ui.dispatch("history");
+            }
+        }
+    });
     let weak = Rc::downgrade(ui);
     ui.composer.buffer().connect_changed(move |buffer| {
         if let Some(ui) = weak.upgrade() {

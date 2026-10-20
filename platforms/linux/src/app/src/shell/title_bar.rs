@@ -86,6 +86,7 @@ pub struct TitleBar {
     job_shape: RefCell<Vec<(&'static str, bool)>>,
     job_rows: RefCell<Vec<JobRow>>,
     settings: gtk::Button,
+    chat: gtk::Button,
 }
 
 impl TitleBar {
@@ -237,6 +238,16 @@ impl TitleBar {
         let act_settings = act.clone();
         settings.connect_clicked(move |_| act_settings(Action::Navigate("settings")));
         header.pack_end(&settings);
+        let chat = gtk::Button::builder()
+            .icon_name("chat-symbolic")
+            .css_classes(["tb-control", "tb-icon"])
+            .tooltip_text("Open chat beside this page (Ctrl+Shift+K)")
+            .valign(gtk::Align::Center)
+            .build();
+        chat.update_property(&[gtk::accessible::Property::Label("Open chat beside this page")]);
+        let act_chat = act.clone();
+        chat.connect_clicked(move |_| act_chat(Action::ToggleChat));
+        header.pack_end(&chat);
 
         let activity_content = hbox(8);
         let activity_dot = gtk::Box::builder()
@@ -302,6 +313,7 @@ impl TitleBar {
             job_shape: RefCell::new(vec![("", false)]),
             job_rows: RefCell::new(Vec::new()),
             settings,
+            chat,
         });
         bar.wire_search();
         bar.update(&Status::default(), None);
@@ -418,6 +430,18 @@ impl TitleBar {
             }
         }
         self.search_popover.popup();
+    }
+
+    /// The chat button: lit while the inspector is open, off on the Chat page.
+    pub fn set_chat_state(&self, open: bool, on_chat_page: bool) {
+        if open {
+            self.chat.add_css_class("active");
+        } else {
+            self.chat.remove_css_class("active");
+        }
+        self.chat.set_sensitive(!on_chat_page);
+        let label = if open { "Close chat (Ctrl+Shift+K)" } else { "Open chat beside this page (Ctrl+Shift+K)" };
+        self.chat.set_tooltip_text(Some(label));
     }
 
     pub fn set_settings_active(&self, active: bool) {

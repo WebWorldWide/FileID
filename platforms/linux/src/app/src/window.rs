@@ -74,6 +74,7 @@ struct Shell {
     note: RefCell<Option<String>>,
     current: Cell<&'static str>,
     counting: Cell<bool>,
+    inspector: gtk::Revealer,
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -148,7 +149,23 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .show_sidebar(crate::app_settings::sidebar_visible())
         .build();
     split.set_sidebar(Some(&sidebar.root));
-    split.set_content(Some(&stack));
+    let inspector = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideLeft)
+        .transition_duration(if crate::spring::animations_enabled() { 240 } else { 0 })
+        .build();
+    let close_slot = slot.clone();
+    inspector.set_child(Some(&crate::tabs::workbenches::chat_inspector(
+        engine.clone(),
+        Rc::new(move || {
+            if let Some(shell) = close_slot.get().and_then(Weak::upgrade) {
+                shell.handle(Action::ToggleChat);
+            }
+        }),
+    )));
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content.append(&stack);
+    content.append(&inspector);
+    split.set_content(Some(&content));
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&title_bar.header);
     toolbar.set_content(Some(&split));
@@ -191,6 +208,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         note: RefCell::new(None),
         current: Cell::new("library"),
         counting: Cell::new(false),
+        inspector,
     });
     let _ = slot.set(Rc::downgrade(&shell));
 
@@ -301,6 +319,11 @@ impl Shell {
                 self.hand_off("library", LIBRARY_SEARCH_HINT, &text);
             }
             Action::FocusSearch => self.title_bar.focus_search(),
+            Action::ToggleChat => {
+                let open = !self.inspector.reveals_child() && self.current.get() != "chat";
+                self.inspector.set_reveal_child(open);
+                self.title_bar.set_chat_state(open, self.current.get() == "chat");
+            }
             Action::DismissNote => self.set_note(None),
         }
         self.refresh();
@@ -316,6 +339,10 @@ impl Shell {
         }
         self.sidebar.show_page(page.id);
         self.title_bar.set_settings_active(page.id == "settings");
+        if page.id == "chat" {
+            self.inspector.set_reveal_child(false);
+        }
+        self.title_bar.set_chat_state(self.inspector.reveals_child(), page.id == "chat");
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false);
         }
@@ -680,6 +707,7 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
     bindings.extend([
         ("<Control>comma".to_owned(), Action::Navigate("settings")),
         ("<Control>k".to_owned(), Action::FocusSearch),
+        ("<Control><Shift>k".to_owned(), Action::ToggleChat),
         ("<Control>o".to_owned(), Action::PickFolder),
         ("<Control>r".to_owned(), Action::StartScan),
         ("F9".to_owned(), Action::ToggleSidebar),
