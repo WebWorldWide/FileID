@@ -24,13 +24,15 @@ use gtk::glib::BoxedAnyObject;
 
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
 use crate::engine_client::{
-    texture_from_decoded, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, QUERY_MAX_ROWS,
+    texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
+    QUERY_MAX_ROWS,
 };
+use std::sync::atomic::Ordering;
 
 const QUERY_LIMIT: i64 = 600;
 const LIVE_RELOAD_MAX: i64 = 3000;
 const TILE_THUMB_PX: i32 = 256;
-const PREVIEW_PX: i32 = 1280;
+const PREVIEW_PX: i32 = 2400;
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Shared state ─────────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     ));
     factory.connect_unbind(|_, list_item| {
         if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
+            cancel_tile_token(li);
             if let Some(tile) = li.child() {
                 clear_tile(&tile);
             }
@@ -579,39 +582,84 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             return;
         }
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
-        let want = key.clone();
-        let rx = if is_video {
-            engine
-                .borrow()
-                .request_video_thumbnail(key.path.clone(), TILE_THUMB_PX)
-        } else {
-            engine
-                .borrow()
-                .request_scaled_thumbnail(key.path.clone(), TILE_THUMB_PX)
+        let parts = TileRequest {
+            engine: engine.clone(),
+            list_item: list_item.downgrade(),
+            pic: pic.downgrade(),
+            play: play.downgrade(),
+            key,
+            is_video,
         };
-        let pic_weak = pic.downgrade();
-        let play_weak = play.downgrade();
-        let li_weak = list_item.downgrade();
-        glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(decoded)) = rx.recv().await else {
-                return;
-            };
-            let tex = texture_from_decoded(decoded);
-            thumb_cache_put(want.clone(), tex.clone());
-            // Re-check: the tile may have been recycled while we were decoding.
-            if !tile_still_wants(&li_weak, &want) {
-                return;
-            }
-            if let Some(pic) = pic_weak.upgrade() {
-                pic.set_paintable(Some(&tex));
-            }
-            if let Some(play) = play_weak.upgrade() {
-                play.set_visible(is_video);
-            }
-        });
+        request_tile_thumbnail(list_item, parts, true);
     } else {
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
     }
+}
+
+struct TileRequest {
+    engine: Rc<RefCell<EngineClient>>,
+    list_item: glib::WeakRef<gtk::ListItem>,
+    pic: glib::WeakRef<gtk::Picture>,
+    play: glib::WeakRef<gtk::Image>,
+    key: ThumbCacheKey,
+    is_video: bool,
+}
+
+thread_local! {
+    static TILE_TOKENS: RefCell<HashMap<usize, CancelToken>> = RefCell::new(HashMap::new());
+}
+
+fn tile_token_key(list_item: &gtk::ListItem) -> usize {
+    list_item.as_ptr() as usize
+}
+
+/// A fresh cancel token for the tile; the previous binding's work is dropped.
+fn renew_tile_token(list_item: &gtk::ListItem) -> CancelToken {
+    let token = CancelToken::default();
+    let previous = TILE_TOKENS.with_borrow_mut(|tokens| tokens.insert(tile_token_key(list_item), token.clone()));
+    if let Some(previous) = previous {
+        previous.store(true, Ordering::Release);
+    }
+    token
+}
+
+fn cancel_tile_token(list_item: &gtk::ListItem) {
+    if let Some(token) = TILE_TOKENS.with_borrow_mut(|tokens| tokens.remove(&tile_token_key(list_item))) {
+        token.store(true, Ordering::Release);
+    }
+}
+
+fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry: bool) {
+    let cancel = renew_tile_token(list_item);
+    let rx = request
+        .engine
+        .borrow()
+        .request_tile(request.key.path.clone(), TILE_THUMB_PX, request.is_video, cancel);
+    glib::MainContext::default().spawn_local(async move {
+        let reply = rx.recv().await.unwrap_or(ThumbReply::Dropped);
+        let still_wanted = tile_still_wants(&request.list_item, &request.key);
+        let decoded = match reply {
+            ThumbReply::Image(decoded) => decoded,
+            ThumbReply::Dropped if retry && still_wanted => {
+                if let Some(list_item) = request.list_item.upgrade() {
+                    request_tile_thumbnail(&list_item, request, false);
+                }
+                return;
+            }
+            ThumbReply::Dropped | ThumbReply::Failed => return,
+        };
+        let tex = texture_from_decoded(decoded);
+        thumb_cache_put(request.key.clone(), tex.clone());
+        if !still_wanted {
+            return;
+        }
+        if let Some(pic) = request.pic.upgrade() {
+            pic.set_paintable(Some(&tex));
+        }
+        if let Some(play) = request.play.upgrade() {
+            play.set_visible(request.is_video);
+        }
+    });
 }
 
 fn clear_tile(tile: &gtk::Widget) {
@@ -955,19 +1003,13 @@ fn load_preview_image(
     generation: u64,
 ) {
     if row.kind == "image" || row.kind == "video" {
-        let rx = if row.kind == "video" {
-            engine
-                .borrow()
-                .request_video_thumbnail(row.path.clone(), PREVIEW_PX)
-        } else {
-            engine
-                .borrow()
-                .request_scaled_thumbnail(row.path.clone(), PREVIEW_PX)
-        };
+        let rx = engine
+            .borrow()
+            .request_preview(row.path.clone(), PREVIEW_PX, row.kind == "video");
         let kind = row.kind.clone();
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let decoded = rx.recv().await.ok().flatten();
+            let decoded = rx.recv().await.ok().and_then(ThumbReply::into_image);
             if active_generation.get() != generation {
                 return;
             }

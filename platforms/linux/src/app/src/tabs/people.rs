@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
+use crate::engine_client::{texture_from_decoded, CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply};
 use fileid_engine::ipc::{
     BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
     RenamePersonPayload,
@@ -1124,11 +1124,11 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
         pic.set_paintable(Some(&tex));
         return;
     }
-    let rx = request_face_thumbnail(key.path.clone(), key.bbox.clone(), CARD_THUMB_PX);
+    let rx = request_face_thumbnail(&ui.engine, pic, key.path.clone(), key.bbox.clone(), CARD_THUMB_PX);
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
-        let Ok(Some(decoded)) = rx.recv().await else {
+        let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
             return;
         };
         let tex = texture_from_decoded(decoded);
@@ -1716,19 +1716,20 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     // Photos load off the main loop, then tiles stream in.
     let rx = read_person_files_async(pid);
     let photos_weak = photos.downgrade();
+    let engine = ui.engine.clone();
     glib::MainContext::default().spawn_local(async move {
         let files = rx.recv().await.unwrap_or_default();
         let Some(photos) = photos_weak.upgrade() else {
             return;
         };
         for face in files {
-            let tile = build_photo_tile(&face);
+            let tile = build_photo_tile(&engine, &face);
             photos.append(&tile);
         }
     });
 }
 
-fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
+fn build_photo_tile(engine: &Rc<RefCell<EngineClient>>, face: &PersonFace) -> gtk::Widget {
     let pic = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .height_request(118)
@@ -1754,10 +1755,10 @@ fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
 
     let (thumbnail_path, thumbnail_bbox) =
         face_thumbnail_source(Some(face.face_id), &face.path, face.bbox.as_deref());
-    let rx = request_face_thumbnail(thumbnail_path, thumbnail_bbox, PHOTO_THUMB_PX);
+    let rx = request_face_thumbnail(engine, &pic, thumbnail_path, thumbnail_bbox, PHOTO_THUMB_PX);
     let pic_weak = pic.downgrade();
     glib::MainContext::default().spawn_local(async move {
-        let Ok(Some(decoded)) = rx.recv().await else {
+        let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
             return;
         };
         if let Some(pic) = pic_weak.upgrade() {
@@ -2313,17 +2314,21 @@ fn face_thumbnail_source_in(
     }
 }
 
+/// Face crops decode on the engine client's bounded thumbnail workers, and a
+/// tile's pending crop is dropped once the picture is disposed.
 fn request_face_thumbnail(
+    engine: &Rc<RefCell<EngineClient>>,
+    pic: &gtk::Picture,
     path: String,
     bbox: Option<String>,
     max_px: i32,
-) -> async_channel::Receiver<Option<DecodedImage>> {
-    let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let image = cropped_texture(&path, bbox.as_deref(), max_px);
-        let _ = tx.send_blocking(image);
-    });
-    rx
+) -> async_channel::Receiver<ThumbReply> {
+    let cancel = CancelToken::default();
+    let on_destroy = cancel.clone();
+    pic.connect_destroy(move |_| on_destroy.store(true, std::sync::atomic::Ordering::Release));
+    engine
+        .borrow()
+        .request_decode(move || cropped_texture(&path, bbox.as_deref(), max_px), cancel)
 }
 
 fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {

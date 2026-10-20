@@ -29,6 +29,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -284,7 +285,8 @@ pub struct EngineClient {
     raw_tx: Sender<RawEvent>,
     raw_rx: Option<Receiver<RawEvent>>,
     subscribers: Vec<Sender<EngineState>>,
-    thumb_tx: Option<Sender<ThumbJob>>,
+    thumbs: Arc<ThumbQueue>,
+    preview: Arc<PreviewSlot>,
     query_worker: Arc<QueryWorkerState>,
     next_id: u64,
     respawn_budget: RespawnBudget,
@@ -310,7 +312,8 @@ impl EngineClient {
             raw_tx,
             raw_rx: Some(raw_rx),
             subscribers: Vec::new(),
-            thumb_tx: None,
+            thumbs: Arc::new(ThumbQueue::new()),
+            preview: Arc::new(PreviewSlot::new()),
             query_worker: spawn_query_worker(),
             next_id: 0,
             respawn_budget: RespawnBudget::default(),
@@ -390,7 +393,8 @@ impl EngineClient {
         self.ready = false;
         self.pending_health = None;
         self.subscribers.clear();
-        self.thumb_tx.take();
+        self.thumbs.stop();
+        self.preview.stop();
         self.query_worker.stop();
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
@@ -414,14 +418,14 @@ impl EngineClient {
     /// Boot the engine and thumbnail workers and start the main-context
     /// fan-out pump, which also drives health probes and respawns.
     pub fn start(this: &Rc<RefCell<Self>>) {
-        let (thumb_tx, thumb_rx) = async_channel::bounded::<ThumbJob>(THUMB_QUEUE_CAP);
-        for _ in 0..THUMB_WORKERS {
-            let worker_rx = thumb_rx.clone();
-            thread::spawn(move || thumbnail_worker(worker_rx));
-        }
         let raw_rx = {
             let mut client = this.borrow_mut();
-            client.thumb_tx = Some(thumb_tx);
+            for _ in 0..THUMB_WORKERS {
+                let queue = client.thumbs.clone();
+                thread::spawn(move || thumbnail_worker(&queue));
+            }
+            let preview = client.preview.clone();
+            thread::spawn(move || preview_worker(&preview));
             client.raw_rx.take().expect("EngineClient::start called twice")
         };
         spawn_process(this);
@@ -559,29 +563,51 @@ impl EngineClient {
         rx
     }
 
+    /// First-in-first-out decode on the shared bounded workers.
     pub fn request_scaled_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
-        self.enqueue_thumb_work(ThumbWork::Image { path, dim })
+        self.background_plain(ThumbWork::Image { path, dim })
     }
 
     pub fn request_video_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
-        self.enqueue_thumb_work(ThumbWork::VideoKeyframe { path, dim })
+        self.background_plain(ThumbWork::VideoKeyframe { path, dim })
     }
 
-    fn enqueue_thumb_work(&self, work: ThumbWork) -> Receiver<Option<DecodedImage>> {
+    fn background_plain(&self, work: ThumbWork) -> Receiver<Option<DecodedImage>> {
         let (reply, rx) = async_channel::bounded(1);
-        let job = ThumbJob { work, reply };
-        match &self.thumb_tx {
-            Some(sender) => {
-                if let Err(async_channel::TrySendError::Full(job) | async_channel::TrySendError::Closed(job)) =
-                    sender.try_send(job)
-                {
-                    let _ = job.reply.try_send(None);
-                }
-            }
-            None => {
-                let _ = job.reply.try_send(None);
-            }
-        }
+        self.thumbs.push_background(ThumbJob { work, reply: ReplyTo::Plain(reply), cancel: None });
+        rx
+    }
+
+    /// A grid tile's thumbnail: newest request first, the oldest evicted with
+    /// `Dropped` when the queue is full, and skipped once `cancel` is set.
+    pub fn request_tile(&self, path: String, dim: i32, video: bool, cancel: CancelToken) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
+        let (reply, rx) = async_channel::bounded(1);
+        self.thumbs.push_tile(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: Some(cancel) });
+        rx
+    }
+
+    /// Any bounded decode (face crops) on the shared workers, in order.
+    pub fn request_decode(
+        &self,
+        decode: impl FnOnce() -> Option<DecodedImage> + Send + 'static,
+        cancel: CancelToken,
+    ) -> Receiver<ThumbReply> {
+        let (reply, rx) = async_channel::bounded(1);
+        self.thumbs.push_background(ThumbJob {
+            work: ThumbWork::Custom(Box::new(decode)),
+            reply: ReplyTo::Full(reply),
+            cancel: Some(cancel),
+        });
+        rx
+    }
+
+    /// A preview image on its own latest-wins worker, never queued behind
+    /// grid tiles; a newer request supersedes an unstarted one.
+    pub fn request_preview(&self, path: String, dim: i32, video: bool) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
+        let (reply, rx) = async_channel::bounded(1);
+        self.preview.submit(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: None });
         rx
     }
 }
@@ -989,27 +1015,214 @@ fn fts_match(text: &str) -> String {
         .join(" ")
 }
 
+pub type CancelToken = Arc<AtomicBool>;
+
+#[derive(Debug)]
+pub enum ThumbReply {
+    Image(DecodedImage),
+    Failed,
+    /// Evicted, cancelled or superseded before it was decoded.
+    Dropped,
+}
+
+impl ThumbReply {
+    pub fn into_image(self) -> Option<DecodedImage> {
+        match self {
+            ThumbReply::Image(image) => Some(image),
+            ThumbReply::Failed | ThumbReply::Dropped => None,
+        }
+    }
+}
+
 enum ThumbWork {
     Image { path: String, dim: i32 },
     VideoKeyframe { path: String, dim: i32 },
-    #[cfg(test)]
-    Probe(Box<dyn FnOnce() -> Option<DecodedImage> + Send>),
+    Custom(Box<dyn FnOnce() -> Option<DecodedImage> + Send>),
+}
+
+impl ThumbWork {
+    fn run(self) -> Option<DecodedImage> {
+        match self {
+            ThumbWork::Image { path, dim } => image_thumbnail(Path::new(&path), dim),
+            ThumbWork::VideoKeyframe { path, dim } => video_thumbnail(Path::new(&path), dim),
+            ThumbWork::Custom(decode) => decode(),
+        }
+    }
+}
+
+enum ReplyTo {
+    Plain(Sender<Option<DecodedImage>>),
+    Full(Sender<ThumbReply>),
+}
+
+impl ReplyTo {
+    fn send(&self, reply: ThumbReply) {
+        match self {
+            ReplyTo::Plain(tx) => {
+                let _ = tx.try_send(reply.into_image());
+            }
+            ReplyTo::Full(tx) => {
+                let _ = tx.try_send(reply);
+            }
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            ReplyTo::Plain(tx) => tx.is_closed(),
+            ReplyTo::Full(tx) => tx.is_closed(),
+        }
+    }
 }
 
 struct ThumbJob {
     work: ThumbWork,
-    reply: Sender<Option<DecodedImage>>,
+    reply: ReplyTo,
+    cancel: Option<CancelToken>,
 }
 
-fn thumbnail_worker(rx: Receiver<ThumbJob>) {
-    while let Ok(job) = rx.recv_blocking() {
-        let decoded = match job.work {
-            ThumbWork::Image { path, dim } => image_thumbnail(Path::new(&path), dim),
-            ThumbWork::VideoKeyframe { path, dim } => video_thumbnail(Path::new(&path), dim),
-            #[cfg(test)]
-            ThumbWork::Probe(run) => run(),
+impl ThumbJob {
+    fn abandoned(&self) -> bool {
+        self.reply.is_closed() || self.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    }
+
+    fn finish(self) {
+        if self.abandoned() {
+            self.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        let reply = match self.work.run() {
+            Some(image) => ThumbReply::Image(image),
+            None => ThumbReply::Failed,
         };
-        let _ = job.reply.send_blocking(decoded);
+        self.reply.send(reply);
+    }
+}
+
+#[derive(Default)]
+struct ThumbQueues {
+    tiles: VecDeque<ThumbJob>,
+    background: VecDeque<ThumbJob>,
+}
+
+struct ThumbQueue {
+    queues: Mutex<ThumbQueues>,
+    ready: Condvar,
+    stopping: AtomicBool,
+}
+
+impl ThumbQueue {
+    fn new() -> Self {
+        Self { queues: Mutex::new(ThumbQueues::default()), ready: Condvar::new(), stopping: AtomicBool::new(false) }
+    }
+
+    fn push_tile(&self, job: ThumbJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            job.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        let evicted = {
+            let mut queues = self.queues.lock().expect("thumbnail queue poisoned");
+            queues.tiles.push_back(job);
+            if queues.tiles.len() > THUMB_QUEUE_CAP {
+                queues.tiles.pop_front()
+            } else {
+                None
+            }
+        };
+        if let Some(evicted) = evicted {
+            evicted.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_one();
+    }
+
+    fn push_background(&self, job: ThumbJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            job.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        self.queues.lock().expect("thumbnail queue poisoned").background.push_back(job);
+        self.ready.notify_one();
+    }
+
+    /// Tiles newest-first (what is on screen now), then background work.
+    fn next(&self) -> Option<ThumbJob> {
+        let mut queues = self.queues.lock().expect("thumbnail queue poisoned");
+        loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(job) = queues.tiles.pop_back().or_else(|| queues.background.pop_front()) {
+                return Some(job);
+            }
+            queues = self.ready.wait(queues).expect("thumbnail queue poisoned");
+        }
+    }
+
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        let drained = std::mem::take(&mut *self.queues.lock().expect("thumbnail queue poisoned"));
+        for job in drained.tiles.into_iter().chain(drained.background) {
+            job.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_all();
+    }
+}
+
+fn thumbnail_worker(queue: &ThumbQueue) {
+    while let Some(job) = queue.next() {
+        job.finish();
+    }
+}
+
+struct PreviewSlot {
+    latest: Mutex<Option<ThumbJob>>,
+    ready: Condvar,
+    stopping: AtomicBool,
+}
+
+impl PreviewSlot {
+    fn new() -> Self {
+        Self { latest: Mutex::new(None), ready: Condvar::new(), stopping: AtomicBool::new(false) }
+    }
+
+    fn submit(&self, job: ThumbJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            job.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        let superseded = self.latest.lock().expect("preview slot poisoned").replace(job);
+        if let Some(superseded) = superseded {
+            superseded.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_one();
+    }
+
+    fn next(&self) -> Option<ThumbJob> {
+        let mut latest = self.latest.lock().expect("preview slot poisoned");
+        loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(job) = latest.take() {
+                return Some(job);
+            }
+            latest = self.ready.wait(latest).expect("preview slot poisoned");
+        }
+    }
+
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Some(job) = self.latest.lock().expect("preview slot poisoned").take() {
+            job.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_all();
+    }
+}
+
+fn preview_worker(slot: &PreviewSlot) {
+    while let Some(job) = slot.next() {
+        job.finish();
     }
 }
 
@@ -1355,27 +1568,72 @@ mod tests {
         assert!(SUBSCRIBER_EVENT_CAP > 0 && SUBSCRIBER_EVENT_CAP <= 4);
     }
 
+    fn probe_job(run: impl FnOnce() -> Option<DecodedImage> + Send + 'static) -> (ThumbJob, Receiver<ThumbReply>, CancelToken) {
+        let (reply, rx) = async_channel::bounded(1);
+        let cancel = CancelToken::default();
+        (ThumbJob { work: ThumbWork::Custom(Box::new(run)), reply: ReplyTo::Full(reply), cancel: Some(cancel.clone()) }, rx, cancel)
+    }
+
     #[test]
-    fn thumbnail_queue_has_a_hard_admission_bound() {
-        let (sender, _receiver) = async_channel::bounded(THUMB_QUEUE_CAP);
-        for _ in 0..THUMB_QUEUE_CAP {
-            let (reply, _rx) = async_channel::bounded(1);
-            assert!(sender.try_send(ThumbJob { work: ThumbWork::Probe(Box::new(|| None)), reply }).is_ok());
+    fn a_full_tile_queue_evicts_the_oldest_and_serves_the_newest_first() {
+        let queue = ThumbQueue::new();
+        let mut replies = Vec::new();
+        for _ in 0..=THUMB_QUEUE_CAP {
+            let (job, rx, _) = probe_job(|| None);
+            queue.push_tile(job);
+            replies.push(rx);
         }
-        let (reply, _rx) = async_channel::bounded(1);
-        assert!(matches!(
-            sender.try_send(ThumbJob { work: ThumbWork::Probe(Box::new(|| None)), reply }),
-            Err(async_channel::TrySendError::Full(_))
-        ));
+        assert!(matches!(replies[0].try_recv(), Ok(ThumbReply::Dropped)));
+        assert_eq!(queue.queues.lock().unwrap().tiles.len(), THUMB_QUEUE_CAP);
+        let newest = queue.next().unwrap();
+        newest.finish();
+        assert!(matches!(replies[THUMB_QUEUE_CAP].try_recv(), Ok(ThumbReply::Failed)));
+    }
+
+    #[test]
+    fn a_still_bound_tile_is_not_starved_by_a_fling() {
+        let queue = ThumbQueue::new();
+        for _ in 0..(THUMB_QUEUE_CAP * 3) {
+            let (job, _rx, cancel) = probe_job(|| None);
+            cancel.store(true, Ordering::Release);
+            queue.push_tile(job);
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        let (wanted, rx, _) = probe_job(move || {
+            flag.store(true, Ordering::SeqCst);
+            None
+        });
+        queue.push_tile(wanted);
+        queue.next().unwrap().finish();
+        assert!(ran.load(Ordering::SeqCst));
+        assert!(matches!(rx.try_recv(), Ok(ThumbReply::Failed)));
+    }
+
+    #[test]
+    fn cancelled_and_superseded_work_is_skipped_without_decoding() {
+        let queue = ThumbQueue::new();
+        let (job, rx, cancel) = probe_job(|| panic!("cancelled work must not decode"));
+        queue.push_background(job);
+        cancel.store(true, Ordering::Release);
+        queue.next().unwrap().finish();
+        assert!(matches!(rx.try_recv(), Ok(ThumbReply::Dropped)));
+
+        let slot = PreviewSlot::new();
+        let (first, first_rx, _) = probe_job(|| panic!("superseded preview must not decode"));
+        let (second, _second_rx, _) = probe_job(|| None);
+        slot.submit(first);
+        slot.submit(second);
+        assert!(matches!(first_rx.try_recv(), Ok(ThumbReply::Dropped)));
     }
 
     #[test]
     fn thumbnail_decode_concurrency_never_exceeds_worker_count() {
-        let (sender, receiver) = async_channel::bounded(THUMB_QUEUE_CAP);
+        let queue = Arc::new(ThumbQueue::new());
         let workers: Vec<_> = (0..THUMB_WORKERS)
             .map(|_| {
-                let receiver = receiver.clone();
-                thread::spawn(move || thumbnail_worker(receiver))
+                let queue = queue.clone();
+                thread::spawn(move || thumbnail_worker(&queue))
             })
             .collect();
         let active = Arc::new(AtomicUsize::new(0));
@@ -1383,21 +1641,20 @@ mod tests {
         let mut replies = Vec::new();
         for _ in 0..(THUMB_WORKERS * 4) {
             let (active, peak) = (active.clone(), peak.clone());
-            let (reply, rx) = async_channel::bounded(1);
-            replies.push(rx);
-            let probe = move || {
+            let (job, rx, _) = probe_job(move || {
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(10));
                 active.fetch_sub(1, Ordering::SeqCst);
                 None
-            };
-            sender.send_blocking(ThumbJob { work: ThumbWork::Probe(Box::new(probe)), reply }).unwrap();
+            });
+            queue.push_background(job);
+            replies.push(rx);
         }
-        drop(sender);
         for reply in replies {
-            assert!(reply.recv_blocking().unwrap().is_none());
+            assert!(matches!(reply.recv_blocking().unwrap(), ThumbReply::Failed));
         }
+        queue.stop();
         for worker in workers {
             worker.join().unwrap();
         }
