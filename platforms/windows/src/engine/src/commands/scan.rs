@@ -13,7 +13,7 @@ use crate::coordinator::ScanCoordinator;
 use crate::ipc::{
     self, sink::Sink, EngineError, EventPayload, IpcEvent, ScanPhase, ScanProgress, Wrap,
 };
-use crate::models::{self, registry::LookupResult};
+use crate::models;
 use crate::pipeline::tagging::ModelStack;
 use crate::platform;
 use crate::scan_session::ScanSession;
@@ -157,15 +157,9 @@ pub(crate) async fn handle_start_scan(
     // ENTIRE scan with models_not_installed, so face scanning produced zero
     // faces even though YuNet+SFace+MobileCLIP were fully installed. clip_text's
     // absence must only degrade query-time search, never block a scan.
-    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface"]
-        .iter()
-        .filter_map(|kind| {
-            let model = match models::registry::lookup_full(kind) {
-                LookupResult::Found(m) => m,
-                LookupResult::Unknown => return Some(*kind),
-            };
-            (!models::registry::installation_complete(&model)).then_some(*kind)
-        })
+    let missing_models: Vec<&str> = models::required::missing_required()
+        .into_iter()
+        .map(|missing| missing.kind)
         .collect();
     if !missing_models.is_empty() {
         tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; aborting scan");

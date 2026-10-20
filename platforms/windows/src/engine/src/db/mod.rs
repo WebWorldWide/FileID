@@ -7,6 +7,9 @@
 //! reads use ephemeral read-only connections opened on demand.
 
 pub mod migrations;
+#[path = "../read/mod.rs"]
+#[allow(dead_code)]
+pub mod read;
 pub mod zero_byte;
 
 use std::path::Path;

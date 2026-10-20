@@ -45,12 +45,7 @@ pub(super) fn search(
     } else {
         Some(serde_json::to_string(events)?)
     };
-    let quoted = query
-        .split_whitespace()
-        .filter(|s| s.chars().any(char::is_alphanumeric))
-        .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let quoted = crate::db::read::text::fts_phrase_query(query);
     if quoted.is_empty() && kinds.is_none() && people.is_none() && events.is_none() && time.is_none() {
         return Ok(vec![]);
     }
