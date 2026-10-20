@@ -1,5 +1,6 @@
 use super::*;
-use std::time::Instant;
+use super::super::moments::build_catalog;
+use std::time::{Duration, Instant};
 
 fn pump_until(mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -64,11 +65,11 @@ fn catalog_selection_clears_chapters_and_rejects_stale_controls_through_failed_b
     let controls = buttons(&ui.chapters.clone().upcast());
     let edit = controls
         .iter()
-        .find(|b| b.label().as_deref() == Some("Edit"))
+        .find(|b| b.label().as_deref() == Some("Rename"))
         .unwrap();
     let delete = controls
         .iter()
-        .find(|b| b.label().as_deref() == Some("Delete"))
+        .find(|b| b.tooltip_text().as_deref() == Some("Delete chapter"))
         .unwrap();
     ui.select(hit(2));
     assert!(ui.chapters.first_child().is_none());

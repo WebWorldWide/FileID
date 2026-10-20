@@ -5,6 +5,8 @@ pub mod deep_analyze;
 pub mod library;
 mod library_pane;
 mod model_catalog;
+mod moments;
+mod moments_timeline;
 pub mod people;
 pub mod restructure;
 pub mod settings;

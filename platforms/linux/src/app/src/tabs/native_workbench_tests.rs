@@ -24,6 +24,37 @@ fn button(root: &gtk::Widget, text: &str) -> gtk::Button {
         .find(|b| b.label().as_deref() == Some(text))
         .unwrap_or_else(|| panic!("Missing button: {text}"))
 }
+fn tooltip_button(root: &gtk::Widget, tooltip: &str) -> gtk::Button {
+    descendants(root)
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .find(|b| b.tooltip_text().as_deref() == Some(tooltip))
+        .unwrap_or_else(|| panic!("Missing button with tooltip: {tooltip}"))
+}
+fn first_with_class(root: &gtk::Widget, class: &str) -> gtk::Button {
+    descendants(root)
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .find(|b| b.has_css_class(class))
+        .unwrap_or_else(|| panic!("Missing button with class: {class}"))
+}
+fn in_job_row(widget: &gtk::Widget) -> bool {
+    let mut parent = widget.parent();
+    while let Some(ancestor) = parent {
+        if ancestor.has_css_class("v3-job-row") {
+            return true;
+        }
+        parent = ancestor.parent();
+    }
+    false
+}
+fn job_buttons(root: &gtk::Widget) -> Vec<gtk::Button> {
+    descendants(root)
+        .into_iter()
+        .filter(in_job_row)
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .collect()
+}
 fn entry(root: &gtk::Widget, hint: &str) -> gtk::Entry {
     descendants(root)
         .into_iter()
@@ -116,28 +147,29 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| engine.borrow().is_ready());
     wait(|| button(&tools, "Preview").is_sensitive());
 
-    entry(&catalog, "Search names, text, chapters and sampled frames").set_text("photo-fixture");
-    button(&catalog, "Search").emit_clicked();
+    let query = entry(&catalog, "Search names, captions, chapters");
+    query.set_text("photo-fixture");
+    query.emit_activate();
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
-    button(&catalog, "Chapters").emit_clicked();
+    first_with_class(&catalog, "v3-rail").emit_clicked();
+    button(&catalog, "+ Add chapter").emit_clicked();
     entry(&catalog, "Chapter title").set_text("Reviewed marker");
-    button(&catalog, "Add / save chapter").emit_clicked();
+    button(&catalog, "Add chapter").emit_clicked();
     wait(|| text(&catalog).contains("Reviewed marker"));
-    button(&catalog, "Delete").emit_clicked();
+    tooltip_button(&catalog, "Delete chapter").emit_clicked();
     wait(|| !text(&catalog).contains("Reviewed marker"));
-    button(&catalog, "Undo chapter edit").emit_clicked();
+    button(&catalog, "Undo last edit").emit_clicked();
     wait(|| text(&catalog).contains("Reviewed marker"));
-    button(&catalog, "Edit").emit_clicked();
+    button(&catalog, "Rename").emit_clicked();
     entry(&catalog, "Chapter title").set_text("Changed marker");
-    button(&catalog, "Add / save chapter").emit_clicked();
+    button(&catalog, "Save chapter").emit_clicked();
     wait(|| text(&catalog).contains("Changed marker"));
-    button(&catalog, "Undo chapter edit").emit_clicked();
+    button(&catalog, "Undo last edit").emit_clicked();
     wait(|| {
         text(&catalog).contains("Reviewed marker") && !text(&catalog).contains("Changed marker")
     });
-    assert!(!descendants(&catalog)
+    assert!(!job_buttons(&catalog)
         .into_iter()
-        .filter_map(|w| w.downcast::<gtk::Button>().ok())
         .any(|b| matches!(
             b.label().as_deref(),
             Some("Pause" | "Resume" | "Retry" | "Cancel")
@@ -156,9 +188,12 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();
         conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-index-job','catalogIndex','[1]','{}','paused',0,'Synthetic paused index; no model inference ran',0,0)",[]).unwrap();
     }
-    button(&catalog, "Refresh jobs").emit_clicked();
-    wait(|| text(&catalog).contains("catalogIndex · paused"));
-    button(&catalog, "Cancel").emit_clicked();
+    wait(|| text(&catalog).contains("Catalog index") && text(&catalog).contains("Paused"));
+    job_buttons(&catalog)
+        .into_iter()
+        .find(|b| b.label().as_deref() == Some("Cancel"))
+        .expect("paused index job offers Cancel")
+        .emit_clicked();
     wait(|| {
         read.query_row(
             "SELECT state FROM catalog_jobs WHERE id='fixture-index-job'",
@@ -168,16 +203,10 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .unwrap()
             == "cancelled"
     });
-    button(&catalog, "Refresh jobs").emit_clicked();
-    wait(|| text(&catalog).contains("catalogIndex · cancelled"));
+    wait(|| text(&catalog).contains("Cancelled"));
 
-    let search_mode = descendants(&catalog)
-        .into_iter()
-        .filter_map(|w| w.downcast::<gtk::DropDown>().ok())
-        .next()
-        .unwrap();
-    search_mode.set_selected(1);
-    button(&catalog, "Search").emit_clicked();
+    button(&catalog, "Hybrid").emit_clicked();
+    query.emit_activate();
     wait(|| text(&catalog).contains("Using keyword search"));
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
 

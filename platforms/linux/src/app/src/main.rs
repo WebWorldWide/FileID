@@ -16,6 +16,7 @@ mod lavalamp;
 mod model_license;
 mod shell;
 mod spring;
+mod v3;
 mod tabs;
 mod theme;
 mod welcome;

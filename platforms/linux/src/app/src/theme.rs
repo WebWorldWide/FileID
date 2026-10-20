@@ -239,7 +239,7 @@ entry, .fileid-search {
     padding: 4px 10px;
     box-shadow: none;
 }
-entry:focus-within, .fileid-search:focus-within { border-color: alpha(@fileid_gold, 0.55); }
+entry:focus-within, .fileid-search:focus-within { border-color: alpha(#FFFFFF, 0.14); }
 entry image { color: alpha(#FFFFFF, 0.55); }
 
 /* ── Adwaita rows / boxed lists → glassy, not opaque GNOME ────────────────── */
@@ -396,7 +396,7 @@ button.tb-plain:hover { background-color: alpha(#FFFFFF, 0.06); border-color: tr
     font-size: 13.5px;
     color: @fileid_text1;
 }
-.tb-search:focus-within { border-color: @fileid_gold; }
+.tb-search:focus-within { border-color: alpha(#FFFFFF, 0.16); }
 .kbd { font-size: 11px; color: @fileid_text3; border: 1px solid alpha(#FFFFFF, 0.16); border-radius: 4px; padding: 1px 5px; }
 
 /* ── Popovers (folder switcher, search, activity) ────────────────────────── */
@@ -497,6 +497,181 @@ button.gold-button.compact { min-height: 28px; padding: 0 12px; font-size: 13px;
     border: 1px solid alpha(#FFFFFF, 0.14);
 }
 .numeric { font-feature-settings: "tnum"; }
+
+/* ── Focus (DESIGN_V3_PORT "Focus"): one 2 px gold ring 3 px outside every
+   control, replacing Adwaita's own ring so there is never a double ring. ── */
+*:focus-visible { outline: 2px solid alpha(@fileid_gold, 0.9); outline-offset: 3px; }
+entry:focus-within, spinbutton:focus-within, .tb-search:focus-within, textview.v3-composer:focus-within {
+    outline: 2px solid alpha(@fileid_gold, 0.9);
+    outline-offset: 3px;
+}
+entry > text:focus-visible, spinbutton > text:focus-visible, .tb-search > text:focus-visible { outline: none; }
+checkbutton, radiobutton { min-height: 28px; }
+check { min-width: 15px; min-height: 15px; }
+switch { min-width: 30px; min-height: 16px; padding: 0; }
+switch > slider { min-width: 12px; min-height: 12px; margin: 2px; box-shadow: none; }
+switch:checked > slider { background-color: #141414; }
+
+/* ── v3 controls (DESIGN_V3_PORT "Controls") ─────────────────────────────── */
+.v3-body { font-size: 13.5px; color: @fileid_text1; }
+.v3-meta { font-size: 12px; color: @fileid_text3; }
+.v3-mono { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; }
+.v3-mono.s10 { font-size: 10.5px; } .v3-mono.s11 { font-size: 11px; } .v3-mono.s115 { font-size: 11.5px; }
+.v3-mono.s12 { font-size: 12px; } .v3-mono.s125 { font-size: 12.5px; } .v3-mono.s13 { font-size: 13px; }
+.v3-mono.s20 { font-size: 20px; font-weight: 600; }
+.v3-medium { font-weight: 500; } .v3-semibold { font-weight: 600; }
+.v3-serif-28 { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 28px; color: @fileid_text1; }
+.v3-serif-34 { font-family: "Instrument Serif", "New York", "Georgia", serif; font-size: 34px; color: @fileid_text1; }
+.v3-pane { background-color: alpha(#FFFFFF, 0.015); }
+button.v3-primary {
+    min-height: 30px; padding: 0 14px; border: none; border-radius: 6px; box-shadow: none;
+    background-color: @fileid_gold; background-image: none; color: #141414; font-size: 13px; font-weight: 600;
+    transition: background-color 140ms ease-out;
+}
+button.v3-primary.h28 { min-height: 28px; }
+button.v3-primary:hover { background-color: #FFD84D; }
+button.v3-primary:active { background-color: #CCA300; }
+button.v3-primary:disabled { opacity: 0.4; color: #141414; }
+button.v3-secondary {
+    min-height: 28px; padding: 0 12px; border-radius: 6px; box-shadow: none;
+    background-color: alpha(#FFFFFF, 0.05); border: 1px solid alpha(#FFFFFF, 0.14);
+    color: @fileid_text1; font-size: 13px; font-weight: 500;
+}
+button.v3-secondary.h30 { min-height: 30px; }
+button.v3-secondary:hover { background-color: alpha(#FFFFFF, 0.09); border-color: alpha(#FFFFFF, 0.24); }
+button.v3-secondary:active { background-color: alpha(#FFFFFF, 0.14); }
+button.v3-secondary:disabled, button.v3-ghost:disabled, button.v3-accent:disabled, button.v3-icon:disabled { opacity: 0.4; }
+button.v3-ghost {
+    min-height: 28px; padding: 0 6px; border: none; border-radius: 4px; box-shadow: none;
+    background: transparent; color: @fileid_text3; font-size: 12.5px; font-weight: 500;
+}
+button.v3-ghost:hover { background-color: alpha(#FFFFFF, 0.06); }
+button.v3-ghost.tone-danger { color: @fileid_danger; }
+button.v3-accent {
+    min-height: 28px; padding: 0 10px; border-radius: 6px; box-shadow: none; font-size: 12px; font-weight: 600;
+    background-color: alpha(@fileid_gold, 0.10); border: 1px solid alpha(@fileid_gold, 0.6); color: @fileid_gold;
+}
+button.v3-accent.h30 { min-height: 30px; }
+button.v3-accent:hover { background-color: alpha(@fileid_gold, 0.16); }
+button.v3-accent.tone-ai { background-color: alpha(@fileid_lavender, 0.10); border-color: alpha(@fileid_lavender, 0.6); color: @fileid_lavender; }
+button.v3-accent.tone-ai:hover { background-color: alpha(@fileid_lavender, 0.16); }
+button.v3-accent.tone-done { background-color: alpha(@fileid_pink, 0.10); border-color: alpha(@fileid_pink, 0.6); color: @fileid_pink; }
+button.v3-accent.tone-warning { background-color: alpha(@fileid_warning, 0.10); border-color: alpha(@fileid_warning, 0.6); color: @fileid_warning; }
+button.v3-danger {
+    min-height: 30px; padding: 0 12px; border-radius: 6px; box-shadow: none; font-size: 13px; font-weight: 600;
+    background-color: alpha(#E8433A, 0.12); border: 1px solid alpha(#E8433A, 0.5); color: @fileid_danger;
+}
+button.v3-danger:hover { background-color: alpha(#E8433A, 0.85); color: #FFFFFF; }
+button.v3-icon {
+    min-width: 28px; min-height: 28px; padding: 0; border: none; border-radius: 6px; box-shadow: none;
+    background: transparent; color: @fileid_text2;
+}
+button.v3-icon:hover { background-color: alpha(#FFFFFF, 0.045); }
+.v3-segmented {
+    min-height: 28px; border-radius: 6px;
+    background-color: alpha(#000000, 0.28); border: 1px solid alpha(#FFFFFF, 0.14);
+}
+.v3-segmented button {
+    min-height: 28px; padding: 0 12px; border: none; border-radius: 4px; box-shadow: none;
+    background: transparent; color: @fileid_text2; font-size: 12.5px; font-weight: 400;
+}
+.v3-segmented button:hover { background: transparent; color: @fileid_text1; }
+.v3-segmented button.selected { color: #141414; font-weight: 600; }
+.v3-pill { font-size: 10.5px; font-weight: 600; padding: 2px 6px; border-radius: 4px; border: 1px solid alpha(#FFFFFF, 0.36); }
+.v3-pill.tone-gold { border-color: alpha(@fileid_gold, 0.6); }
+.v3-pill.tone-ai { border-color: alpha(@fileid_lavender, 0.6); }
+.v3-pill.tone-done { border-color: alpha(@fileid_pink, 0.6); }
+.v3-pill.tone-warning { border-color: alpha(@fileid_warning, 0.6); }
+.v3-pill.tone-danger { border-color: alpha(@fileid_danger, 0.6); }
+entry.v3-field { min-height: 30px; padding: 0 8px; background-color: alpha(#000000, 0.3); border: 1px solid alpha(#FFFFFF, 0.14); border-radius: 6px; font-size: 13.5px; }
+entry.v3-field.h28 { min-height: 28px; }
+spinbutton.v3-number { min-height: 28px; border-radius: 6px; background-color: alpha(#000000, 0.3); border: 1px solid alpha(#FFFFFF, 0.14); }
+spinbutton.v3-number > text { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 12.5px; min-width: 56px; }
+spinbutton.v3-number > button { min-width: 20px; min-height: 26px; padding: 0; border: none; background: transparent; }
+.v3-toggle-row { min-height: 28px; }
+.v3-dashed { padding: 26px; border-radius: 10px; border: 1px dashed alpha(#FFFFFF, 0.16); }
+.v3-panel { background-color: alpha(#18181B, 0.78); border-radius: 10px; border: 1px solid alpha(#FFFFFF, 0.112); }
+.v3-panel-header { padding: 10px 14px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); min-height: 28px; }
+.v3-panel-footer { padding: 8px 14px; background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.08); border-radius: 0 0 10px 10px; }
+.v3-soft-row { border-bottom: 1px solid alpha(#FFFFFF, 0.06); }
+button.v3-rail {
+    min-height: 28px; padding: 7px 10px; margin: 0 6px; border-radius: 8px; box-shadow: none;
+    background: transparent; border: 1px solid transparent;
+}
+button.v3-rail:hover { background-color: alpha(#FFFFFF, 0.045); }
+button.v3-rail.selected { background-color: alpha(@fileid_gold, 0.12); border-color: alpha(@fileid_gold, 0.45); }
+.v3-current { background-color: alpha(@fileid_gold, 0.07); box-shadow: inset 3px 0 @fileid_gold; }
+.v3-note-ai { padding: 8px 14px; font-size: 12px; color: @fileid_lavender; background-color: alpha(@fileid_lavender, 0.06); }
+.v3-editor { padding: 12px 14px; background-color: alpha(#FFFFFF, 0.02); border-bottom: 1px solid alpha(#FFFFFF, 0.06); }
+.v3-black { background-color: #000000; border-radius: 8px; border: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-unplayable { padding: 12px; border-radius: 8px; background-color: alpha(#000000, 0.3); }
+.v3-dot { min-width: 7px; min-height: 7px; border-radius: 99px; }
+.v3-dot.tone-gold { background-color: @fileid_gold; } .v3-dot.tone-ai { background-color: @fileid_lavender; }
+.v3-dot.tone-done { background-color: @fileid_pink; } .v3-dot.tone-warning { background-color: @fileid_warning; }
+.v3-dot.tone-muted { background-color: @fileid_text3; }
+.v3-chip { font-size: 11.5px; font-weight: 500; color: @fileid_text2; background-color: alpha(#FFFFFF, 0.07); border-radius: 4px; padding: 2px 7px; }
+button.v3-cite {
+    min-height: 24px; padding: 0 8px; border-radius: 6px; box-shadow: none;
+    background-color: alpha(#FFFFFF, 0.04); border: 1px solid alpha(#FFFFFF, 0.14);
+}
+button.v3-cite.selected { background-color: alpha(@fileid_gold, 0.12); border-color: alpha(@fileid_gold, 0.5); }
+.v3-message { padding-left: 12px; }
+.v3-message.you { box-shadow: inset 2px 0 alpha(@fileid_gold, 0.5); }
+.v3-message.model { box-shadow: inset 2px 0 alpha(@fileid_lavender, 0.5); }
+textview.v3-composer, textview.v3-composer > text { background-color: transparent; color: @fileid_text1; font-size: 13.5px; }
+.v3-composer-frame { min-height: 30px; padding: 5px 8px; border-radius: 6px; background-color: alpha(#000000, 0.3); border: 1px solid alpha(#FFFFFF, 0.14); }
+button.v3-suggestion {
+    min-height: 34px; padding: 0 12px; border-radius: 6px; box-shadow: none;
+    background-color: alpha(#FFFFFF, 0.04); border: 1px solid alpha(#FFFFFF, 0.08); color: @fileid_text1; font-size: 13px;
+}
+.v3-preview-frame { background-color: alpha(#000000, 0.35); border-radius: 8px; border: 1.5px solid @fileid_gold; }
+button.v3-aspect {
+    min-width: 96px; min-height: 28px; padding: 8px 6px; border-radius: 8px; box-shadow: none;
+    background-color: transparent; border: 1px solid alpha(#FFFFFF, 0.14); color: @fileid_text2; font-size: 11.5px;
+}
+button.v3-aspect.selected { border-color: @fileid_gold; background-color: alpha(@fileid_gold, 0.1); color: @fileid_text1; }
+.v3-aspect-frame { border: 1.5px solid alpha(#FFFFFF, 0.5); border-radius: 2px; }
+button.v3-aspect.selected .v3-aspect-frame { border-color: @fileid_gold; }
+.v3-step { padding: 12px 14px; }
+.v3-step.current { background-color: alpha(@fileid_gold, 0.07); box-shadow: inset 3px 0 @fileid_gold; }
+.v3-step-badge { min-width: 20px; min-height: 20px; border-radius: 99px; border: 1px solid alpha(#FFFFFF, 0.14); font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 11px; font-weight: 600; color: @fileid_text3; }
+.v3-step-badge.current { border: 1.5px solid @fileid_gold; color: @fileid_gold; }
+.v3-step-badge.done { background-color: @fileid_pink; border-color: @fileid_pink; color: #141414; }
+.v3-step-title { font-size: 13.5px; font-weight: 600; color: @fileid_text1; }
+.v3-step-title.upcoming { color: @fileid_text3; }
+.v3-metric { padding: 12px 14px; }
+.v3-metric:hover { background-color: alpha(#FFFFFF, 0.07); }
+.v3-notice { padding: 12px 14px; border-radius: 10px; background-color: alpha(@fileid_gold, 0.05); box-shadow: inset 3px 0 @fileid_gold; }
+.v3-notice.tone-done { background-color: alpha(@fileid_pink, 0.05); box-shadow: inset 3px 0 @fileid_pink; }
+.v3-notice.tone-warning { background-color: alpha(@fileid_warning, 0.05); box-shadow: inset 3px 0 @fileid_warning; }
+.v3-notice.tone-ai { background-color: alpha(@fileid_lavender, 0.05); box-shadow: inset 3px 0 @fileid_lavender; }
+.v3-icon-tile { min-width: 30px; min-height: 30px; border-radius: 6px; }
+.v3-icon-tile.tone-done { background-color: alpha(@fileid_pink, 0.16); color: @fileid_pink; }
+.v3-icon-tile.tone-warning { background-color: alpha(@fileid_warning, 0.16); color: @fileid_warning; }
+.v3-icon-tile.tone-gold { background-color: alpha(@fileid_gold, 0.16); color: @fileid_gold; }
+.v3-rec { padding: 12px 14px; }
+.v3-rec:hover { background-color: alpha(#FFFFFF, 0.06); box-shadow: inset 3px 0 alpha(#FFFFFF, 0.3); }
+.v3-rec.skipped { opacity: 0.55; }
+.v3-expanded { background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.06); }
+button.v3-proposal { min-height: 28px; padding: 3px 8px; border-radius: 6px; border: none; box-shadow: none; background: transparent; }
+button.v3-proposal:hover { background-color: alpha(#FFFFFF, 0.045); }
+.v3-guide { margin-left: 10px; padding-left: 16px; box-shadow: inset 1px 0 alpha(#FFFFFF, 0.14); }
+.v3-pane-top { padding: 14px; }
+.v3-page-pad { padding: 20px 26px; }
+.v3-page-pad-inner { margin: 20px 26px; }
+.v3-panel-pad { padding: 12px 14px; }
+.v3-row-pad { padding: 6px 14px; }
+.v3-title-13 { font-size: 13px; font-weight: 500; color: @fileid_text1; }
+.v3-meta-115 { font-size: 11.5px; color: @fileid_text3; }
+.v3-snippet { font-size: 12px; color: @fileid_text2; }
+.v3-state { font-size: 12px; font-weight: 600; }
+.v3-lane-label { font-size: 11.5px; font-weight: 500; color: @fileid_text3; }
+.v3-lane { border-radius: 4px; }
+.v3-chapter-row { padding: 6px 10px 6px 14px; }
+button.v3-chapter-button { min-height: 28px; padding: 2px 6px; border: none; border-radius: 6px; box-shadow: none; background: transparent; }
+button.v3-chapter-button:hover { background-color: alpha(#FFFFFF, 0.045); }
+.v3-job-row { padding: 10px 14px; }
+button.v3-mono-button { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
@@ -555,4 +730,8 @@ headerbar.fileid-titlebar, .page-header { border-bottom-color: alpha(#FFFFFF, 0.
 .tb-control, menubutton.tb-control > button, .area-switcher, .tb-search, .chip, .scan-card, button.secondary, entry, popover.fileid-popover > contents { border-color: alpha(#FFFFFF, 0.5); }
 separator { background-color: alpha(#FFFFFF, 0.34); }
 .fileid-scrim { background-color: #0B0B0C; }
+.v3-meta, .v3-step-title.upcoming, .v3-step-badge, button.v3-ghost { color: #D6D9DD; }
+.v3-panel, .v3-segmented, button.v3-secondary, entry.v3-field, spinbutton.v3-number, .v3-composer-frame, button.v3-cite, button.v3-aspect { border-color: alpha(#FFFFFF, 0.5); }
+.v3-panel-header, .v3-panel-footer, .v3-soft-row, .v3-expanded, .v3-editor { border-color: alpha(#FFFFFF, 0.26); }
+.v3-dashed { border-color: alpha(#FFFFFF, 0.5); }
 "#;
