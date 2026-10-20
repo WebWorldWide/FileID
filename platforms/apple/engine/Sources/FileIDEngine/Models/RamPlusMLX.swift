@@ -40,6 +40,7 @@ final class RamPlusMLX: @unchecked Sendable {
     private let head: [HeadLayer]
     private let fcW, fcB, tagMask: MLXArray
     private let lock = NSLock()
+    private var forward: (@Sendable (MLXArray) -> MLXArray)?
 
     var classCount: Int { classes }
 
@@ -201,9 +202,25 @@ final class RamPlusMLX: @unchecked Sendable {
     /// `pixels` holds `count` ImageNet-normalized CHW 384×384 images back to
     /// back. Returns `count` logit vectors, one per tag class.
     func logits(pixels: [Float], count: Int) -> [[Float]] {
-        let side = Self.inputSize, grid = side / Self.patch
         lock.lock(); defer { lock.unlock() }
-        let input = MLXArray(pixels, [count, 3, grid, Self.patch, grid, Self.patch]).asType(.float16)
+        if forward == nil {
+            forward = compile { [unowned self] input in tagLogits(imageEmbeds(input)) }
+        }
+        let out = forward!(Self.input(pixels, count: count))
+        eval(out)
+        let values = out.asArray(Float.self)
+        return (0..<count).map { Array(values[($0 * classes)..<(($0 + 1) * classes)]) }
+    }
+
+    private static func input(_ pixels: [Float], count: Int) -> MLXArray {
+        let grid = inputSize / patch
+        return MLXArray(pixels, [count, 3, grid, patch, grid, patch]).asType(.float16)
+    }
+
+    func imageEmbeds(pixels: [Float], count: Int) -> MLXArray { imageEmbeds(Self.input(pixels, count: count)) }
+
+    private func imageEmbeds(_ input: MLXArray) -> MLXArray {
+        let count = input.dim(0), grid = Self.inputSize / Self.patch
         var x = matmul(input.transposed(axes: [0, 2, 4, 1, 3, 5]).reshaped([count, grid * grid, 3 * Self.patch * Self.patch]), patchW) + patchB
         x = Self.norm(x, patchNW, patchNB, Self.swinEps)
         var resolution = grid
@@ -216,8 +233,11 @@ final class RamPlusMLX: @unchecked Sendable {
         }
         x = Self.norm(x, normW, normB, Self.swinEps)
         let pooled = x.mean(axis: 1, keepDims: true)
-        let embeds = matmul(concatenated([pooled, x], axis: 1), imageProjW) + imageProjB
+        return matmul(concatenated([pooled, x], axis: 1), imageProjW) + imageProjB
+    }
 
+    func tagLogits(_ embeds: MLXArray) -> MLXArray {
+        let count = embeds.dim(0)
         let cls = embeds[0..., 0, 0...].asType(.float32)
         let length = sqrt((cls * cls).sum(axis: -1, keepDims: true)).asType(.float16).asType(.float32)
         let query = reweightScale * (cls / length).asType(.float16)
@@ -238,9 +258,6 @@ final class RamPlusMLX: @unchecked Sendable {
             let inner = Self.gelu(matmul(h, layer.iW) + layer.iB)
             h = Self.norm(matmul(inner, layer.o2W) + layer.o2B + h, layer.ln2w, layer.ln2b, Self.headEps)
         }
-        let out = ((matmul(h, fcW) + fcB).squeezed(axis: -1) + tagMask).asType(.float32)
-        eval(out)
-        let values = out.asArray(Float.self)
-        return (0..<count).map { Array(values[($0 * classes)..<(($0 + 1) * classes)]) }
+        return ((matmul(h, fcW) + fcB).squeezed(axis: -1) + tagMask).asType(.float32)
     }
 }

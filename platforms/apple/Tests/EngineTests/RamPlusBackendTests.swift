@@ -3,6 +3,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import OnnxRuntimeBindings
+import MLX
 @testable import FileIDEngine
 
 /// Opt-in: FILEID_GPU_TESTS=1 with RAM++ installed. FILEID_RAMPLUS_IMAGES
@@ -90,6 +91,11 @@ struct RamPlusBackendTests {
         t = CFAbsoluteTimeGetCurrent()
         for _ in 0..<3 { _ = model.logits(pixels: pixels, count: batch.count) }
         let batched = (CFAbsoluteTimeGetCurrent() - t) / Double(3 * batch.count)
+        t = CFAbsoluteTimeGetCurrent()
+        for _ in 0..<3 { eval(model.imageEmbeds(pixels: pixels, count: batch.count)) }
+        let backbone = (CFAbsoluteTimeGetCurrent() - t) / Double(3 * batch.count)
+        print(String(format: "ramplus-speed backbone %.1f ms, head %.1f ms per image (batch%d)",
+                     backbone * 1000, (batched - backbone) * 1000, batch.count))
         print(String(format: "ramplus-speed mlx first %.0f ms, batch1 %.1f ms, batch%d %.1f ms per image",
                      first * 1000, single * 1000, batch.count, batched * 1000))
     }
