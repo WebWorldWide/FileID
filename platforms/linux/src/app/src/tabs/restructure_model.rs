@@ -112,8 +112,9 @@ pub fn zero_move_status(anchors: u32) -> String {
 pub struct Library {
     pub indexed: u64,
     pub images_without_clip: u64,
-    /// (folder relative to the root, files) for folders no move touches.
-    pub staying: Vec<(String, u64)>,
+    /// (full path, path relative to the root, files) for folders no move
+    /// touches.
+    pub staying: Vec<(String, String, u64)>,
 }
 
 /// Indexed files under `root`, photos without CLIP, and the folders that keep
@@ -152,15 +153,10 @@ pub fn library_under(conn: &rusqlite::Connection, root: &str, moved_from: &[Stri
             let relative = folder
                 .strip_prefix(root.trim_end_matches('/'))
                 .unwrap_or(&folder)
-                .trim_start_matches('/');
-            (
-                if relative.is_empty() {
-                    "(library root)".to_owned()
-                } else {
-                    relative.to_owned()
-                },
-                count,
-            )
+                .trim_start_matches('/')
+                .to_owned();
+            let shown = if relative.is_empty() { "(library root)".to_owned() } else { relative };
+            (folder, shown, count)
         })
         .collect();
     Library {
@@ -270,6 +266,6 @@ mod tests {
         .unwrap();
         let library = library_under(&conn, "/lib", &["/lib/Untitled".to_owned()]);
         assert_eq!((library.indexed, library.images_without_clip), (3, 1));
-        assert_eq!(library.staying, vec![("Trips".to_owned(), 2)]);
+        assert_eq!(library.staying, vec![("/lib/Trips".to_owned(), "Trips".to_owned(), 2)]);
     }
 }

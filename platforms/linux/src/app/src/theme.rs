@@ -687,6 +687,37 @@ button.v3-staying-header { min-height: 38px; padding: 0 14px; border: none; bord
 button.v3-staying-header:hover { background-color: alpha(#FFFFFF, 0.04); }
 .v3-review-head { padding: 20px 26px 14px 26px; }
 .v3-review-list { padding: 16px 26px; }
+.v3-map-head { font-size: 10px; font-weight: 700; letter-spacing: 0.8px; color: @fileid_text2; }
+button.v3-map-node {
+    padding: 4px 10px; border-radius: 8px; box-shadow: 0 1px 2.5px alpha(#000000, 0.22);
+    background-color: alpha(#18181B, 0.9); border: 1px solid alpha(#FFFFFF, 0.14);
+    transition: border-color 180ms ease-out, background-color 180ms ease-out;
+}
+button.v3-map-node:hover, button.v3-map-node.lit { border-color: alpha(@fileid_gold, 0.95); background-color: alpha(@fileid_gold, 0.10); }
+.v3-map-node-name { font-size: 12px; font-weight: 600; color: @fileid_text1; }
+.v3-map-node-count { font-size: 10px; font-weight: 500; color: @fileid_text3; font-feature-settings: "tnum"; }
+.v3-letter {
+    min-width: 18px; min-height: 18px; border-radius: 99px;
+    font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 11px; font-weight: 600;
+}
+.v3-letter.tone-done { background-color: @fileid_pink; color: #141414; }
+.v3-letter.tone-warning { background-color: @fileid_warning; color: #141414; }
+.v3-letter.tone-gold { background-color: @fileid_gold; color: #141414; }
+.v3-tree-pane { padding: 8px; border-radius: 6px; border: 1px solid alpha(#FFFFFF, 0.14); }
+.v3-title-12 { font-size: 12px; font-weight: 600; color: @fileid_text1; }
+.v3-tree-row, button.v3-tree-row {
+    min-height: 28px; padding: 3px 8px; border-radius: 6px; box-shadow: none;
+    border: 1px solid transparent; transition: background-color 180ms ease-out;
+}
+.v3-tree-row.tone-done { background-color: alpha(@fileid_pink, 0.06); }
+.v3-tree-row.tone-warning { background-color: alpha(@fileid_warning, 0.06); }
+.v3-tree-row.tone-gold { background-color: alpha(@fileid_gold, 0.06); }
+.v3-tree-row.tone-done.lit { background-color: alpha(@fileid_pink, 0.22); border-color: alpha(@fileid_pink, 0.7); }
+.v3-tree-row.tone-warning.lit { background-color: alpha(@fileid_warning, 0.22); border-color: alpha(@fileid_warning, 0.7); }
+.v3-tree-row.tone-gold.lit { background-color: alpha(@fileid_gold, 0.22); border-color: alpha(@fileid_gold, 0.7); }
+.v3-tree-row, button.v3-tree-row { color: @fileid_text1; }
+.v3-rec.lit { background-color: alpha(#FFFFFF, 0.06); box-shadow: inset 3px 0 alpha(@fileid_gold, 0.8); }
+.v3-staying-row.lit { background-color: alpha(@fileid_pink, 0.08); }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
