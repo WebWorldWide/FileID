@@ -141,8 +141,7 @@ struct Sidebar: View {
     }
 
     private var isFaceModelInstalled: Bool {
-        if case .installed = ArcFaceModelInstaller.shared.status[.sface] ?? .unknown { return true }
-        return false
+        ModelInstaller.face.status.isInstalled
     }
 
     private func compact(_ n: Int) -> String {

@@ -219,6 +219,30 @@ struct ReadStorePresentationTests {
         #expect(fixture.store.persons().map(\.id) == [7])
     }
 
+    @Test("person names agree between display, tagging and the SQL named filter")
+    func personNames() throws {
+        let fixture = try makeStore { db in
+            try db.execute(sql: """
+                INSERT INTO persons(id,name,title,first_name,last_name,suffix) VALUES
+                    (1,NULL,' Dr ','Ada',' Lovelace','Jr'),
+                    (2,'Legacy Name',NULL,NULL,NULL,NULL),
+                    (3,'  ',NULL,' ',NULL,NULL)
+                """)
+            try db.execute(sql: "INSERT INTO face_prints(id,person_id) VALUES(1,1),(2,2),(3,3)")
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+        let byID = Dictionary(uniqueKeysWithValues: fixture.store.persons().map { ($0.id, $0) })
+        #expect(byID[1]?.displayName == "Dr Ada Lovelace Jr")
+        #expect(byID[1]?.tagName == "Dr Ada Lovelace Jr")
+        #expect(byID[2]?.displayName == "Legacy Name")
+        #expect(byID[3]?.displayName == "Person 3")
+        #expect(byID[3]?.hasAnyName == false)
+        #expect(fixture.store.namedPersonCount() == 2)
+    }
+
     @Test("merge suggestions reject people who appear in the same file")
     func mergeSuggestionsRejectCooccurringPeople() throws {
         let blob = { (values: [Float]) in

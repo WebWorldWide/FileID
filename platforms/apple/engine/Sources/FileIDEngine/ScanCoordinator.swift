@@ -88,7 +88,6 @@ public actor ScanCoordinator {
     // cancelling a running scan poisoned a separately-queued later scan.
     private var runningEpoch = -1
 
-    private var lastEmitAt: Date = .distantPast
     private var lastProcessedSnapshot: Int = 0
     private var lastSnapshotAt: Date = .distantPast
     private var rollingFilesPerSecond: Double = 0

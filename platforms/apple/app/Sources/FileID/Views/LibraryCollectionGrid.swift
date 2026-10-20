@@ -4,7 +4,6 @@ import FileIDShared
 
 /// Library grid on NSCollectionView: cells are reused as they scroll, so a
 /// library of tens of thousands of files costs only the visible tiles.
-/// Visuals match `FileTile`.
 struct LibraryCollectionGrid: NSViewRepresentable {
     let rows: [FileRow]
     let tagsByFile: [Int64: [String]]
@@ -517,7 +516,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         return NSFont(descriptor: descriptor, size: size) ?? base
     }
 
-    /// Same chip text as FileTile: last segment of hierarchical labels,
+    /// Chip text: last segment of hierarchical labels,
     /// capitalised, de-duplicated, two at most.
     static func displayTags(_ raw: [String]) -> [String] {
         var seen = Set<String>()

@@ -42,8 +42,8 @@ struct FileIDApp: App {
                         }
                     }
                     CLIPModelInstaller.shared.refreshStatus()
-                    RamPlusModelInstaller.shared.refreshStatus()
-                    ArcFaceModelInstaller.shared.refreshStatus()
+                    ModelInstaller.ramPlus.refreshStatus()
+                    ModelInstaller.face.refreshStatus()
                     if !welcomeSheetSeen { showWelcome = true }
                 }
                 .sheet(isPresented: $showWelcome) {

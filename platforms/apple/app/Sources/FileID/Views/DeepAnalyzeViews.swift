@@ -20,7 +20,7 @@ struct DeepAnalyzeModelPickerCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("AI models · Deep Analyze").font(Theme.Font.body(14, .semibold))
@@ -313,7 +313,11 @@ struct DeepAnalyzeView: View {
     }
 
     private func refreshPendingRenameCount() {
-        pendingRenameCount = store.countFilesWithProposedNames()
+        Task {
+            pendingRenameCount = await Task.detached(priority: .userInitiated) { [store] in
+                store.countFilesWithProposedNames()
+            }.value
+        }
     }
 
     /// Coalesce the ~1/sec `store.version` bumps a live scan emits into at
@@ -344,15 +348,21 @@ struct DeepAnalyzeView: View {
 
     // Refresh the cached status counts off the 4 Hz body-eval path.
     private func refreshStatusCounts() {
-        pendingTotals = store.deepAnalyzePending(modelKey: settings.activeKind.rawValue)
-        hasNamedAnyone = store.namedPersonCount() > 0
+        let modelKey = settings.activeKind.rawValue
+        Task {
+            let counts = await Task.detached(priority: .userInitiated) { [store] in
+                (store.deepAnalyzePending(modelKey: modelKey), store.namedPersonCount() > 0)
+            }.value
+            pendingTotals = counts.0
+            hasNamedAnyone = counts.1
+        }
     }
 
     // Item 4: plain-language explanation of the two AI passes so non-technical
     // users don't conflate automatic in-scan tagging with the heavier, opt-in
     // Deep Analyze step. Dismissible.
     private var explainerCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "sparkles")
                     .font(Theme.Font.body(16, .semibold))
@@ -379,7 +389,7 @@ struct DeepAnalyzeView: View {
     // smartNamesCard above. Tag writes are additive (never clobber the user's
     // own Finder tags) and reversible by removing the tag.
     private var applyActionsCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
                     Image(systemName: "square.and.arrow.down.on.square")
@@ -506,7 +516,7 @@ struct DeepAnalyzeView: View {
     }
 
     private var smartNamesCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
@@ -534,7 +544,7 @@ struct DeepAnalyzeView: View {
     }
 
     private var unavailableCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(Theme.Font.body(20, .semibold))
@@ -563,7 +573,7 @@ struct DeepAnalyzeView: View {
     private var statusCard: some View {
         let totals = pendingTotals
         let pendingMins = Double(totals.pending) * settings.activeKind.secondsPerImage / 60.0
-        return GlassCard {
+        return Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("Library status").font(Theme.Font.body(14, .semibold))
@@ -591,7 +601,7 @@ struct DeepAnalyzeView: View {
                     }
                     GridRow {
                         Text("Estimated batch time").foregroundStyle(Theme.text3)
-                        Text(formatDuration(seconds: pendingMins * 60))
+                        Text(DurationText.short(pendingMins * 60))
                             .font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
                 }
@@ -602,7 +612,7 @@ struct DeepAnalyzeView: View {
     private var actionsCard: some View {
         let activeFits = settings.activeKind.fits(ramGB: settings.systemRAMGB)
         let canRun = engine.deepAnalyzeAvailable && activeFits && hasNamedAnyone
-        return GlassCard {
+        return Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Run Deep Analyze").font(Theme.Font.body(14, .semibold))
                 // Banner only when there's nothing in flight — once a
@@ -730,7 +740,7 @@ struct DeepAnalyzeView: View {
     /// through each phase.
     @ViewBuilder
     private var startingCard: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
                     ProgressView()
@@ -769,13 +779,13 @@ struct DeepAnalyzeView: View {
     @ViewBuilder
     private var progressCard: some View {
         if let p = engine.deepAnalyzeProgress {
-            GlassCard {
+            Panel(padding: 16) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("Working…").font(Theme.Font.body(14, .semibold))
                         Spacer()
                         if let eta = p.etaSeconds {
-                            Text("ETA \(formatDuration(seconds: eta))")
+                            Text("ETA \(DurationText.short(eta))")
                                 .font(Theme.Font.mono(12.5)).foregroundStyle(Theme.gold)
                         }
                     }
@@ -809,7 +819,7 @@ struct DeepAnalyzeView: View {
     }
 
     private func completionCard(_ c: DeepAnalyzeComplete) -> some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Image(systemName: c.cancelled ? "xmark.octagon" : "checkmark.seal.fill")
@@ -817,14 +827,14 @@ struct DeepAnalyzeView: View {
                     Text(c.cancelled ? "Cancelled" : "Last run complete").font(Theme.Font.body(14, .semibold))
                     Spacer()
                 }
-                Text("\(c.processed) processed · \(c.failed) failed · \(formatDuration(seconds: c.totalSeconds)) wall time")
+                Text("\(c.processed) processed · \(c.failed) failed · \(DurationText.short(c.totalSeconds)) wall time")
                     .font(Theme.Font.mono(12.5)).foregroundStyle(Theme.text3)
             }
         }
     }
 
     private func lastFileCard(_ d: DeepAnalyzeFileDone) -> some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Most recent caption").font(Theme.Font.body(14, .semibold))
                 Text(d.description).font(Theme.Font.body(13.5))
@@ -839,16 +849,6 @@ struct DeepAnalyzeView: View {
                 }
             }
         }
-    }
-
-    private func formatDuration(seconds: Double) -> String {
-        let s = max(0, Int(seconds.rounded()))
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
     }
 }
 

@@ -66,14 +66,9 @@ struct PipelineProgress: View {
         if engine.isPaused { return .tag }
 
         // Nothing in flight — derive from the DB state.
-        let scanned   = store.totalFiles > 0
-        let clustered = store.totalFacePrints() > 0
-        let named     = store.namedPersonCount() > 0
-        let captioned = store.totalCaptioned() > 0
-        if !scanned   { return .scan }
-        if !clustered { return .people }   // clustering still pending
-        if !named     { return .people }   // user hasn't named anyone yet
-        if !captioned { return .captions } // Deep Analyze still pending
+        if store.totalFiles == 0 { return .scan }
+        if !store.hasFacePrints || !store.hasNamedPerson { return .people }
+        if !store.hasCaptions { return .captions }
         return .done
     }
 
@@ -130,6 +125,7 @@ struct PipelineProgress: View {
             }
         }
         .padding(.horizontal, 4)
+        .onChange(of: engine.lastTerminalEventAt) { _, _ in store.refreshCounters() }
     }
 
     @ViewBuilder

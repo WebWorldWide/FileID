@@ -9,9 +9,9 @@ struct WelcomeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var clip = CLIPModelInstaller.shared
-    @State private var ramplus = RamPlusModelInstaller.shared
-    @State private var arcface = ArcFaceModelInstaller.shared
-    @State private var bge = BGEModelInstaller.shared
+    @State private var ramplus = ModelInstaller.ramPlus
+    @State private var arcface = ModelInstaller.face
+    @State private var bge = ModelInstaller.bge
 
     private let recommendedFace: FaceEmbedderKind
     private let hardwareRecommendedVLM: AIModelKind
@@ -62,23 +62,15 @@ struct WelcomeSheet: View {
                 title: "CLIP ViT-B/32",
                 detail: "Search by description · Required",
                 size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
-                installed: clipInstalled,
-                inProgress: clipInProgress,
-                progressLabel: clipProgressLabel,
-                progressFrac: clipProgressFrac,
-                rateETA: clipRateETA,
+                status: clip.status,
                 action: { clip.install() },
                 cancel: { clip.cancel() }
             )
             modelRow(
                 title: "RAM++",
                 detail: "Tags images (4,585 labels) · Required",
-                size: "~926 MB",
-                installed: ramplusInstalled,
-                inProgress: ramplusInProgress,
-                progressLabel: ramplusProgressLabel,
-                progressFrac: ramplusProgressFrac,
-                rateETA: ramplusRateETA,
+                size: "~\(ByteCountFormatter.string(fromByteCount: ramplus.spec.approxBytes, countStyle: .file))",
+                status: ramplus.status,
                 action: { ramplus.install() },
                 cancel: { ramplus.cancel() }
             )
@@ -86,23 +78,15 @@ struct WelcomeSheet: View {
                 title: recommendedFace.displayName,
                 detail: "Finds and groups faces · Required",
                 size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
-                installed: arcfaceInstalled,
-                inProgress: arcfaceInProgress,
-                progressLabel: arcfaceProgressLabel,
-                progressFrac: arcfaceProgressFrac,
-                rateETA: arcfaceRateETA,
-                action: { arcface.install(recommendedFace) },
-                cancel: { arcface.cancel(recommendedFace) }
+                status: arcface.status,
+                action: { arcface.install() },
+                cancel: { arcface.cancel() }
             )
             modelRow(
                 title: "BGE-small",
                 detail: "Reads documents for search and Restructure · Required",
-                size: "~129 MB",
-                installed: bgeInstalled,
-                inProgress: bgeInProgress,
-                progressLabel: bgeProgressLabel,
-                progressFrac: bgeProgressFrac,
-                rateETA: bgeRateETA,
+                size: "~\(ByteCountFormatter.string(fromByteCount: bge.spec.approxBytes, countStyle: .file))",
+                status: bge.status,
                 action: { bge.install() },
                 cancel: { bge.cancel() }
             )
@@ -266,7 +250,7 @@ struct WelcomeSheet: View {
                 installAllRequested = true
                 if !clipInstalled, !clipInProgress { clip.install() }
                 if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
-                if !arcfaceInstalled, !arcfaceInProgress { arcface.install(recommendedFace) }
+                if !arcfaceInstalled, !arcfaceInProgress { arcface.install() }
                 if !bgeInstalled, !bgeInProgress { bge.install() }
                 if !vlmInstalled, !vlmInProgress { triggerVLMInstall() }
             }
@@ -277,6 +261,16 @@ struct WelcomeSheet: View {
         }
         .padding(.horizontal, 22).padding(.vertical, 16)
         .overlay(alignment: .top) { Hairline() }
+    }
+
+    private func modelRow(title: String, detail: String, size: String,
+                          status: ModelInstaller.Status,
+                          action: @escaping () -> Void,
+                          cancel: @escaping () -> Void) -> some View {
+        modelRow(title: title, detail: detail, size: size,
+                 installed: status.isInstalled, inProgress: status.inProgress,
+                 progressLabel: status.progressLabel, progressFrac: status.fraction,
+                 rateETA: status.rateAndETA, action: action, cancel: cancel)
     }
 
     @ViewBuilder
@@ -364,122 +358,14 @@ struct WelcomeSheet: View {
         }
     }
 
-    private var clipInstalled: Bool {
-        if case .installed = clip.status { return true }
-        return false
-    }
-    private var clipInProgress: Bool {
-        switch clip.status {
-        case .downloading, .extracting: return true
-        default: return false
-        }
-    }
-    private var clipProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = clip.status { return frac }
-        return nil
-    }
-    private var clipProgressLabel: String? {
-        switch clip.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .extracting:                    return "Extracting…"
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var clipRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = clip.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
-    private var ramplusInstalled: Bool {
-        if case .installed = ramplus.status { return true }
-        return false
-    }
-    private var ramplusInProgress: Bool {
-        if case .downloading = ramplus.status { return true }
-        return false
-    }
-    private var ramplusProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = ramplus.status { return frac }
-        return nil
-    }
-    private var ramplusProgressLabel: String? {
-        switch ramplus.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var ramplusRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = ramplus.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
-    private var bgeInstalled: Bool {
-        if case .installed = bge.status { return true }
-        return false
-    }
-    private var bgeInProgress: Bool {
-        if case .downloading = bge.status { return true }
-        return false
-    }
-    private var bgeProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = bge.status { return frac }
-        return nil
-    }
-    private var bgeProgressLabel: String? {
-        switch bge.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var bgeRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = bge.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
-    private var arcfaceInstalled: Bool {
-        if case .installed = arcface.status[recommendedFace] { return true }
-        return false
-    }
-    private var arcfaceInProgress: Bool {
-        switch arcface.status[recommendedFace] {
-        case .downloading: return true
-        default:           return false
-        }
-    }
-    private var arcfaceProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = arcface.status[recommendedFace] { return frac }
-        return nil
-    }
-    private var arcfaceProgressLabel: String? {
-        switch arcface.status[recommendedFace] {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var arcfaceRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = arcface.status[recommendedFace] {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
+    private var clipInstalled: Bool { clip.status.isInstalled }
+    private var clipInProgress: Bool { clip.status.inProgress }
+    private var ramplusInstalled: Bool { ramplus.status.isInstalled }
+    private var ramplusInProgress: Bool { ramplus.status.inProgress }
+    private var bgeInstalled: Bool { bge.status.isInstalled }
+    private var bgeInProgress: Bool { bge.status.inProgress }
+    private var arcfaceInstalled: Bool { arcface.status.isInstalled }
+    private var arcfaceInProgress: Bool { arcface.status.inProgress }
 
     private var vlmInstalled: Bool {
         ModelInstallStatus.isInstalled(kind: selectedVLM)

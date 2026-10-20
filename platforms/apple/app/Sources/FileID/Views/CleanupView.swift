@@ -125,10 +125,7 @@ struct CleanupView: View {
             MetaText(headerSubtitle, color: Theme.text2)
                 .lineLimit(2)
                 .layoutPriority(-1)
-            ThemedSegmentedControl(
-                selection: $mode,
-                options: [(tag: "exact", label: "Exact"), (tag: "similar", label: "Similar")]
-            )
+            SegmentedBar(selection: $mode, options: [("exact", "Exact"), ("similar", "Similar")])
             .help("Exact: byte-for-byte identical copies. Similar: visually near-identical images (resizes, re-encodes, crops, light edits) found by perceptual hash — review each before deleting, they are NOT byte-identical.")
             Spacer()
             if !visibleGroups.isEmpty {
@@ -684,7 +681,6 @@ private struct CopyTile: View {
     let isKeeper: Bool
     let isSelected: Bool
     let onToggle: () -> Void
-    @State private var thumb: NSImage?
     @State private var hovering = false
 
     private var borderColor: Color {
@@ -738,8 +734,6 @@ private struct CopyTile: View {
             }
             .frame(width: 132)
         }
-        .task(id: file.id) { thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 264) }
-        .onDisappear { thumb = nil }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
@@ -756,13 +750,8 @@ private struct CopyTile: View {
         return "\(role)\(file.url.lastPathComponent), \(mb)"
     }
 
-    @ViewBuilder
     private var thumbContent: some View {
-        if let thumb {
-            Image(nsImage: thumb).resizable().scaledToFill()
-        } else {
-            Image(systemName: "photo").foregroundStyle(Theme.text3)
-        }
+        AsyncThumbnail(url: file.url, size: 264) { Image(systemName: "photo").foregroundStyle(Theme.text3) }
     }
 
     @ViewBuilder

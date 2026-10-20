@@ -75,7 +75,6 @@ struct RestructureView: View {
     /// Shared hover state used by the Sankey, recommendation rows,
     /// tree, and staysPut disclosure to drive cross-highlight.
     @State private var hoverBus = RestructureHoverBus()
-    @State private var hasPulsed = false
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @AppStorage("restructure.dismissedDeepAnalyzeHint") private var dismissedDeepAnalyzeHint = false
@@ -758,7 +757,7 @@ struct RestructureView: View {
         let hiddenCount = unlimited ? 0 : max(0, g.proposals.count - cap)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: bucketIcon(g.bucket))
+                Image(systemName: bucketIconName(g.bucket))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.gold)
                     .frame(width: 20, alignment: .center)
@@ -805,7 +804,7 @@ struct RestructureView: View {
         } label: {
             HStack(spacing: 10) {
                 DSCheck(on: on)
-                Image(systemName: Self.fileIcon(forFilename: filename))
+                Image(systemName: FileTypes.symbolName(forExtension: (filename as NSString).pathExtension))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text3)
                     .frame(width: 14, alignment: .center)
@@ -864,31 +863,6 @@ struct RestructureView: View {
             EmptyView()
         }
     }
-
-    /// SF Symbol for a filename based on its extension. Helps the user
-    /// scan a long file list — photos vs videos vs PDFs are visually
-    /// distinct without reading the extension.
-    private static func fileIcon(forFilename name: String) -> String {
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "jpg", "jpeg", "png", "heic", "heif", "gif", "tiff", "tif", "bmp", "webp", "raw", "dng":
-            return "photo"
-        case "mp4", "mov", "m4v", "avi", "mkv", "webm":
-            return "video"
-        case "pdf":
-            return "doc.richtext"
-        case "doc", "docx", "pages", "rtf", "txt", "md":
-            return "doc.text"
-        case "mp3", "m4a", "wav", "flac", "aac", "ogg":
-            return "waveform"
-        case "zip", "tar", "gz", "7z":
-            return "archivebox"
-        default:
-            return "doc"
-        }
-    }
-
-    private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
     // MARK: - Engine-routed plan + apply
 
