@@ -467,8 +467,10 @@ impl ScanSession {
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
+        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
         let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
-            .with_scan_root(root.to_path_buf());
+            .with_scan_root(root.to_path_buf())
+            .with_legacy_hashes(writer.rename_heal_enabled());
         let (tagged_rx, mut decoder_join): (
             mpsc::Receiver<TaggedFile>,
             tokio::task::JoinHandle<()>,
@@ -478,7 +480,6 @@ impl ScanSession {
         // every 1000 files (whichever first). Without throttling, a fast
         // scan floods the IPC channel and the app dispatcher.
         let progress_state = Arc::new(Mutex::new(ProgressState::new()));
-        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
 
         let sink_for_batch = sink.clone();
         let session_id_for_batch = session_id.clone();

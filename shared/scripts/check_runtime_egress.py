@@ -179,7 +179,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/shell/tags.rs": "e3173acbbbae07939168102cbcb8a082e48e15bb92b0c82bd0eb4ffec527816a",
   "platforms/windows/src/engine/src/shell/trash.rs": "81e1cf3e11a4d3a839fa439e014199655f8cdd91c3a09f79f1139e21b21acc99",
   "platforms/windows/src/engine/src/shell/video.rs": "96d06fc7aa090f568732acb2c04585d66f2be5fe8994fef7bfbc48a85f8799e0",
-  "platforms/windows/src/engine/src/util/content_hash.rs": "7ee089593e70e9bcf6dd3dfe53fb16ee01eae06b561ba21409396240ebe65588",
+  "platforms/windows/src/engine/src/util/content_hash.rs": "8c85c0de6998646a80060bdb706789d24c1d9e96a1f54479cadc098f8ed30cf8",
   "platforms/windows/src/engine/src/util/path_safety.rs": "75fc778eb1d98ed35adbfe52c1d74fa375b53b536c78f0591a82b8e63d8d45f9",
 }
 SAFE_NETWORK_CALLER_FILES = {

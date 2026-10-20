@@ -154,7 +154,7 @@ impl DbWriter {
                     }
                     buffer.push(file);
                     if buffer.len() >= current_target {
-                        let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
+                        let stats = self.flush_off_runtime(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                         batch_index += 1;
                         deadline = None;
                         on_batch(stats);
@@ -162,14 +162,14 @@ impl DbWriter {
                 }
                 Ok(None) => {
                     if !buffer.is_empty() {
-                        let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
+                        let stats = self.flush_off_runtime(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                         on_batch(stats);
                     }
                     break;
                 }
                 Err(_) => {
                     if !buffer.is_empty() {
-                        let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
+                        let stats = self.flush_off_runtime(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                         batch_index += 1;
                         deadline = None;
                         on_batch(stats);
@@ -183,13 +183,82 @@ impl DbWriter {
                 // fully re-processed on the next scan. Mirrors the Ok(None)/Err
                 // drain arms above.
                 if !buffer.is_empty() {
-                    let stats = self.flush(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
+                    let stats = self.flush_off_runtime(&mut buffer, &mut total, &mut heavy, &mut failed, batch_index)?;
                     on_batch(stats);
                 }
                 break;
             }
         }
         Ok((total, failed))
+    }
+
+    pub fn rename_heal_enabled(&self) -> bool {
+        self.rename_heal_enabled
+    }
+
+    /// `flush` is synchronous SQLite + filesystem work; on the multi-threaded
+    /// runtime hand this worker's other tasks off for its duration instead of
+    /// stalling them.
+    fn flush_off_runtime(
+        &self,
+        buffer: &mut Vec<TaggedFile>,
+        total: &mut u64,
+        heavy: &mut u64,
+        failed: &mut u64,
+        batch_index: u32,
+    ) -> Result<BatchStats> {
+        let mut flush = || self.flush(buffer, total, heavy, failed, batch_index);
+        match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(flush),
+            _ => flush(),
+        }
+    }
+
+    /// Per file in `buffer`, the `(id, old_path)` of every identity-matched
+    /// row at a different path whose old path is gone from disk (a genuine
+    /// move), file_ref matches first.
+    fn moved_heal_candidates(&self, buffer: &[TaggedFile]) -> Result<Vec<Vec<(i64, String)>>> {
+        let mut per_file: Vec<Vec<(i64, String)>> = Vec::with_capacity(buffer.len());
+        {
+            let conn = self.conn.lock();
+            let mut heal_lookup = conn
+                .prepare_cached(HEAL_LOOKUP_SQL)
+                .context("preparing rename-heal lookup")?;
+            for f in buffer {
+                if f.file_ref.is_none() && f.content_hash.is_none() {
+                    per_file.push(Vec::new());
+                    continue;
+                }
+                let legacy = f.legacy_hashes.as_ref();
+                let rows = heal_lookup
+                    .query_map(
+                        params![
+                            f.file_ref.map(|r| r as i64),
+                            f.content_hash.as_ref().map(|h| h.as_slice()),
+                            f.path.to_string_lossy().as_ref(),
+                            legacy.map(|h| h.v2.as_slice()),
+                            f.size_bytes as i64,
+                            legacy.and_then(|h| h.v1.as_ref()).map(|h| h.as_slice())
+                        ],
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                    )
+                    .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+                    .with_context(|| {
+                        format!("rename-heal lookup for {}", crate::platform::redact_path_for_log(&f.path))
+                    })?;
+                per_file.push(rows);
+            }
+        } // writer lock released before any filesystem IO
+        let mut gone: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        for (_, old) in per_file.iter().flatten() {
+            if !gone.contains_key(old) {
+                gone.insert(old.clone(), heal_candidate_moved(old));
+            }
+        }
+        for candidates in &mut per_file {
+            candidates.retain(|(_, old)| gone[old]);
+        }
+        Ok(per_file)
     }
 
     /// Persist `buffer` in a single transaction. Empties the buffer.
@@ -219,82 +288,21 @@ impl DbWriter {
         // encode + fs::write stays outside the transaction and writer lock.
         let mut deferred_crops: Vec<DeferredFaceCrop> = Vec::new();
 
-        // Legacy BLAKE3 digests for rows stamped before the cross-platform
-        // SHA-256 switch: computing them re-reads the file off disk (full read
-        // at or under the cap, ~2.25 MB head ‖ samples ‖ tail over it). Done
-        // BEFORE the writer lock so the blocking IO never runs inside the
-        // single-writer tx — a slow/sleeping disk on one file would otherwise
-        // stall every reader-blocking writer-lock holder for the whole batch.
-        // (F-C1-025)
-        // Index-parallel to `buffer`; `None` for files that need no legacy probe.
-        // Computed for EVERY hashed size — v0.0.1 stamped full-file BLAKE3 for
-        // under-cap files too, so gating this on over-cap orphaned every ≤16 MB
-        // legacy row on its first cross-volume move.
-        let legacy_hashes: Vec<Option<crate::util::content_hash::LegacyHashes>> = buffer
-            .iter()
-            .map(|f| {
-                if self.rename_heal_enabled && f.content_hash.is_some() {
-                    crate::util::content_hash::legacy_content_hashes(&f.path, f.size_bytes).ok()
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Rename/move heal old-path existence is resolved BEFORE the writer
-        // lock: `heal_candidate_moved()` does a blocking `symlink_metadata()`
-        // stat (is the candidate's old path still on disk?). On a dead/slow
-        // mount (unmounted NAS, pulled SD/external drive) that stat can block
-        // for the full fs/SMB timeout; inside the tx it would stall the single
-        // writer for the whole batch — the same hazard the `legacy_hashes` hoist
-        // above and the post-commit crop write defend against. Enumerate
-        // candidate old paths under a brief read lock, then stat them with the
-        // writer lock RELEASED, into a path -> "gone" map the in-tx loop
-        // consults instead of statting. (audit R3-16)
-        let heal_old_path_gone: std::collections::HashMap<String, bool> = if self.rename_heal_enabled {
-            let mut old_paths: Vec<String> = Vec::new();
-            {
-                let conn = self.conn.lock();
-                let mut heal_lookup = conn
-                    .prepare_cached(HEAL_LOOKUP_SQL)
-                    .context("preparing rename-heal lookup (pre-pass)")?;
-                for (i, f) in buffer.iter().enumerate() {
-                    if f.file_ref.is_none() && f.content_hash.is_none() {
-                        continue;
-                    }
-                    let path_text = f.path.to_string_lossy();
-                    let rows = heal_lookup
-                        .query_map(
-                            params![
-                                f.file_ref.map(|r| r as i64),
-                                f.content_hash.as_ref().map(|h| h.as_slice()),
-                                path_text.as_ref(),
-                                legacy_hashes[i].as_ref().map(|h| h.v2.as_slice()),
-                                f.size_bytes as i64,
-                                legacy_hashes[i]
-                                    .as_ref()
-                                    .and_then(|h| h.v1.as_ref())
-                                    .map(|h| h.as_slice())
-                            ],
-                            |r| r.get::<_, String>(1),
-                        )
-                        .context("rename-heal lookup (pre-pass)")?;
-                    for old in rows {
-                        old_paths.push(old.context("rename-heal lookup row (pre-pass)")?);
-                    }
-                }
-            } // writer lock released before any filesystem IO
-            old_paths.sort();
-            old_paths.dedup();
-            old_paths
-                .into_iter()
-                .map(|old| {
-                    let gone = heal_candidate_moved(false, &old);
-                    (old, gone)
-                })
-                .collect()
+        // Rename/move heal candidates are resolved BEFORE the writer lock:
+        // `heal_candidate_moved()` does a blocking `symlink_metadata()` stat (is
+        // the candidate's old path still on disk?). On a dead/slow mount
+        // (unmounted NAS, pulled SD/external drive) that stat can block for the
+        // full fs/SMB timeout; inside the tx it would stall the single writer
+        // for the whole batch. Look the candidates up under a brief lock, stat
+        // their old paths with the lock RELEASED, and keep — per file, in SQL
+        // order (file_ref matches first) — only those whose old path is gone.
+        // The legacy BLAKE3 digests come from the decoder's own read
+        // (`TaggedFile::legacy_hashes`), so the writer never re-reads a file.
+        // (F-C1-025, audit R3-16)
+        let heal_candidates = if self.rename_heal_enabled {
+            self.moved_heal_candidates(buffer)?
         } else {
-            std::collections::HashMap::new()
+            vec![Vec::new(); buffer.len()]
         };
 
         let conn = self.conn.lock();
@@ -310,9 +318,9 @@ impl DbWriter {
             let mut file_stmt = tx
                 .prepare_cached(INSERT_FILE_RETURNING_ID_SQL)
                 .context("preparing file insert (RETURNING)")?;
-            let mut heal_lookup_stmt = tx
-                .prepare_cached(HEAL_LOOKUP_SQL)
-                .context("preparing rename-heal lookup")?;
+            let mut heal_recheck_stmt = tx
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM files WHERE id = ?1 AND path_text = ?2)")
+                .context("preparing rename-heal recheck")?;
             let mut heal_update_stmt = tx
                 .prepare_cached(HEAL_UPDATE_SQL)
                 .context("preparing rename-heal update")?;
@@ -390,74 +398,50 @@ impl DbWriter {
                 // path BEFORE the INSERT. The ON CONFLICT(path_text) clause
                 // below then updates the (now-relocated) existing row,
                 // preserving its id + every FK-linked row (tags / embeddings /
-                // faces / OCR) — what the rename-heal is for. Skipped when we
-                // have neither identity (no heal possible).
-                if self.rename_heal_enabled && (f.file_ref.is_some() || f.content_hash.is_some()) {
-                    let ch_bytes = f.content_hash.as_ref().map(|h| h.as_slice());
-                    // Legacy fallbacks (?4/?6): rows stamped by pre-SHA-256
-                    // builds hold BLAKE3 — full-file at or under the cap, the
-                    // v0.0.1 head ‖ samples ‖ tail ‖ size composite (?4) or the
-                    // earlier pre-interior-sample head ‖ tail ‖ size composite
-                    // (?6) over it. Reproduced so those rows still heal; the
-                    // upsert below re-stamps the current recipe. The read was
-                    // hoisted out of the writer lock (computed into
-                    // `legacy_hashes` before `conn.lock()`). (F-C1-025)
-                    let legacy_hash = legacy_hashes[i].as_ref();
-                    let candidates: Vec<(i64, String, bool)> = heal_lookup_stmt
-                        .query_map(
-                            params![
-                                f.file_ref.map(|r| r as i64),
-                                ch_bytes,
-                                path_text.as_ref(),
-                                legacy_hash.map(|h| h.v2.as_slice()),
-                                f.size_bytes as i64,
-                                legacy_hash.and_then(|h| h.v1.as_ref()).map(|h| h.as_slice())
-                            ],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
-                        )
-                        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
-                        .with_context(|| format!("rename-heal lookup for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                    // Heal the FIRST identity match whose old path genuinely MOVED
-                    // (is gone from disk). Iterating — rather than the old
-                    // LIMIT-1/no-ORDER-BY single fetch — ensures a still-present
-                    // coexisting COPY returned ahead of the real orphan doesn't
-                    // skip the heal and leave the genuinely-moved file's prior row
-                    // (with its tags/faces) orphaned forever. file_ref matches are
-                    // ordered first in SQL (the precise rename signal).
-                    if let Some((id, _old, _by_ref)) = candidates
-                        .into_iter()
-                        .find(|(_, old, _by_ref)| heal_old_path_gone.get(old).copied().unwrap_or(false))
-                    {
-                        match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
-                            Ok(_) => tracing::info!(
+                // faces / OCR) — what the rename-heal is for. The pre-pass
+                // candidates are re-checked here: an earlier file in this batch
+                // may already have healed the same row (two copies of one moved
+                // file), so heal the first one still sitting at its old path.
+                let mut healable = None;
+                for (id, old) in &heal_candidates[i] {
+                    let still_there: bool = heal_recheck_stmt
+                        .query_row(params![id, old], |r| r.get(0))
+                        .context("rename-heal recheck")?;
+                    if still_there {
+                        healable = Some(*id);
+                        break;
+                    }
+                }
+                if let Some(id) = healable {
+                    match heal_update_stmt.execute(params![path_text, path_hash, id, path_search]) {
+                        Ok(_) => tracing::info!(
+                            id,
+                            new_path = %crate::platform::redact_path_for_log(&f.path),
+                            "[RENAME-HEAL] re-bound existing row to new path"
+                        ),
+                        // A content-identical COPY already occupies the new path
+                        // (scanned there independently). Skip the heal rather than
+                        // OR REPLACE-deleting that row — which silently orphaned its
+                        // FTS5 external-content index (ocr_fts/doc_fts have no delete
+                        // triggers, so the rowid entries would be left dangling). The
+                        // moved-away orphan keeps its old path and is cleaned by
+                        // orphan-pruning; the existing row is updated by the INSERT
+                        // ON CONFLICT below.
+                        Err(rusqlite::Error::SqliteFailure(sf, _))
+                            if sf.code == rusqlite::ErrorCode::ConstraintViolation =>
+                        {
+                            tracing::debug!(
                                 id,
-                                new_path = %crate::platform::redact_path_for_log(&f.path),
-                                "[RENAME-HEAL] re-bound existing row to new path"
-                            ),
-                            // A content-identical COPY already occupies the new path
-                            // (scanned there independently). Skip the heal rather than
-                            // OR REPLACE-deleting that row — which silently orphaned its
-                            // FTS5 external-content index (ocr_fts/doc_fts have no delete
-                            // triggers, so the rowid entries would be left dangling). The
-                            // moved-away orphan keeps its old path and is cleaned by
-                            // orphan-pruning; the existing row is updated by the INSERT
-                            // ON CONFLICT below.
-                            Err(rusqlite::Error::SqliteFailure(sf, _))
-                                if sf.code == rusqlite::ErrorCode::ConstraintViolation =>
-                            {
-                                tracing::debug!(
-                                    id,
-                                    "[RENAME-HEAL] new path already occupied by a copy; skipping heal"
-                                );
-                            }
-                            Err(e) => {
-                                Err::<(), _>(e).with_context(|| {
-                                    format!(
-                                        "rename-heal update for {}",
-                                        crate::platform::redact_path_for_log(&f.path)
-                                    )
-                                })?;
-                            }
+                                "[RENAME-HEAL] new path already occupied by a copy; skipping heal"
+                            );
+                        }
+                        Err(e) => {
+                            Err::<(), _>(e).with_context(|| {
+                                format!(
+                                    "rename-heal update for {}",
+                                    crate::platform::redact_path_for_log(&f.path)
+                                )
+                            })?;
                         }
                     }
                 }
@@ -918,9 +902,8 @@ const HEAL_UPDATE_SQL: &str = r#"
 /// keeps coexisting files as distinct rows while still healing every real move
 /// (whose old path is, by definition, gone). `symlink_metadata` (not
 /// `metadata`) so a dangling symlink still counts as present and is not treated
-/// as a move. (`_by_ref` is retained for the call site's tuple; the decision no
-/// longer depends on it.)
-fn heal_candidate_moved(_by_ref: bool, old_path: &str) -> bool {
+/// as a move.
+fn heal_candidate_moved(old_path: &str) -> bool {
     std::fs::symlink_metadata(crate::util::path_safety::to_extended_length(
         std::path::Path::new(old_path),
     ))
@@ -1195,6 +1178,7 @@ mod tests {
             error_message: None,
             file_ref: None,
             content_hash: None,
+            legacy_hashes: None,
             text_embedding: None,
             doc_text: None,
             tags: vec![],
@@ -1539,8 +1523,8 @@ mod tests {
                 )
                 .optional()
                 .unwrap();
-            if let Some((id, old_path, by_ref)) = healed {
-                if heal_candidate_moved(by_ref, &old_path) {
+            if let Some((id, old_path, _by_ref)) = healed {
+                if heal_candidate_moved(&old_path) {
                     // Mirror the production guard: `UPDATE OR ABORT` raises a
                     // UNIQUE violation when the new path is already occupied by a
                     // live row — skip the heal in that case (don't clobber it).
@@ -1734,6 +1718,42 @@ mod tests {
             .query_row("SELECT path_text FROM files WHERE id = ?1", params![id_b], |r| r.get(0))
             .unwrap();
         assert_eq!(healed_path, new_path.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two copies of one moved file in the same batch: the pre-pass offers
+    /// both the same orphan row; only the first may heal it.
+    #[test]
+    fn one_batch_heals_a_moved_row_once() {
+        let dir = unique_tmp_dir("batch_move");
+        let old_path = dir.join("gone").join("orig.jpg");
+        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let mut seed = fixture(old_path.to_str().unwrap());
+        seed.content_hash = Some([0x33; 32]);
+        let seed_id = ingest_with_heal(&conn.lock(), &seed);
+        let mut buffer: Vec<TaggedFile> = ["a.jpg", "b.jpg"]
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                std::fs::write(&path, b"payload").unwrap();
+                let mut f = fixture(path.to_str().unwrap());
+                f.content_hash = Some([0x33; 32]);
+                f
+            })
+            .collect();
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        writer.flush(&mut buffer, &mut 0, &mut 0, &mut 0, 0).unwrap();
+        let rows: Vec<(i64, String)> = conn
+            .lock()
+            .prepare("SELECT id, path_text FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (seed_id, dir.join("a.jpg").to_string_lossy().into_owned()));
+        assert_eq!(rows[1].1, dir.join("b.jpg").to_string_lossy());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2169,6 +2189,8 @@ mod tests {
         incoming.size_bytes = over_cap_bytes;
         incoming.kind = FileKind::Other;
         incoming.content_hash = Some([0xABu8; 32]);
+        incoming.legacy_hashes =
+            Some(crate::util::content_hash::legacy_content_hashes(&new_path, over_cap_bytes).unwrap());
 
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
         let mut buffer = vec![incoming];
@@ -2232,6 +2254,8 @@ mod tests {
         incoming.kind = FileKind::Other;
         incoming.content_hash =
             Some(crate::util::content_hash::content_hash(&new_path, size).unwrap());
+        incoming.legacy_hashes =
+            Some(crate::util::content_hash::legacy_content_hashes(&new_path, size).unwrap());
 
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
         let mut buffer = vec![incoming];
@@ -2297,6 +2321,8 @@ mod tests {
         incoming.kind = FileKind::Other;
         incoming.content_hash =
             Some(crate::util::content_hash::content_hash(&new_path, size).unwrap());
+        incoming.legacy_hashes =
+            Some(crate::util::content_hash::legacy_content_hashes(&new_path, size).unwrap());
 
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
         let mut buffer = vec![incoming];
@@ -2320,4 +2346,5 @@ mod tests {
         drop(c);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
 }

@@ -27,6 +27,11 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     out
 }
 
+fn composite_hashes(file: &DiscoveredFile, legacy: bool) -> (Option<[u8; 32]>, Option<LegacyHashes>) {
+    crate::util::content_hash::content_hashes(&file.path, file.size_bytes, legacy)
+        .map_or((None, None), |(hash, legacy)| (Some(hash), legacy))
+}
+
 fn perf_trace_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| {
@@ -55,6 +60,7 @@ use crate::models::{bge_text::BgeText, face_align, face_geometry, mobileclip::Mo
 use crate::pipeline::batch_clip::ClipBatchCoordinator;
 use crate::pipeline::discovery::{DiscoveredFile, FileKind};
 use crate::shell;
+use crate::util::content_hash::LegacyHashes;
 
 /// Per-file stage timings. Each worker adds its µs into these atomics;
 /// every STATS_PERIOD files an info-level [STATS] line summarises the
@@ -198,6 +204,9 @@ pub struct TaggedFile {
     /// fresh INSERT.
     pub file_ref: Option<u64>,
     pub content_hash: Option<[u8; 32]>,
+    /// Frozen pre-SHA-256 BLAKE3 digests, computed from the decoder's single
+    /// read only when the catalog may hold rows they could heal.
+    pub legacy_hashes: Option<LegacyHashes>,
 
     /// BGE-small text embedding — 384-d L2-normalized float vector
     /// for the document's extracted text. Persisted by the dbwriter into
@@ -899,6 +908,7 @@ pub struct Tagger {
     worker_count: usize,
     models: Arc<ModelStack>,
     scan_root: Option<std::path::PathBuf>,
+    legacy_hashes: bool,
 }
 
 impl Tagger {
@@ -908,7 +918,15 @@ impl Tagger {
             worker_count: worker_count.max(1),
             models,
             scan_root: None,
+            legacy_hashes: false,
         }
+    }
+
+    /// Have the decoders also compute the legacy BLAKE3 digests the
+    /// dbwriter's rename-heal probes (only useful on a non-empty catalog).
+    pub fn with_legacy_hashes(mut self, enabled: bool) -> Self {
+        self.legacy_hashes = enabled;
+        self
     }
 
     /// Lets the decoder pool clamp to the scan root's storage type; without
@@ -1058,9 +1076,10 @@ impl Tagger {
             let tx = predecoded_tx.clone();
             let coord = self.coordinator.clone();
             let budget = byte_budget.clone();
+            let legacy = self.legacy_hashes;
             let spawn_result = std::thread::Builder::new()
                 .name(format!("fileid-decode-{decoder_idx}"))
-                .spawn(move || run_decoder_thread(rx, tx, coord, budget));
+                .spawn(move || run_decoder_thread(rx, tx, coord, budget, legacy));
             match spawn_result {
                 Ok(handle) => decoder_handles.push(handle),
                 Err(e) => {
@@ -1191,6 +1210,7 @@ impl Tagger {
                                 error_message: Some("per-file timeout after 60s".into()),
                                 file_ref: None,
                                 content_hash: None,
+                                legacy_hashes: None,
                                 text_embedding: None,
                                 doc_text: None,
                                 tags: Vec::new(),
@@ -1234,6 +1254,7 @@ pub struct PreDecoded {
     /// Empty for non-audio kinds + online-only + extraction failures.
     pub audio_tags: Vec<(String, Option<f32>)>,
     pub content_hash: Option<[u8; 32]>,
+    pub legacy_hashes: Option<LegacyHashes>,
     pub exif: Option<(Option<String>, Option<f64>, Option<f64>)>,
     /// Reservation of this frame's decoded bytes in the predecode budget;
     /// released when the worker drops the frame.
@@ -1346,6 +1367,7 @@ fn run_decoder_thread(
     tx: async_channel::Sender<PreDecoded>,
     coord: ScanCoordinator,
     budget: Arc<PredecodeBudget>,
+    legacy: bool,
 ) {
     let _thread_guard = DecoderThreadGuard::enter();
     loop {
@@ -1377,6 +1399,7 @@ fn run_decoder_thread(
 
         let mut file_bytes = None;
         let mut content_hash = None;
+        let mut legacy_hashes = None;
         let mut exif_data = None;
 
         if !file.online_only {
@@ -1404,6 +1427,7 @@ fn run_decoder_thread(
                                 Some(parse_exif_fields(&bytes).unwrap_or((None, None, None)));
                             // ≤16 MB → full SHA-256 (cross-platform with Swift).
                             content_hash = Some(sha256_bytes(&bytes));
+                            legacy_hashes = legacy.then(|| LegacyHashes::of_full_bytes(&bytes));
                             file_bytes = Some(bytes);
                         }
                     }
@@ -1420,8 +1444,7 @@ fn run_decoder_thread(
                     // bounded head read — there is no later fallback, so
                     // skipping it here would lose camera/GPS for every over-cap
                     // image.
-                    content_hash =
-                        crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
+                    (content_hash, legacy_hashes) = composite_hashes(&file, legacy);
                     exif_data = exif_from_head(&file.path);
                 }
                 // Doc / PDF / Audio share the image-style single-read pattern
@@ -1438,6 +1461,7 @@ fn run_decoder_thread(
                         let mut bytes = Vec::with_capacity((file.size_bytes as usize).min(MAX_PREALLOC_BYTES));
                         if std::io::Read::read_to_end(&mut f, &mut bytes).is_ok() {
                             content_hash = Some(sha256_bytes(&bytes));
+                            legacy_hashes = legacy.then(|| LegacyHashes::of_full_bytes(&bytes));
                             file_bytes = Some(bytes);
                         }
                     }
@@ -1447,10 +1471,7 @@ fn run_decoder_thread(
                 // bounded composite (head + interior samples + tail + size — no
                 // full read), so the async worker's `or_else` fallback never
                 // re-opens the file as blocking IO on a tokio worker.
-                _ => {
-                    content_hash =
-                        crate::util::content_hash::content_hash(&file.path, file.size_bytes).ok();
-                }
+                _ => (content_hash, legacy_hashes) = composite_hashes(&file, legacy),
             }
         }
 
@@ -1593,6 +1614,7 @@ fn run_decoder_thread(
             doc_text,
             audio_tags,
             content_hash,
+            legacy_hashes,
             exif: exif_data,
             budget: budget_guard,
         };
@@ -1935,7 +1957,7 @@ async fn process_file_predecoded(
 ) -> TaggedFile {
     // `_budget` keeps the byte-budget reservation alive while this worker
     // holds the frame; it releases when the function returns.
-    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, exif, budget: _budget } =
+    let PreDecoded { file, decoded, doc_text, audio_tags, content_hash, legacy_hashes, exif, budget: _budget } =
         predecoded;
     let file = &file;
     let started = Instant::now();
@@ -1970,6 +1992,7 @@ async fn process_file_predecoded(
         error_message: None,
         file_ref: file.file_ref,
         content_hash: None,
+        legacy_hashes: None,
         text_embedding: None,
         doc_text: None,
         tags: Vec::new(),
@@ -2004,6 +2027,7 @@ async fn process_file_predecoded(
     // never hydrate a OneDrive online-only file.
     if !file.online_only {
         tagged.content_hash = content_hash;
+        tagged.legacy_hashes = legacy_hashes;
     }
 
     // Document content: the decoder thread already pulled the text
@@ -3212,7 +3236,7 @@ mod tests {
         let budget = PredecodeBudget::new(1024);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget);
+            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget, false);
             let _ = done_tx.send(());
         });
         for index in 0..2 {
@@ -3238,6 +3262,43 @@ mod tests {
     }
 
     #[test]
+    fn decoder_computes_legacy_digests_from_its_single_read_only_when_asked() {
+        let dir = std::env::temp_dir().join(format!("fileid-decoder-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = [("note.txt", FileKind::Doc), ("clip.bin", FileKind::Other)];
+        for (name, _) in files {
+            std::fs::write(dir.join(name), name.repeat(5000)).unwrap();
+        }
+        for legacy in [true, false] {
+            let (raw_tx, raw_rx) = async_channel::bounded(files.len());
+            let (predecoded_tx, predecoded_rx) = async_channel::bounded(files.len());
+            for (name, kind) in files {
+                raw_tx
+                    .send_blocking(DiscoveredFile {
+                        path: dir.join(name),
+                        kind,
+                        size_bytes: (name.len() * 5000) as u64,
+                        modified_unix: 0.0,
+                        created_unix: None,
+                        online_only: false,
+                        file_ref: None,
+                    })
+                    .unwrap();
+            }
+            drop(raw_tx);
+            run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), legacy);
+            assert_eq!(predecoded_rx.len(), files.len());
+            while let Ok(item) = predecoded_rx.try_recv() {
+                let size = item.file.size_bytes;
+                let expected = crate::util::content_hash::content_hashes(&item.file.path, size, true).unwrap();
+                assert_eq!(item.content_hash, Some(expected.0));
+                assert_eq!(item.legacy_hashes.map(|h| h.v2), legacy.then(|| expected.1.unwrap().v2));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn idle_decoder_exits_on_cancel_while_discovery_sender_stays_open() {
         let (_raw_tx, raw_rx) = async_channel::bounded(1);
         let (predecoded_tx, _predecoded_rx) = async_channel::bounded(1);
@@ -3246,7 +3307,7 @@ mod tests {
         let budget = PredecodeBudget::new(1024);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget);
+            run_decoder_thread(raw_rx, predecoded_tx, worker_coord, budget, false);
             let _ = done_tx.send(());
         });
 
@@ -3499,6 +3560,7 @@ mod tests {
             error_message: None,
             file_ref: None,
             content_hash: None,
+            legacy_hashes: None,
             text_embedding: None,
             doc_text: None,
             tags: Vec::new(),
