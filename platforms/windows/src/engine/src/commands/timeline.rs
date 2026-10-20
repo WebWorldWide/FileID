@@ -750,7 +750,7 @@ async fn analyze_moments<M: FrameModel>(
 /// A window's frame extraction started while the model works on the previous
 /// window. Frame extraction is CPU work; inference is GPU work.
 struct Prefetch {
-    start: f64,
+    window: usize,
     stop: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<Result<Vec<PathBuf>>>,
 }
@@ -759,7 +759,7 @@ impl Prefetch {
     fn spawn<D: FrameDecoder>(
         decoder: D,
         source: &Path,
-        (start, plan): (f64, Vec<(f64, PathBuf)>),
+        (window, plan): (usize, Vec<(f64, PathBuf)>),
         size: (u32, u32),
         cancel: &Arc<AtomicBool>,
     ) -> Self {
@@ -767,7 +767,7 @@ impl Prefetch {
         let (source, cancel, flag) = (source.to_owned(), cancel.clone(), stop.clone());
         let task =
             tokio::task::spawn_blocking(move || decode_window(&decoder, &source, &plan, size, &cancel, Some(&flag)));
-        Self { start, stop, task }
+        Self { window, stop, task }
     }
 
     fn discard(self) {
@@ -880,7 +880,7 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
             let (kept, plan) = window_plan(window, duration, frames)?;
             let pending = prefetched.take();
             let paths = match pending {
-                Some(pending) if pending.start == window.start => {
+                Some(pending) if pending.window == index => {
                     pending.task.await.map_err(|error| anyhow!(error)).and_then(|decoded| decoded)
                 }
                 other => {
@@ -898,7 +898,7 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
                         *prefetched = Some(Prefetch::spawn(
                             decoder.clone(),
                             &source.path,
-                            (next.start, next_plan),
+                            (index + 1, next_plan),
                             size,
                             cancel,
                         ));
