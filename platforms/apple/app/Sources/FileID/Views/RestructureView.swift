@@ -856,7 +856,7 @@ struct RestructureView: View {
                 .accessibilityLabel("Medium confidence — review")
         case "ask":
             Image(systemName: "hand.raised")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(12))
                 .help("Low confidence — review before applying.")
                 .accessibilityLabel("Low confidence — ask")

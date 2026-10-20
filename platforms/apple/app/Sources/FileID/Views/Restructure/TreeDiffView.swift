@@ -172,7 +172,7 @@ struct TreeDiffView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(.primary)
+                Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
                 Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
             }
             .padding(.horizontal, 10).padding(.top, 8)

@@ -54,16 +54,16 @@ struct ProcessingControl: View {
     private var preScan: some View {
         HStack {
             Image(systemName: startRequested ? "hourglass" : "moon.zzz")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
             Text(startRequested ? "Starting…" : "Idle")
-                .font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary)
+                .font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text3)
             Spacer()
         }
         Text(startRequested
              ? "Sent to engine. The first phase event will appear shortly."
              : "Ready to scan this folder. Click Start when you're ready.")
             .font(Theme.Font.body(11))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.text3)
         pillButton("Start Scan", color: Theme.gold, system: "play.fill",
                     filled: true, disabled: startRequested) {
             startRequested = true
@@ -151,7 +151,7 @@ struct ProcessingControl: View {
                         .foregroundStyle(Theme.warning)
                     Text("Workers idle. Click Resume to continue or Cancel to stop.")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 Spacer()
             }

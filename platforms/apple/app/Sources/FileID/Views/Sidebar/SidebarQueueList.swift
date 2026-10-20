@@ -22,7 +22,7 @@ struct QueueListView: View {
                 HStack(spacing: 6) {
                     Image(systemName: icon(for: job.category))
                         .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                         .frame(width: 14)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(job.title)
@@ -32,7 +32,7 @@ struct QueueListView: View {
                         if let eta = job.etaSeconds, eta > 0 {
                             Text("ETA \(formatETA(eta))")
                                 .font(Theme.Font.body(11).monospacedDigit())
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Theme.text3)
                         }
                     }
                     Spacer()

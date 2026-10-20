@@ -401,6 +401,8 @@ extension PrimitiveButtonStyle where Self == DSBareButtonStyle { static var dsBa
 // MARK: - Toggle / radio / check
 
 struct DSToggleStyle: ToggleStyle {
+    @Environment(\.labelsVisibility) private var labelsVisibility
+
     func makeBody(configuration: Configuration) -> some View {
         Button { configuration.isOn.toggle() } label: {
             HStack(spacing: 10) {
@@ -410,7 +412,7 @@ struct DSToggleStyle: ToggleStyle {
                 }
                 .frame(width: 30, height: 16)
                 .animation(Theme.spring, value: configuration.isOn)
-                configuration.label
+                if labelsVisibility != .hidden { configuration.label }
             }
             .frame(minHeight: Theme.Metrics.hitTarget)
             .contentShape(Rectangle())
