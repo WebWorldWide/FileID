@@ -45,6 +45,11 @@ pub fn accent(text: &str, tone: Tone, tall: bool) -> gtk::Button {
     button
 }
 
+pub fn danger(text: &str) -> gtk::Button {
+    labelled(text, &["v3-danger"])
+}
+
+/// 28 × 28 icon-only button; its tooltip doubles as the spoken label.
 pub fn icon_button(icon: &str, label: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name(icon)

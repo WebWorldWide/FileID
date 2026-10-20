@@ -11,6 +11,7 @@ mod moments;
 mod moments_timeline;
 pub mod people;
 pub mod restructure;
+mod restructure_model;
 pub mod settings;
 pub(crate) mod util;
 

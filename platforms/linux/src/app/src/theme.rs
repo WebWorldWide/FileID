@@ -680,6 +680,13 @@ button.v3-mono-button { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sa
 .v3-citations { margin-left: 12px; }
 .v3-output-label { font-size: 12.5px; font-weight: 500; color: @fileid_text2; }
 .v3-state-115 { font-size: 11.5px; font-weight: 600; }
+.v3-body-125 { font-size: 12.5px; color: @fileid_text2; }
+.v3-reason { font-size: 11.5px; color: @fileid_text2; }
+.v3-strip { padding: 16px 26px 12px 26px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
+button.v3-staying-header { min-height: 38px; padding: 0 14px; border: none; border-radius: 10px; box-shadow: none; background: transparent; }
+button.v3-staying-header:hover { background-color: alpha(#FFFFFF, 0.04); }
+.v3-review-head { padding: 20px 26px 14px 26px; }
+.v3-review-list { padding: 16px 26px; }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
