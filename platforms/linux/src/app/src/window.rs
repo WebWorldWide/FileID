@@ -23,7 +23,6 @@ use crate::shell::{self, Action};
 use fileid_engine::ipc::{CommandPayload, Empty, ScanPhase};
 
 const LIBRARY_SEARCH_HINT: &str = "Search filenames, tags, text in images…";
-const CHAT_INPUT_HINT: &str = "Ask about indexed files (maximum 2000 characters)";
 
 #[derive(Clone)]
 struct ActiveWindow {
@@ -293,7 +292,9 @@ impl Shell {
             Action::WipeAndRescan => self.confirm_wipe(),
             Action::AskChat(text) => {
                 self.navigate("chat");
-                self.hand_off("chat", CHAT_INPUT_HINT, &text);
+                if let Some((_, page)) = self.contents.iter().find(|(id, _)| *id == "chat") {
+                    let _ = page.activate_action("chat.ask", Some(&text.to_variant()));
+                }
             }
             Action::LibraryQuery(text) => {
                 self.navigate("library");
