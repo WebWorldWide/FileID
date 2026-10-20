@@ -24,6 +24,28 @@ pub fn file_size_i64(bytes: i64) -> String {
     file_size(u64::try_from(bytes).unwrap_or(0))
 }
 
+/// Transfer progress in the total's decimal unit: `182/271 MB`, `3.5/24.9 GB`
+/// (one decimal under 100 of the unit); just [`file_size`] when the total is
+/// unknown.
+pub fn size_pair(done: u64, total: Option<u64>) -> String {
+    const UNITS: [(&str, f64); 5] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("KB", 1e3), ("bytes", 1.0)];
+    let Some(total) = total else {
+        return file_size(done);
+    };
+    let (unit, scale) = UNITS.iter().copied().find(|(_, scale)| total as f64 >= *scale).unwrap_or(UNITS[4]);
+    let (done, total) = (done as f64 / scale, total as f64 / scale);
+    let decimals = usize::from(total < 100.0 && scale > 1.0);
+    format!("{done:.decimals$}/{total:.decimals$} {unit}")
+}
+
+/// `3.4 MB/s`; `—` when the rate is unknown.
+pub fn rate(bytes_per_second: f64) -> String {
+    if !bytes_per_second.is_finite() || bytes_per_second <= 0.0 {
+        return "—".to_string();
+    }
+    format!("{}/s", file_size(bytes_per_second as u64))
+}
+
 /// Last path segment, splitting on both `/` and `\`.
 pub fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(path)
@@ -80,6 +102,16 @@ mod tests {
         assert_eq!(file_size(4_290_000_000), "4.29 GB");
         assert_eq!(file_size(2_500_000_000_000), "2.50 TB");
         assert_eq!(file_size_i64(-5), "Zero KB");
+    }
+
+    #[test]
+    fn transfer_progress() {
+        assert_eq!(size_pair(182_000_000, Some(271_000_000)), "182/271 MB");
+        assert_eq!(size_pair(3_500_000_000, Some(24_900_000_000)), "3.5/24.9 GB");
+        assert_eq!(size_pair(5_000_000, None), "5.0 MB");
+        assert_eq!(size_pair(10, Some(500)), "10/500 bytes");
+        assert_eq!(rate(3_400_000.0), "3.4 MB/s");
+        assert_eq!(rate(0.0), "—");
     }
 
     #[test]

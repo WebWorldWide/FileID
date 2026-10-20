@@ -4,7 +4,9 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
-use crate::context::{human_size, print_json, terminal_text, Ctx};
+use fileid_engine::util::display::fmt_date;
+
+use crate::context::{file_size_i64, print_json, terminal_text, Ctx};
 
 struct FileRow {
     id: i64,
@@ -93,14 +95,14 @@ pub fn run(ctx: &Ctx, target: &str) -> Result<()> {
         terminal_text(&row.kind),
         terminal_text(&row.extension)
     );
-    println!("  size:      {}", human_size(row.size));
+    println!("  size:      {}", file_size_i64(row.size));
     if let Some(c) = row.created {
-        println!("  created:   {}", unix_to_date(c));
+        println!("  created:   {}", fmt_date(c));
     }
     if let Some(m) = row.modified {
-        println!("  modified:  {}", unix_to_date(m));
+        println!("  modified:  {}", fmt_date(m));
     }
-    println!("  scanned:   {}", unix_to_date(row.scanned));
+    println!("  scanned:   {}", fmt_date(row.scanned));
     if let Some(cam) = &row.camera {
         println!("  camera:    {}", terminal_text(cam));
     }
@@ -201,28 +203,4 @@ fn load_people(conn: &rusqlite::Connection, file_id: i64) -> Vec<(i64, Option<St
     stmt.query_map(params![file_id], |r| Ok((r.get(0)?, r.get(1)?)))
         .map(|rows| rows.flatten().collect())
         .unwrap_or_default()
-}
-
-/// Format a Unix timestamp (seconds) as `YYYY-MM-DD HH:MM` UTC, no deps.
-/// Howard Hinnant's civil-from-days algorithm.
-fn unix_to_date(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 {
-        return "—".to_string();
-    }
-    let total = secs as i64;
-    let days = total.div_euclid(86_400);
-    let rem = total.rem_euclid(86_400);
-    let (hh, mm) = (rem / 3600, (rem % 3600) / 60);
-
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    format!("{year:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC")
 }

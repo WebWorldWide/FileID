@@ -1,9 +1,12 @@
 //! Run context: global flags + output helpers shared by every subcommand.
 
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
+pub use fileid_engine::read::text::escape_like;
+pub use fileid_engine::util::display::{file_size_i64, truncate};
+use fileid_engine::util::path_safety::strip_extended_length;
 
 /// Resolved global flags, threaded through every command handler.
 pub struct Ctx {
@@ -182,17 +185,6 @@ fn macos_app_db() -> Option<PathBuf> {
     None
 }
 
-/// Escape SQL `LIKE` metacharacters (`%`, `_`, and the `\` escape char) so a
-/// user-supplied string matches literally under `LIKE ?1 ESCAPE '\'`. The
-/// backslash is escaped first so it can't double-escape the wildcard escapes
-/// added afterward. Mirrors the macOS `ReadStore` escaping so a `_` or `%` in
-/// a name resolves the same file on every platform.
-pub fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
 /// Resolve a `<path-or-id>` argument to a `files.id`. Mirrors the lookup
 /// order `info` uses (numeric id → exact canonical/raw path → basename suffix)
 /// so the same argument resolves identically across subcommands.
@@ -211,7 +203,7 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
         }
     }
     let canon = std::fs::canonicalize(target)
-        .map(|p| strip_extended_length(&p.to_string_lossy()))
+        .map(|p| strip_extended_length(&p).to_string_lossy().into_owned())
         .unwrap_or_else(|_| target.to_string());
     for candidate in [canon.as_str(), target] {
         if let Ok(Some(id)) = conn
@@ -314,73 +306,6 @@ fn terminal_output(s: &str) -> String {
     output
 }
 
-/// Human-readable byte size.
-pub fn human_size(bytes: i64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    format!("{size:.1} {}", UNITS[unit])
-}
-
-/// Truncate to `max` characters (char-aware), appending an ellipsis when cut.
-pub fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let keep: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{keep}…")
-    }
-}
-
-/// Mirror of the engine's `util::path_safety::stable_path_hash` (which is
-/// crate-private). Byte-faithful: lowercase the path, hash with the std
-/// `DefaultHasher` (fixed-key SipHash → deterministic across runs/machines on
-/// the same std), store the `i64`. Keeping this in lockstep means a row the
-/// CLI writes is found by the engine's `index_files_on_path_hash` lookups and
-/// vice-versa.
-pub fn stable_path_hash(path: &str) -> i64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    path.to_ascii_lowercase().hash(&mut h);
-    h.finish() as i64
-}
-
-/// Best-effort absolute, lexically-normalized path string for `path_text`.
-pub fn canonical_path_text(p: &Path) -> String {
-    let raw = std::fs::canonicalize(p)
-        .unwrap_or_else(|_| p.to_path_buf())
-        .to_string_lossy()
-        .into_owned();
-    strip_extended_length(&raw)
-}
-
-/// Strip a Windows extended-length ("\\?\" / "\\?\UNC\") verbatim prefix from a
-/// path string. `std::fs::canonicalize` returns the verbatim form on Windows,
-/// but the engine stores the stripped, user-facing form — so without this the
-/// same folder scanned via the CLI and via the engine would key two distinct
-/// `path_text` rows (the unique key), silently duplicating the library. Mirrors
-/// the engine's crate-private `util::path_safety::strip_extended_length`. A
-/// no-op on every non-verbatim string, so it never alters a canonicalized POSIX
-/// path (those begin with `/`, never `\\?\`).
-///   `\\?\C:\a\b`             → `C:\a\b`
-///   `\\?\UNC\srv\sh\x`       → `\\srv\sh\x`
-pub fn strip_extended_length(s: &str) -> String {
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        s.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,31 +325,6 @@ mod tests {
             .unwrap();
         }
         conn
-    }
-
-    #[test]
-    fn strip_extended_length_removes_verbatim_prefix() {
-        assert_eq!(strip_extended_length(r"\\?\C:\a\b"), r"C:\a\b");
-        assert_eq!(strip_extended_length(r"\\?\UNC\srv\sh\x"), r"\\srv\sh\x");
-        // UNC prefix must win over the shorter `\\?\` prefix it contains.
-        assert_eq!(
-            strip_extended_length(r"\\?\UNC\server\share"),
-            r"\\server\share"
-        );
-        // Non-verbatim strings pass through unchanged on every OS.
-        assert_eq!(strip_extended_length(r"C:\a\b"), r"C:\a\b");
-        assert_eq!(
-            strip_extended_length("/home/alice/pic.jpg"),
-            "/home/alice/pic.jpg"
-        );
-    }
-
-    #[test]
-    fn escape_like_neutralizes_wildcards_and_escape_char() {
-        assert_eq!(escape_like("report_2023.pdf"), "report\\_2023.pdf");
-        assert_eq!(escape_like("50%off.png"), "50\\%off.png");
-        // Backslash is escaped first so it can't swallow the wildcard escapes.
-        assert_eq!(escape_like("a\\b_c%"), "a\\\\b\\_c\\%");
     }
 
     #[test]
