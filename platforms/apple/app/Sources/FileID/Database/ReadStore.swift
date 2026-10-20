@@ -32,6 +32,9 @@ public final class ReadStore: @unchecked Sendable {
     public private(set) var totalImages: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
     public private(set) var totalReclaimableMB: Double = 0
+    public private(set) var hasFacePrints = false
+    public private(set) var hasNamedPerson = false
+    public private(set) var hasCaptions = false
     public private(set) var lastError: String?
 
     // `lastError` is an @Observable property SwiftUI reads on the
@@ -75,6 +78,9 @@ public final class ReadStore: @unchecked Sendable {
             self.totalImages = 0
             self.totalDuplicateGroups = 0
             self.totalReclaimableMB = 0
+            self.hasFacePrints = false
+            self.hasNamedPerson = false
+            self.hasCaptions = false
             return
         }
         if queue == nil {
@@ -165,6 +171,9 @@ public final class ReadStore: @unchecked Sendable {
         let totalImages: Int
         let totalDuplicateGroups: Int
         let totalReclaimableMB: Double
+        let hasFacePrints: Bool
+        let hasNamedPerson: Bool
+        let hasCaptions: Bool
     }
 
     private enum CounterResult {
@@ -181,7 +190,7 @@ public final class ReadStore: @unchecked Sendable {
     /// it ran) and throttles successive heavy queries, so the main thread
     /// never pays for scan ticks and the table is scanned at most ~once a
     /// second during a burst. Property writes still land on the main actor.
-    private func refreshCounters() {
+    func refreshCounters() {
         countersLock.lock()
         countersDirty = true
         if countersRunning {
@@ -246,13 +255,23 @@ public final class ReadStore: @unchecked Sendable {
                         HAVING COUNT(*) > 1
                     )
                     """)
+                let hasFacePrints = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM face_prints)") ?? false
+                let hasNamedPerson = try Bool.fetchOne(db, sql: """
+                    SELECT EXISTS(SELECT 1 FROM persons WHERE IFNULL(is_unknown, 0) = 0 AND \(Self.personHasNameSQL()))
+                    """) ?? false
+                let hasCaptions = try Bool.fetchOne(db, sql: """
+                    SELECT EXISTS(SELECT 1 FROM files WHERE failed = 0 AND vlm_proposed_name IS NOT NULL AND vlm_proposed_name <> '')
+                    """) ?? false
                 let groups: Int = dupRow?["groups"] ?? 0
                 let reclaimableBytes: Int64 = dupRow?["reclaimable"] ?? 0
                 return .ok(CounterSnapshot(
                     totalFiles: totalFiles,
                     totalImages: totalImages,
                     totalDuplicateGroups: groups,
-                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576
+                    totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
+                    hasFacePrints: hasFacePrints,
+                    hasNamedPerson: hasNamedPerson,
+                    hasCaptions: hasCaptions
                 ))
             }
         } catch {
@@ -266,6 +285,9 @@ public final class ReadStore: @unchecked Sendable {
         self.totalImages = snapshot.totalImages
         self.totalDuplicateGroups = snapshot.totalDuplicateGroups
         self.totalReclaimableMB = snapshot.totalReclaimableMB
+        self.hasFacePrints = snapshot.hasFacePrints
+        self.hasNamedPerson = snapshot.hasNamedPerson
+        self.hasCaptions = snapshot.hasCaptions
     }
 
     // MARK: - Library queries
@@ -913,20 +935,6 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? (0, 0)
     }
 
-    /// Files that have a VLM-generated caption / proposed name. Used
-    /// by the sidebar pipeline to know whether Deep Analyze has run.
-    public func totalCaptioned() -> Int {
-        guard let q = queue else { return 0 }
-        return (try? q.read { db in
-            try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM files
-                WHERE failed = 0
-                  AND vlm_proposed_name IS NOT NULL
-                  AND vlm_proposed_name <> ''
-            """) ?? 0
-        }) ?? 0
-    }
-
     /// Files supported by the engine's Deep Analyze runner.
     /// Used by the Restructure tab's hint banner to decide whether to
     /// nudge the user toward running Deep Analyze for sharper proposals.
@@ -941,7 +949,7 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? 0
     }
 
-    /// `totalAnalyzableFiles` + `totalCaptioned` in one table pass —
+    /// `totalAnalyzableFiles` + captioned count in one table pass —
     /// Restructure's regenerate() needs both, and two separate
     /// full-table COUNTs doubled the scan on large libraries. Same
     /// predicates as the individual functions; one shared snapshot.
