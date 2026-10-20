@@ -1,0 +1,411 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+    TitleBar: Prototype v3 window chrome (48 px). Folder switcher on the left,
+    "Search or ask" centred, activity / chat / settings on the right, the
+    system caption buttons in the reserved trailing column. 1:1 port of the
+    macOS Views/Shell/TitleBar.swift.
+
+    The bar background and drag region live on MainWindow.AppTitleBar. This
+    control has no background so empty areas fall through to the drag region;
+    MainWindow registers every InteractiveElements rect as a non-client
+    passthrough region so the controls stay clickable.
+-->
+<UserControl
+    x:Class="FileID.Views.Shell.TitleBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:sidebar="using:FileID.Views.Sidebar"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid x:Name="Root" Padding="10,0,0,0" ColumnSpacing="12">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition x:Name="CaptionColumn" Width="138" />
+        </Grid.ColumnDefinitions>
+
+        <StackPanel Grid.Column="0"
+                    Orientation="Horizontal"
+                    Spacing="10"
+                    VerticalAlignment="Center">
+            <Button x:Name="SidebarToggleButton"
+                    Style="{StaticResource ShellButtonStyle}"
+                    Width="26"
+                    Height="26"
+                    MinHeight="26"
+                    Padding="0"
+                    Click="OnSidebarToggleClicked"
+                    AutomationProperties.Name="Hide sidebar"
+                    ToolTipService.ToolTip="Hide sidebar (Ctrl+Shift+S)">
+                <FontIcon x:Name="SidebarToggleGlyph"
+                          FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          Glyph="&#xE700;"
+                          FontSize="13"
+                          Foreground="{StaticResource Text2Brush}"
+                          AutomationProperties.AccessibilityView="Raw" />
+            </Button>
+
+            <Button x:Name="FolderButton"
+                    Style="{StaticResource ShellButtonStyle}"
+                    Height="30"
+                    MinHeight="30"
+                    Padding="10,0,10,0"
+                    Background="{StaticResource ShellControlFillBrush}"
+                    BorderBrush="{StaticResource ShellControlBorderBrush}"
+                    BorderThickness="1"
+                    AutomationProperties.Name="Switch folder"
+                    ToolTipService.ToolTip="Switch folder">
+                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <TextBlock Text="FileID"
+                               FontFamily="{StaticResource DisplayFontFamily}"
+                               FontSize="18"
+                               Foreground="{StaticResource Text1Brush}"
+                               VerticalAlignment="Center" />
+                    <Border Width="1"
+                            Height="14"
+                            Background="{StaticResource ControlBorderBrush}"
+                            VerticalAlignment="Center" />
+                    <TextBlock x:Name="FolderNameText"
+                               Text="No folder"
+                               MaxWidth="180"
+                               FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="13.5"
+                               FontWeight="SemiBold"
+                               Foreground="{StaticResource Text3Brush}"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center" />
+                    <TextBlock Text="&#x25BE;"
+                               FontFamily="{StaticResource MonoFontFamily}"
+                               FontSize="11"
+                               Foreground="{StaticResource Text3Brush}"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+                <Button.Flyout>
+                    <Flyout x:Name="FolderFlyout"
+                            Placement="BottomEdgeAlignedLeft"
+                            FlyoutPresenterStyle="{StaticResource ShellFlyoutPresenterStyle}">
+                        <sidebar:SidebarFolderHeader x:Name="FolderPanel" />
+                    </Flyout>
+                </Button.Flyout>
+            </Button>
+        </StackPanel>
+
+        <StackPanel Grid.Column="2"
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    VerticalAlignment="Center">
+            <Button x:Name="ActivityButton"
+                    Style="{StaticResource ShellButtonStyle}"
+                    Height="30"
+                    MinHeight="30"
+                    Padding="10,0,10,0"
+                    Background="{StaticResource ShellControlFillStrongBrush}"
+                    BorderBrush="{StaticResource ShellControlBorderBrush}"
+                    BorderThickness="1"
+                    AutomationProperties.Name="Activity"
+                    ToolTipService.ToolTip="Activity">
+                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Ellipse x:Name="ActivityDot"
+                             Width="6"
+                             Height="6"
+                             Fill="{StaticResource InfoBrush}"
+                             VerticalAlignment="Center" />
+                    <TextBlock x:Name="ActivityLabel"
+                               Text="Idle"
+                               FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="12.5"
+                               FontWeight="Medium"
+                               Foreground="{StaticResource Text1Brush}"
+                               VerticalAlignment="Center" />
+                    <ProgressBar x:Name="ActivityBar"
+                                 Width="54"
+                                 Height="4"
+                                 MinHeight="4"
+                                 Maximum="1000"
+                                 Value="1000"
+                                 CornerRadius="2"
+                                 Foreground="{StaticResource InfoProgressBrush}"
+                                 Background="{StaticResource ProgressTrackBrush}"
+                                 VerticalAlignment="Center" />
+                    <TextBlock x:Name="ActivityPercent"
+                               MinWidth="28"
+                               TextAlignment="Right"
+                               FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="12.5"
+                               FontWeight="SemiBold"
+                               Foreground="{StaticResource GoldBrush}"
+                               Visibility="Collapsed"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+                <Button.Flyout>
+                    <Flyout x:Name="ActivityFlyout"
+                            Placement="BottomEdgeAlignedRight"
+                            FlyoutPresenterStyle="{StaticResource ShellFlyoutPresenterStyle}">
+                        <StackPanel Width="400">
+                            <Grid Padding="14,10,14,10"
+                                  BorderBrush="{StaticResource HairlineBrush}"
+                                  BorderThickness="0,0,0,1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="ACTIVITY"
+                                           Style="{StaticResource ShellSectionLabelStyle}"
+                                           VerticalAlignment="Center"
+                                           AutomationProperties.HeadingLevel="Level2" />
+                                <TextBlock x:Name="ActivitySummary"
+                                           Grid.Column="1"
+                                           Text="Nothing running"
+                                           Style="{StaticResource ShellMetaTextStyle}"
+                                           FontSize="11.5"
+                                           VerticalAlignment="Center" />
+                            </Grid>
+
+                            <TextBlock x:Name="ActivityEmpty"
+                                       Text="Scans, captions and face grouping appear here."
+                                       Style="{StaticResource ShellMetaTextStyle}"
+                                       TextWrapping="Wrap"
+                                       Margin="14" />
+
+                            <StackPanel x:Name="ScanRow"
+                                        Visibility="Collapsed"
+                                        Spacing="8"
+                                        Padding="14,12,14,12"
+                                        BorderBrush="{StaticResource HairlineSoftBrush}"
+                                        BorderThickness="0,0,0,1">
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Library scan"
+                                               FontFamily="{StaticResource BodyFontFamily}"
+                                               FontSize="14"
+                                               FontWeight="SemiBold"
+                                               Foreground="{StaticResource Text1Brush}" />
+                                    <TextBlock x:Name="ScanRowSub"
+                                               Grid.Column="1"
+                                               Style="{StaticResource ShellMetaTextStyle}"
+                                               VerticalAlignment="Bottom" />
+                                    <TextBlock x:Name="ScanRowState"
+                                               Grid.Column="2"
+                                               Style="{StaticResource ShellMetaTextStyle}"
+                                               VerticalAlignment="Bottom" />
+                                </Grid>
+                                <ProgressBar x:Name="ScanRowBar"
+                                             Height="4"
+                                             MinHeight="4"
+                                             Maximum="1000"
+                                             CornerRadius="2"
+                                             Foreground="{StaticResource GoldProgressBrush}"
+                                             Background="{StaticResource ProgressTrackBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Button x:Name="ScanRowAction"
+                                            Style="{StaticResource ShellSecondaryButtonStyle}"
+                                            Height="24"
+                                            MinHeight="24"
+                                            Padding="9,0,9,0"
+                                            FontSize="12"
+                                            Content="Pause"
+                                            Click="OnScanRowActionClicked" />
+                                    <Button Style="{StaticResource ShellSecondaryButtonStyle}"
+                                            Height="24"
+                                            MinHeight="24"
+                                            Padding="9,0,9,0"
+                                            FontSize="12"
+                                            Content="Open Library"
+                                            Click="OnOpenLibraryClicked" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel x:Name="DeepRow"
+                                        Visibility="Collapsed"
+                                        Spacing="8"
+                                        Padding="14,12,14,12"
+                                        BorderBrush="{StaticResource HairlineSoftBrush}"
+                                        BorderThickness="0,0,0,1">
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Deep Analyze"
+                                               FontFamily="{StaticResource BodyFontFamily}"
+                                               FontSize="14"
+                                               FontWeight="SemiBold"
+                                               Foreground="{StaticResource Text1Brush}" />
+                                    <TextBlock x:Name="DeepRowSub"
+                                               Grid.Column="1"
+                                               Style="{StaticResource ShellMetaTextStyle}"
+                                               VerticalAlignment="Bottom" />
+                                    <TextBlock x:Name="DeepRowState"
+                                               Grid.Column="2"
+                                               Style="{StaticResource ShellMetaTextStyle}"
+                                               VerticalAlignment="Bottom" />
+                                </Grid>
+                                <ProgressBar x:Name="DeepRowBar"
+                                             Height="4"
+                                             MinHeight="4"
+                                             Maximum="1000"
+                                             CornerRadius="2"
+                                             Foreground="{StaticResource AiProgressBrush}"
+                                             Background="{StaticResource ProgressTrackBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Button x:Name="DeepRowAction"
+                                            Style="{StaticResource ShellSecondaryButtonStyle}"
+                                            Height="24"
+                                            MinHeight="24"
+                                            Padding="9,0,9,0"
+                                            FontSize="12"
+                                            Content="Cancel"
+                                            Click="OnDeepRowActionClicked" />
+                                    <Button Style="{StaticResource ShellSecondaryButtonStyle}"
+                                            Height="24"
+                                            MinHeight="24"
+                                            Padding="9,0,9,0"
+                                            FontSize="12"
+                                            Content="Open Deep Analyze"
+                                            Click="OnOpenDeepAnalyzeClicked" />
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel x:Name="FacesRow"
+                                        Visibility="Collapsed"
+                                        Spacing="8"
+                                        Padding="14,12,14,12"
+                                        BorderBrush="{StaticResource HairlineSoftBrush}"
+                                        BorderThickness="0,0,0,1">
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Face grouping"
+                                               FontFamily="{StaticResource BodyFontFamily}"
+                                               FontSize="14"
+                                               FontWeight="SemiBold"
+                                               Foreground="{StaticResource Text1Brush}" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="Comparing faces"
+                                               Style="{StaticResource ShellMetaTextStyle}"
+                                               VerticalAlignment="Bottom" />
+                                    <TextBlock Grid.Column="2"
+                                               Text="RUNNING"
+                                               Style="{StaticResource ShellMetaTextStyle}"
+                                               Foreground="{StaticResource AiBrush}"
+                                               VerticalAlignment="Bottom" />
+                                </Grid>
+                                <ProgressBar x:Name="FacesRowBar"
+                                             Height="4"
+                                             MinHeight="4"
+                                             CornerRadius="2"
+                                             Foreground="{StaticResource AiProgressBrush}"
+                                             Background="{StaticResource ProgressTrackBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Button Style="{StaticResource ShellSecondaryButtonStyle}"
+                                            Height="24"
+                                            MinHeight="24"
+                                            Padding="9,0,9,0"
+                                            FontSize="12"
+                                            Content="Open People"
+                                            Click="OnOpenPeopleClicked" />
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </Flyout>
+                </Button.Flyout>
+            </Button>
+
+            <Button x:Name="ChatButton"
+                    Style="{StaticResource ShellIconButtonStyle}"
+                    Click="OnChatClicked"
+                    AutomationProperties.Name="Open Chat"
+                    ToolTipService.ToolTip="Chat">
+                <FontIcon x:Name="ChatGlyph"
+                          FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          Glyph="&#xE8F2;"
+                          FontSize="13"
+                          Foreground="{StaticResource Text2Brush}"
+                          AutomationProperties.AccessibilityView="Raw" />
+            </Button>
+
+            <Button x:Name="SettingsButton"
+                    Style="{StaticResource ShellIconButtonStyle}"
+                    Click="OnSettingsClicked"
+                    AutomationProperties.Name="Settings"
+                    ToolTipService.ToolTip="Settings (Ctrl+,)">
+                <FontIcon x:Name="SettingsGlyph"
+                          FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                          Glyph="&#xE713;"
+                          FontSize="13"
+                          Foreground="{StaticResource Text2Brush}"
+                          AutomationProperties.AccessibilityView="Raw" />
+            </Button>
+        </StackPanel>
+
+        <Grid x:Name="SearchField"
+              Grid.ColumnSpan="4"
+              Width="360"
+              Height="30"
+              Padding="10,0,6,0"
+              ColumnSpacing="8"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              Background="{StaticResource ShellControlFillStrongBrush}"
+              BorderBrush="{StaticResource ShellControlBorderBrush}"
+              BorderThickness="1"
+              CornerRadius="{StaticResource CornerRadiusS}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <FontIcon Grid.Column="0"
+                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                      Glyph="&#xE721;"
+                      FontSize="12"
+                      Foreground="{StaticResource Text3Brush}"
+                      VerticalAlignment="Center"
+                      AutomationProperties.AccessibilityView="Raw" />
+            <AutoSuggestBox x:Name="SearchBox"
+                            Grid.Column="1"
+                            PlaceholderText="Search or ask"
+                            UpdateTextOnSelect="False"
+                            BorderThickness="0"
+                            Background="Transparent"
+                            VerticalAlignment="Center"
+                            AutomationProperties.Name="Search or ask"
+                            GotFocus="OnSearchGotFocus"
+                            TextChanged="OnSearchTextChanged"
+                            QuerySubmitted="OnSearchQuerySubmitted">
+                <AutoSuggestBox.Resources>
+                    <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
+                    <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
+                    <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
+                    <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
+                    <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
+                    <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
+                    <x:Double x:Key="TextControlThemeMinHeight">24</x:Double>
+                    <Thickness x:Key="TextControlThemePadding">0,2,0,0</Thickness>
+                </AutoSuggestBox.Resources>
+            </AutoSuggestBox>
+            <Border Grid.Column="2"
+                    Padding="5,1,5,1"
+                    VerticalAlignment="Center"
+                    BorderBrush="{StaticResource ShellControlBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource CornerRadiusS}">
+                <TextBlock Text="Ctrl K"
+                           FontFamily="{StaticResource MonoFontFamily}"
+                           FontSize="11"
+                           Foreground="{StaticResource Text3Brush}" />
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>
