@@ -103,7 +103,7 @@
                        VerticalAlignment="Center"
                        FontFamily="{StaticResource BodyFontFamily}"
                        FontSize="12"
-                       Foreground="{StaticResource Text3Brush}" />
+                       Foreground="{ThemeResource Text3Brush}" />
 
             <Button x:Name="SelectAllButton"
                     Grid.Column="3"
@@ -512,7 +512,7 @@
                   Grid.Column="1"
                   Margin="12,0,0,0"
                   Visibility="Collapsed"
-                  BorderBrush="{StaticResource HairlineBrush}"
+                  BorderBrush="{ThemeResource HairlineBrush}"
                   BorderThickness="1,0,0,0">
                 <library:LibrarySelectedPane x:Name="SelectedPane" />
             </Grid>

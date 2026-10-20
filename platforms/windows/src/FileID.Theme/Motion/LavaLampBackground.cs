@@ -24,6 +24,8 @@
 //     equivalent: stacked first in MainWindow's Grid).
 //   * Pause when occluded: XamlRoot.Changed + IsHostVisible.
 //   * Reduced motion: halve the time multipliers (animations slow down).
+//   * Transparency effects off / high contrast: solid Bg1, no wax
+//     (macOS Reduce Transparency parity).
 //
 // 1:1 visual reference: platforms/apple/app/Sources/FileID/Theme/LavaLampBackground.swift.
 
@@ -44,6 +46,7 @@ public sealed class LavaLampBackground : Control
     private SpriteVisual? _goldVisual;
     private SpriteVisual? _orangeVisual;
     private SpriteVisual? _darkVisual;
+    private CompositionColorBrush? _baseBrush;
     private bool _animationsRunning;
 
     public LavaLampBackground()
@@ -61,6 +64,7 @@ public sealed class LavaLampBackground : Control
         BuildVisualTree();
         StartAnimations();
         ReducedMotion.Instance.PropertyChanged += OnReducedMotionChanged;
+        TransparencyEffects.Instance.PropertyChanged += OnTransparencyChanged;
         if (XamlRoot is { } root)
         {
             root.Changed += OnXamlRootChanged;
@@ -71,6 +75,7 @@ public sealed class LavaLampBackground : Control
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         ReducedMotion.Instance.PropertyChanged -= OnReducedMotionChanged;
+        TransparencyEffects.Instance.PropertyChanged -= OnTransparencyChanged;
         if (XamlRoot is { } root)
         {
             root.Changed -= OnXamlRootChanged;
@@ -89,6 +94,7 @@ public sealed class LavaLampBackground : Control
             _goldVisual = null;
             _orangeVisual = null;
             _darkVisual = null;
+            _baseBrush = null;
         }
     }
 
@@ -136,9 +142,35 @@ public sealed class LavaLampBackground : Control
         });
     }
 
+    private void OnTransparencyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            try
+            {
+                StopAnimations();
+                ApplyVisibility();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Trace.TraceError($"LavaLampBackground transparency change failed: {ex}");
+            }
+        });
+    }
+
     private void ApplyVisibility()
     {
-        bool visible = XamlRoot?.IsHostVisible ?? true;
+        bool solid = TransparencyEffects.Instance.IsSolid;
+        if (_goldVisual is not null) _goldVisual.IsVisible = !solid;
+        if (_orangeVisual is not null) _orangeVisual.IsVisible = !solid;
+        if (_darkVisual is not null) _darkVisual.IsVisible = !solid;
+        if (_baseBrush is not null)
+        {
+            _baseBrush.Color = solid
+                ? ResolveColor("Bg1Color", Color.FromArgb(0xFF, 0x0B, 0x0B, 0x0C))
+                : ResolveColor("LavaLampBaseColor", Color.FromArgb(0xFF, 0x14, 0x14, 0x14));
+        }
+        bool visible = (XamlRoot?.IsHostVisible ?? true) && !solid;
         if (visible && !_animationsRunning) StartAnimations();
         else if (!visible && _animationsRunning) StopAnimations();
     }
@@ -151,8 +183,9 @@ public sealed class LavaLampBackground : Control
         _root.Size = new Vector2((float)Math.Max(1, ActualWidth), (float)Math.Max(1, ActualHeight));
 
         // Solid base: #141414 (Color(white: 0.08) on macOS).
-        _root.Brush = compositor.CreateColorBrush(
+        _baseBrush = compositor.CreateColorBrush(
             ResolveColor("LavaLampBaseColor", Color.FromArgb(0xFF, 0x14, 0x14, 0x14)));
+        _root.Brush = _baseBrush;
 
         // Three soft-edge ellipses. The size is the max diameter the
         // composition needs; the radial brush handles the falloff.

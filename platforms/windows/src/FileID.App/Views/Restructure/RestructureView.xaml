@@ -155,8 +155,8 @@
                       Visibility="Collapsed"
                       ColumnSpacing="14"
                       CornerRadius="{StaticResource CornerRadiusL}"
-                      Background="{StaticResource PanelBrush}"
-                      BorderBrush="{StaticResource HairlineStrongBrush}"
+                      Background="{ThemeResource PanelBrush}"
+                      BorderBrush="{ThemeResource HairlineStrongBrush}"
                       BorderThickness="1">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="3" />
@@ -170,12 +170,12 @@
                                    FontFamily="{StaticResource BodyFontFamily}"
                                    FontSize="13.5"
                                    FontWeight="SemiBold"
-                                   Foreground="{StaticResource Text1Brush}"
+                                   Foreground="{ThemeResource Text1Brush}"
                                    TextWrapping="Wrap" />
                         <TextBlock x:Name="MissingContentModelsBody"
                                    FontFamily="{StaticResource BodyFontFamily}"
                                    FontSize="12.5"
-                                   Foreground="{StaticResource Text2Brush}"
+                                   Foreground="{ThemeResource Text2Brush}"
                                    TextWrapping="Wrap" />
                     </StackPanel>
                     <Button Grid.Column="2"

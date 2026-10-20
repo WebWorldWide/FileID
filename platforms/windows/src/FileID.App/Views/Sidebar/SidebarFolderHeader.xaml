@@ -23,7 +23,7 @@
               Visibility="Collapsed"
               Padding="12,9,12,9"
               ColumnSpacing="10"
-              BorderBrush="{StaticResource HairlineSoftBrush}"
+              BorderBrush="{ThemeResource HairlineSoftBrush}"
               BorderThickness="0,1,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="14" />
@@ -40,7 +40,7 @@
                            FontFamily="{StaticResource BodyFontFamily}"
                            FontSize="14"
                            FontWeight="SemiBold"
-                           Foreground="{StaticResource Text1Brush}"
+                           Foreground="{ThemeResource Text1Brush}"
                            TextTrimming="CharacterEllipsis" />
                 <TextBlock x:Name="FolderPathText"
                            Style="{StaticResource ShellMetaTextStyle}" />
@@ -48,7 +48,7 @@
             <TextBlock x:Name="FileCountText"
                        Grid.Column="2"
                        Style="{StaticResource ShellMetaTextStyle}"
-                       Foreground="{StaticResource Text2Brush}" />
+                       Foreground="{ThemeResource Text2Brush}" />
         </Grid>
 
         <TextBlock x:Name="EmptyFolderText"
@@ -60,7 +60,7 @@
                     Spacing="8"
                     Padding="10"
                     Background="{StaticResource PanelHeaderBrush}"
-                    BorderBrush="{StaticResource HairlineStrongBrush}"
+                    BorderBrush="{ThemeResource HairlineStrongBrush}"
                     BorderThickness="0,1,0,0">
             <Button Style="{StaticResource ShellSecondaryButtonStyle}"
                     Content="Add folder…"
@@ -83,7 +83,7 @@
         <Grid x:Name="ActionsPanel"
               Visibility="Collapsed"
               Padding="10,8,10,8"
-              BorderBrush="{StaticResource HairlineSoftBrush}"
+              BorderBrush="{ThemeResource HairlineSoftBrush}"
               BorderThickness="0,1,0,0">
             <Button Style="{StaticResource ShellGhostButtonStyle}"
                     Content="Clear folder"

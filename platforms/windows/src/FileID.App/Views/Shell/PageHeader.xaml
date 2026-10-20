@@ -14,7 +14,7 @@
 
     <Grid Padding="26,18,26,14"
           ColumnSpacing="16"
-          BorderBrush="{StaticResource HairlineBrush}"
+          BorderBrush="{ThemeResource HairlineBrush}"
           BorderThickness="0,0,0,1">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
@@ -30,7 +30,7 @@
         <TextBlock x:Name="PageMetaText"
                    Grid.Column="1"
                    Style="{StaticResource ShellMetaTextStyle}"
-                   Foreground="{StaticResource Text2Brush}"
+                   Foreground="{ThemeResource Text2Brush}"
                    VerticalAlignment="Bottom"
                    Margin="0,0,0,6" />
     </Grid>

@@ -20,7 +20,7 @@
                    Text="Step 1 of 5 · Scan"
                    FontFamily="{StaticResource BodyFontFamily}"
                    FontSize="12"
-                   Foreground="{StaticResource Text2Brush}"
+                   Foreground="{ThemeResource Text2Brush}"
                    Margin="0,0,24,0"
                    TextTrimming="CharacterEllipsis" />
     </StackPanel>

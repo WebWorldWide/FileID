@@ -41,13 +41,13 @@
                       Height="167"
                       CornerRadius="{StaticResource CornerRadiusM}"
                       Background="#59000000"
-                      BorderBrush="{StaticResource HairlineBrush}"
+                      BorderBrush="{ThemeResource HairlineBrush}"
                       BorderThickness="1"
                       DoubleTapped="OnPreviewDoubleTapped">
                     <FontIcon x:Name="PreviewGlyph"
                               FontSize="28"
                               Glyph="&#xE8A5;"
-                              Foreground="{StaticResource Text3Brush}" />
+                              Foreground="{ThemeResource Text3Brush}" />
                     <Image x:Name="PreviewImage"
                            Stretch="Uniform"
                            AutomationProperties.Name="Selected file preview" />
@@ -58,7 +58,7 @@
                                FontFamily="{StaticResource BodyFontFamily}"
                                FontSize="14"
                                FontWeight="SemiBold"
-                               Foreground="{StaticResource Text1Brush}"
+                               Foreground="{ThemeResource Text1Brush}"
                                TextWrapping="Wrap"
                                MaxLines="2"
                                TextTrimming="CharacterEllipsis"
@@ -66,7 +66,7 @@
                     <TextBlock x:Name="FolderText"
                                FontFamily="{StaticResource MonoFontFamily}"
                                FontSize="11"
-                               Foreground="{StaticResource Text3Brush}"
+                               Foreground="{ThemeResource Text3Brush}"
                                TextTrimming="CharacterEllipsis" />
                 </StackPanel>
 
@@ -76,7 +76,7 @@
                            Visibility="Collapsed"
                            FontFamily="{StaticResource BodyFontFamily}"
                            FontSize="12.5"
-                           Foreground="{StaticResource Text2Brush}"
+                           Foreground="{ThemeResource Text2Brush}"
                            TextWrapping="Wrap"
                            IsTextSelectionEnabled="True" />
 

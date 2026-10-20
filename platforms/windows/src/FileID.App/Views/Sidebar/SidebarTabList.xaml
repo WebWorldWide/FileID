@@ -22,7 +22,7 @@
         <Grid Margin="10,0,10,0"
               Padding="3"
               Background="{StaticResource ShellControlFillBrush}"
-              BorderBrush="{StaticResource HairlineStrongBrush}"
+              BorderBrush="{ThemeResource HairlineStrongBrush}"
               BorderThickness="1"
               CornerRadius="{StaticResource CornerRadiusM}">
             <Grid x:Name="AreaTrack" ColumnSpacing="0">
