@@ -473,6 +473,11 @@ public actor DeepAnalyze {
 
     /// Reloads a parked model before use; a no-op otherwise.
     func ensureResident() async throws {
+        // Starting a use invalidates any pending park before the first await, so an
+        // idle unload can't free the weights between this check and the caller's lease.
+        useGeneration &+= 1
+        idleUnloadTask?.cancel()
+        idleUnloadTask = nil
         guard container == nil, let kind = parkedKind else { return }
         JSONLog.shared.info(ev: "model_unparked", extra: ["kind": AnyCodable(kind.rawValue)])
         try await ensureLoaded(kind: kind)

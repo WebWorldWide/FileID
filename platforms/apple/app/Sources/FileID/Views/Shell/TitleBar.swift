@@ -24,14 +24,10 @@ struct TitleBar: View {
     private var isNarrow: Bool { false }
 
     var body: some View {
-        ZStack {
-            HStack(spacing: 12) {
-                leading
-                Spacer(minLength: 12)
-                trailing
-            }
-            searchField
-                .frame(width: 360)
+        HStack(spacing: 12) {
+            leading.frame(maxWidth: .infinity, alignment: .leading)
+            searchField.frame(minWidth: 200, idealWidth: 360, maxWidth: 360)
+            trailing.frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.leading, TrafficLights.reservedWidth)
         .padding(.trailing, 14)
@@ -73,6 +69,8 @@ struct TitleBar: View {
                     VHairline(color: Color.white.opacity(0.18)).frame(height: 14)
                     Text(pickedURL?.lastPathComponent ?? "No folder").font(Theme.Font.body(13.5, .semibold))
                         .foregroundStyle(pickedURL == nil ? Theme.text3 : Theme.text1).lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 180, alignment: .leading)
                     Text("▾").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                 }
                 .padding(.horizontal, 10)

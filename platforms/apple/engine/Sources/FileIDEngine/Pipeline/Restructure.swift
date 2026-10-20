@@ -573,7 +573,8 @@ public enum Restructure {
         // they were captured during; fix RAW/JPEG/video files in the wrong format
         // folder. Owner kill-switch: FILEID_RESTRUCTURE_RESPECT=0.
         var keptOrganizedFolders = Set<String>()
-        if ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_RESPECT"] != "0" {
+        let respectOn = ProcessInfo.processInfo.environment["FILEID_RESTRUCTURE_RESPECT"] != "0"
+        if respectOn {
             let infos = rows.map { RestructureRespect.FileInfo(fileID: $0.id, path: $0.path, kind: $0.kind,
                                                                 captureUnix: $0.createdAt ?? $0.modifiedAt) }
             let byID = Dictionary(infos.map { ($0.fileID, $0) }, uniquingKeysWith: { a, _ in a })
@@ -628,13 +629,24 @@ public enum Restructure {
         // recompute can't see those folders at all and the "Keep" tile would silently
         // undercount the folders actually being left alone. Mirrors the Windows engine,
         // which computes folder_class on the full proposed set before stripping.
-        let folderClass = classifyFolders(proposals)
-        var tiers = folderTiersAndCounts(classified: folderClass, exempt: semanticSourceFolders)
+        //
+        // With the respect stage on, every surviving move is either a format
+        // correction or a loose file the stage chose to organize; those share one
+        // bucket by design (a dated event, "RAWs"), so the anchor strip would drop
+        // exactly the moves the stage meant to make. Its folders count as Mixed.
+        let folderClass = classifyFolders(proposals, libraryRoot: libraryRoot.path)
+        var exempt = semanticSourceFolders
+        if respectOn {
+            for p in proposals where !pathsEqual(p.oldPath, p.newPath) {
+                exempt.insert((p.oldPath as NSString).deletingLastPathComponent)
+            }
+        }
+        var tiers = folderTiersAndCounts(classified: folderClass, exempt: exempt)
         for folder in keptOrganizedFolders where tiers.tierByFolder[folder] == nil {
             tiers.tierByFolder[folder] = "Anchor"
             tiers.anchor += 1
         }
-        let stripped = stripAnchorFolderMovesExcept(
+        let stripped = respectOn ? proposals : stripAnchorFolderMovesExcept(
             proposals, classified: folderClass, exempt: semanticSourceFolders)
         let actionable = stripped.filter { !pathsEqual($0.oldPath, $0.newPath) }
         return PlanResult(
@@ -870,7 +882,7 @@ public enum Restructure {
     }
 
     private static let genericFolderNames: Set<String> = [
-        "downloads", "downloaded", "new folder", "untitled", "temp", "tmp",
+        "downloads", "downloaded", "desktop", "unsorted", "inbox", "new folder", "untitled", "temp", "tmp",
         "misc", "other", "stuff", "things", "files",
     ]
 
@@ -878,8 +890,10 @@ public enum Restructure {
     /// dominant category is the most frequent (so a folder of one person's
     /// photos is dominated by "People/<that person>" — homogeneity is measured
     /// against the DOMINANT person). ≤2 files or a generic name →
-    /// Junk; ≥80% one category → Anchor; else Mixed.
-    static func classifyFolders(_ moves: [RestructureProposal]) -> [ClassifiedFolder] {
+    /// Junk; ≥80% one category → Anchor; else Mixed. The library root itself is
+    /// never an Anchor (Windows `classify_folders`).
+    static func classifyFolders(_ moves: [RestructureProposal], libraryRoot: String? = nil) -> [ClassifiedFolder] {
+        let root = libraryRoot.map { ($0 as NSString).standardizingPath.lowercased() }
         var byFolder: [String: [RestructureProposal]] = [:]
         for m in moves {
             let parent = (m.oldPath as NSString).deletingLastPathComponent
@@ -901,7 +915,7 @@ public enum Restructure {
             let classification: FolderClassification
             if generic || total <= 2 {
                 classification = .junk
-            } else if homogeneity >= 0.80 {
+            } else if homogeneity >= 0.80 && (folder as NSString).standardizingPath.lowercased() != root {
                 classification = .anchor
             } else {
                 classification = .mixed

@@ -58,7 +58,12 @@ struct LibraryView: View {
     /// nears its end; similarity and semantic results are one ranked list.
     @State private var canLoadMore = false
     @State private var loadingMore = false
+    @State private var loadMoreTask: Task<Void, Never>?
+    /// Query and kind of the rows on screen; a refresh with the same pair keeps
+    /// every loaded page instead of dropping back to the first.
+    @State private var listedQuery: (String, String?)? = nil
     private static let pageSize = 300
+    private static let refreshCap = 3_000
     /// The tile about two screens before the end; the grid creates it lazily,
     /// so its appearance means the user is approaching the last loaded row.
     private var loadTriggerID: Int64? { rows.isEmpty ? nil : rows[max(0, rows.count - 24)].id }
@@ -652,7 +657,7 @@ struct LibraryView: View {
             tagsByFile: tagsByFile,
             selectMode: selectMode,
             checkedIDs: Set(checkedFiles.keys),
-            selectedID: paneSelectedID ?? previewSelectedID,
+            selectedID: previewSelectedID ?? paneSelectedID,
             refreshToken: tileRefreshToken,
             onSelect: { paneSelectedID = $0.id },
             onOpen: { openPreview($0) },
@@ -671,6 +676,7 @@ struct LibraryView: View {
             get: { previewSelectedID != nil },
             set: {
                 if !$0 {
+                    if paneSelectedID != nil { paneSelectedID = previewSelectedID }
                     previewSelectedID = nil
                     previewSiblingTask?.cancel()
                     previewSiblingTask = nil
@@ -745,7 +751,11 @@ struct LibraryView: View {
         let query = searchText
         let kind = kindFilter
         let encoderReady = CLIPTextEncoder.shared.isReady
+        let sameListing = seed == nil && listedQuery.map { $0 == query && $1 == kind } == true
+        let want = sameListing ? min(max(Self.pageSize, rows.count), Self.refreshCap) : Self.pageSize
         reloadTask?.cancel()
+        loadMoreTask?.cancel()
+        loadingMore = false
         visualSearchPending = false
         reloadTask = Task { @MainActor in
             defer { if !Task.isCancelled { visualSearchPending = false } }
@@ -757,8 +767,8 @@ struct LibraryView: View {
                     newRows = await store.catalogFilesAsync(ids: response.hits.map(\.fileID), kindFilter: kind)
                 } else { newRows = [] }
             } else {
-                newRows = await store.filesAsync(limit: Self.pageSize, search: query, kindFilter: kind)
-                pageable = newRows.count == Self.pageSize
+                newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
+                pageable = newRows.count == want
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.count >= 3, encoderReady, let vector = await store.semanticVectorAsync(query: trimmed) {
                     guard !Task.isCancelled else { return }
@@ -781,6 +791,7 @@ struct LibraryView: View {
             rows = newRows
             tagsByFile = tags
             canLoadMore = pageable
+            listedQuery = seed == nil ? (query, kind) : nil
         }
     }
 
@@ -788,14 +799,15 @@ struct LibraryView: View {
         guard canLoadMore, !loadingMore, similarSeed == nil else { return }
         loadingMore = true
         let offset = rows.count, query = searchText, kind = kindFilter
-        Task { @MainActor in
-            defer { loadingMore = false }
+        loadMoreTask = Task { @MainActor in
+            defer { if !Task.isCancelled { loadingMore = false } }
             let page = await store.filesAsync(offset: offset, limit: Self.pageSize, search: query, kindFilter: kind)
-            guard query == searchText, kind == kindFilter, offset == rows.count else { return }
+            guard !Task.isCancelled, query == searchText, kind == kindFilter, offset == rows.count else { return }
             let ids = page.map(\.id)
             let tags = await Task.detached(priority: .userInitiated) { [store] in
                 store.topVisionTagsBulk(forFileIDs: ids, limit: 4)
             }.value
+            guard !Task.isCancelled, offset == rows.count else { return }
             let known = Set(rows.map(\.id))
             rows.append(contentsOf: page.filter { !known.contains($0.id) })
             tagsByFile.merge(tags) { _, new in new }

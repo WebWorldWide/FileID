@@ -99,12 +99,12 @@ public enum CatalogStore {
             .map(String.init)
             .filter { $0.count >= 3 })).sorted().prefix(6)
         guard !words.isEmpty else { return [] }
-        let wordMatch = """
-            EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.source IN ('auto','user','vlm')
-              AND (' ' || REPLACE(LOWER(t.tag), '_', ' ')) LIKE ?)
-            """
-        let score = words.map { _ in "(\(wordMatch))" }.joined(separator: " + ")
-        let likeArgs: [DatabaseValueConvertible] = words.map { "% \($0)%" }
+        let forms = words.map(Self.wordForms)
+        let score: String = forms.map { (variants: [String]) -> String in
+            let any: String = variants.map { _ in "(' ' || REPLACE(LOWER(t.tag), '_', ' ')) LIKE ?" }.joined(separator: " OR ")
+            return "(EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.source IN ('auto','user','vlm') AND (\(any))))"
+        }.joined(separator: " + ")
+        let likeArgs: [DatabaseValueConvertible] = forms.flatMap { $0.map { "% \($0)%" } }
         let rows = try Row.fetchAll(db, sql: """
             WITH scored AS (
               SELECT f.id, f.path_text, f.kind, \(score) AS score
@@ -131,6 +131,16 @@ public enum CatalogStore {
             let tags: String = row["tag_list"] ?? ""
             return CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: "Tags: " + tags)
         }
+    }
+
+    /// The word plus its singular, so "dogs" and "beaches" find the singular
+    /// labels scans write (Rust `tag_hits`).
+    static func wordForms(_ word: String) -> [String] {
+        guard word.count >= 4 else { return [word] }
+        if word.hasSuffix("ies") { return [word, String(word.dropLast(3)) + "y"] }
+        if word.hasSuffix("es") { return [word, String(word.dropLast(2)), String(word.dropLast())] }
+        if word.hasSuffix("s") && !word.hasSuffix("ss") { return [word, String(word.dropLast())] }
+        return [word]
     }
 
     static func search(

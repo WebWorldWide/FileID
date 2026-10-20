@@ -7,20 +7,29 @@ import ImageIO
 /// data), otherwise decodes the full image. Small EXIF thumbnails never pass.
 /// A preview up to a third larger than the target is used at its native size:
 /// resampling a 1616 px Sony preview down to 1536 px cost more than decoding it.
+/// Larger previews are scaled to the target; everything else decodes at it.
 func decodeBoundedImage(_ source: CGImageSource, maxPixelSize: Int) -> CGImage? {
+    let cap = maxPixelSize * 4 / 3
     var options: [CFString: Any] = [
         kCGImageSourceShouldCacheImmediately: true,
         kCGImageSourceCreateThumbnailWithTransform: true,
-        kCGImageSourceThumbnailMaxPixelSize: maxPixelSize * 4 / 3,
-        kCGImageSourceCreateThumbnailFromImageIfAbsent: true
+        kCGImageSourceThumbnailMaxPixelSize: cap,
+        kCGImageSourceCreateThumbnailFromImageIfAbsent: false
     ]
-    if let preview = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-       max(preview.width, preview.height) * 3 >= maxPixelSize * 2 || !hasLargerImage(source, than: preview) {
-        return preview
+    var largePreview = false
+    if let preview = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+        let side = max(preview.width, preview.height)
+        if side * 3 >= maxPixelSize * 2 && side < cap { return preview }
+        if !hasLargerImage(source, than: preview) { return preview }
+        largePreview = side >= cap
     }
     options[kCGImageSourceThumbnailMaxPixelSize] = maxPixelSize
-    options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
-    options[kCGImageSourceCreateThumbnailFromImageAlways] = true
+    if largePreview {
+        options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = true
+    } else {
+        options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
+        options[kCGImageSourceCreateThumbnailFromImageAlways] = true
+    }
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
 }
 

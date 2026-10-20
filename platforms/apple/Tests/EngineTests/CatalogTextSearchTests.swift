@@ -63,6 +63,18 @@ struct CatalogTextSearchTests {
         #expect(both.map(\.fileID) == [1], "files matching every word outrank partial matches")
 
         #expect(try await database.pool.read { try CatalogStore.search($0, query: "sky") }.map(\.fileID) == [2])
+        #expect(try await database.pool.read { try CatalogStore.search($0, query: "dogs on grass") }.map(\.fileID) == [1],
+                "plural questions match singular scan tags")
+    }
+
+    @Test func pluralWordForms() {
+        #expect(CatalogStore.wordForms("dogs") == ["dogs", "dog"])
+        #expect(CatalogStore.wordForms("puppies") == ["puppies", "puppy"])
+        #expect(CatalogStore.wordForms("beaches").contains("beach"))
+        #expect(CatalogStore.wordForms("faces").contains("face"))
+        #expect(CatalogStore.wordForms("grass") == ["grass"])
+        #expect(CatalogStore.wordForms("cats") == ["cats", "cat"])
+        #expect(CatalogStore.wordForms("sky") == ["sky"])
     }
 
     @Test func evidencePromptIsNumberedAndBounded() {

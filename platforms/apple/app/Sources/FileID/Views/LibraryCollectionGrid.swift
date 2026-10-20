@@ -57,11 +57,19 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastSelectMode = false
         private var lastChecked: Set<Int64> = []
         private var lastSelected: Int64?
+        private var lastRows: [FileRow] = []
+        private var lastTags: [Int64: [String]] = [:]
+        private var lastClickRowID: Int64?
+        /// Keyboard cursor in select mode, where the pane selection is hidden.
+        private var cursorID: Int64?
 
         func apply(_ grid: LibraryCollectionGrid, force: Bool) {
             model = grid
             guard let collection else { return }
             let newIDs = grid.rows.map(\.id)
+            let stateChanged = grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
+                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected
+            if !grid.selectMode { cursorID = nil }
             if force || newIDs != ids {
                 let appended = !ids.isEmpty && newIDs.count > ids.count && Array(newIDs.prefix(ids.count)) == ids
                 let old = ids.count
@@ -69,35 +77,49 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 if appended {
                     let paths = Set((old..<newIDs.count).map { IndexPath(item: $0, section: 0) })
                     NSAnimationContext.runAnimationGroup { $0.duration = 0; collection.insertItems(at: paths) }
+                    if stateChanged || grid.tagsByFile != lastTags {
+                        reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken)
+                    }
                 } else {
                     collection.reloadData()
                 }
-            } else if grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
-                        || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected {
-                let reloadImages = grid.refreshToken != lastToken
-                for item in collection.visibleItems() {
-                    guard let tile = item as? LibraryTileItem, let path = collection.indexPath(for: item),
-                          path.item < grid.rows.count else { continue }
-                    configure(tile, row: grid.rows[path.item], reloadImage: reloadImages)
-                }
+            } else if stateChanged || grid.rows != lastRows || grid.tagsByFile != lastTags {
+                reconfigureVisible(grid, reloadImages: grid.refreshToken != lastToken)
+            }
+            if let selected = grid.selectedID, selected != lastSelected, let index = newIDs.firstIndex(of: selected) {
+                collection.scrollToItems(at: [IndexPath(item: index, section: 0)], scrollPosition: .nearestHorizontalEdge)
             }
             lastToken = grid.refreshToken
             lastSelectMode = grid.selectMode
             lastChecked = grid.checkedIDs
             lastSelected = grid.selectedID
+            lastRows = grid.rows
+            lastTags = grid.tagsByFile
+        }
+
+        private func reconfigureVisible(_ grid: LibraryCollectionGrid, reloadImages: Bool) {
+            guard let collection else { return }
+            let oldPaths = Dictionary(lastRows.map { ($0.id, $0.pathText) }, uniquingKeysWith: { a, _ in a })
+            for item in collection.visibleItems() {
+                guard let tile = item as? LibraryTileItem, let path = collection.indexPath(for: item),
+                      path.item < grid.rows.count else { continue }
+                let row = grid.rows[path.item]
+                configure(tile, row: row, reloadImage: reloadImages || oldPaths[row.id] != row.pathText)
+            }
         }
 
         func handle(_ key: TileCollectionView.TileKey) -> Bool {
             guard let model, let collection, !model.rows.isEmpty else { return false }
-            let current = model.selectedID.flatMap { id in model.rows.firstIndex { $0.id == id } }
+            let focusID = model.selectMode ? cursorID : model.selectedID
+            let current = focusID.flatMap { id in model.rows.firstIndex { $0.id == id } }
             if key == .clear {
                 guard current != nil else { return false }
-                model.onClearSelection()
+                if model.selectMode { moveCursor(to: nil) } else { model.onClearSelection() }
                 return true
             }
             if key == .open {
                 guard let current else { return false }
-                model.onOpen(model.rows[current])
+                if model.selectMode { model.onToggleCheck(model.rows[current]) } else { model.onOpen(model.rows[current]) }
                 return true
             }
             let columns = max(1, (collection.collectionViewLayout as? AdaptiveGridLayout)?.columnCount ?? 1)
@@ -111,10 +133,15 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             }
             let target = min(max(next, 0), model.rows.count - 1)
             guard target != current else { return true }
-            model.onSelect(model.rows[target])
+            if model.selectMode { moveCursor(to: model.rows[target].id) } else { model.onSelect(model.rows[target]) }
             collection.scrollToItems(at: [IndexPath(item: target, section: 0)], scrollPosition: .nearestHorizontalEdge)
             if target >= model.rows.count - 24 { model.onNearEnd() }
             return true
+        }
+
+        private func moveCursor(to id: Int64?) {
+            cursorID = id
+            if let model { reconfigureVisible(model, reloadImages: false) }
         }
 
         func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int { ids.count }
@@ -136,14 +163,18 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             tile.configure(
                 row: row,
                 tags: LibraryTileItem.displayTags(model.tagsByFile[row.id] ?? []),
-                selected: !model.selectMode && model.selectedID == row.id,
+                selected: model.selectMode ? cursorID == row.id : model.selectedID == row.id,
                 selectMode: model.selectMode,
                 checked: model.checkedIDs.contains(row.id),
                 reloadImage: reloadImage)
             tile.onClick = { [weak self] count in
                 guard let self, let model = self.model else { return }
+                // A first click can open the details pane and reflow the grid, so the
+                // second click of a double-click may land on a different tile.
+                let sameTile = self.lastClickRowID == row.id
+                self.lastClickRowID = row.id
                 if model.selectMode { model.onToggleCheck(row) }
-                else if count >= 2 { model.onOpen(row) }
+                else if count >= 2 && sameTile { model.onOpen(row) }
                 else { model.onSelect(row) }
             }
             tile.onFindSimilar = { [weak self] in self?.model?.onFindSimilar(row) }
@@ -240,9 +271,12 @@ final class TextLayer: CATextLayer {
     var text: String = "" { didSet { if text != oldValue { string = text } } }
     var textWidth: CGFloat { ceil((text as NSString).size(withAttributes: [.font: textFont]).width) }
 
+    let color: NSColor
+
     init(size: CGFloat, weight: NSFont.Weight, color: NSColor, align: CATextLayerAlignmentMode = .left,
          truncation: CATextLayerTruncationMode = .end) {
         textFont = LibraryTileItem.brandFont(size: size, weight: weight)
+        self.color = color
         super.init()
         font = textFont
         fontSize = size
@@ -255,6 +289,7 @@ final class TextLayer: CATextLayer {
     }
     override init(layer: Any) {
         textFont = (layer as? TextLayer)?.textFont ?? .systemFont(ofSize: 11)
+        color = (layer as? TextLayer)?.color ?? .white
         super.init(layer: layer)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -285,11 +320,13 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let ringLayer = CALayer()
     private let badge = TextLayer(size: 10.5, weight: .semibold, color: NSColor(hex: 0xE2E5E8), align: .center)
     private let name = TextLayer(size: 13, weight: .medium, color: NSColor(hex: 0xF0F1F2), truncation: .middle)
-    private let chips = [TextLayer(size: 11.5, weight: .medium, color: NSColor(hex: 0xCFD3D8), align: .center),
-                         TextLayer(size: 11.5, weight: .medium, color: NSColor(hex: 0xCFD3D8), align: .center)]
-    private let size = TextLayer(size: 11, weight: .regular, color: NSColor(hex: 0xA6ACB3))
-    private let date = TextLayer(size: 11, weight: .regular, color: NSColor(hex: 0xA6ACB3), align: .right)
+    private let chips = [TextLayer(size: 11.5, weight: .medium, color: Theme.nsText2, align: .center),
+                         TextLayer(size: 11.5, weight: .medium, color: Theme.nsText2, align: .center)]
+    private let size = TextLayer(size: 11, weight: .regular, color: Theme.nsText3)
+    private let date = TextLayer(size: 11, weight: .regular, color: Theme.nsText3, align: .right)
     private let check = NSImageView()
+    private let textGlyph = NSImageView()
+    private var hasSmartName = false
     private var rowID: Int64?
     private var thumbTask: Task<Void, Never>?
     private var hovering = false { didSet { updateRing() } }
@@ -318,8 +355,15 @@ final class LibraryTileItem: NSCollectionViewItem {
             chip.cornerRadius = 4
         }
         check.imageScaling = .scaleProportionallyUpOrDown
+        textGlyph.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
+        textGlyph.contentTintColor = NSColor.white.withAlphaComponent(0.85)
+        textGlyph.wantsLayer = true
+        textGlyph.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        textGlyph.layer?.cornerRadius = 4
+        textGlyph.setAccessibilityElement(false)
         for layer in [badge, name, size, date] + chips { root.layer?.addSublayer(layer) }
         root.addSubview(check)
+        root.addSubview(textGlyph)
         view = root
     }
 
@@ -335,6 +379,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         badge.frame = CGRect(x: 6, y: b.height - 6 - 17, width: badge.textWidth + 12, height: 17)
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
+        textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
         var y = b.height - thumbHeight - 6 - 17
         name.frame = CGRect(x: 0, y: y, width: b.width, height: 17)
         y -= 4 + 18
@@ -356,7 +401,10 @@ final class LibraryTileItem: NSCollectionViewItem {
         self.isChosen = selected
         self.checked = checked
         badge.text = row.kind.capitalized
-        name.text = row.url.lastPathComponent
+        let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        hasSmartName = !proposed.isEmpty
+        name.text = hasSmartName ? (row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)") : row.url.lastPathComponent
+        textGlyph.isHidden = !row.hasText
         for (index, chip) in chips.enumerated() {
             chip.isHidden = index >= tags.count
             if index < tags.count { chip.text = tags[index] }
@@ -370,8 +418,11 @@ final class LibraryTileItem: NSCollectionViewItem {
         view.needsLayout = true
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
-        view.setAccessibilityLabel([row.url.lastPathComponent, row.kind.capitalized,
-                                    row.displayDate?.formatted(date: .abbreviated, time: .omitted)].compactMap { $0 }.joined(separator: ", "))
+        view.setAccessibilityLabel([row.url.lastPathComponent, hasSmartName ? "smart name \(name.text)" : nil, row.kind.capitalized,
+                                    row.displayDate?.formatted(date: .abbreviated, time: .omitted),
+                                    row.hasFaces ? "contains faces" : nil, row.hasText ? "contains text" : nil]
+            .compactMap { $0 }.joined(separator: ", "))
+        applyColors()
         view.setAccessibilitySelected(selected || checked)
         (view as? TileView)?.customActions = [NSAccessibilityCustomAction(name: "Open preview") { [weak self] in self?.onOpenPreview?(); return true }]
         if changedFile || reloadImage { loadThumbnail(for: row, keepCurrent: !changedFile) }
@@ -407,7 +458,9 @@ final class LibraryTileItem: NSCollectionViewItem {
             ringLayer.cornerRadius = 11
         } else {
             ringLayer.borderWidth = 1
-            ringLayer.borderColor = NSColor.white.withAlphaComponent(hovering ? 0.28 : 0.08).cgColor
+            view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                ringLayer.borderColor = (hovering ? Theme.nsHairlineHover : Theme.nsHairline).cgColor
+            }
             ringLayer.cornerRadius = 8
         }
         CATransaction.commit()
@@ -415,6 +468,27 @@ final class LibraryTileItem: NSCollectionViewItem {
     }
 
     func setHover(_ on: Bool) { if hovering != on { hovering = on } }
+
+    /// Layer colours are CGColors, so dynamic tokens (Increase Contrast) are
+    /// resolved here and again whenever the appearance changes.
+    fileprivate func applyColors() {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            for layer in [badge, size, date] + chips { layer.foregroundColor = layer.color.cgColor }
+            name.foregroundColor = (hasSmartName ? NSColor(hex: 0xFFCC00) : name.color).cgColor
+        }
+        CATransaction.commit()
+        updateRing()
+    }
+
+    fileprivate func applyBackingScale(_ scale: CGFloat) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        for layer in [badge, name, size, date] + chips where layer.contentsScale != scale {
+            layer.contentsScale = scale
+            layer.setNeedsDisplay()
+        }
+        CATransaction.commit()
+    }
 
     fileprivate func contextMenu() -> NSMenu {
         let menu = NSMenu()
@@ -468,6 +542,14 @@ private final class TileView: NSView {
     override func menu(for event: NSEvent) -> NSMenu? { owner?.contextMenu() }
     override func accessibilityPerformPress() -> Bool { owner?.onClick?(1); return true }
     override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? { customActions }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        owner?.applyColors()
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        owner?.applyBackingScale(window?.backingScaleFactor ?? 2)
+    }
 }
 
 private final class ClosureMenuItem: NSMenuItem {

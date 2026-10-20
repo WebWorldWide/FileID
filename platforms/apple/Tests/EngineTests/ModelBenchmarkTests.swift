@@ -113,4 +113,9 @@ struct IdleModelReleaseTests {
         #expect(DeepAnalyze.idleUnloadSeconds(environment: ["FILEID_MODEL_IDLE_SECONDS": "45"]) == 45)
         #expect(DeepAnalyze.idleUnloadSeconds(environment: ["FILEID_MODEL_IDLE_SECONDS": "-1"]) == 300)
     }
+
+    @Test func peakMemoryIsDecimalGigabytes() {
+        #expect(ModelBenchmarkRunner.decimalGB(3_600_000_000) == 3.6)
+        #expect(ModelBenchmarkRunner.decimalGB(1_073_741_824) == 1.07)
+    }
 }

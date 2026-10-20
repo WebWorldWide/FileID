@@ -39,11 +39,18 @@ enum Theme {
 
     /// Resolves per appearance, so it follows System Settings ▸ Accessibility ▸ Increase Contrast live.
     static func adaptive(normal: NSColor, increased: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
+        Color(nsColor: nsAdaptive(normal: normal, increased: increased))
+    }
+    static func nsAdaptive(normal: NSColor, increased: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
             appearance.bestMatch(from: [.accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua, .darkAqua, .aqua])
                 .map { $0.rawValue.contains("HighContrast") } == true ? increased : normal
-        })
+        }
     }
+    static let nsText2 = nsAdaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
+    static let nsText3 = nsAdaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
+    static let nsHairline = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
+    static let nsHairlineHover = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.28), increased: NSColor.white.withAlphaComponent(0.6))
     static let controlBorder  = Color.white.opacity(0.18)
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
