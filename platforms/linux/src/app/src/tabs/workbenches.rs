@@ -753,6 +753,7 @@ fn choose_indexed_files(ui: &Rc<ToolsUi>) {
             kind: None,
             limit: 1000,
             offset: 0,
+            channel: crate::engine_client::QueryChannel::Tools,
         });
     glib::MainContext::default().spawn_local(async move {
         match rx.recv().await {

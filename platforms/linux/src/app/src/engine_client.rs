@@ -84,6 +84,31 @@ enum RawEvent {
     Health { request_id: String, pid: i32 },
 }
 
+/// Each caller keeps its own latest-wins slot, so the Library grid, the
+/// preview and the File Tools picker never cancel one another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueryChannel {
+    #[default]
+    Library,
+    Preview,
+    Tools,
+}
+
+impl QueryChannel {
+    const COUNT: usize = 3;
+
+    fn slot(self) -> usize {
+        match self {
+            QueryChannel::Library => 0,
+            QueryChannel::Preview => 1,
+            QueryChannel::Tools => 2,
+        }
+    }
+}
+
+/// The most rows one read returns (the preview's full-library list).
+pub const QUERY_MAX_ROWS: i64 = 20_000;
+
 #[derive(Debug, Clone, Default)]
 pub struct QuerySpec {
     pub search: String,
@@ -91,6 +116,7 @@ pub struct QuerySpec {
     pub limit: i64,
     /// Rows to skip; the Library pages in as the grid nears its end.
     pub offset: i64,
+    pub channel: QueryChannel,
 }
 
 #[derive(Debug, Clone)]
@@ -134,45 +160,74 @@ struct QueryJob {
     reply: QueryReply,
 }
 
+#[derive(Default)]
+struct QuerySlots {
+    pending: [Option<QueryJob>; QueryChannel::COUNT],
+    next: usize,
+}
+
+impl QuerySlots {
+    fn is_empty(&self) -> bool {
+        self.pending.iter().all(Option::is_none)
+    }
+
+    /// Round-robin across channels so a chatty Library cannot starve the rest.
+    fn take_next(&mut self) -> Option<QueryJob> {
+        for step in 0..QueryChannel::COUNT {
+            let index = (self.next + step) % QueryChannel::COUNT;
+            if let Some(job) = self.pending[index].take() {
+                self.next = (index + 1) % QueryChannel::COUNT;
+                return Some(job);
+            }
+        }
+        None
+    }
+}
+
 struct QueryWorkerState {
-    latest: Mutex<Option<QueryJob>>,
+    latest: Mutex<QuerySlots>,
     ready: Condvar,
     stopping: AtomicBool,
 }
 
 impl QueryWorkerState {
+    fn new() -> Self {
+        Self {
+            latest: Mutex::new(QuerySlots::default()),
+            ready: Condvar::new(),
+            stopping: AtomicBool::new(false),
+        }
+    }
+
     fn submit(&self, job: QueryJob) {
         if self.stopping.load(Ordering::Acquire) {
             return;
         }
-        *self.latest.lock().expect("query queue poisoned") = Some(job);
+        let slot = job.spec.channel.slot();
+        self.latest.lock().expect("query queue poisoned").pending[slot] = Some(job);
         self.ready.notify_one();
     }
 
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
-        self.latest.lock().expect("query queue poisoned").take();
+        *self.latest.lock().expect("query queue poisoned") = QuerySlots::default();
         self.ready.notify_all();
     }
 }
 
 fn spawn_query_worker() -> Arc<QueryWorkerState> {
-    let state = Arc::new(QueryWorkerState {
-        latest: Mutex::new(None),
-        ready: Condvar::new(),
-        stopping: AtomicBool::new(false),
-    });
+    let state = Arc::new(QueryWorkerState::new());
     let worker_state = state.clone();
     thread::spawn(move || loop {
         let job = {
             let mut latest = worker_state.latest.lock().expect("query queue poisoned");
-            while latest.is_none() && !worker_state.stopping.load(Ordering::Acquire) {
+            while latest.is_empty() && !worker_state.stopping.load(Ordering::Acquire) {
                 latest = worker_state.ready.wait(latest).expect("query queue poisoned");
             }
             if worker_state.stopping.load(Ordering::Acquire) {
                 return;
             }
-            latest.take()
+            latest.take_next()
         };
         let Some(job) = job else { continue };
         let _ = job.reply.send_blocking(query_files_from_db(&job.spec));
@@ -496,8 +551,8 @@ impl EngineClient {
         Ok(())
     }
 
-    /// Queue a Library read on the single latest-request-wins query worker;
-    /// a superseded request's receiver closes without a result.
+    /// Queue a read on the query worker. Within one `QueryChannel` the latest
+    /// request wins and a superseded receiver closes without a result.
     pub fn query_files(&self, spec: QuerySpec) -> Receiver<Result<(Vec<FileRow>, i64)>> {
         let (reply, rx) = async_channel::bounded(1);
         self.query_worker.submit(QueryJob { spec, reply });
@@ -849,7 +904,7 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
     let fts = fts_match(search);
     let has_fts = !fts.is_empty();
     let kind = spec.kind.as_deref().filter(|kind| !kind.is_empty());
-    let limit = if spec.limit > 0 { spec.limit.min(1000) } else { 500 };
+    let limit = if spec.limit > 0 { spec.limit.min(QUERY_MAX_ROWS) } else { 500 };
     let mut stmt = conn.prepare(&format!(
         "SELECT f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, \
          f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, \
@@ -1255,17 +1310,31 @@ mod tests {
 
     #[test]
     fn query_queue_is_bounded_and_latest_request_wins() {
-        let state = QueryWorkerState {
-            latest: Mutex::new(None),
-            ready: Condvar::new(),
-            stopping: AtomicBool::new(false),
-        };
+        let state = QueryWorkerState::new();
         let (first_reply, first_rx) = async_channel::bounded(1);
         state.submit(QueryJob { spec: QuerySpec { search: "first".into(), ..QuerySpec::default() }, reply: first_reply });
         let (second_reply, _second_rx) = async_channel::bounded(1);
         state.submit(QueryJob { spec: QuerySpec { search: "second".into(), ..QuerySpec::default() }, reply: second_reply });
         assert!(matches!(first_rx.try_recv(), Err(async_channel::TryRecvError::Closed)));
-        assert_eq!(state.latest.lock().unwrap().as_ref().unwrap().spec.search, "second");
+        assert_eq!(state.latest.lock().unwrap().pending[0].as_ref().unwrap().spec.search, "second");
+    }
+
+    #[test]
+    fn query_channels_do_not_cancel_each_other_and_take_turns() {
+        let state = QueryWorkerState::new();
+        let submit = |search: &str, channel| {
+            let (reply, rx) = async_channel::bounded(1);
+            state.submit(QueryJob { spec: QuerySpec { search: search.into(), channel, ..QuerySpec::default() }, reply });
+            rx
+        };
+        let tools = submit("picker", QueryChannel::Tools);
+        let _library = submit("grid", QueryChannel::Library);
+        let _preview = submit("siblings", QueryChannel::Preview);
+        assert!(!tools.is_closed());
+        let mut slots = state.latest.lock().unwrap();
+        let order: Vec<_> = std::iter::from_fn(|| slots.take_next()).map(|job| job.spec.search).collect();
+        assert_eq!(order, ["grid", "siblings", "picker"]);
+        assert!(slots.is_empty());
     }
 
     #[test]
@@ -1380,7 +1449,7 @@ mod tests {
         let query = |search: &str, kind: Option<&str>, limit: i64| {
             query_files_at_path(
                 &db_path,
-                &QuerySpec { search: search.to_owned(), kind: kind.map(str::to_owned), limit, offset: 0 },
+                &QuerySpec { search: search.to_owned(), kind: kind.map(str::to_owned), limit, ..QuerySpec::default() },
             )
             .unwrap()
         };
