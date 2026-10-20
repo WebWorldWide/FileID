@@ -3969,3 +3969,7 @@ Ctrl+1–9 jump to pages in the macOS order and Alt+1–9 still work for existin
 
 `peakResidentGB` was GiB on macOS and GB in the shared engine. The contract now says decimal gigabytes (bytes / 1e9); macOS converts the same way. Figures recorded before this date on macOS read about 7% low.
 
+
+## 2026-10-20 — zip 2 → 9 for RUSTSEC-2026-0367/0368/0369
+
+Three advisories against `zip` (SUID bits, symlink targets and permissions applied during `ZipArchive::extract`) failed `cargo-deny`. FileID's extractor (`util/zip.rs`) never calls `extract`, skips symlinks and special entries and never applies Unix modes, so it was not exposed; the crate was upgraded anyway rather than ignored, since 9.0.5 supports Rust 1.88 (inside the 1.90 pin) and the only API change touching FileID is that `file_names()` now yields fallible names. New transitive crates: `zlib-rs` (Zlib), `nix` (MIT), `typed-path` (MIT/Apache-2.0), all on the license allowlist. Engine, CLI, TUI and GTK lockfiles move together.

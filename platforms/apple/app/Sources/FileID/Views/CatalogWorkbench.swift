@@ -6,6 +6,7 @@ import FileIDShared
 struct CatalogWorkbench: View {
     @Bindable var engine: EngineClient
     var store: ReadStore? = nil
+    var onSwitchTab: ((MainWindow.Tab) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var hits: [CatalogHit] = []
@@ -525,7 +526,13 @@ struct CatalogWorkbench: View {
         pendingID = ""
         pendingAction = ""
         message = response.message ?? (response.status == "ok" ? "" : "The request failed.")
-        if !message.isEmpty, action != "search" { ToastCenter.shared.show(message) }
+        if !message.isEmpty, action != "search" {
+            if action == "enqueueTimeline", response.status != "ok", message.localizedCaseInsensitiveContains("model"), let onSwitchTab {
+                ToastCenter.shared.show(message, actionLabel: "Open Deep Analyze", duration: 8) { onSwitchTab(.deep) }
+            } else {
+                ToastCenter.shared.show(message)
+            }
+        }
         guard response.status == "ok" else { return }
         switch action {
         case "search":
@@ -656,7 +663,14 @@ struct MomentTimeline: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name)
-        .accessibilityValue(value)
+        .accessibilityValue("\(value), playhead at \(Timecode.spoken(playhead))")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: onSeek(min(duration, playhead + 5))
+            case .decrement: onSeek(max(0, playhead - 5))
+            @unknown default: break
+            }
+        }
     }
 
     static func rulerStep(_ duration: Double) -> Double {

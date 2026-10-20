@@ -717,7 +717,8 @@ struct ToastView: View {
     var body: some View {
         HStack(spacing: 12) {
             Circle().fill(Theme.delight).frame(width: 7, height: 7)
-            Text(toast.text).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
+            Text(toast.text).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1)
+                .lineLimit(2).fixedSize(horizontal: false, vertical: true).frame(maxWidth: 520, alignment: .leading)
             if let label = toast.actionLabel {
                 Button(label) { toast.action?(); ToastCenter.shared.dismiss() }.buttonStyle(.dsAccentOutline)
             }
