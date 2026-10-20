@@ -17,20 +17,27 @@ internal sealed class EvidencePanel : StackPanel
     private MediaPlayer? _player;
     private CatalogHit? _hit;
     private int _revision;
-    private static readonly string[] VideoExtensions = { ".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm", ".mp3", ".m4a", ".wav", ".aac", ".flac", ".wma" };
+    private readonly Button _open;
+    private readonly Button _reveal;
+    private static readonly string[] MediaExtensions = { ".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm", ".mp3", ".m4a", ".wav", ".aac", ".flac", ".wma" };
 
     public EvidencePanel(Action<string> status)
     {
         _status = status;
         Spacing = 8;
         Children.Add(_label);
-        var open = new Button { Content = "Open file / matching moment" };
-        open.Click += async (_, _) =>
+        _open = new Button { Content = "Open", IsEnabled = false };
+        _open.Click += async (_, _) =>
         {
             try { await OpenAsync(); }
             catch (Exception) { _status("This catalog file is offline, unavailable, or cannot be opened."); }
         };
-        Children.Add(open);
+        _reveal = new Button { Content = "Show in Explorer", IsEnabled = false };
+        _reveal.Click += (_, _) => DebugLog.SafeRun("Evidence.Reveal", () =>
+        {
+            if (_hit is { } hit) SafeOpen.Reveal(hit.Path);
+        });
+        Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _open, _reveal } });
         Children.Add(_preview);
         Unloaded += (_, _) => Stop();
     }
@@ -45,7 +52,15 @@ internal sealed class EvidencePanel : StackPanel
         Stop();
         _hit = hit;
         _label.Text = hit is null ? "Select catalog evidence." : Label(hit);
+        _open.IsEnabled = hit is not null;
+        _reveal.IsEnabled = hit is not null;
+        _open.Content = hit is null || !IsMedia(hit.Path)
+            ? "Open"
+            : hit.StartSeconds is > 0 ? "Play from match" : "Play from start";
     }
+
+    private static bool IsMedia(string path) =>
+        MediaExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
     private void Stop()
     {
@@ -62,7 +77,7 @@ internal sealed class EvidencePanel : StackPanel
         if (hit is null) return;
         var revision = _revision;
         if (!File.Exists(hit.Path)) { _status("This catalog file is offline or unavailable."); return; }
-        if (VideoExtensions.Contains(Path.GetExtension(hit.Path), StringComparer.OrdinalIgnoreCase))
+        if (IsMedia(hit.Path))
         {
             double seconds = hit.StartSeconds is { } s && double.IsFinite(s) && s >= 0 ? s : 0;
             var file = await StorageFile.GetFileFromPathAsync(hit.Path);
