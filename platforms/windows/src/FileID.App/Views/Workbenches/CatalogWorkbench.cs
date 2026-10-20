@@ -28,33 +28,75 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private bool _polling;
     private long _jobsRevision;
     private string? _editingID;
+    private readonly TextBlock _resultsCount = Meta("");
     private long? _fileID;
 
     public CatalogWorkbench() : base("Search & Moments")
     {
         _evidence = new EvidencePanel(message => Status.Text = message);
-        Inputs.Children.Add(Row(_query, _mode, ActionButton("Search", SearchAsync), ActionButton("Search keyword", ct => SearchAsync("keyword", ct))));
-        Inputs.Children.Add(Text("Keyword works without a model. Hybrid and semantic search require a real installed CLIP text model and matching engine index; unavailable models or indexing are reported explicitly. Search keyword is always available as a fallback. Sparse sampled frames are unverified and can miss brief events."));
-        Inputs.Children.Add(_hits);
-        Inputs.Children.Add(Row(_timelineMode, ActionButton("Analyze selected timelines / generate chapters", EnqueueTimelineAsync), ActionButton("Refresh selected chapters", RefreshDetailAsync)));
-        Inputs.Children.Add(Text("Select video rows to enqueue their unique catalog files. Install a local visual model in Deep Analyze first; nothing is downloaded automatically. Quick samples caption one moment per ten seconds; significant moments also examine overlapping four-second frame sequences and take longer. With a speech model installed from the Models workbench (such as Qwen3-ASR), speech is transcribed on this PC in 30-second searchable passages. Model, runtime and media failures are reported in jobs, not treated as completion."));
-        Inputs.Children.Add(_evidence);
-        Inputs.Children.Add(_coverage);
-        Inputs.Children.Add(Text("Chapters · stale markers remain visible; draft suggestions from sparse samples require review."));
-        Inputs.Children.Add(_chapters);
-        Inputs.Children.Add(_title);
-        Inputs.Children.Add(_summary);
-        Inputs.Children.Add(Row(_start, _end));
-        Inputs.Children.Add(Row(ActionButton("New chapter", _ => { ResetEditor(); return Task.CompletedTask; }),
-            ActionButton("Add / save chapter", SaveAsync), ActionButton("Delete selected chapter", DeleteAsync),
-            ActionButton("Undo last chapter edit", ct => MutateAsync(CatalogRequest("undoChapterEdit", fileID: RequireFile()), ct))));
-        Inputs.Children.Add(Text("Markers are stored in the internal catalog. Original files are never changed. Generated chapter suggestions require review; job completion and sparse sampling do not establish full-video coverage."));
-        Inputs.Children.Add(Text("Durable analysis jobs · progress is the engine's worker snapshot, not event-detection coverage"));
-        Inputs.Children.Add(_jobs);
-        _pause = ActionButton("Pause selected job", ct => JobAsync("pauseJob", ct));
-        _cancel = ActionButton("Cancel selected job", ct => JobAsync("cancelJob", ct));
-        _resume = ActionButton("Resume / retry selected job", ct => JobAsync("resumeJob", ct));
-        Inputs.Children.Add(Row(ActionButton("Refresh jobs", RefreshJobsAsync), _pause, _resume, _cancel));
+
+        _query.PlaceholderText = "Search names, captions, chapters";
+        _query.MinWidth = 0;
+        _query.KeyDown += (_, e) =>
+        {
+            if (e.Key != Windows.System.VirtualKey.Enter) return;
+            e.Handled = true;
+            Run(SearchAsync);
+        };
+        _mode.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var searchTop = new StackPanel { Spacing = 10, Padding = new Thickness(14) };
+        searchTop.Children.Add(_query);
+        var searchControls = new Grid { ColumnSpacing = 6 };
+        searchControls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        searchControls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        searchControls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var search = Primary(ActionButton("Search", SearchAsync));
+        var keyword = Secondary(ActionButton("Keyword", ct => SearchAsync("keyword", ct)));
+        ToolTipService.SetToolTip(keyword, "Search keyword: always available, no model needed");
+        Grid.SetColumn(search, 1);
+        Grid.SetColumn(keyword, 2);
+        searchControls.Children.Add(_mode);
+        searchControls.Children.Add(search);
+        searchControls.Children.Add(keyword);
+        searchTop.Children.Add(searchControls);
+        searchTop.Children.Add(_resultsCount);
+        var resultsPane = new Grid();
+        resultsPane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        resultsPane.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        _hits.Height = double.NaN;
+        _hits.Padding = new Thickness(6, 8, 6, 8);
+        Grid.SetRow(_hits, 1);
+        resultsPane.Children.Add(searchTop);
+        resultsPane.Children.Add(_hits);
+        UseSidePane(resultsPane, 300, paneOnLeft: true);
+
+        Inputs.Children.Add(V3Panel("Player", null,
+            _evidence,
+            _coverage,
+            Row(_timelineMode, Primary(ActionButton("Analyze", EnqueueTimelineAsync)), Ghost(ActionButton("Refresh chapters", RefreshDetailAsync))),
+            Meta("Select video rows to enqueue their unique catalog files. Install a local visual model in Deep Analyze first; nothing is downloaded automatically. Quick samples caption one moment per ten seconds; significant moments also examine overlapping four-second frame sequences and take longer. With a speech model installed from the Models workbench (such as Qwen3-ASR), speech is transcribed on this PC in 30-second searchable passages. Model, runtime and media failures are reported in jobs, not treated as completion."),
+            Meta("Keyword works without a model. Hybrid and semantic search require a real installed CLIP text model and matching engine index; unavailable models or indexing are reported explicitly. Sparse sampled frames are unverified and can miss brief events.")));
+
+        var undo = Ghost(ActionButton("Undo last edit", ct => MutateAsync(CatalogRequest("undoChapterEdit", fileID: RequireFile()), ct)));
+        var addChapter = Secondary(ActionButton("+ Add chapter", _ => { ResetEditor(); return Task.CompletedTask; }));
+        Inputs.Children.Add(V3Panel("Chapters", Row(undo, addChapter),
+            Meta("Stale markers remain visible; draft suggestions from sparse samples require review."),
+            _chapters,
+            SectionLabel("Edit chapter"),
+            _title,
+            _summary,
+            Row(_start, _end),
+            Row(Primary(ActionButton("Save chapter", SaveAsync)), Ghost(ActionButton("Delete chapter", DeleteAsync))),
+            Meta("Chapters live in FileID's catalog. The video file is never changed. Generated chapter suggestions require review; job completion and sparse sampling do not establish full-video coverage.")));
+
+        _pause = Secondary(ActionButton("Pause", ct => JobAsync("pauseJob", ct)));
+        _cancel = Ghost(ActionButton("Cancel", ct => JobAsync("cancelJob", ct)));
+        _resume = Styled(ActionButton("Resume", ct => JobAsync("resumeJob", ct)), "ShellSecondaryButtonStyle");
+        ToolTipService.SetToolTip(_resume, "Resume or retry the selected job");
+        Inputs.Children.Add(V3Panel("Analysis queue", Ghost(ActionButton("Refresh", RefreshJobsAsync)),
+            Meta("Progress is the engine's worker snapshot, not event-detection coverage."),
+            _jobs,
+            Row(_pause, _resume, _cancel)));
         _hits.SelectionChanged += (_, e) =>
         {
             if ((e.AddedItems.LastOrDefault() ?? _hits.SelectedItems.LastOrDefault()) is not HitItem item)
@@ -107,6 +149,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             Status.Text = result.Message ?? (result.Status == "ok" ? $"{result.Hits.Count} {mode} evidence matches." : "Search failed.");
             if (result.Status != "ok" && mode != "keyword") Status.Text += " Use Search keyword as a fallback.";
             _hits.ItemsSource = result.Status == "ok" ? result.Hits.Select(hit => new HitItem(hit)).ToArray() : Array.Empty<HitItem>();
+            var count = result.Status == "ok" ? result.Hits.Count : 0;
+            _resultsCount.Text = $"{count:N0} result{(count == 1 ? "" : "s")}";
             _fileID = null;
             Interlocked.Increment(ref _detailRevision);
             _coverage.Text = "Select evidence for chapter detail. No full-video coverage metric is available in this contract.";

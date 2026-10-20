@@ -88,6 +88,9 @@
     <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}" />
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}" />
     <SolidColorBrush x:Key="GoldWashBrush" Color="#12FFCC00" />
+    <SolidColorBrush x:Key="PaneFillBrush" Color="#04FFFFFF" />
+    <SolidColorBrush x:Key="RailSelectedBrush" Color="#1FFFCC00" />
+    <SolidColorBrush x:Key="RailSelectedStrokeBrush" Color="#73FFCC00" />
     <Color x:Key="GoldHoverColor">#FFFFD84D</Color>
     <SolidColorBrush x:Key="GoldHoverBrush" Color="{StaticResource GoldHoverColor}" />
     <SolidColorBrush x:Key="TitleBarBrush" Color="#9E0B0B0C" />

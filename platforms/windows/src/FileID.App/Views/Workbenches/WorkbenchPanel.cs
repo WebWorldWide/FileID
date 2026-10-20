@@ -10,7 +10,7 @@ namespace FileID.Views.Workbenches;
 internal abstract class WorkbenchPanel : UserControl
 {
     protected EngineClient Engine { get; } = EngineClient.Instance;
-    protected StackPanel Body { get; } = new() { Spacing = 12, Margin = new Thickness(20) };
+    protected StackPanel Body { get; } = new() { Spacing = 16, Margin = new Thickness(26, 20, 26, 20) };
     protected StackPanel Inputs { get; } = new() { Spacing = 10 };
     protected TextBlock Status { get; } = Text("Ready.");
     protected CancellationToken Lifetime => _lifetime?.Token ?? new CancellationToken(true);
@@ -53,6 +53,115 @@ internal abstract class WorkbenchPanel : UserControl
 
     /// <summary>The shell page header already names the page when the panel is hosted inline.</summary>
     internal void HideTitle() => _heading.Visibility = Visibility.Collapsed;
+
+    /// <summary>Prototype v3 split: a fixed-width pane (pane fill) beside the
+    /// scrolling page body, separated by a hairline (DESIGN_V3_PORT).</summary>
+    protected void UseSidePane(UIElement pane, double width, bool paneOnLeft)
+    {
+        if (Content is ScrollViewer previous) previous.Content = null;
+        Content = null;
+        var grid = new Grid();
+        var paneHost = new Border { Background = ThemeHelper.GetBrushSafe("PaneFillBrush"), Child = pane };
+        var hairline = new Border { Background = ThemeHelper.GetBrushSafe("HairlineBrush") };
+        var scroll = new ScrollViewer { Content = Body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var columns = paneOnLeft
+            ? new[] { new GridLength(width), new GridLength(1), new GridLength(1, GridUnitType.Star) }
+            : new[] { new GridLength(1, GridUnitType.Star), new GridLength(1), new GridLength(width) };
+        foreach (var column in columns) grid.ColumnDefinitions.Add(new ColumnDefinition { Width = column });
+        Grid.SetColumn(paneHost, paneOnLeft ? 0 : 2);
+        Grid.SetColumn(hairline, 1);
+        Grid.SetColumn(scroll, paneOnLeft ? 2 : 0);
+        grid.Children.Add(scroll);
+        grid.Children.Add(hairline);
+        grid.Children.Add(paneHost);
+        Content = grid;
+    }
+
+    /// <summary>v3 panel: panel fill, radius 10, strong hairline; header row
+    /// with an uppercase section label, optional trailing controls and a
+    /// bottom hairline; content padded 14 / 12.</summary>
+    protected static Border V3Panel(string header, UIElement? trailing, params UIElement[] content)
+    {
+        var headerGrid = new Grid
+        {
+            Padding = new Thickness(14, 10, 14, 10),
+            BorderBrush = ThemeHelper.GetBrushSafe("HairlineBrush"),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            ColumnSpacing = 8,
+        };
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var label = SectionLabel(header);
+        label.VerticalAlignment = VerticalAlignment.Center;
+        headerGrid.Children.Add(label);
+        if (trailing is FrameworkElement trailingElement)
+        {
+            trailingElement.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(trailingElement, 1);
+            headerGrid.Children.Add(trailingElement);
+        }
+        var body = new StackPanel { Spacing = 8, Padding = new Thickness(14, 12, 14, 12) };
+        foreach (var element in content) body.Children.Add(element);
+        var stack = new StackPanel();
+        stack.Children.Add(headerGrid);
+        stack.Children.Add(body);
+        return new Border
+        {
+            Background = ThemeHelper.GetBrushSafe("PanelBrush"),
+            BorderBrush = ThemeHelper.GetBrushSafe("HairlineStrongBrush"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Child = stack,
+        };
+    }
+
+    protected static TextBlock SectionLabel(string text)
+    {
+        var label = new TextBlock { Text = text.ToUpperInvariant() };
+        if (ThemeHelper.GetStyleSafe("ShellSectionLabelStyle") is { } style) label.Style = style;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(label, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
+        return label;
+    }
+
+    protected static TextBlock Meta(string text)
+    {
+        var meta = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true };
+        if (ThemeHelper.GetStyleSafe("ShellMetaTextStyle") is { } style) meta.Style = style;
+        meta.TextWrapping = TextWrapping.Wrap;
+        return meta;
+    }
+
+    protected static Border Chip(string text)
+    {
+        var label = new TextBlock
+        {
+            Text = text,
+            FontSize = 11.5,
+            FontWeight = Microsoft.UI.Text.FontWeights.Medium,
+            Foreground = ThemeHelper.GetBrushSafe("Text2Brush"),
+        };
+        try { if (Application.Current.Resources["BodyFontFamily"] is FontFamily family) label.FontFamily = family; }
+        catch (Exception) { }
+        return new Border
+        {
+            Padding = new Thickness(7, 2, 7, 2),
+            CornerRadius = new CornerRadius(4),
+            Background = ThemeHelper.GetBrushSafe("WhiteSubtleFillBrush"),
+            Child = label,
+        };
+    }
+
+    protected static T Styled<T>(T button, string style) where T : Button
+    {
+        if (ThemeHelper.GetStyleSafe(style) is { } resolved) button.Style = resolved;
+        return button;
+    }
+
+    protected static T Primary<T>(T button) where T : Button => Styled(button, "ShellPrimaryButtonStyle");
+
+    protected static T Secondary<T>(T button) where T : Button => Styled(button, "ShellSecondaryButtonStyle");
+
+    protected static T Ghost<T>(T button) where T : Button => Styled(button, "ShellGhostButtonStyle");
 
     protected virtual void OnOpened() { }
     protected virtual void OnClosed() { }

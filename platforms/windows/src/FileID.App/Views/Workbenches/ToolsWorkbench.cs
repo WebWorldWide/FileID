@@ -2,6 +2,7 @@
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace FileID.Views.Workbenches;
@@ -33,21 +34,41 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     {
         _hwnd = hwnd;
         _execution = Engine.ToolExecution;
-        Inputs.Children.Add(Row(_query, ActionButton("Find files", SearchAsync)));
-        Inputs.Children.Add(Text("Select up to 100 catalog files. Preview first; exports create new versions and preserve originals."));
-        Inputs.Children.Add(_files);
-        Inputs.Children.Add(Row(_kind, _format, _dimension));
-        Inputs.Children.Add(_destination);
-        Inputs.Children.Add(ActionButton("Choose existing output folder", ChooseDestinationAsync));
-        Inputs.Children.Add(_detail);
-        _preview = ActionButton("Preview export", PreviewAsync);
-        _execute = ActionButton("Export new versions…", ExecuteAsync);
-        _undo = ActionButton("Undo last export…", UndoAsync);
-        Inputs.Children.Add(Row(ActionButton("Refresh capabilities", CapabilitiesAsync), ActionButton("Last export", ct => SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "history"), ct)), _preview, _execute, _undo));
-        Inputs.Children.Add(Text(ToolUndoIntegration.Detail));
-        Inputs.Children.Add(_outputs);
-        Inputs.Children.Add(_executionStatus);
-        Inputs.Children.Add(Text("Only recipes reported as available by the engine can run. Photo exports may strip metadata and normalize to SDR; review the capability details. Chapter VTT is markers, not speech subtitles. Video conversion does not imply stabilization, AI upscaling or tracked reframing. Cancel requests target the current export; wait for its final response. A timeout does not mean an export stopped: check Last export before retrying."));
+        _query.MinWidth = 280;
+        _files.Height = 260;
+        Inputs.Children.Add(V3Panel("01 · Recipe", _kind,
+            Row(_query, Secondary(ActionButton("Find", SearchAsync))),
+            _files,
+            Meta("Select up to 100 catalog files. Preview first; exports create new versions and preserve originals.")));
+
+        var output = new Grid { ColumnSpacing = 12, RowSpacing = 10 };
+        output.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
+        output.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        AddOutputRow(output, 0, "Format", _format);
+        _dimension.Header = null;
+        _dimension.Width = 120;
+        AddOutputRow(output, 1, "Longest side", Row(_dimension, Meta("px, up to 8192")));
+        var chooseFolder = Secondary(ActionButton("Choose…", ChooseDestinationAsync));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chooseFolder, "Choose output folder");
+        AddOutputRow(output, 2, "Save to", Row(_destination, chooseFolder));
+        Inputs.Children.Add(V3Panel("02 · Output", null, output, _detail));
+
+        _preview = Secondary(ActionButton("Preview", PreviewAsync));
+        _execute = Primary(ActionButton("Export…", ExecuteAsync));
+        _undo = Secondary(ActionButton("Undo last export…", UndoAsync));
+        ToolTipService.SetToolTip(_execute, "Export new versions; originals are preserved");
+        var previewPane = new StackPanel { Spacing = 10, Padding = new Thickness(14, 12, 14, 14) };
+        previewPane.Children.Add(SectionLabel("03 · Preview"));
+        _outputs.Height = 300;
+        previewPane.Children.Add(_outputs);
+        previewPane.Children.Add(_executionStatus);
+        previewPane.Children.Add(Row(_preview, _execute, _undo));
+        previewPane.Children.Add(Row(
+            Ghost(ActionButton("Show last export", ct => SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "history"), ct))),
+            Ghost(ActionButton("Refresh tools", CapabilitiesAsync))));
+        previewPane.Children.Add(Meta(ToolUndoIntegration.Detail));
+        previewPane.Children.Add(Meta("Only recipes reported as available by the engine can run. Photo exports may strip metadata and normalize to SDR; review the capability details. Chapter VTT is markers, not speech subtitles. Video conversion does not imply stabilization, AI upscaling or tracked reframing. Cancel requests target the current export; wait for its final response. A timeout does not mean an export stopped: check Last export before retrying."));
+        UseSidePane(new ScrollViewer { Content = previewPane, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, 380, paneOnLeft: false);
         _cancel = ControlButton("Cancel current export", CancelAsync);
         _files.SelectionChanged += (_, _) => Invalidate();
         _kind.SelectionChanged += (_, _) =>
@@ -61,6 +82,21 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         _dimension.ValueChanged += (_, _) => Invalidate();
         UpdateControls();
     }
+    private static void AddOutputRow(Grid grid, int row, string label, FrameworkElement value)
+    {
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var key = Meta(label);
+        key.FontSize = 12.5;
+        key.FontWeight = Microsoft.UI.Text.FontWeights.Medium;
+        key.Foreground = ThemeHelper.GetBrushSafe("Text2Brush");
+        key.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetRow(key, row);
+        Grid.SetRow(value, row);
+        Grid.SetColumn(value, 1);
+        grid.Children.Add(key);
+        grid.Children.Add(value);
+    }
+
     private ToolCapability? Capability => (_kind.SelectedItem as CapabilityItem)?.Capability;
     protected override void OnOpened()
     {

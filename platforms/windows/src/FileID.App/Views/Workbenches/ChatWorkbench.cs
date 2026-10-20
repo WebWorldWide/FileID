@@ -3,6 +3,7 @@ using System.IO;
 using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace FileID.Views.Workbenches;
@@ -19,18 +20,57 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     private readonly Button _stop;
     private CancellationTokenSource? _sendObservation;
     private string? _conversationID;
+    private readonly TextBlock _sourcesCount = Meta("");
 
     public ChatWorkbench() : base("FileID Chat")
     {
         _evidence = new EvidencePanel(message => Status.Text = message);
-        Inputs.Children.Add(Text("Local keyword retrieval only. Model summaries and stopping a running request are unavailable on this adapter. Answers are suggestions; sparse analysis can miss events. Wait for the current request's own completion before sending or deleting."));
-        Inputs.Children.Add(Row(ActionButton("Refresh conversation history", HistoryAsync), ActionButton("Delete conversation…", ClearAsync)));
+        var lookingIn = new StackPanel { Spacing = 6 };
+        lookingIn.Children.Add(SectionLabel("Looking in"));
+        var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        foreach (var source in new[] { "Names", "Tags", "Captions", "Chapters", "Text in files" }) chips.Children.Add(Chip(source));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chips, "Looking in names, tags, captions, chapters and text in files");
+        lookingIn.Children.Add(chips);
+        var header = new Grid { ColumnSpacing = 8 };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var clear = Ghost(ActionButton("Clear", ClearAsync));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(clear, "Delete conversation");
+        Grid.SetColumn(clear, 1);
+        header.Children.Add(lookingIn);
+        header.Children.Add(clear);
+        Inputs.Children.Add(header);
+        _messages.Height = 420;
+        _messages.MaxWidth = 760;
+        _messages.HorizontalAlignment = HorizontalAlignment.Left;
         Inputs.Children.Add(_messages);
-        Inputs.Children.Add(Row(_input, ActionButton("Send", SendAsync)));
-        Inputs.Children.Add(_useModel);
-        Inputs.Children.Add(Text("Citations · sampled frames are unverified, not identified events"));
-        Inputs.Children.Add(_citations);
-        Inputs.Children.Add(_evidence);
+        _input.AcceptsReturn = false;
+        _input.MinHeight = 30;
+        Inputs.Children.Add(Row(_input, Primary(ActionButton("Send", SendAsync))));
+        Inputs.Children.Add(Row(_useModel, Ghost(ActionButton("Refresh history", HistoryAsync))));
+        Inputs.Children.Add(Meta("Local keyword retrieval only. Model summaries and stopping a running request are unavailable on this adapter. Answers are suggestions; sparse analysis can miss events. Wait for the current request's own completion before sending or deleting."));
+
+        var sources = new Grid { Padding = new Thickness(0) };
+        sources.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        sources.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        sources.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var sourcesHeader = new Grid { Padding = new Thickness(14, 12, 14, 12), ColumnSpacing = 8 };
+        sourcesHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        sourcesHeader.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        sourcesHeader.Children.Add(SectionLabel("Sources"));
+        Grid.SetColumn(_sourcesCount, 1);
+        sourcesHeader.Children.Add(_sourcesCount);
+        _citations.Height = double.NaN;
+        _citations.Padding = new Thickness(6, 0, 6, 0);
+        Grid.SetRow(_citations, 1);
+        var evidenceHost = new StackPanel { Spacing = 6, Padding = new Thickness(14, 10, 14, 14) };
+        evidenceHost.Children.Add(Meta("Sampled frames are unverified, not identified events."));
+        evidenceHost.Children.Add(_evidence);
+        Grid.SetRow(evidenceHost, 2);
+        sources.Children.Add(sourcesHeader);
+        sources.Children.Add(_citations);
+        sources.Children.Add(evidenceHost);
+        UseSidePane(sources, 300, paneOnLeft: false);
         _stop = ControlButton("Stop response", StopAsync);
         _citations.SelectionChanged += (_, _) => _evidence.Select((_citations.SelectedItem as CitationItem)?.Hit);
     }
@@ -215,6 +255,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         if (ChatFrontendPolicy.ShouldReplaceCitations(action, response))
         {
             _citations.ItemsSource = response.Hits.Select((hit, index) => new CitationItem(index + 1, hit)).ToArray();
+            _sourcesCount.Text = response.Hits.Count > 0 ? response.Hits.Count.ToString("N0") : string.Empty;
             _evidence.Select(null);
         }
     }
