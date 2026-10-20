@@ -1,0 +1,200 @@
+[
+  {
+    "name": "people-merge-unnamed-destination-inherits-source-name",
+    "description": "Merging a named source into an unknown, unnamed destination moves every face, transfers the complete identity, clears Unknown, recounts files and picks the best embedded face as representative.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg'),(3,'{root}/3.jpg',3,1,0,'image','jpg')",
+      "INSERT INTO persons(id,created_at,is_unknown,representative_face_id,file_count) VALUES(1,123,1,1,1)",
+      "INSERT INTO persons(id,first_name,last_name,created_at,representative_face_id,file_count) VALUES(2,'Alex','Rivera',123,2,2)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.4),(2,2,2,X'00','[0,0,1,1]',X'0000803f',0.9),(3,3,2,X'00','[0,0,1,1]',NULL,1.0)"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"action": "mergeClusters", "succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,title,first_name,middle_name,last_name,suffix,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+       "expect": [[1, null, null, "Alex", null, "Rivera", null, 0, 2, 3]]},
+      {"label": "faces", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 1], [3, 1]]}
+    ]
+  },
+  {
+    "name": "people-merge-named-destination-keeps-name",
+    "description": "Two named people merge into the destination's identity; the source name is discarded.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,'Grandma','Grandma',123,1)",
+      "INSERT INTO persons(id,first_name,created_at,file_count) VALUES(2,'Alex',123,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+       "expect": [[1, "Grandma", "Grandma", 0, 1, 2]]}
+    ]
+  },
+  {
+    "name": "people-merge-blank-name-counts-as-unnamed",
+    "description": "A destination whose name fields are only empty strings is unnamed and inherits the source identity.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,' ','',123,1)",
+      "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(2,'Alex','Alex',123,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+       "expect": [[1, "Alex", "Alex", 0, 1, 2]]}
+    ]
+  },
+  {
+    "name": "people-merge-rolls-back-on-sql-failure",
+    "description": "A failure while deleting the source leaves people and faces exactly as they were.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,created_at,is_unknown,file_count) VALUES(1,123,1,1)",
+      "INSERT INTO persons(id,first_name,created_at,file_count) VALUES(2,'Alex',123,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')",
+      "CREATE TRIGGER fixture_fail BEFORE DELETE ON persons WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'fixture failure'); END"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+       "expect": [[1, null, null, 1, null, 1], [2, null, "Alex", 0, null, 1]]},
+      {"label": "faces", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 2]]},
+      {"label": "no verdicts", "db": "SELECT COUNT(*) FROM face_verifications", "expect": [[0]]}
+    ]
+  },
+  {
+    "name": "people-merge-missing-person-is-refused",
+    "description": "A merge naming a person that no longer exists fails without touching the catalog, in either direction.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,created_at,is_unknown,file_count) VALUES(1,123,1,1)",
+      "INSERT INTO persons(id,first_name,created_at,file_count) VALUES(2,'Alex',123,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "missing destination", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 99}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "missing source", "command": {"mergeClusters": {"sourcePersonID": 99, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "persons", "db": "SELECT id,first_name,is_unknown,file_count FROM persons ORDER BY id",
+       "expect": [[1, null, 1, 1], [2, "Alex", 0, 1]]},
+      {"label": "faces", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 2]]}
+    ]
+  },
+  {
+    "name": "people-merge-self-is-a-no-op",
+    "description": "Merging a person into itself succeeds and changes nothing.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg')",
+      "INSERT INTO persons(id,first_name,created_at,representative_face_id,file_count) VALUES(1,'Alex',123,1,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 1, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,first_name,representative_face_id,file_count FROM persons", "expect": [[1, "Alex", 1, 1]]},
+      {"label": "faces", "db": "SELECT id,person_id FROM face_prints", "expect": [[1, 1]]}
+    ]
+  },
+  {
+    "name": "people-merge-faceless-named-source",
+    "description": "A named person with no faces (all reassigned away) can still be merged into an unnamed cluster, carrying its name.",
+    "knownDivergences": [
+      {"engine": "rust", "reason": "mergeClusters requires a face anchor on both people (persist_manual_merge_constraint) and refuses a faceless source"}
+    ],
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg')",
+      "INSERT INTO persons(id,created_at,is_unknown,representative_face_id,file_count) VALUES(1,123,1,1,1)",
+      "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(2,'Alex','Alex',123,0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+       "expect": [[1, "Alex", "Alex", 0, 1, 1]]}
+    ]
+  },
+  {
+    "name": "people-merge-records-user-constraint",
+    "description": "An explicit merge persists a user-merged verdict between the two people's anchor faces so a later recluster keeps them together.",
+    "knownDivergences": [
+      {"engine": "swift", "reason": "Database.mergePersons writes no face_verifications 'user-merged' row, so reclustering can split a user merge"}
+    ],
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
+      "INSERT INTO persons(id,created_at,is_unknown,representative_face_id,file_count) VALUES(1,123,1,1,1)",
+      "INSERT INTO persons(id,first_name,created_at,representative_face_id,file_count) VALUES(2,'Alex',123,2,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "verdict", "db": "SELECT person_a,person_b,same_person,vlm_model,face_a,face_b FROM face_verifications",
+       "expect": [[1, 2, 1, "user-merged", 1, 2]]}
+    ]
+  },
+  {
+    "name": "people-rename-sets-display-name",
+    "description": "renamePerson trims each part, stores NULL for blank parts, joins the display name and clears Unknown; renaming to all blanks clears the name.",
+    "sql": [
+      "INSERT INTO persons(id,name,middle_name,created_at,is_unknown) VALUES(1,'Old','Q',123,1)"
+    ],
+    "steps": [
+      {"label": "rename", "command": {"renamePerson": {"personID": 1, "title": "Dr.", "firstName": " Jane ", "middleName": "", "lastName": "Doe", "suffix": null}},
+       "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 1, "failed": 0}},
+      {"label": "named", "db": "SELECT name,title,first_name,middle_name,last_name,suffix,is_unknown FROM persons",
+       "expect": [["Dr. Jane Doe", "Dr.", "Jane", null, "Doe", null, 0]]},
+      {"label": "blank rename", "command": {"renamePerson": {"personID": 1, "firstName": "  "}},
+       "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "cleared", "db": "SELECT name,title,first_name,middle_name,last_name,suffix,is_unknown FROM persons",
+       "expect": [[null, null, null, null, null, null, 0]]}
+    ]
+  },
+  {
+    "name": "people-rename-missing-person-fails",
+    "description": "Renaming a person that no longer exists reports a failure instead of a silent success.",
+    "knownDivergences": [
+      {"engine": "swift", "reason": "renamePerson reports succeeded=1 when the UPDATE matched no row"}
+    ],
+    "steps": [
+      {"label": "rename", "command": {"renamePerson": {"personID": 42, "firstName": "Ghost"}},
+       "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 0, "failed": 1}}
+    ]
+  },
+  {
+    "name": "people-mark-unknown-clears-every-name-field",
+    "description": "markPersonsAsUnknown clears the display name and all five structured parts and sets Unknown, leaving faces and the representative alone.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg')",
+      "INSERT INTO persons(id,name,title,first_name,middle_name,last_name,suffix,created_at,is_unknown,representative_face_id,file_count) VALUES(1,'Dr. Jane Q Doe Jr.','Dr.','Jane','Q','Doe','Jr.',123,0,1,1),(2,'Sam',NULL,'Sam',NULL,NULL,NULL,123,0,NULL,0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "mark", "command": {"markPersonsAsUnknown": {"personIDs": [1]}}, "await": "bulkActionResult",
+       "expect": {"action": "markPersonsAsUnknown", "succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,title,first_name,middle_name,last_name,suffix,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
+       "expect": [[1, null, null, null, null, null, null, 1, 1, 1], [2, "Sam", null, "Sam", null, null, null, 0, null, 0]]},
+      {"label": "faces", "db": "SELECT id,person_id FROM face_prints", "expect": [[1, 1]]}
+    ]
+  },
+  {
+    "name": "people-mark-unknown-missing-person-fails",
+    "description": "Marking a missing person Unknown reports that item as failed while the existing one succeeds.",
+    "knownDivergences": [
+      {"engine": "swift", "reason": "markPersonsAsUnknown reports ok for an id whose UPDATE matched no row"}
+    ],
+    "sql": [
+      "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Sam',123)"
+    ],
+    "steps": [
+      {"label": "mark", "command": {"markPersonsAsUnknown": {"personIDs": [1, 42]}}, "await": "bulkActionResult",
+       "expect": {"succeeded": 1, "failed": 1, "messages": {"$tol": "set", "value": [{"fileID": 1, "ok": true}, {"fileID": 42, "ok": false}]}}}
+    ]
+  }
+]
