@@ -11,7 +11,9 @@ use gtk::glib;
 
 use super::workbench_state::*;
 use super::workbenches::{Engine, LINUX_TOOL_UNDO_SAFETY_ACCEPTED, TOOL_UNDO_UNAVAILABLE_REASON};
-use crate::engine_client::{texture_from_decoded, EngineState, FileRow, QueryChannel, QuerySpec, ThumbReply};
+use crate::engine_client::{
+    texture_from_decoded, EngineState, FileRow, QueryChannel, QuerySpec, ThumbReply,
+};
 use crate::shell::status::Tone;
 use crate::spring::{animate_with, Spring};
 use crate::v3;
@@ -52,7 +54,11 @@ impl RecipeChoice {
             format: format.into(),
             max_dimension,
             allow_upscale: (kind == "photo" && self.enlarge).then_some(true),
-            video_aspect_ratio: if kind == "video" { FRAMES[self.frame.min(4)].1.map(str::to_owned) } else { None },
+            video_aspect_ratio: if kind == "video" {
+                FRAMES[self.frame.min(4)].1.map(str::to_owned)
+            } else {
+                None
+            },
             video_framing: None,
             video_stabilization: None,
         }
@@ -62,7 +68,11 @@ impl RecipeChoice {
         let recipe = self.recipe();
         let files = format!("{files} file{}", if files == 1 { "" } else { "s" });
         match recipe.kind.as_str() {
-            "photo" => format!("{files} · {} · ≤ {} px", recipe.format.to_uppercase(), recipe.max_dimension),
+            "photo" => format!(
+                "{files} · {} · ≤ {} px",
+                recipe.format.to_uppercase(),
+                recipe.max_dimension
+            ),
             "video" => format!(
                 "{files} · MP4 · H.264 · {} · {}",
                 RESOLUTIONS[self.resolution.min(1)].0,
@@ -74,7 +84,9 @@ impl RecipeChoice {
 
     pub fn frame_ratio(&self, photo_aspect: Option<f64>) -> f64 {
         match KINDS[self.kind.min(2)] {
-            "photo" => photo_aspect.filter(|a| a.is_finite() && *a > 0.0).unwrap_or(4.0 / 3.0),
+            "photo" => photo_aspect
+                .filter(|a| a.is_finite() && *a > 0.0)
+                .unwrap_or(4.0 / 3.0),
             "video" => FRAMES[self.frame.min(4)].2,
             _ => 16.0 / 9.0,
         }
@@ -138,9 +150,12 @@ impl ToolsUi {
         let recipe = self.recipe();
         let busy = s.requests.busy("operation");
         let ready = self.destination.borrow().is_some() && !self.selected.borrow().is_empty();
-        self.execute.set_sensitive(s.can_execute() && s.supports(&recipe));
-        self.undo.set_sensitive(LINUX_TOOL_UNDO_SAFETY_ACCEPTED && s.history.is_some() && !busy);
-        self.preview.set_sensitive(s.supports(&recipe) && !busy && ready);
+        self.execute
+            .set_sensitive(s.can_execute() && s.supports(&recipe));
+        self.undo
+            .set_sensitive(LINUX_TOOL_UNDO_SAFETY_ACCEPTED && s.history.is_some() && !busy);
+        self.preview
+            .set_sensitive(s.supports(&recipe) && !busy && ready);
         let exporting = busy && self.running.borrow().is_some();
         self.undo.set_visible(!exporting);
         self.cancel.set_visible(exporting && recipe.kind == "video");
@@ -149,11 +164,22 @@ impl ToolsUi {
             .capabilities
             .iter()
             .find(|c| c.id == recipe.kind)
-            .map(|c| if c.available { c.detail.clone() } else { format!("Unavailable here. {}", c.detail) })
+            .map(|c| {
+                if c.available {
+                    c.detail.clone()
+                } else {
+                    format!("Unavailable here. {}", c.detail)
+                }
+            })
             .unwrap_or_else(|| "Checking what this computer can export…".into());
         self.capability.set_text(&detail);
-        self.summary.set_text(&self.choice.borrow().summary(self.selected.borrow().len()));
-        self.files_count.set_text(&format!("{} of {} selected", self.selected.borrow().len(), self.rows.borrow().len()));
+        self.summary
+            .set_text(&self.choice.borrow().summary(self.selected.borrow().len()));
+        self.files_count.set_text(&format!(
+            "{} of {} selected",
+            self.selected.borrow().len(),
+            self.rows.borrow().len()
+        ));
     }
 
     fn changed(&self) {
@@ -166,11 +192,14 @@ impl ToolsUi {
             self.status.set_label(TOOL_UNDO_UNAVAILABLE_REASON);
             return;
         }
-        if !matches!(action, "capabilities" | "cancel") && self.state.borrow().requests.busy("operation") {
+        if !matches!(action, "capabilities" | "cancel")
+            && self.state.borrow().requests.busy("operation")
+        {
             return;
         }
         if action == "preview" && !self.state.borrow().supports(&self.recipe()) {
-            self.status.set_label("This recipe or format isn't available on this computer.");
+            self.status
+                .set_label("This recipe or format isn't available on this computer.");
             return;
         }
         let mut r = ToolRequest {
@@ -213,7 +242,12 @@ impl ToolsUi {
             };
             state.requests.begin(slot, &r.request_id);
         }
-        let sent = self.engine.borrow_mut().send(CommandPayload::ToolRequest(ToolRequestPayload { request: r }));
+        let sent = self
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::ToolRequest(ToolRequestPayload {
+                request: r,
+            }));
         if let Err(e) = sent {
             self.state.borrow_mut().requests.clear();
             self.running.replace(None);
@@ -269,7 +303,9 @@ impl ToolsUi {
             let Some(ui) = weak.upgrade() else { return };
             match result {
                 Ok(Ok((files, _))) => ui.render_files(files),
-                Ok(Err(error)) => ui.status.set_label(&format!("Library unavailable: {error}")),
+                Ok(Err(error)) => ui
+                    .status
+                    .set_label(&format!("Library unavailable: {error}")),
                 Err(_) => {}
             }
         });
@@ -285,7 +321,10 @@ impl ToolsUi {
         }
         let selected = self.selected.borrow().clone();
         for file in files {
-            let check = gtk::CheckButton::builder().active(selected.contains(&file.id)).valign(gtk::Align::Center).build();
+            let check = gtk::CheckButton::builder()
+                .active(selected.contains(&file.id))
+                .valign(gtk::Align::Center)
+                .build();
             check.update_property(&[gtk::accessible::Property::Label(&file.name)]);
             let row = v3::hbox(10);
             row.add_css_class("v3-row-pad");
@@ -332,7 +371,12 @@ impl ToolsUi {
     }
 
     fn select_all(&self, on: bool) {
-        let checks: Vec<gtk::CheckButton> = self.rows.borrow().iter().map(|(_, check)| check.clone()).collect();
+        let checks: Vec<gtk::CheckButton> = self
+            .rows
+            .borrow()
+            .iter()
+            .map(|(_, check)| check.clone())
+            .collect();
         for check in checks.iter().take(if on { MAX_FILES } else { usize::MAX }) {
             check.set_active(on);
         }
@@ -340,20 +384,33 @@ impl ToolsUi {
 
     fn load_preview_picture(self: &Rc<Self>) {
         let first = self.selected.borrow().first().copied();
-        let row = first.and_then(|id| self.rows.borrow().iter().find(|(file, _)| file.id == id).map(|(file, _)| file.clone()));
+        let row = first.and_then(|id| {
+            self.rows
+                .borrow()
+                .iter()
+                .find(|(file, _)| file.id == id)
+                .map(|(file, _)| file.clone())
+        });
         let Some(row) = row else {
             self.picture.set_paintable(None::<&gtk::gdk::Texture>);
             return;
         };
-        let rx = self.engine.borrow().request_preview(row.path.clone(), 900, row.kind == "video");
+        let rx = self
+            .engine
+            .borrow()
+            .request_preview(row.path.clone(), 900, row.kind == "video");
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let Ok(ThumbReply::Image(decoded)) = rx.recv().await else { return };
+            let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
+                return;
+            };
             let Some(ui) = weak.upgrade() else { return };
             if decoded.height > 0 && row.kind == "image" {
-                ui.photo_aspect.set(Some(f64::from(decoded.width) / f64::from(decoded.height)));
+                ui.photo_aspect
+                    .set(Some(f64::from(decoded.width) / f64::from(decoded.height)));
             }
-            ui.picture.set_paintable(Some(&texture_from_decoded(decoded)));
+            ui.picture
+                .set_paintable(Some(&texture_from_decoded(decoded)));
             ui.animate_frame();
         });
     }
@@ -460,7 +517,11 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     output_body.add_css_class("v3-panel-pad");
     let photo_format = v3::Segmented::new(&PHOTO_FORMATS.map(|(label, _)| label), 0);
     let chapter_format = v3::Segmented::new(&CHAPTER_FORMATS.map(|(label, _)| label), 0);
-    let format_stack = gtk::Stack::builder().hhomogeneous(false).vhomogeneous(false).halign(gtk::Align::Start).build();
+    let format_stack = gtk::Stack::builder()
+        .hhomogeneous(false)
+        .vhomogeneous(false)
+        .halign(gtk::Align::Start)
+        .build();
     format_stack.add_named(&photo_format.root, Some("photo"));
     format_stack.add_named(&v3::label("MP4 · H.264", &["v3-body"]), Some("video"));
     format_stack.add_named(&chapter_format.root, Some("chapters"));
@@ -484,7 +545,11 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let mut frames = Vec::new();
     for (index, (name, _, ratio)) in FRAMES.iter().enumerate() {
         let tile = v3::vbox(6);
-        let (w, h) = if *ratio >= 1.0 { (30.0 * ratio.min(1.9), 30.0) } else { (30.0 * ratio, 30.0) };
+        let (w, h) = if *ratio >= 1.0 {
+            (30.0 * ratio.min(1.9), 30.0)
+        } else {
+            (30.0 * ratio, 30.0)
+        };
         let shape = gtk::Box::builder()
             .width_request(w as i32)
             .height_request(h as i32)
@@ -493,7 +558,10 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
             .build();
         tile.append(&shape);
         tile.append(&v3::label(name, &[]));
-        let button = gtk::Button::builder().child(&tile).css_classes(["v3-aspect"]).build();
+        let button = gtk::Button::builder()
+            .child(&tile)
+            .css_classes(["v3-aspect"])
+            .build();
         button.update_property(&[gtk::accessible::Property::Label(&format!("Frame {name}"))]);
         v3::set_selected(&button, index == 0);
         frames_box.append(&button);
@@ -545,7 +613,9 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     pane.append(&preview_head);
     let preview_body = v3::vbox(10);
     preview_body.add_css_class("v3-panel-pad");
-    let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).build();
+    let picture = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Contain)
+        .build();
     let frame = gtk::AspectFrame::builder()
         .ratio(4.0 / 3.0)
         .obey_child(false)
@@ -589,7 +659,10 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let history_row = v3::hbox(8);
     let last = v3::ghost("Show last export");
     history_row.append(&last);
-    history_row.append(&v3::wrapped("Exports never change the originals.", &["v3-meta"]));
+    history_row.append(&v3::wrapped(
+        "Exports never change the originals.",
+        &["v3-meta"],
+    ));
     actions.append(&history_row);
     pane.append(&actions);
 
@@ -606,7 +679,14 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         execute,
         undo,
         preview,
-        choice: RefCell::new(RecipeChoice { kind: 0, format: 0, longest_side: 2048, resolution: 1, frame: 0, enlarge: false }),
+        choice: RefCell::new(RecipeChoice {
+            kind: 0,
+            format: 0,
+            longest_side: 2048,
+            resolution: 1,
+            frame: 0,
+            enlarge: false,
+        }),
         kind,
         photo_format,
         chapter_format,
@@ -655,7 +735,11 @@ fn wire(
             ui.set_kind(kind);
         }
     });
-    for (segmented, field) in [(&ui.photo_format, 0), (&ui.chapter_format, 1), (&ui.resolution, 2)] {
+    for (segmented, field) in [
+        (&ui.photo_format, 0),
+        (&ui.chapter_format, 1),
+        (&ui.resolution, 2),
+    ] {
         let weak = Rc::downgrade(ui);
         segmented.connect_changed(move |index| {
             let Some(ui) = weak.upgrade() else { return };
@@ -717,11 +801,16 @@ fn wire(
     }
     let weak = Rc::downgrade(ui);
     choose.connect_clicked(move |button| {
-        let dialog = gtk::FileDialog::builder().title("Choose output folder").build();
+        let dialog = gtk::FileDialog::builder()
+            .title("Choose output folder")
+            .build();
         let window = button.root().and_downcast::<gtk::Window>();
         let weak = weak.clone();
         dialog.select_folder(window.as_ref(), gio::Cancellable::NONE, move |result| {
-            let (Some(ui), Some(path)) = (weak.upgrade(), result.ok().and_then(|file| file.path())) else { return };
+            let (Some(ui), Some(path)) = (weak.upgrade(), result.ok().and_then(|file| file.path()))
+            else {
+                return;
+            };
             let path = path.to_string_lossy().into_owned();
             ui.destination_label.set_text(&path);
             ui.destination_label.set_tooltip_text(Some(&path));
@@ -767,8 +856,12 @@ fn wire(
     let keys = gtk::EventControllerKey::new();
     let weak = Rc::downgrade(ui);
     keys.connect_key_pressed(move |_, key, _, _| {
-        let Some(ui) = weak.upgrade() else { return glib::Propagation::Proceed };
-        if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter) && ui.execute.is_sensitive() {
+        let Some(ui) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
+        if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
+            && ui.execute.is_sensitive()
+        {
             ui.execute.emit_clicked();
             return glib::Propagation::Stop;
         }
@@ -803,7 +896,9 @@ fn wire(
                     u.state.borrow_mut().requests.clear();
                     u.state.borrow_mut().preview = None;
                     u.running.replace(None);
-                    u.status.set_label("Engine exited. Show the last export before retrying an interrupted one.");
+                    u.status.set_label(
+                        "Engine exited. Show the last export before retrying an interrupted one.",
+                    );
                     u.update();
                 }
                 _ => {}
@@ -815,7 +910,9 @@ fn wire(
 fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
     let action = {
         let mut state = u.state.borrow_mut();
-        let Some(slot) = state.requests.accept(&r.request_id, true) else { return };
+        let Some(slot) = state.requests.accept(&r.request_id, true) else {
+            return;
+        };
         if slot == "operation" {
             state.operation_action.take().unwrap_or_default()
         } else {
@@ -841,15 +938,23 @@ fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
             s.invalidate();
         }
         if matches!(action, "execute" | "history") && (r.status == "ok" || !r.outputs.is_empty()) {
-            s.history = if r.outputs.iter().any(|o| o.state == "completed") { r.operation_id.clone() } else { None };
+            s.history = if r.outputs.iter().any(|o| o.state == "completed") {
+                r.operation_id.clone()
+            } else {
+                None
+            };
         }
         if action == "undo" && r.status == "ok" {
             s.history = None;
         }
     }
-    let replace_receipts = !matches!(action, "capabilities" | "cancel") && (r.status == "ok" || !r.outputs.is_empty());
+    let replace_receipts =
+        !matches!(action, "capabilities" | "cancel") && (r.status == "ok" || !r.outputs.is_empty());
     if replace_receipts {
-        let title = format!("{action} operation {}", r.operation_id.as_deref().unwrap_or("none"));
+        let title = format!(
+            "{action} operation {}",
+            r.operation_id.as_deref().unwrap_or("none")
+        );
         u.render_outputs(&title, &r.outputs);
     }
     u.update();
@@ -860,33 +965,69 @@ mod tests {
     use super::*;
 
     fn choice(kind: usize) -> RecipeChoice {
-        RecipeChoice { kind, format: 0, longest_side: 4096, resolution: 1, frame: 0, enlarge: true }
+        RecipeChoice {
+            kind,
+            format: 0,
+            longest_side: 4096,
+            resolution: 1,
+            frame: 0,
+            enlarge: true,
+        }
     }
 
     #[test]
     fn recipes_only_carry_what_the_engine_accepts() {
         let photo = choice(0).recipe();
-        assert_eq!((photo.kind.as_str(), photo.format.as_str(), photo.max_dimension), ("photo", "png", 4096));
+        assert_eq!(
+            (
+                photo.kind.as_str(),
+                photo.format.as_str(),
+                photo.max_dimension
+            ),
+            ("photo", "png", 4096)
+        );
         assert_eq!(photo.allow_upscale, Some(true));
         assert_eq!(photo.video_aspect_ratio, None);
-        let video = RecipeChoice { frame: 2, resolution: 0, ..choice(1) }.recipe();
+        let video = RecipeChoice {
+            frame: 2,
+            resolution: 0,
+            ..choice(1)
+        }
+        .recipe();
         assert_eq!((video.format.as_str(), video.max_dimension), ("mp4", 1280));
         assert_eq!(video.video_aspect_ratio.as_deref(), Some("9:16"));
         assert_eq!(video.allow_upscale, None);
         assert!(video.video_framing.is_none() && video.video_stabilization.is_none());
         assert_eq!(choice(1).recipe().video_aspect_ratio, None);
         let chapters = choice(2).recipe();
-        assert_eq!((chapters.kind.as_str(), chapters.format.as_str()), ("chapters", "vtt"));
+        assert_eq!(
+            (chapters.kind.as_str(), chapters.format.as_str()),
+            ("chapters", "vtt")
+        );
     }
 
     #[test]
     fn summary_and_frame_follow_the_recipe() {
         assert_eq!(choice(0).summary(3), "3 files · PNG · ≤ 4096 px");
-        assert_eq!(RecipeChoice { frame: 3, ..choice(1) }.summary(1), "1 file · MP4 · H.264 · 1080p · 1:1");
+        assert_eq!(
+            RecipeChoice {
+                frame: 3,
+                ..choice(1)
+            }
+            .summary(1),
+            "1 file · MP4 · H.264 · 1080p · 1:1"
+        );
         assert_eq!(choice(2).summary(2), "2 files · WebVTT");
         assert_eq!(choice(0).frame_ratio(Some(1.5)), 1.5);
         assert_eq!(choice(0).frame_ratio(None), 4.0 / 3.0);
-        assert_eq!(RecipeChoice { frame: 2, ..choice(1) }.frame_ratio(None), 9.0 / 16.0);
+        assert_eq!(
+            RecipeChoice {
+                frame: 2,
+                ..choice(1)
+            }
+            .frame_ratio(None),
+            9.0 / 16.0
+        );
         assert_eq!(output_state("completed"), ("Completed", Tone::Done));
     }
 }

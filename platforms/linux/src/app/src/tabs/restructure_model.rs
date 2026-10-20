@@ -27,8 +27,13 @@ pub fn default_selected(confidence: &str) -> bool {
 pub fn bucket(movement: &RestructureMove, root: &str) -> String {
     let destination = std::path::Path::new(&movement.destination);
     let folder = destination.parent().unwrap_or(destination);
-    let relative = folder.strip_prefix(root.trim_end_matches('/')).unwrap_or(folder);
-    let label = relative.to_string_lossy().trim_start_matches('/').to_owned();
+    let relative = folder
+        .strip_prefix(root.trim_end_matches('/'))
+        .unwrap_or(folder);
+    let label = relative
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .to_owned();
     if label.is_empty() {
         movement.category.clone()
     } else {
@@ -63,7 +68,11 @@ pub struct Progress {
 /// Preview · Review · Move cell states from DESIGN_V3_PORT "Restructure".
 pub fn steps(p: Progress) -> [StepState; 3] {
     use StepState::*;
-    let preview = if p.planning || (!p.has_plan && !p.moved) { Current } else { Done };
+    let preview = if p.planning || (!p.has_plan && !p.moved) {
+        Current
+    } else {
+        Done
+    };
     let review = if p.moved || (p.has_plan && p.selected > 0) {
         Done
     } else if p.has_plan {
@@ -82,13 +91,20 @@ pub fn steps(p: Progress) -> [StepState; 3] {
 }
 
 pub fn plural(n: usize, noun: &str) -> String {
-    format!("{} {noun}{}", crate::shell::grouped(n as u64), if n == 1 { "" } else { "s" })
+    format!(
+        "{} {noun}{}",
+        crate::shell::grouped(n as u64),
+        if n == 1 { "" } else { "s" }
+    )
 }
 
 pub fn zero_move_status(anchors: u32) -> String {
     match anchors {
         0 => "No moves were proposed for this folder.".to_owned(),
-        n => format!("Everything here is already organized. {n} folder{} kept.", if n == 1 { "" } else { "s" }),
+        n => format!(
+            "Everything here is already organized. {n} folder{} kept.",
+            if n == 1 { "" } else { "s" }
+        ),
     }
 }
 
@@ -115,9 +131,9 @@ pub fn library_under(conn: &rusqlite::Connection, root: &str, moved_from: &[Stri
         )
         .unwrap_or((0, 0));
     let mut folders: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-    if let Ok(mut stmt) =
-        conn.prepare("SELECT path_text FROM files WHERE failed = 0 AND substr(path_text, 1, length(?1)) = ?1")
-    {
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT path_text FROM files WHERE failed = 0 AND substr(path_text, 1, length(?1)) = ?1",
+    ) {
         if let Ok(rows) = stmt.query_map([&prefix], |row| row.get::<_, String>(0)) {
             for path in rows.flatten() {
                 let folder = std::path::Path::new(&path)
@@ -133,11 +149,25 @@ pub fn library_under(conn: &rusqlite::Connection, root: &str, moved_from: &[Stri
         .into_iter()
         .filter(|(folder, _)| !moved.contains(folder.as_str()))
         .map(|(folder, count)| {
-            let relative = folder.strip_prefix(root.trim_end_matches('/')).unwrap_or(&folder).trim_start_matches('/');
-            (if relative.is_empty() { "(library root)".to_owned() } else { relative.to_owned() }, count)
+            let relative = folder
+                .strip_prefix(root.trim_end_matches('/'))
+                .unwrap_or(&folder)
+                .trim_start_matches('/');
+            (
+                if relative.is_empty() {
+                    "(library root)".to_owned()
+                } else {
+                    relative.to_owned()
+                },
+                count,
+            )
         })
         .collect();
-    Library { indexed, images_without_clip, staying }
+    Library {
+        indexed,
+        images_without_clip,
+        staying,
+    }
 }
 
 #[cfg(test)]
@@ -157,9 +187,18 @@ mod tests {
 
     #[test]
     fn tiers_map_to_tidy_or_reorganize() {
-        assert_eq!(outcome(&movement("/l/a.jpg", "/l/b/a.jpg", Some("Mixed"))), Outcome::Tidy);
-        assert_eq!(outcome(&movement("/l/a.jpg", "/l/b/a.jpg", Some("Junk"))), Outcome::Reorganize);
-        assert_eq!(outcome(&movement("/l/a.jpg", "/l/b/a.jpg", None)), Outcome::Reorganize);
+        assert_eq!(
+            outcome(&movement("/l/a.jpg", "/l/b/a.jpg", Some("Mixed"))),
+            Outcome::Tidy
+        );
+        assert_eq!(
+            outcome(&movement("/l/a.jpg", "/l/b/a.jpg", Some("Junk"))),
+            Outcome::Reorganize
+        );
+        assert_eq!(
+            outcome(&movement("/l/a.jpg", "/l/b/a.jpg", None)),
+            Outcome::Reorganize
+        );
         assert!(default_selected("AUTO") && !default_selected("review"));
     }
 
@@ -169,7 +208,10 @@ mod tests {
         assert_eq!(bucket(&m, "/lib"), "Photos/2024");
         assert_eq!(bucket(&m, "/lib/"), "Photos/2024");
         assert_eq!(source_folder(&m), "Untitled");
-        assert_eq!(bucket(&movement("/lib/x/a.jpg", "/lib/a.jpg", None), "/lib"), "Photos");
+        assert_eq!(
+            bucket(&movement("/lib/x/a.jpg", "/lib/a.jpg", None), "/lib"),
+            "Photos"
+        );
     }
 
     #[test]
@@ -177,14 +219,41 @@ mod tests {
         use StepState::*;
         let none = Progress::default();
         assert_eq!(steps(none), [Current, Upcoming, Upcoming]);
-        assert_eq!(steps(Progress { planning: true, ..none }), [Current, Upcoming, Upcoming]);
-        let planned = Progress { has_plan: true, ..none };
+        assert_eq!(
+            steps(Progress {
+                planning: true,
+                ..none
+            }),
+            [Current, Upcoming, Upcoming]
+        );
+        let planned = Progress {
+            has_plan: true,
+            ..none
+        };
         assert_eq!(steps(planned), [Done, Current, Upcoming]);
-        let chosen = Progress { selected: 4, ..planned };
+        let chosen = Progress {
+            selected: 4,
+            ..planned
+        };
         assert_eq!(steps(chosen), [Done, Done, Current]);
-        assert_eq!(steps(Progress { moving: true, ..chosen }), [Done, Done, Current]);
-        assert_eq!(steps(Progress { moved: true, ..none }), [Done, Done, Done]);
-        assert_eq!(zero_move_status(4), "Everything here is already organized. 4 folders kept.");
+        assert_eq!(
+            steps(Progress {
+                moving: true,
+                ..chosen
+            }),
+            [Done, Done, Current]
+        );
+        assert_eq!(
+            steps(Progress {
+                moved: true,
+                ..none
+            }),
+            [Done, Done, Done]
+        );
+        assert_eq!(
+            zero_move_status(4),
+            "Everything here is already organized. 4 folders kept."
+        );
         assert_eq!(plural(1200, "file"), "1,200 files");
     }
 

@@ -13,8 +13,9 @@ use crate::v3;
 
 const LANE_HEIGHT: i32 = 16;
 const LABEL_WIDTH: i32 = 70;
-const RULER_STEPS: [f64; 14] =
-    [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0];
+const RULER_STEPS: [f64; 14] = [
+    1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0,
+];
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Coverage {
@@ -60,8 +61,10 @@ pub fn read_coverage(conn: &rusqlite::Connection, file_id: i64) -> Coverage {
     let spans = |sql: &str| -> Vec<(f64, f64)> {
         conn.prepare(sql)
             .and_then(|mut stmt| {
-                stmt.query_map([file_id], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()
+                stmt.query_map([file_id], |row| {
+                    Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
             })
             .unwrap_or_default()
     };
@@ -75,7 +78,11 @@ pub fn read_coverage(conn: &rusqlite::Connection, file_id: i64) -> Coverage {
         )
         .and_then(|mut stmt| {
             stmt.query_map([file_id], |row| {
-                Ok(PersonMoment { name: row.get(0)?, start: row.get(1)?, reviewed: row.get::<_, i64>(2)? == 1 })
+                Ok(PersonMoment {
+                    name: row.get(0)?,
+                    start: row.get(1)?,
+                    reviewed: row.get::<_, i64>(2)? == 1,
+                })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
         })
@@ -132,13 +139,17 @@ impl Timeline {
                 .build();
             lane.update_property(&[gtk::accessible::Property::Label(name)]);
             let draw_state = state.clone();
-            lane.set_draw_func(move |_, cr, width, height| draw_lane(cr, &draw_state.borrow(), name, width, height));
+            lane.set_draw_func(move |_, cr, width, height| {
+                draw_lane(cr, &draw_state.borrow(), name, width, height)
+            });
             let click = gtk::GestureClick::new();
             let click_state = state.clone();
             let seek = on_seek.clone();
             let lane_ref = lane.downgrade();
             click.connect_pressed(move |_, _, x, _| {
-                let Some(lane) = lane_ref.upgrade() else { return };
+                let Some(lane) = lane_ref.upgrade() else {
+                    return;
+                };
                 let duration = click_state.borrow().duration;
                 let width = f64::from(lane.width());
                 if duration > 0.0 && width > 0.0 {
@@ -154,15 +165,27 @@ impl Timeline {
         let pad = v3::hbox(0);
         pad.set_size_request(LABEL_WIDTH, -1);
         ruler_row.append(&pad);
-        let ruler = gtk::DrawingArea::builder().content_height(20).hexpand(true).can_target(false).build();
+        let ruler = gtk::DrawingArea::builder()
+            .content_height(20)
+            .hexpand(true)
+            .can_target(false)
+            .build();
         let ruler_state = state.clone();
-        ruler.set_draw_func(move |_, cr, width, _| draw_ticks(cr, ruler_state.borrow().duration, width));
+        ruler.set_draw_func(move |_, cr, width, _| {
+            draw_ticks(cr, ruler_state.borrow().duration, width)
+        });
         let ruler_labels = gtk::Fixed::builder().can_target(false).build();
         let ruler_stack = gtk::Overlay::builder().child(&ruler).hexpand(true).build();
         ruler_stack.add_overlay(&ruler_labels);
         ruler_row.append(&ruler_stack);
         root.append(&ruler_row);
-        let timeline = Rc::new(Self { root, state, lanes, ruler, ruler_labels });
+        let timeline = Rc::new(Self {
+            root,
+            state,
+            lanes,
+            ruler,
+            ruler_labels,
+        });
         let weak = Rc::downgrade(&timeline);
         // Re-placing labels inside the allocation pass would queue another
         // resize, so it waits for idle.
@@ -218,8 +241,10 @@ impl Timeline {
     }
 
     pub fn set_chapters(&self, chapters: &[CatalogChapter]) {
-        self.state.borrow_mut().chapters =
-            chapters.iter().map(|c| (c.start_seconds, c.end_seconds, chapter_state(c))).collect();
+        self.state.borrow_mut().chapters = chapters
+            .iter()
+            .map(|c| (c.start_seconds, c.end_seconds, chapter_state(c)))
+            .collect();
         self.refresh();
     }
 
@@ -258,7 +283,9 @@ impl Timeline {
         let state = self.state.borrow();
         for (lane, name) in &self.lanes {
             let value = match *name {
-                "Examined" if !state.analyzed && state.coverage.examined.is_empty() => "Not analyzed yet".to_owned(),
+                "Examined" if !state.analyzed && state.coverage.examined.is_empty() => {
+                    "Not analyzed yet".to_owned()
+                }
                 "Examined" => count(state.coverage.examined.len(), "sampled frame"),
                 "Chapters" if state.chapters.is_empty() => "None".to_owned(),
                 "Chapters" => count(state.chapters.len(), "chapter"),
@@ -382,8 +409,16 @@ mod tests {
         assert_eq!(
             coverage.people,
             vec![
-                PersonMoment { name: "Ada".into(), start: Some(5.0), reviewed: true },
-                PersonMoment { name: "Unnamed person".into(), start: None, reviewed: false },
+                PersonMoment {
+                    name: "Ada".into(),
+                    start: Some(5.0),
+                    reviewed: true
+                },
+                PersonMoment {
+                    name: "Unnamed person".into(),
+                    start: None,
+                    reviewed: false
+                },
             ]
         );
     }

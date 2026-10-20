@@ -52,7 +52,13 @@ where
 
 /// Animate a scalar on `spring`; it begins playing immediately, or jumps to
 /// `to` when GTK animations are disabled.
-pub fn animate_with<W, F>(spring: Spring, widget: &W, from: f64, to: f64, setter: F) -> adw::SpringAnimation
+pub fn animate_with<W, F>(
+    spring: Spring,
+    widget: &W,
+    from: f64,
+    to: f64,
+    setter: F,
+) -> adw::SpringAnimation
 where
     W: IsA<gtk::Widget>,
     F: Fn(f64) + 'static,

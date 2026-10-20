@@ -24,12 +24,26 @@ fn labelled(text: &str, classes: &[&str]) -> gtk::Button {
 
 /// Gold primary, 30 tall (`small` = 28).
 pub fn primary(text: &str, small: bool) -> gtk::Button {
-    labelled(text, if small { &["v3-primary", "h28"] } else { &["v3-primary"] })
+    labelled(
+        text,
+        if small {
+            &["v3-primary", "h28"]
+        } else {
+            &["v3-primary"]
+        },
+    )
 }
 
 /// Hairline secondary, 28 tall (`tall` = 30).
 pub fn secondary(text: &str, tall: bool) -> gtk::Button {
-    labelled(text, if tall { &["v3-secondary", "h30"] } else { &["v3-secondary"] })
+    labelled(
+        text,
+        if tall {
+            &["v3-secondary", "h30"]
+        } else {
+            &["v3-secondary"]
+        },
+    )
 }
 
 pub fn ghost(text: &str) -> gtk::Button {
@@ -61,7 +75,10 @@ pub fn icon_button(icon: &str, label: &str) -> gtk::Button {
 }
 
 pub fn label(text: &str, classes: &[&str]) -> gtk::Label {
-    classed(gtk::Label::builder().label(text).xalign(0.0).build(), classes)
+    classed(
+        gtk::Label::builder().label(text).xalign(0.0).build(),
+        classes,
+    )
 }
 
 pub fn wrapped(text: &str, classes: &[&str]) -> gtk::Label {
@@ -163,7 +180,9 @@ pub fn busy_bar(width: i32) -> gtk::ProgressBar {
         .build();
     let weak = bar.downgrade();
     glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
-        let Some(bar) = weak.upgrade() else { return glib::ControlFlow::Break };
+        let Some(bar) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
         if bar.is_mapped() {
             bar.pulse();
         }
@@ -174,7 +193,11 @@ pub fn busy_bar(width: i32) -> gtk::ProgressBar {
 
 /// m:ss, h:mm:ss past an hour.
 pub fn timecode(seconds: f64) -> String {
-    let total = if seconds.is_finite() { seconds.max(0.0).floor() as u64 } else { 0 };
+    let total = if seconds.is_finite() {
+        seconds.max(0.0).floor() as u64
+    } else {
+        0
+    };
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
     if h > 0 {
         format!("{h}:{m:02}:{s:02}")
@@ -185,7 +208,11 @@ pub fn timecode(seconds: f64) -> String {
 
 /// "N minutes N seconds" for screen readers.
 pub fn spoken_timecode(seconds: f64) -> String {
-    let total = if seconds.is_finite() { seconds.max(0.0).floor() as u64 } else { 0 };
+    let total = if seconds.is_finite() {
+        seconds.max(0.0).floor() as u64
+    } else {
+        0
+    };
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
     let unit = |n: u64, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
     let mut parts = Vec::new();
@@ -226,7 +253,13 @@ pub fn panel(title: &str) -> Panel {
     footer.add_css_class("v3-panel-footer");
     footer.set_visible(false);
     root.append(&footer);
-    Panel { root, title, trailing, body, footer }
+    Panel {
+        root,
+        title,
+        trailing,
+        body,
+        footer,
+    }
 }
 
 impl Panel {
@@ -242,7 +275,10 @@ impl Panel {
 
 /// Rail row: a selectable list row (min 28, radius 8) whose child is free.
 pub fn rail_row(child: &impl IsA<gtk::Widget>) -> gtk::Button {
-    gtk::Button::builder().child(child).css_classes(["v3-rail"]).build()
+    gtk::Button::builder()
+        .child(child)
+        .css_classes(["v3-rail"])
+        .build()
 }
 
 pub fn set_selected(widget: &impl IsA<gtk::Widget>, selected: bool) {
@@ -268,7 +304,10 @@ pub struct Segmented {
 impl Segmented {
     pub fn new(options: &[&str], selected: usize) -> Rc<Self> {
         let position = Rc::new(Cell::new(selected as f64));
-        let pill = gtk::DrawingArea::builder().can_target(false).hexpand(true).build();
+        let pill = gtk::DrawingArea::builder()
+            .can_target(false)
+            .hexpand(true)
+            .build();
         let buttons_box = gtk::Box::builder().homogeneous(true).build();
         let count = options.len().max(1) as f64;
         let draw_position = position.clone();
@@ -276,7 +315,14 @@ impl Segmented {
             let inset = 2.0;
             let segment = f64::from(width) / count;
             let x = draw_position.get() * segment + inset;
-            draw_round_rect(cr, x, inset, segment - inset * 2.0, f64::from(height) - inset * 2.0, 4.0);
+            draw_round_rect(
+                cr,
+                x,
+                inset,
+                segment - inset * 2.0,
+                f64::from(height) - inset * 2.0,
+                4.0,
+            );
             let (r, g, b) = crate::theme::rgb::GOLD;
             cr.set_source_rgb(r, g, b);
             let _ = cr.fill();
@@ -287,7 +333,10 @@ impl Segmented {
             buttons_box.append(&button);
             buttons.push(button);
         }
-        let root = gtk::Overlay::builder().child(&pill).css_classes(["v3-segmented"]).build();
+        let root = gtk::Overlay::builder()
+            .child(&pill)
+            .css_classes(["v3-segmented"])
+            .build();
         root.add_overlay(&buttons_box);
         root.set_measure_overlay(&buttons_box, true);
         let segmented = Rc::new(Self {
@@ -332,10 +381,16 @@ impl Segmented {
             previous.pause();
         }
         let from = position.get();
-        let animation = animate_with(Spring::Tight, &self.pill, from, index as f64, move |value| {
-            position.set(value);
-            pill.queue_draw();
-        });
+        let animation = animate_with(
+            Spring::Tight,
+            &self.pill,
+            from,
+            index as f64,
+            move |value| {
+                position.set(value);
+                pill.queue_draw();
+            },
+        );
         self.animation.replace(Some(animation));
         if notify {
             let handlers: Vec<_> = self.handlers.borrow().clone();
@@ -396,7 +451,11 @@ pub fn show_in_files(widget: &impl IsA<gtk::Widget>, path: &str) {
     let fallback = window.clone();
     launcher.open_containing_folder(window.as_ref(), gio::Cancellable::NONE, move |result| {
         if let (Err(_), Some(folder)) = (result, folder) {
-            gtk::FileLauncher::new(Some(&folder)).launch(fallback.as_ref(), gio::Cancellable::NONE, |_| {});
+            gtk::FileLauncher::new(Some(&folder)).launch(
+                fallback.as_ref(),
+                gio::Cancellable::NONE,
+                |_| {},
+            );
         }
     });
 }

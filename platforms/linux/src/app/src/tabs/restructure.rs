@@ -11,8 +11,8 @@ use adw::prelude::*;
 use gtk::glib;
 
 use fileid_engine::ipc::{
-    ApplyRestructurePayload, CommandPayload, Empty, PlanRestructurePayload, RestructureApplyResult, RestructureMove,
-    RestructurePlan, UndoRestructurePayload,
+    ApplyRestructurePayload, CommandPayload, Empty, PlanRestructurePayload, RestructureApplyResult,
+    RestructureMove, RestructurePlan, UndoRestructurePayload,
 };
 
 use super::restructure_model::*;
@@ -93,7 +93,13 @@ fn step_cell(index: usize, title: &str) -> StepCell {
     detail.set_lines(2);
     detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
     root.append(&detail);
-    StepCell { number: index + 1, root, badge, title, detail }
+    StepCell {
+        number: index + 1,
+        root,
+        badge,
+        title,
+        detail,
+    }
 }
 
 fn notice(tone: Tone) -> (gtk::Box, gtk::Label, gtk::Label) {
@@ -111,8 +117,15 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Step strip ─────────────────────────────────────────────────────────
     let strip_outer = v3::vbox(0);
     strip_outer.add_css_class("v3-strip");
-    let strip = gtk::Box::builder().homogeneous(true).css_classes(["v3-panel"]).build();
-    let cells = [step_cell(0, "Preview"), step_cell(1, "Review"), step_cell(2, "Move")];
+    let strip = gtk::Box::builder()
+        .homogeneous(true)
+        .css_classes(["v3-panel"])
+        .build();
+    let cells = [
+        step_cell(0, "Preview"),
+        step_cell(1, "Review"),
+        step_cell(2, "Move"),
+    ];
     let preview_actions = v3::hbox(8);
     preview_actions.add_css_class("v3-toggle-row");
     let plan_button = v3::primary("Plan", true);
@@ -170,12 +183,21 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     notice_box.set_visible(false);
     content.append(&notice_box);
 
-    let metrics = gtk::Box::builder().homogeneous(true).css_classes(["v3-panel"]).visible(false).build();
+    let metrics = gtk::Box::builder()
+        .homogeneous(true)
+        .css_classes(["v3-panel"])
+        .visible(false)
+        .build();
     let metric = |label: &str, tone: Tone| -> (gtk::Box, gtk::Label, gtk::Label) {
         let cell = v3::vbox(4);
         cell.add_css_class("v3-metric");
         let head = v3::hbox(6);
-        head.append(&gtk::Box::builder().css_classes(["v3-dot", tone.css()]).valign(gtk::Align::Center).build());
+        head.append(
+            &gtk::Box::builder()
+                .css_classes(["v3-dot", tone.css()])
+                .valign(gtk::Align::Center)
+                .build(),
+        );
         head.append(&v3::label(label, &["v3-meta"]));
         cell.append(&head);
         let value = v3::mono("0", "s20");
@@ -204,7 +226,9 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content.append(&clip_notice);
 
     let recommendations = v3::panel("Recommendations");
-    recommendations.trailing.append(&v3::meta("Skip a group to leave it out of the move"));
+    recommendations
+        .trailing
+        .append(&v3::meta("Skip a group to leave it out of the move"));
     recommendations.root.set_visible(false);
     content.append(&recommendations.root);
 
@@ -219,13 +243,20 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     staying_head.append(&staying_title);
     let staying_meta = v3::meta("");
     staying_head.append(&staying_meta);
-    let staying_header = gtk::Button::builder().child(&staying_head).css_classes(["v3-staying-header"]).build();
+    let staying_header = gtk::Button::builder()
+        .child(&staying_head)
+        .css_classes(["v3-staying-header"])
+        .build();
     staying_header.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
     staying.append(&staying_header);
     let staying_rows = v3::vbox(0);
     let staying_list = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .transition_duration(if crate::spring::animations_enabled() { 220 } else { 0 })
+        .transition_duration(if crate::spring::animations_enabled() {
+            220
+        } else {
+            0
+        })
         .child(&staying_rows)
         .build();
     staying.append(&staying_list);
@@ -243,7 +274,9 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     let ui = Rc::new(Ui {
         engine,
-        root: RefCell::new(crate::app_settings::last_folder().map(|path| path.to_string_lossy().into_owned())),
+        root: RefCell::new(
+            crate::app_settings::last_folder().map(|path| path.to_string_lossy().into_owned()),
+        ),
         plan: RefCell::new(None),
         selected: RefCell::new(Vec::new()),
         skipped: RefCell::new(HashSet::new()),
@@ -291,11 +324,18 @@ impl Ui {
     fn set_folder_label(&self, root: &str) {
         self.folder.set_text(root);
         self.folder.set_tooltip_text(Some(root));
-        self.folder.update_property(&[gtk::accessible::Property::Label(&format!("Library folder {root}"))]);
+        self.folder
+            .update_property(&[gtk::accessible::Property::Label(&format!(
+                "Library folder {root}"
+            ))]);
     }
 
     fn moves(&self) -> Vec<RestructureMove> {
-        self.plan.borrow().as_ref().map(|plan| plan.moves.clone()).unwrap_or_default()
+        self.plan
+            .borrow()
+            .as_ref()
+            .map(|plan| plan.moves.clone())
+            .unwrap_or_default()
     }
 
     /// Selected moves outside skipped groups: what Move applies.
@@ -305,7 +345,10 @@ impl Ui {
         self.moves()
             .into_iter()
             .enumerate()
-            .filter(|(index, movement)| selected.get(*index).copied().unwrap_or(false) && !skipped.contains(&outcome(movement)))
+            .filter(|(index, movement)| {
+                selected.get(*index).copied().unwrap_or(false)
+                    && !skipped.contains(&outcome(movement))
+            })
             .map(|(_, movement)| movement)
             .collect()
     }
@@ -313,7 +356,11 @@ impl Ui {
     fn progress(&self) -> Progress {
         Progress {
             planning: self.operation.get() == Some(Operation::Planning),
-            has_plan: self.plan.borrow().as_ref().is_some_and(|plan| !plan.moves.is_empty()),
+            has_plan: self
+                .plan
+                .borrow()
+                .as_ref()
+                .is_some_and(|plan| !plan.moves.is_empty()),
             selected: self.chosen().len(),
             moving: self.operation.get() == Some(Operation::Applying),
             moved: self.moved.get(),
@@ -335,8 +382,10 @@ impl Ui {
         let states = steps(progress);
         let moves = self.moves();
         let sources: HashSet<String> = moves.iter().map(|m| v3::parent_name(&m.source)).collect();
-        let buckets: HashSet<String> =
-            moves.iter().map(|m| bucket(m, self.root.borrow().as_deref().unwrap_or(""))).collect();
+        let buckets: HashSet<String> = moves
+            .iter()
+            .map(|m| bucket(m, self.root.borrow().as_deref().unwrap_or("")))
+            .collect();
         let details = [
             if progress.has_plan {
                 format!(
@@ -349,7 +398,11 @@ impl Ui {
                 "Build a plan from the library folder. Nothing moves.".to_owned()
             },
             if progress.has_plan {
-                format!("{} of {} selected", plural(progress.selected, "move"), crate::shell::grouped(moves.len() as u64))
+                format!(
+                    "{} of {} selected",
+                    plural(progress.selected, "move"),
+                    crate::shell::grouped(moves.len() as u64)
+                )
             } else {
                 "Check where each file would go.".to_owned()
             },
@@ -373,14 +426,22 @@ impl Ui {
                 StepState::Done => cell.badge.add_css_class("done"),
                 StepState::Upcoming => cell.title.add_css_class("upcoming"),
             }
-            cell.badge.set_text(&if state == StepState::Done { "✓".to_owned() } else { cell.number.to_string() });
+            cell.badge.set_text(&if state == StepState::Done {
+                "✓".to_owned()
+            } else {
+                cell.number.to_string()
+            });
             let state_word = match state {
                 StepState::Done => "done",
                 StepState::Current => "current",
                 StepState::Upcoming => "not started",
             };
             cell.root.update_property(&[
-                gtk::accessible::Property::Label(&format!("Step {} of 3, {}, {state_word}", cell.number, cell.title.text())),
+                gtk::accessible::Property::Label(&format!(
+                    "Step {} of 3, {}, {state_word}",
+                    cell.number,
+                    cell.title.text()
+                )),
                 gtk::accessible::Property::Description(&detail),
             ]);
             cell.detail.set_text(&detail);
@@ -394,14 +455,21 @@ impl Ui {
         self.planning_bar.set_visible(progress.planning);
         self.review_button.set_sensitive(progress.has_plan && !busy);
         let count = progress.selected;
-        self.move_button.set_label(&format!("Move {}", plural(count, "file")));
-        self.move_button.set_visible(!progress.moving && !self.moved.get());
+        self.move_button
+            .set_label(&format!("Move {}", plural(count, "file")));
+        self.move_button
+            .set_visible(!progress.moving && !self.moved.get());
         self.move_button.set_sensitive(count > 0 && !busy);
         self.moving_bar.set_visible(progress.moving);
         self.cancel_button.set_visible(progress.moving);
-        self.cancel_button.set_label(if self.stopping.get() { "Stopping…" } else { "Cancel" });
+        self.cancel_button.set_label(if self.stopping.get() {
+            "Stopping…"
+        } else {
+            "Cancel"
+        });
         self.cancel_button.set_sensitive(!self.stopping.get());
-        self.undo_button.set_visible(self.moved.get() && !progress.moving);
+        self.undo_button
+            .set_visible(self.moved.get() && !progress.moving);
         self.undo_button.set_sensitive(!busy);
     }
 
@@ -418,7 +486,9 @@ impl Ui {
         let reorganize = moves.len() - tidy;
         let total_moves = plan.total_moves.unwrap_or(moves.len() as u64);
         let counts = plan.folder_classifications.clone();
-        let (anchors, mixed, junk) = counts.map_or((0, 0, 0), |c| (c.anchor_folders, c.mixed_folders, c.junk_folders));
+        let (anchors, mixed, junk) = counts.map_or((0, 0, 0), |c| {
+            (c.anchor_folders, c.mixed_folders, c.junk_folders)
+        });
         let library = self.library.borrow().clone();
         let staying = library.indexed.saturating_sub(total_moves);
         self.metric_values[0].set_text(&crate::shell::grouped(staying));
@@ -436,7 +506,10 @@ impl Ui {
                 "folder-symbolic",
                 Tone::Done,
                 &format!("Keep {} as they are", plural(anchors as usize, "folder")),
-                &format!("Clear names and matching contents. {} stay exactly where they are.", plural(staying as usize, "file")),
+                &format!(
+                    "Clear names and matching contents. {} stay exactly where they are.",
+                    plural(staying as usize, "file")
+                ),
                 staying as usize,
                 anchors as usize,
             ));
@@ -463,7 +536,9 @@ impl Ui {
                 junk as usize,
             ));
         }
-        self.recommendations.root.set_visible(self.recommendations.body.first_child().is_some());
+        self.recommendations
+            .root
+            .set_visible(self.recommendations.body.first_child().is_some());
         self.render_staying();
     }
 
@@ -486,7 +561,10 @@ impl Ui {
         if skipped {
             row.add_css_class("skipped");
         }
-        let tile = gtk::Box::builder().css_classes(["v3-icon-tile", tone.css()]).valign(gtk::Align::Start).build();
+        let tile = gtk::Box::builder()
+            .css_classes(["v3-icon-tile", tone.css()])
+            .valign(gtk::Align::Start)
+            .build();
         let glyph = gtk::Image::from_icon_name(icon);
         glyph.set_pixel_size(13);
         glyph.set_hexpand(true);
@@ -500,17 +578,32 @@ impl Ui {
         if let Some(group) = group {
             let actions = v3::hbox(8);
             let expanded = *self.expanded.borrow() == Some(group);
-            let toggle = v3::secondary(if expanded { "Hide files ▾" } else { "Review files ▸" }, false);
+            let toggle = v3::secondary(
+                if expanded {
+                    "Hide files ▾"
+                } else {
+                    "Review files ▸"
+                },
+                false,
+            );
             toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
             let weak = Rc::downgrade(self);
             toggle.connect_clicked(move |_| {
                 let Some(ui) = weak.upgrade() else { return };
-                let next = if *ui.expanded.borrow() == Some(group) { None } else { Some(group) };
+                let next = if *ui.expanded.borrow() == Some(group) {
+                    None
+                } else {
+                    Some(group)
+                };
                 ui.expanded.replace(next);
                 ui.render_plan();
             });
             actions.append(&toggle);
-            let skip = if skipped { v3::accent("Include", tone, false) } else { v3::ghost("Skip these") };
+            let skip = if skipped {
+                v3::accent("Include", tone, false)
+            } else {
+                v3::ghost("Skip these")
+            };
             let weak = Rc::downgrade(self);
             skip.connect_clicked(move |_| {
                 let Some(ui) = weak.upgrade() else { return };
@@ -553,8 +646,15 @@ impl Ui {
         let root = self.root.borrow().clone().unwrap_or_default();
         let moves = self.moves();
         let mut buckets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (index, movement) in moves.iter().enumerate().filter(|(_, m)| outcome(m) == group) {
-            buckets.entry(bucket(movement, &root)).or_default().push(index);
+        for (index, movement) in moves
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| outcome(m) == group)
+        {
+            buckets
+                .entry(bucket(movement, &root))
+                .or_default()
+                .push(index);
         }
         let total: usize = buckets.values().map(Vec::len).sum();
         let mut shown = 0;
@@ -567,7 +667,10 @@ impl Ui {
             shown += take;
         }
         if total > shown {
-            list.append(&v3::meta(&format!("+ {} more", crate::shell::grouped((total - shown) as u64))));
+            list.append(&v3::meta(&format!(
+                "+ {} more",
+                crate::shell::grouped((total - shown) as u64)
+            )));
         }
         if total > SEE_ALL_AFTER {
             let see_all = v3::ghost(&format!("See all {}", plural(total, "file")));
@@ -631,7 +734,11 @@ impl Ui {
         let root = self.root.borrow().clone().unwrap_or_default();
         let selected = self.selected.borrow().get(index).copied().unwrap_or(false);
         let row = v3::hbox(8);
-        let check = gtk::CheckButton::builder().active(selected).can_focus(false).can_target(false).build();
+        let check = gtk::CheckButton::builder()
+            .active(selected)
+            .can_focus(false)
+            .can_target(false)
+            .build();
         row.append(&check);
         let icon = gtk::Image::from_icon_name("text-x-generic-symbolic");
         icon.set_pixel_size(11);
@@ -660,7 +767,10 @@ impl Ui {
             _ => ("Unrated", Tone::Muted),
         };
         row.append(&v3::pill(confidence, tone));
-        let button = gtk::Button::builder().child(&row).css_classes(["v3-proposal"]).build();
+        let button = gtk::Button::builder()
+            .child(&row)
+            .css_classes(["v3-proposal"])
+            .build();
         button.update_property(&[gtk::accessible::Property::Label(&format!(
             "Move {} from {} to {}",
             v3::file_name(&movement.source),
@@ -674,11 +784,17 @@ impl Ui {
             let Some(ui) = weak.upgrade() else { return };
             let now = {
                 let mut selected = ui.selected.borrow_mut();
-                let Some(slot) = selected.get_mut(index) else { return };
+                let Some(slot) = selected.get_mut(index) else {
+                    return;
+                };
                 *slot = !*slot;
                 *slot
             };
-            if let Some(check) = button.child().and_then(|c| c.first_child()).and_downcast::<gtk::CheckButton>() {
+            if let Some(check) = button
+                .child()
+                .and_then(|c| c.first_child())
+                .and_downcast::<gtk::CheckButton>()
+            {
                 check.set_active(now);
             }
             button.update_state(&[gtk::accessible::State::Selected(Some(now))]);
@@ -691,7 +807,8 @@ impl Ui {
         let library = self.library.borrow().clone();
         v3::clear(&self.staying_rows);
         let files: u64 = library.staying.iter().map(|(_, n)| n).sum();
-        self.staying.set_visible(!library.staying.is_empty() && self.plan.borrow().is_some());
+        self.staying
+            .set_visible(!library.staying.is_empty() && self.plan.borrow().is_some());
         self.staying_meta.set_text(&format!(
             "{} · {}",
             plural(library.staying.len(), "folder"),
@@ -701,11 +818,19 @@ impl Ui {
             let row = v3::hbox(10);
             row.add_css_class("v3-row-pad");
             row.add_css_class("v3-soft-row");
-            row.append(&gtk::Box::builder().css_classes(["v3-dot", "tone-done"]).valign(gtk::Align::Center).build());
+            row.append(
+                &gtk::Box::builder()
+                    .css_classes(["v3-dot", "tone-done"])
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
             let name = v3::mono(folder, "s12");
             name.set_hexpand(true);
             row.append(&name);
-            row.append(&v3::label(&plural(*count as usize, "file"), &["v3-meta-115"]));
+            row.append(&v3::label(
+                &plural(*count as usize, "file"),
+                &["v3-meta-115"],
+            ));
             self.staying_rows.append(&row);
         }
     }
@@ -713,7 +838,11 @@ impl Ui {
     /// Drill-down sheet with every move (or one group's), grouped by
     /// destination; Done (Return) closes it.
     fn open_review(self: &Rc<Self>, anchor: &impl IsA<gtk::Widget>, group: Option<Outcome>) {
-        let dialog = adw::Dialog::builder().content_width(820).content_height(640).title("Review moves").build();
+        let dialog = adw::Dialog::builder()
+            .content_width(820)
+            .content_height(640)
+            .title("Review moves")
+            .build();
         let column = v3::vbox(0);
         let head = v3::hbox(16);
         head.add_css_class("v3-review-head");
@@ -744,7 +873,10 @@ impl Ui {
         let mut buckets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, movement) in self.moves().iter().enumerate() {
             if group.map_or(true, |group| group == outcome(movement)) {
-                buckets.entry(bucket(movement, &root)).or_default().push(index);
+                buckets
+                    .entry(bucket(movement, &root))
+                    .or_default()
+                    .push(index);
             }
         }
         let total: usize = buckets.values().map(Vec::len).sum();
@@ -753,7 +885,11 @@ impl Ui {
             list.append(&self.bucket_section(name, indices, indices));
         }
         column.append(
-            &gtk::ScrolledWindow::builder().hscrollbar_policy(gtk::PolicyType::Never).vexpand(true).child(&list).build(),
+            &gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vexpand(true)
+                .child(&list)
+                .build(),
         );
         dialog.set_child(Some(&column));
         let close = dialog.downgrade();
@@ -785,8 +921,14 @@ impl Ui {
     }
 
     fn load_library(self: &Rc<Self>) {
-        let Some(root) = self.root.borrow().clone() else { return };
-        let moved_from: Vec<String> = self.moves().iter().map(|m| v3::parent_name(&m.source)).collect();
+        let Some(root) = self.root.borrow().clone() else {
+            return;
+        };
+        let moved_from: Vec<String> = self
+            .moves()
+            .iter()
+            .map(|m| v3::parent_name(&m.source))
+            .collect();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let library = fileid_engine::paths::db_path()
@@ -808,9 +950,14 @@ impl Ui {
                 ui.clip_body.set_text(&format!(
                     "{} group by date only. {}",
                     plural(without_clip as usize, "photo"),
-                    if installed { "Rescan to sort them by what they show." } else { "Install CLIP in Settings, then rescan." }
+                    if installed {
+                        "Rescan to sort them by what they show."
+                    } else {
+                        "Install CLIP in Settings, then rescan."
+                    }
                 ));
-                ui.clip_button.set_label(if installed { "Rescan" } else { "Open Settings" });
+                ui.clip_button
+                    .set_label(if installed { "Rescan" } else { "Open Settings" });
                 ui.clip_notice.set_visible(true);
             } else {
                 ui.clip_notice.set_visible(false);
@@ -822,8 +969,16 @@ impl Ui {
     fn show_plan(self: &Rc<Self>, plan: RestructurePlan) {
         self.operation.set(None);
         self.moved.set(false);
-        let anchors = plan.folder_classifications.as_ref().map_or(0, |c| c.anchor_folders);
-        self.selected.replace(plan.moves.iter().map(|m| default_selected(&m.confidence)).collect());
+        let anchors = plan
+            .folder_classifications
+            .as_ref()
+            .map_or(0, |c| c.anchor_folders);
+        self.selected.replace(
+            plan.moves
+                .iter()
+                .map(|m| default_selected(&m.confidence))
+                .collect(),
+        );
         self.skipped.borrow_mut().clear();
         self.expanded.replace(None);
         if plan.moves.is_empty() {
@@ -845,24 +1000,50 @@ impl Ui {
         } else if operation == Some(Operation::Undoing) {
             if result.failed == 0 {
                 self.moved.set(false);
-                self.set_notice(Tone::Done, "Undone", &format!("{} put back.", plural(result.applied as usize, "file")));
+                self.set_notice(
+                    Tone::Done,
+                    "Undone",
+                    &format!("{} put back.", plural(result.applied as usize, "file")),
+                );
             } else {
                 self.set_notice(
                     Tone::Warning,
                     "Undo incomplete",
-                    &format!("{} put back; {} failed. You can retry.", plural(result.applied as usize, "file"), result.failed),
+                    &format!(
+                        "{} put back; {} failed. You can retry.",
+                        plural(result.applied as usize, "file"),
+                        result.failed
+                    ),
                 );
             }
         } else {
             self.moved.set(result.applied > 0);
             let body = if result.cancelled {
-                format!("Stopped after {}. Undo puts them back.", plural(result.applied as usize, "file"))
+                format!(
+                    "Stopped after {}. Undo puts them back.",
+                    plural(result.applied as usize, "file")
+                )
             } else if result.failed > 0 {
-                format!("{} moved; {} failed. Undo puts the moved ones back.", plural(result.applied as usize, "file"), result.failed)
+                format!(
+                    "{} moved; {} failed. Undo puts the moved ones back.",
+                    plural(result.applied as usize, "file"),
+                    result.failed
+                )
             } else {
-                format!("{} moved. Undo puts every file back.", plural(result.applied as usize, "file"))
+                format!(
+                    "{} moved. Undo puts every file back.",
+                    plural(result.applied as usize, "file")
+                )
             };
-            self.set_notice(if result.failed > 0 { Tone::Warning } else { Tone::Done }, "Done", &body);
+            self.set_notice(
+                if result.failed > 0 {
+                    Tone::Warning
+                } else {
+                    Tone::Done
+                },
+                "Done",
+                &body,
+            );
             if result.applied > 0 {
                 self.plan.replace(None);
                 self.render_plan();
@@ -897,8 +1078,12 @@ impl Ui {
         dialog.set_close_response("cancel");
         let weak = Rc::downgrade(self);
         dialog.connect_response(None, move |_, response| {
-            let Some(ui) = weak.upgrade().filter(|_| response == "move") else { return };
-            let Some(root) = ui.root.borrow().clone() else { return };
+            let Some(ui) = weak.upgrade().filter(|_| response == "move") else {
+                return;
+            };
+            let Some(root) = ui.root.borrow().clone() else {
+                return;
+            };
             let moves = ui.chosen();
             ui.send(
                 Operation::Applying,
@@ -922,11 +1107,17 @@ fn clip_model_installed() -> bool {
 fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
     let weak = Rc::downgrade(ui);
     change_folder.connect_clicked(move |button| {
-        let dialog = gtk::FileDialog::builder().title("Choose a library folder").modal(true).build();
+        let dialog = gtk::FileDialog::builder()
+            .title("Choose a library folder")
+            .modal(true)
+            .build();
         let parent = button.root().and_downcast::<gtk::Window>();
         let weak = weak.clone();
         dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
-            let (Some(ui), Some(path)) = (weak.upgrade(), result.ok().and_then(|f| f.path())) else { return };
+            let (Some(ui), Some(path)) = (weak.upgrade(), result.ok().and_then(|f| f.path()))
+            else {
+                return;
+            };
             let root = path.to_string_lossy().into_owned();
             crate::app_settings::remember_folder(&path);
             ui.root.replace(Some(root.clone()));
@@ -942,11 +1133,16 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
         let weak = Rc::downgrade(ui);
         button.connect_clicked(move |_| {
             let Some(ui) = weak.upgrade() else { return };
-            let Some(root) = ui.root.borrow().clone() else { return };
+            let Some(root) = ui.root.borrow().clone() else {
+                return;
+            };
             ui.notice.set_visible(false);
             ui.send(
                 Operation::Planning,
-                CommandPayload::PlanRestructure(PlanRestructurePayload { library_root: root, supports_paged_plans: false }),
+                CommandPayload::PlanRestructure(PlanRestructurePayload {
+                    library_root: root,
+                    supports_paged_plans: false,
+                }),
             );
         });
     }
@@ -966,16 +1162,24 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
     ui.cancel_button.connect_clicked(move |_| {
         let Some(ui) = weak.upgrade() else { return };
         ui.stopping.set(true);
-        let _ = ui.engine.borrow_mut().send(CommandPayload::CancelRestructure(Empty {}));
+        let _ = ui
+            .engine
+            .borrow_mut()
+            .send(CommandPayload::CancelRestructure(Empty {}));
         ui.refresh();
     });
     let weak = Rc::downgrade(ui);
     ui.undo_button.connect_clicked(move |_| {
         let Some(ui) = weak.upgrade() else { return };
-        let Some(root) = ui.root.borrow().clone() else { return };
+        let Some(root) = ui.root.borrow().clone() else {
+            return;
+        };
         ui.send(
             Operation::Undoing,
-            CommandPayload::UndoRestructure(UndoRestructurePayload { library_root: root, shortcut_undo_token: None }),
+            CommandPayload::UndoRestructure(UndoRestructurePayload {
+                library_root: root,
+                shortcut_undo_token: None,
+            }),
         );
     });
     let weak = Rc::downgrade(ui);
@@ -986,8 +1190,14 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
             if let Some(root) = root {
                 let started = ui.engine.borrow_mut().start_scan(&root);
                 match started {
-                    Ok(()) => ui.set_notice(Tone::Gold, "Rescanning", "Plan again when the scan finishes."),
-                    Err(error) => ui.set_notice(Tone::Warning, "Something went wrong", &error.to_string()),
+                    Ok(()) => ui.set_notice(
+                        Tone::Gold,
+                        "Rescanning",
+                        "Plan again when the scan finishes.",
+                    ),
+                    Err(error) => {
+                        ui.set_notice(Tone::Warning, "Something went wrong", &error.to_string())
+                    }
                 }
             }
         } else {
@@ -999,7 +1209,11 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
         let Some(ui) = weak.upgrade() else { return };
         let open = !ui.staying_list.reveals_child();
         ui.staying_list.set_reveal_child(open);
-        ui.staying_chevron.set_icon_name(Some(if open { "pan-down-symbolic" } else { "pan-end-symbolic" }));
+        ui.staying_chevron.set_icon_name(Some(if open {
+            "pan-down-symbolic"
+        } else {
+            "pan-end-symbolic"
+        }));
         header.update_state(&[gtk::accessible::State::Expanded(Some(open))]);
     });
 
@@ -1013,13 +1227,21 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                 EngineState::Error { kind, message, .. } if ui.operation.get().is_some() => {
                     ui.operation.set(None);
                     ui.stopping.set(false);
-                    ui.set_notice(Tone::Warning, "Something went wrong", &format!("{kind}: {message}"));
+                    ui.set_notice(
+                        Tone::Warning,
+                        "Something went wrong",
+                        &format!("{kind}: {message}"),
+                    );
                     ui.refresh();
                 }
                 EngineState::Exited => {
                     ui.operation.set(None);
                     ui.stopping.set(false);
-                    ui.set_notice(Tone::Warning, "Engine stopped", "The FileID engine is restarting. Plan again when it's back.");
+                    ui.set_notice(
+                        Tone::Warning,
+                        "Engine stopped",
+                        "The FileID engine is restarting. Plan again when it's back.",
+                    );
                     ui.refresh();
                 }
                 _ => {}

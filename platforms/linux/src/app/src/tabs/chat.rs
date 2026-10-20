@@ -19,8 +19,11 @@ use crate::v3;
 const CONVERSATION: &str = "linux-default";
 const MAX_CITATIONS: usize = 8;
 pub const ASK_ACTION: &str = "ask";
-const SUGGESTIONS: [&str; 3] =
-    ["Photos from the beach last summer", "Where is the contract we signed?", "Clips where someone is speaking"];
+const SUGGESTIONS: [&str; 3] = [
+    "Photos from the beach last summer",
+    "Where is the contract we signed?",
+    "Clips where someone is speaking",
+];
 
 struct ChatUi {
     engine: Engine,
@@ -46,7 +49,9 @@ struct ChatUi {
 impl ChatUi {
     fn text(&self) -> String {
         let buffer = self.composer.buffer();
-        buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string()
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string()
     }
 
     fn set_text(&self, text: &str) {
@@ -77,9 +82,9 @@ impl ChatUi {
                 self.status.set_label("");
                 send_request(&self.engine, &self.state, &self.status, request);
             }
-            Ok(false) => self
-                .status
-                .set_label("Clear waits until the answer being saved finishes. Nothing is deleted yet."),
+            Ok(false) => self.status.set_label(
+                "Clear waits until the answer being saved finishes. Nothing is deleted yet.",
+            ),
             Err(reason) => self.status.set_label(reason),
         }
     }
@@ -131,7 +136,10 @@ impl ChatUi {
             let meta_label = v3::mono(&format!("· {meta}"), "s11");
             meta_label.add_css_class("tone-muted");
             content.append(&meta_label);
-            let chip = gtk::Button::builder().child(&content).css_classes(["v3-cite"]).build();
+            let chip = gtk::Button::builder()
+                .child(&content)
+                .css_classes(["v3-cite"])
+                .build();
             chip.update_property(&[
                 gtk::accessible::Property::Label(&format!(
                     "Source {}: {}, {meta}",
@@ -212,7 +220,9 @@ impl ChatUi {
     /// Playable media plays inline in the Sources pane; everything else
     /// opens in the default app.
     fn open_source(&self, index: usize) {
-        let Some(hit) = self.hits.borrow().get(index).cloned() else { return };
+        let Some(hit) = self.hits.borrow().get(index).cloned() else {
+            return;
+        };
         self.active_source.set(Some(index));
         let mut child = self.sources.first_child();
         let mut position = 0;
@@ -256,7 +266,10 @@ fn message_row(message: &ChatMessage) -> gtk::Box {
     let row = v3::vbox(4);
     row.add_css_class("v3-message");
     row.add_css_class(if you { "you" } else { "model" });
-    let role = v3::label(if you { "You" } else { "FileID" }, &["v3-role", if you { "tone-gold" } else { "tone-ai" }]);
+    let role = v3::label(
+        if you { "You" } else { "FileID" },
+        &["v3-role", if you { "tone-gold" } else { "tone-ai" }],
+    );
     row.append(&role);
     let body = v3::wrapped(&message.text, &["v3-message-body"]);
     body.set_selectable(true);
@@ -265,7 +278,9 @@ fn message_row(message: &ChatMessage) -> gtk::Box {
 }
 
 fn show_source_menu(anchor: &gtk::Button, path: &str) {
-    let popover = gtk::Popover::builder().css_classes(["fileid-popover"]).build();
+    let popover = gtk::Popover::builder()
+        .css_classes(["fileid-popover"])
+        .build();
     let reveal = v3::ghost("Show in Files");
     let path = path.to_owned();
     let weak = popover.downgrade();
@@ -281,8 +296,16 @@ fn show_source_menu(anchor: &gtk::Button, path: &str) {
     popover.popup();
 }
 
-fn send_request(engine: &Engine, state: &Rc<RefCell<ChatState>>, status: &gtk::Label, request: ChatRequest) {
-    if let Err(error) = engine.borrow_mut().send(CommandPayload::ChatRequest(ChatRequestPayload { request })) {
+fn send_request(
+    engine: &Engine,
+    state: &Rc<RefCell<ChatState>>,
+    status: &gtk::Label,
+    request: ChatRequest,
+) {
+    if let Err(error) = engine
+        .borrow_mut()
+        .send(CommandPayload::ChatRequest(ChatRequestPayload { request }))
+    {
         state.borrow_mut().interrupted();
         status.set_label(&format!(
             "Chat transport failed: {error}. Saved answers are unconfirmed; they reload when the engine reconnects."
@@ -329,14 +352,21 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     let busy_bar = v3::busy_bar(60);
     busy_bar.set_visible(true);
     busy.append(&busy_bar);
-    busy.append(&v3::label("Searching your library…", &["v3-meta", "tone-ai"]));
+    busy.append(&v3::label(
+        "Searching your library…",
+        &["v3-meta", "tone-ai"],
+    ));
     busy.set_visible(false);
     let thread = v3::vbox(20);
     thread.add_css_class("v3-page-pad");
     thread.append(&empty);
     thread.append(&messages);
     thread.append(&busy);
-    let clamp = adw::Clamp::builder().maximum_size(760).tightening_threshold(760).child(&thread).build();
+    let clamp = adw::Clamp::builder()
+        .maximum_size(760)
+        .tightening_threshold(760)
+        .child(&thread)
+        .build();
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -381,7 +411,10 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     input_row.append(&stop);
     composer_box.append(&input_row);
     let options = v3::hbox(10);
-    let ai = gtk::Switch::builder().valign(gtk::Align::Center).sensitive(false).build();
+    let ai = gtk::Switch::builder()
+        .valign(gtk::Align::Center)
+        .sensitive(false)
+        .build();
     ai.update_property(&[gtk::accessible::Property::Label("Summarize with local AI")]);
     let ai_row = v3::hbox(8);
     ai_row.add_css_class("v3-toggle-row");
@@ -413,10 +446,19 @@ pub fn chat(engine: Engine) -> gtk::Widget {
     sources_count.add_css_class("numeric");
     pane_header.append(&sources_count);
     pane.append(&pane_header);
-    let video = gtk::Video::builder().autoplay(false).css_classes(["v3-black"]).build();
+    let video = gtk::Video::builder()
+        .autoplay(false)
+        .css_classes(["v3-black"])
+        .build();
     let player_frame = v3::vbox(0);
     player_frame.add_css_class("v3-panel-pad");
-    player_frame.append(&gtk::AspectFrame::builder().ratio(16.0 / 9.0).obey_child(false).child(&video).build());
+    player_frame.append(
+        &gtk::AspectFrame::builder()
+            .ratio(16.0 / 9.0)
+            .obey_child(false)
+            .child(&video)
+            .build(),
+    );
     player_frame.set_visible(false);
     pane.append(&player_frame);
     let sources = v3::vbox(2);
@@ -459,7 +501,10 @@ pub fn chat(engine: Engine) -> gtk::Widget {
         caption.set_hexpand(true);
         content.append(&caption);
         content.append(&v3::label("↖", &["tone-muted"]));
-        let suggestion = gtk::Button::builder().child(&content).css_classes(["v3-suggestion"]).build();
+        let suggestion = gtk::Button::builder()
+            .child(&content)
+            .css_classes(["v3-suggestion"])
+            .build();
         suggestion.set_size_request(460, -1);
         let weak = Rc::downgrade(&ui);
         suggestion.connect_clicked(move |_| {
@@ -484,7 +529,9 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Box) {
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     let weak = Rc::downgrade(ui);
     keys.connect_key_pressed(move |_, key, _, modifiers| {
-        let Some(ui) = weak.upgrade() else { return glib::Propagation::Proceed };
+        let Some(ui) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
         let plain_return = matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
             && !modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
         if plain_return {
@@ -494,7 +541,11 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Box) {
         glib::Propagation::Proceed
     });
     ui.composer.add_controller(keys);
-    for (button, action) in [(&ui.send, "send"), (&ui.stop, "cancel"), (&ui.clear, "clear")] {
+    for (button, action) in [
+        (&ui.send, "send"),
+        (&ui.stop, "cancel"),
+        (&ui.clear, "clear"),
+    ] {
         let weak = Rc::downgrade(ui);
         button.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
@@ -562,7 +613,8 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Box) {
                 EngineState::Exited => {
                     ui.state.borrow_mut().interrupted();
                     ui.set_busy(false);
-                    ui.status.set_label("Engine exited; the answer was interrupted.");
+                    ui.status
+                        .set_label("Engine exited; the answer was interrupted.");
                 }
                 _ => {}
             }

@@ -69,8 +69,9 @@ pub(super) struct CatalogUi {
 impl CatalogUi {
     pub(super) fn send(&self, slot: &str, request: CatalogRequest) {
         if slot == "mutation" {
-            *self.mutation_file_id.borrow_mut() =
-                request.file_id.or_else(|| request.chapter.as_ref().map(|c| c.file_id));
+            *self.mutation_file_id.borrow_mut() = request
+                .file_id
+                .or_else(|| request.chapter.as_ref().map(|c| c.file_id));
         }
         self.requests.borrow_mut().begin(slot, &request.request_id);
         if slot == "search" {
@@ -79,7 +80,9 @@ impl CatalogUi {
         let sent = self
             .engine
             .borrow_mut()
-            .send(CommandPayload::CatalogRequest(Box::new(CatalogRequestPayload { request })));
+            .send(CommandPayload::CatalogRequest(Box::new(
+                CatalogRequestPayload { request },
+            )));
         if let Err(e) = sent {
             self.requests.borrow_mut().clear();
             self.searching.set_visible(false);
@@ -101,7 +104,10 @@ impl CatalogUi {
     }
 
     pub(super) fn is_selected(&self, file_id: i64) -> bool {
-        self.selected.borrow().as_ref().is_some_and(|h| h.file_id == file_id)
+        self.selected
+            .borrow()
+            .as_ref()
+            .is_some_and(|h| h.file_id == file_id)
     }
 
     fn stream(&self) -> Option<gtk::MediaStream> {
@@ -156,8 +162,11 @@ impl CatalogUi {
         }
         self.video.set_media_stream(None::<&gtk::MediaStream>);
         self.timeline.set_playhead(None);
-        self.pending_seek.set(hit.start_seconds.filter(|s| *s > 0.0));
-        let playable = hit.kind != "page" && is_playable_media(&hit.path) && std::path::Path::new(&hit.path).is_file();
+        self.pending_seek
+            .set(hit.start_seconds.filter(|s| *s > 0.0));
+        let playable = hit.kind != "page"
+            && is_playable_media(&hit.path)
+            && std::path::Path::new(&hit.path).is_file();
         self.play_from_start.set_visible(playable);
         if playable {
             let media = gtk::MediaFile::for_filename(&hit.path);
@@ -168,7 +177,8 @@ impl CatalogUi {
                     return;
                 }
                 let duration = stream.duration() as f64 / 1_000_000.0;
-                ui.timeline.set_duration((duration > 0.0).then_some(duration));
+                ui.timeline
+                    .set_duration((duration > 0.0).then_some(duration));
                 if let Some(seconds) = ui.pending_seek.take() {
                     if stream.is_seekable() {
                         stream.seek((seconds * 1_000_000.0) as i64);
@@ -180,19 +190,25 @@ impl CatalogUi {
         } else if is_image(&hit.path) {
             self.picture.set_paintable(None::<&gtk::gdk::Texture>);
             self.media_stack.set_visible_child_name("image");
-            let rx = self.engine.borrow().request_preview(hit.path.clone(), 1600, false);
+            let rx = self
+                .engine
+                .borrow()
+                .request_preview(hit.path.clone(), 1600, false);
             let picture = self.picture.downgrade();
             glib::MainContext::default().spawn_local(async move {
-                if let (Ok(ThumbReply::Image(decoded)), Some(picture)) = (rx.recv().await, picture.upgrade()) {
+                if let (Ok(ThumbReply::Image(decoded)), Some(picture)) =
+                    (rx.recv().await, picture.upgrade())
+                {
                     picture.set_paintable(Some(&texture_from_decoded(decoded)));
                 }
             });
         } else {
-            self.unplayable.set_text(if std::path::Path::new(&hit.path).is_file() {
-                "FileID can't play this format here. Open it in its own app."
-            } else {
-                "This file is offline or has moved."
-            });
+            self.unplayable
+                .set_text(if std::path::Path::new(&hit.path).is_file() {
+                    "FileID can't play this format here. Open it in its own app."
+                } else {
+                    "This file is offline or has moved."
+                });
             self.media_stack.set_visible_child_name("unplayable");
         }
     }
@@ -210,7 +226,9 @@ impl CatalogUi {
         });
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let Ok(coverage) = rx.recv().await else { return };
+            let Ok(coverage) = rx.recv().await else {
+                return;
+            };
             let Some(ui) = weak.upgrade() else { return };
             if !ui.is_selected(file_id) {
                 return;
@@ -218,7 +236,10 @@ impl CatalogUi {
             ui.render_people(&coverage);
             let analyzed = !coverage.examined.is_empty();
             ui.timeline.set_coverage(coverage, analyzed);
-            let known = ui.stream().filter(|s| s.is_prepared()).map(|s| s.duration() as f64 / 1_000_000.0);
+            let known = ui
+                .stream()
+                .filter(|s| s.is_prepared())
+                .map(|s| s.duration() as f64 / 1_000_000.0);
             ui.timeline.set_duration(known);
         });
     }
@@ -231,7 +252,14 @@ impl CatalogUi {
             row.add_css_class("v3-row-pad");
             row.add_css_class("v3-soft-row");
             let dot = gtk::Box::builder()
-                .css_classes(["v3-dot", if person.reviewed { "tone-gold" } else { "tone-ai" }])
+                .css_classes([
+                    "v3-dot",
+                    if person.reviewed {
+                        "tone-gold"
+                    } else {
+                        "tone-ai"
+                    },
+                ])
                 .valign(gtk::Align::Center)
                 .build();
             row.append(&dot);
@@ -258,12 +286,23 @@ impl CatalogUi {
     }
 
     pub(super) fn render_chapters(self: &Rc<Self>, chapters: Vec<CatalogChapter>) {
-        let chapters: Vec<_> = chapters.into_iter().filter(|c| self.is_selected(c.file_id)).collect();
+        let chapters: Vec<_> = chapters
+            .into_iter()
+            .filter(|c| self.is_selected(c.file_id))
+            .collect();
         self.timeline.set_chapters(&chapters);
-        let known = self.stream().filter(|s| s.is_prepared()).map(|s| s.duration() as f64 / 1_000_000.0);
+        let known = self
+            .stream()
+            .filter(|s| s.is_prepared())
+            .map(|s| s.duration() as f64 / 1_000_000.0);
         self.timeline.set_duration(known);
-        self.chapter_panel.set_title(&format!("Chapters · {}", chapters.len()));
-        self.draft_note.set_visible(chapters.iter().any(|c| chapter_state(c) == ChapterState::Draft));
+        self.chapter_panel
+            .set_title(&format!("Chapters · {}", chapters.len()));
+        self.draft_note.set_visible(
+            chapters
+                .iter()
+                .any(|c| chapter_state(c) == ChapterState::Draft),
+        );
         let mut rows = Vec::new();
         for chapter in chapters {
             rows.push(self.chapter_row(chapter));
@@ -299,7 +338,11 @@ impl CatalogUi {
             text.append(&summary);
         }
         content.append(&text);
-        let play = gtk::Button::builder().child(&content).hexpand(true).css_classes(["v3-chapter-button"]).build();
+        let play = gtk::Button::builder()
+            .child(&content)
+            .hexpand(true)
+            .css_classes(["v3-chapter-button"])
+            .build();
         play.update_property(&[
             gtk::accessible::Property::Label(&format!(
                 "{}, at {}",
@@ -324,7 +367,10 @@ impl CatalogUi {
         };
         row.append(&v3::pill(pill_text, tone));
         if state == ChapterState::Draft {
-            let confidence = v3::mono(&format!("{}%", (chapter.confidence.clamp(0.0, 1.0) * 100.0).round()), "s11");
+            let confidence = v3::mono(
+                &format!("{}%", (chapter.confidence.clamp(0.0, 1.0) * 100.0).round()),
+                "s11",
+            );
             confidence.add_css_class("tone-muted");
             confidence.set_size_request(34, -1);
             row.append(&confidence);
@@ -333,7 +379,13 @@ impl CatalogUi {
             let draft = chapter.clone();
             accept.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.save_chapter(&draft, draft.start_seconds, draft.end_seconds, &draft.title, &draft.summary);
+                    ui.save_chapter(
+                        &draft,
+                        draft.start_seconds,
+                        draft.end_seconds,
+                        &draft.title,
+                        &draft.summary,
+                    );
                 }
             });
             row.append(&accept);
@@ -375,8 +427,13 @@ impl CatalogUi {
     fn mark_current_chapter(&self) {
         let playhead = self.playhead();
         for entry in self.chapter_rows.borrow().iter() {
-            let inside = playhead
-                .is_some_and(|t| t >= entry.chapter.start_seconds && t < entry.chapter.end_seconds.max(entry.chapter.start_seconds + 0.5));
+            let inside = playhead.is_some_and(|t| {
+                t >= entry.chapter.start_seconds
+                    && t < entry
+                        .chapter
+                        .end_seconds
+                        .max(entry.chapter.start_seconds + 0.5)
+            });
             if inside {
                 entry.row.add_css_class("v3-current");
                 entry.time.add_css_class("tone-gold");
@@ -387,7 +444,14 @@ impl CatalogUi {
         }
     }
 
-    fn save_chapter(&self, base: &CatalogChapter, start: f64, end: f64, title: &str, summary: &str) {
+    fn save_chapter(
+        &self,
+        base: &CatalogChapter,
+        start: f64,
+        end: f64,
+        title: &str,
+        summary: &str,
+    ) {
         if self.requests.borrow().busy("mutation") {
             return;
         }
@@ -430,7 +494,13 @@ impl CatalogUi {
             user_edited: true,
             stale: false,
         };
-        self.save_chapter(&base, self.start.value(), self.end.value(), &self.title.text(), &self.summary.text());
+        self.save_chapter(
+            &base,
+            self.start.value(),
+            self.end.value(),
+            &self.title.text(),
+            &self.summary.text(),
+        );
     }
 
     fn open_editor(&self, heading: &str, action: &str) {
@@ -442,7 +512,11 @@ impl CatalogUi {
     }
 
     fn update_save(&self) {
-        self.save.set_sensitive(editor_valid(&self.title.text(), self.start.value(), self.end.value()));
+        self.save.set_sensitive(editor_valid(
+            &self.title.text(),
+            self.start.value(),
+            self.end.value(),
+        ));
     }
 
     pub(super) fn reset_editor(&self) {
@@ -454,20 +528,36 @@ impl CatalogUi {
 
     fn tick(&self) {
         let playhead = self.playhead();
-        self.timeline.set_playhead(playhead.or(if self.stream().is_some() { None } else { self.timeline_hint() }));
+        self.timeline
+            .set_playhead(playhead.or(if self.stream().is_some() {
+                None
+            } else {
+                self.timeline_hint()
+            }));
         let duration = self.timeline.duration();
-        self.player_time.set_text(&format!("{} / {}", v3::timecode(playhead.unwrap_or(0.0)), v3::timecode(duration)));
+        self.player_time.set_text(&format!(
+            "{} / {}",
+            v3::timecode(playhead.unwrap_or(0.0)),
+            v3::timecode(duration)
+        ));
         self.mark_current_chapter();
     }
 
     fn timeline_hint(&self) -> Option<f64> {
-        self.selected.borrow().as_ref().and_then(|hit| hit.start_seconds)
+        self.selected
+            .borrow()
+            .as_ref()
+            .and_then(|hit| hit.start_seconds)
     }
 
     fn render_hits(self: &Rc<Self>, hits: Vec<CatalogHit>) {
         v3::clear(&self.hits);
         self.searching.set_visible(false);
-        self.result_count.set_text(&format!("{} result{}", hits.len(), if hits.len() == 1 { "" } else { "s" }));
+        self.result_count.set_text(&format!(
+            "{} result{}",
+            hits.len(),
+            if hits.len() == 1 { "" } else { "s" }
+        ));
         if hits.is_empty() {
             let empty = v3::meta("No matches.");
             empty.set_margin_start(14);
@@ -516,7 +606,10 @@ impl CatalogUi {
 
     fn render_jobs(self: &Rc<Self>, jobs: Vec<CatalogJob>) {
         v3::clear(&self.jobs);
-        let active = jobs.iter().filter(|j| matches!(j.state.as_str(), "running" | "queued" | "paused")).count();
+        let active = jobs
+            .iter()
+            .filter(|j| matches!(j.state.as_str(), "running" | "queued" | "paused"))
+            .count();
         v3::clear(&self.jobs_panel.trailing);
         self.jobs_panel.trailing.append(&v3::meta(&if active == 0 {
             "Idle".to_owned()
@@ -543,11 +636,21 @@ impl CatalogUi {
         head.append(&title);
         let (state, tone) = job_state(&job.state);
         head.append(&v3::label(state, &["v3-state", tone.css()]));
-        let percent = v3::mono(&format!("{:.0}%", job.progress.clamp(0.0, 1.0) * 100.0), "s115");
+        let percent = v3::mono(
+            &format!("{:.0}%", job.progress.clamp(0.0, 1.0) * 100.0),
+            "s115",
+        );
         head.append(&percent);
         row.append(&head);
-        let files = format!("{} file{}", job.file_ids.len(), if job.file_ids.len() == 1 { "" } else { "s" });
-        let detail = job.error.as_ref().map_or(files.clone(), |error| format!("{files} · {error}"));
+        let files = format!(
+            "{} file{}",
+            job.file_ids.len(),
+            if job.file_ids.len() == 1 { "" } else { "s" }
+        );
+        let detail = job
+            .error
+            .as_ref()
+            .map_or(files.clone(), |error| format!("{files} · {error}"));
         let detail = v3::wrapped(&detail, &["v3-meta"]);
         row.append(&detail);
         let bar = crate::shell::GrainBar::new(true);
@@ -587,7 +690,11 @@ fn children(container: &gtk::Box) -> Vec<gtk::Widget> {
 }
 
 fn hit_key(hit: &CatalogHit) -> String {
-    format!("hit-{}-{}", hit.file_id, hit.evidence_id.as_deref().unwrap_or(""))
+    format!(
+        "hit-{}-{}",
+        hit.file_id,
+        hit.evidence_id.as_deref().unwrap_or("")
+    )
 }
 
 fn is_image(path: &str) -> bool {
@@ -652,10 +759,14 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         .primary_icon_name("system-search-symbolic")
         .css_classes(["v3-field"])
         .build();
-    query.update_property(&[gtk::accessible::Property::Label("Search names, captions, chapters")]);
+    query.update_property(&[gtk::accessible::Property::Label(
+        "Search names, captions, chapters",
+    )]);
     top.append(&query);
     let mode = v3::Segmented::new(&["Keyword", "Hybrid"], 0);
-    mode.root.set_tooltip_text(Some("Hybrid adds a local CLIP query; nothing downloads here."));
+    mode.root.set_tooltip_text(Some(
+        "Hybrid adds a local CLIP query; nothing downloads here.",
+    ));
     top.append(&mode.root);
     let count_row = v3::hbox(8);
     let result_count = v3::meta("Search to find a moment");
@@ -700,8 +811,14 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     player_folder.set_ellipsize(gtk::pango::EllipsizeMode::Start);
     player_folder.add_css_class("tone-muted");
     player_body.append(&player_folder);
-    let video = gtk::Video::builder().autoplay(false).css_classes(["v3-black"]).build();
-    let picture = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).css_classes(["v3-black"]).build();
+    let video = gtk::Video::builder()
+        .autoplay(false)
+        .css_classes(["v3-black"])
+        .build();
+    let picture = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Contain)
+        .css_classes(["v3-black"])
+        .build();
     let unplayable_row = v3::hbox(10);
     unplayable_row.add_css_class("v3-unplayable");
     let unplayable = v3::wrapped("", &["v3-body", "tone-text2"]);
@@ -711,8 +828,17 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     unplayable_row.append(&open_unplayable);
     let media_stack = gtk::Stack::builder().vhomogeneous(false).build();
     let framed = |child: &gtk::Widget| -> gtk::Widget {
-        let frame = gtk::AspectFrame::builder().ratio(16.0 / 9.0).obey_child(false).child(child).build();
-        adw::Clamp::builder().maximum_size(604).child(&frame).halign(gtk::Align::Start).build().upcast()
+        let frame = gtk::AspectFrame::builder()
+            .ratio(16.0 / 9.0)
+            .obey_child(false)
+            .child(child)
+            .build();
+        adw::Clamp::builder()
+            .maximum_size(604)
+            .child(&frame)
+            .halign(gtk::Align::Start)
+            .build()
+            .upcast()
     };
     media_stack.add_named(&framed(video.upcast_ref()), Some("video"));
     media_stack.add_named(&framed(picture.upcast_ref()), Some("image"));
@@ -733,7 +859,9 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let depth = v3::Segmented::new(&["Quick samples", "Full moments"], 0);
     footer.append(&depth.root);
     let analyze = v3::primary("Analyze", true);
-    analyze.set_tooltip_text(Some("Needs a local visual model from Deep Analyze; nothing downloads automatically."));
+    analyze.set_tooltip_text(Some(
+        "Needs a local visual model from Deep Analyze; nothing downloads automatically.",
+    ));
     footer.append(&analyze);
     footer.append(&v3::spacer());
     let play_from_start = v3::secondary("Play from start", false);
@@ -786,15 +914,19 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     editor_box.append(&times);
     let editor = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .transition_duration(if crate::spring::animations_enabled() { 220 } else { 0 })
+        .transition_duration(if crate::spring::animations_enabled() {
+            220
+        } else {
+            0
+        })
         .child(&editor_box)
         .build();
     chapter_panel.body.append(&editor);
     let chapters = v3::vbox(0);
     chapter_panel.body.append(&chapters);
-    chapter_panel
-        .show_footer()
-        .append(&v3::meta("Chapters live in FileID's catalog. The video file is never changed."));
+    chapter_panel.show_footer().append(&v3::meta(
+        "Chapters live in FileID's catalog. The video file is never changed.",
+    ));
     detail.append(&chapter_panel.root);
 
     let people = v3::panel("People");
@@ -866,7 +998,17 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         pending_seek: Cell::new(None),
     });
     ui_slot.replace(Some(Rc::downgrade(&ui)));
-    wire(&ui, &analyze, &reveal, &open_unplayable, &undo, &add, &start_here, &end_here, &cancel);
+    wire(
+        &ui,
+        &analyze,
+        &reveal,
+        &open_unplayable,
+        &undo,
+        &add,
+        &start_here,
+        &end_here,
+        &cancel,
+    );
     subscribe(&ui);
     (root.upcast(), ui)
 }
@@ -895,9 +1037,18 @@ fn wire(
         if ui.requests.borrow().busy("timeline") {
             return;
         }
-        let Some(hit) = ui.selected.borrow().clone() else { return };
-        let mode = if ui.depth.selected() == 1 { "moments" } else { "sampled" };
-        ui.send("timeline", super::workbenches::timeline_request(vec![hit.file_id], mode));
+        let Some(hit) = ui.selected.borrow().clone() else {
+            return;
+        };
+        let mode = if ui.depth.selected() == 1 {
+            "moments"
+        } else {
+            "sampled"
+        };
+        ui.send(
+            "timeline",
+            super::workbenches::timeline_request(vec![hit.file_id], mode),
+        );
     });
     let weak = Rc::downgrade(ui);
     ui.play_from_start.connect_clicked(move |_| {
@@ -908,7 +1059,10 @@ fn wire(
     for (button, open) in [(reveal, false), (open_unplayable, true)] {
         let weak = Rc::downgrade(ui);
         button.connect_clicked(move |button| {
-            let Some(path) = weak.upgrade().and_then(|ui| ui.selected.borrow().as_ref().map(|h| h.path.clone())) else {
+            let Some(path) = weak
+                .upgrade()
+                .and_then(|ui| ui.selected.borrow().as_ref().map(|h| h.path.clone()))
+            else {
                 return;
             };
             if open {
@@ -991,7 +1145,9 @@ fn wire(
     let escape = gtk::EventControllerKey::new();
     let weak = Rc::downgrade(ui);
     escape.connect_key_pressed(move |_, key, _, _| {
-        let Some(ui) = weak.upgrade() else { return glib::Propagation::Proceed };
+        let Some(ui) = weak.upgrade() else {
+            return glib::Propagation::Proceed;
+        };
         if key == gtk::gdk::Key::Escape && ui.editor.reveals_child() {
             ui.reset_editor();
             return glib::Propagation::Stop;
@@ -1002,7 +1158,9 @@ fn wire(
 
     let weak = Rc::downgrade(ui);
     glib::timeout_add_local(Duration::from_millis(250), move || {
-        let Some(ui) = weak.upgrade() else { return glib::ControlFlow::Break };
+        let Some(ui) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
         if ui.root.is_mapped() && ui.selected.borrow().is_some() {
             ui.tick();
         }
@@ -1010,8 +1168,13 @@ fn wire(
     });
     let weak = Rc::downgrade(ui);
     glib::timeout_add_local(Duration::from_secs(2), move || {
-        let Some(ui) = weak.upgrade() else { return glib::ControlFlow::Break };
-        if ui.root.is_mapped() && ui.engine.borrow().is_ready() && !ui.requests.borrow().busy("jobs") {
+        let Some(ui) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if ui.root.is_mapped()
+            && ui.engine.borrow().is_ready()
+            && !ui.requests.borrow().busy("jobs")
+        {
             ui.send("jobs", catalog_request("jobs"));
         }
         glib::ControlFlow::Continue
@@ -1047,14 +1210,19 @@ fn run_search(ui: &Rc<CatalogUi>) {
     }
     let request = ui.hybrid.borrow_mut().begin(text.trim());
     let id = request.query_id.clone();
-    ui.search_notice.set_label("Waiting for a local CLIP query embedding…");
+    ui.search_notice
+        .set_label("Waiting for a local CLIP query embedding…");
     ui.search_notice.set_visible(true);
     ui.searching.set_visible(true);
-    let sent = ui.engine.borrow_mut().send(CommandPayload::EmbedTextQuery(request));
+    let sent = ui
+        .engine
+        .borrow_mut()
+        .send(CommandPayload::EmbedTextQuery(request));
     if let Err(e) = sent {
         let fallback = ui.hybrid.borrow_mut().timeout(&id);
         if let Some(r) = fallback {
-            ui.search_notice.set_label(&format!("Hybrid unavailable: {e}. Using keyword search."));
+            ui.search_notice
+                .set_label(&format!("Hybrid unavailable: {e}. Using keyword search."));
             ui.send("search", r);
         }
         return;
@@ -1151,9 +1319,18 @@ mod tests {
 
     #[test]
     fn result_meta_names_the_evidence() {
-        assert_eq!(hit_kind(&hit("chapter", Some(3.0), None)), ("Chapter", false));
-        assert_eq!(hit_kind(&hit("sampledFrame", Some(3.0), None)), ("Sampled frame, unverified", true));
-        assert_eq!(hit_kind(&hit("passage", None, Some(2))).0, "Text in document");
+        assert_eq!(
+            hit_kind(&hit("chapter", Some(3.0), None)),
+            ("Chapter", false)
+        );
+        assert_eq!(
+            hit_kind(&hit("sampledFrame", Some(3.0), None)),
+            ("Sampled frame, unverified", true)
+        );
+        assert_eq!(
+            hit_kind(&hit("passage", None, Some(2))).0,
+            "Text in document"
+        );
         assert_eq!(hit_kind(&hit("passage", Some(30.0), None)).0, "Passage");
         assert_eq!(hit_kind(&hit("passage", None, None)).0, "Text in image");
     }
