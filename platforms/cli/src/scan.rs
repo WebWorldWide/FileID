@@ -25,9 +25,10 @@ use fileid_engine::pipeline::discovery::FileKind;
 use rusqlite::{params, OptionalExtension as _};
 use walkdir::WalkDir;
 
-use crate::context::{
-    canonical_path_text, display_path, print_json, stable_path_hash, terminal_text, Ctx,
-};
+use fileid_engine::pipeline::dbwriter::nfc_path_search;
+use fileid_engine::util::path_safety::{stable_path_hash, strip_extended_length};
+
+use crate::context::{display_path, print_json, terminal_text, Ctx};
 
 const TEXT_CAP_BYTES: u64 = 4 * 1024 * 1024;
 const DB_BATCH_SIZE: usize = 500;
@@ -35,11 +36,12 @@ const DB_BATCH_SIZE: usize = 500;
 const UPSERT_SQL: &str = "\
 INSERT INTO files (
     path_text, path_hash, size_bytes, created_at, modified_at, scanned_at,
-    kind, extension, has_text, file_ref
+    kind, extension, has_text, file_ref, path_search
 )
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?12)
 ON CONFLICT(path_text) DO UPDATE SET
     path_hash    = excluded.path_hash,
+    path_search  = excluded.path_search,
     size_bytes   = excluded.size_bytes,
     created_at   = COALESCE(excluded.created_at, files.created_at),
     modified_at  = excluded.modified_at,
@@ -77,6 +79,13 @@ enum ScanRecord {
     },
 }
 
+/// The stored `path_text` for a walked path. The walk starts at a canonical
+/// root and never follows links, so only the Windows `\\?\` prefix needs
+/// removing — no per-file `realpath`.
+fn stored_path(path: &Path) -> String {
+    strip_extended_length(path).to_string_lossy().into_owned()
+}
+
 fn prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut bytes = prefix.as_bytes().to_vec();
     for index in (0..bytes.len()).rev() {
@@ -94,7 +103,7 @@ fn mark_existing_row_failed(
     path: &Path,
     message: &str,
 ) -> Result<usize> {
-    let path_text = canonical_path_text(path);
+    let path_text = stored_path(path);
     conn.execute(
         "UPDATE files SET failed = 1, error_message = ?2 WHERE path_text = ?1",
         params![path_text, message],
@@ -107,9 +116,7 @@ fn soft_hide_missing_rows(
     root: &Path,
     scan_marker: f64,
 ) -> Result<u64> {
-    let mut lower = canonical_path_text(root)
-        .trim_end_matches(['/', '\\'])
-        .to_string();
+    let mut lower = stored_path(root).trim_end_matches(['/', '\\']).to_string();
     lower.push(std::path::MAIN_SEPARATOR);
     let Some(upper) = prefix_upper_bound(&lower) else {
         return Ok(0);
@@ -152,8 +159,8 @@ fn commit_batch(
     {
         let mut mark_seen = tx
             .prepare(
-                "UPDATE files SET scanned_at = ?1, file_ref = ?2, failed = 0, error_message = NULL \
-                 WHERE path_text = ?3",
+                "UPDATE files SET scanned_at = ?1, file_ref = ?2, failed = 0, error_message = NULL, \
+                 path_hash = ?4, path_search = ?5 WHERE path_text = ?3",
             )
             .context("prepare unchanged-row update")?;
         let mut upsert = tx.prepare(UPSERT_SQL).context("prepare files upsert")?;
@@ -200,7 +207,9 @@ fn commit_batch(
                         .execute(params![
                             scan_marker,
                             file_ref.map(|value| value as i64),
-                            path_text
+                            path_text,
+                            stable_path_hash(&path_text),
+                            nfc_path_search(&path_text)
                         ])
                         .context("mark unchanged file as seen")?;
                 }
@@ -230,7 +239,8 @@ fn commit_batch(
                                 extension,
                                 i64::from(text.is_some()),
                                 file_ref.map(|value| value as i64),
-                                i64::from(authoritative_text)
+                                i64::from(authoritative_text),
+                                nfc_path_search(&path_text)
                             ],
                             |row| row.get(0),
                         )
@@ -354,9 +364,9 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             batch.push(ScanRecord::Zero(ZeroByteObservation {
                 // The engine keys the row by `observation.path.to_string_lossy()`
                 // verbatim, so this must be the SAME stripped form we store as
-                // `path_text` (canonical_path_text) — not the raw `\\?\` walk
+                // `path_text` (stored_path) — not the raw `\\?\` walk
                 // path, which would miss the existing row and leave stale content.
-                path: std::path::PathBuf::from(canonical_path_text(path)),
+                path: std::path::PathBuf::from(stored_path(path)),
                 file_ref: fileid_engine::platform::file_ref(path),
             }));
             // Respect the same batch-flush bound as the main path so a tree of
@@ -390,7 +400,7 @@ pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
             .unwrap_or("")
             .to_ascii_lowercase();
         let kind = FileKind::from_extension(&extension);
-        let path_text = canonical_path_text(path);
+        let path_text = stored_path(path);
         let path_hash = stable_path_hash(&path_text);
         let modified = system_time_to_unix(meta.modified().ok());
         let created = system_time_to_unix(meta.created().ok());
@@ -674,6 +684,12 @@ mod tests {
     );
     type ZeroDormantState = (i64, i64, i64, Option<i64>, Option<Vec<u8>>, Option<String>);
 
+    /// `path_text` the scan stores for a test path under the (symlinked on
+    /// macOS) temp dir.
+    fn stored_path(path: &Path) -> String {
+        super::stored_path(&std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    }
+
     fn test_layout(name: &str) -> (PathBuf, PathBuf, Ctx) {
         let temp = std::env::temp_dir().join(format!(
             "fileid-cli-scan-{name}-{}-{}",
@@ -692,6 +708,52 @@ mod tests {
             db_explicit: true,
         };
         (temp, root, ctx)
+    }
+
+    /// A CLI scan must key rows exactly like the engine: an app rescan after a
+    /// CLI scan otherwise misses every row whose `path_hash` differs (on Linux,
+    /// any path with an uppercase letter) and marks it failed. `path_search`
+    /// must carry the NFC form the app's search queries.
+    #[test]
+    fn scan_keys_rows_like_the_engine_and_heals_older_rows() {
+        let (temp, root, ctx) = test_layout("engine-keys");
+        let path = root.join("Mixed CASE Cafe\u{301}.TXT");
+        std::fs::write(&path, "hello").unwrap();
+        let read = || {
+            let conn = fileid_engine::db::open_read(&ctx.db).unwrap();
+            conn.query_row(
+                "SELECT path_text, path_hash, path_search FROM files",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        let expect_engine_keys = |(text, hash, search): (String, i64, Option<String>)| {
+            assert_eq!(text, stored_path(&path));
+            assert_eq!(hash, stable_path_hash(&text));
+            assert_eq!(search.as_deref(), Some(nfc_path_search(&text).as_str()));
+            assert!(search.unwrap().contains("Caf\u{e9}"));
+            if cfg!(target_os = "linux") {
+                assert_ne!(hash, stable_path_hash(&text.to_ascii_lowercase()));
+            }
+        };
+
+        run(&ctx, &root, false).unwrap();
+        expect_engine_keys(read());
+
+        fileid_engine::db::open_writer(&ctx.db)
+            .unwrap()
+            .execute("UPDATE files SET path_hash = 0, path_search = NULL", [])
+            .unwrap();
+        run(&ctx, &root, false).unwrap();
+        expect_engine_keys(read());
+        std::fs::remove_dir_all(temp).ok();
     }
 
     #[test]
@@ -717,14 +779,14 @@ mod tests {
                     modified,
                     modified + 100.0,
                     old_ref as i64,
-                    canonical_path_text(&path)
+                    stored_path(&path)
                 ],
             )
             .unwrap();
             let file_id: i64 = conn
                 .query_row(
                     "SELECT id FROM files WHERE path_text = ?1",
-                    params![canonical_path_text(&path)],
+                    params![stored_path(&path)],
                     |row| row.get(0),
                 )
                 .unwrap();
@@ -766,7 +828,7 @@ mod tests {
             .query_row(
                 "SELECT f.file_ref, d.text FROM files f \
                  JOIN doc_text d ON d.file_id = f.id WHERE f.path_text = ?1",
-                params![canonical_path_text(&path)],
+                params![stored_path(&path)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
@@ -781,7 +843,7 @@ mod tests {
                  (SELECT COUNT(*) FROM clip_embeddings WHERE file_id = files.id), \
                  (SELECT COUNT(*) FROM text_embeddings WHERE file_id = files.id) \
                  FROM files WHERE path_text = ?1",
-                params![canonical_path_text(&path)],
+                params![stored_path(&path)],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -808,7 +870,7 @@ mod tests {
                      JOIN files f ON f.id = t.file_id WHERE f.path_text = ?1 ORDER BY t.tag",
                 )
                 .unwrap();
-            stmt.query_map(params![canonical_path_text(&path)], |row| {
+            stmt.query_map(params![stored_path(&path)], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
             .unwrap()
@@ -837,7 +899,7 @@ mod tests {
             original_id = conn
                 .query_row(
                     "SELECT id FROM files WHERE path_text = ?1",
-                    params![canonical_path_text(&path)],
+                    params![stored_path(&path)],
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap();
@@ -896,7 +958,7 @@ mod tests {
                 .query_row(
                     "SELECT id, size_bytes, failed, phash, content_hash, vlm_description \
                      FROM files WHERE path_text = ?1",
-                    params![canonical_path_text(&path)],
+                    params![stored_path(&path)],
                     |row| {
                         Ok((
                             row.get(0)?,
@@ -967,7 +1029,7 @@ mod tests {
             .query_row(
                 "SELECT f.id, f.size_bytes, f.failed, d.text FROM files f \
                  JOIN doc_text d ON d.file_id = f.id WHERE f.path_text = ?1",
-                params![canonical_path_text(&path)],
+                params![stored_path(&path)],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
@@ -989,7 +1051,7 @@ mod tests {
         conn.execute(
             "INSERT INTO files(path_text, path_hash, size_bytes, scanned_at, kind, extension) \
              VALUES (?1, 1, 20, 1, 'doc', 'txt')",
-            params![canonical_path_text(&path)],
+            params![stored_path(&path)],
         )
         .unwrap();
         std::fs::write(&path, "grew after discovery").unwrap();
@@ -1022,7 +1084,7 @@ mod tests {
         conn.execute(
             "INSERT INTO files(id, path_text, path_hash, size_bytes, scanned_at, kind, extension) \
              VALUES (1, ?1, 1, 20, 1, 'doc', 'txt'), (2, ?2, 2, 7, 1, 'doc', 'txt')",
-            params![canonical_path_text(&zero), canonical_path_text(&regular)],
+            params![stored_path(&zero), stored_path(&regular)],
         )
         .unwrap();
         conn.execute(
@@ -1041,7 +1103,7 @@ mod tests {
                 file_ref: fileid_engine::platform::file_ref(&zero),
             }),
             ScanRecord::Seen {
-                path_text: canonical_path_text(&regular),
+                path_text: stored_path(&regular),
                 file_ref: fileid_engine::platform::file_ref(&regular),
             },
         ];
@@ -1091,7 +1153,7 @@ mod tests {
         let removed = root.join("removed.txt");
         std::fs::write(&kept, "kept").unwrap();
         std::fs::write(&removed, "removed").unwrap();
-        let removed_key = canonical_path_text(&removed);
+        let removed_key = stored_path(&removed);
         run(&ctx, &root, false).unwrap();
         std::fs::remove_file(&removed).unwrap();
         run(&ctx, &root, false).unwrap();
@@ -1107,7 +1169,7 @@ mod tests {
         let active: i64 = conn
             .query_row(
                 "SELECT failed FROM files WHERE path_text = ?1",
-                params![canonical_path_text(&kept)],
+                params![stored_path(&kept)],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1126,7 +1188,7 @@ mod tests {
             let conn = fileid_engine::db::open_writer(&ctx.db).unwrap();
             conn.execute(
                 "UPDATE files SET failed = 1, error_message = 'missing' WHERE path_text = ?1",
-                params![canonical_path_text(&path)],
+                params![stored_path(&path)],
             )
             .unwrap();
         }
@@ -1135,7 +1197,7 @@ mod tests {
         let state: (i64, Option<String>) = conn
             .query_row(
                 "SELECT failed, error_message FROM files WHERE path_text = ?1",
-                params![canonical_path_text(&path)],
+                params![stored_path(&path)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
@@ -1191,7 +1253,7 @@ mod tests {
             .query_row(
                 "SELECT files.failed, doc_text.text FROM files \
                  JOIN doc_text ON doc_text.file_id = files.id WHERE files.path_text = ?1",
-                params![canonical_path_text(&path)],
+                params![stored_path(&path)],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
