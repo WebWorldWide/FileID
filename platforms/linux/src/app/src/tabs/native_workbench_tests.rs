@@ -123,7 +123,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     }
     let engine = Rc::new(RefCell::new(EngineClient::new()));
     let catalog = workbenches::catalog(engine.clone());
-    let tools = workbenches::tools(engine.clone());
+    let (tools, tools_ui) = super::file_tools::build_tools(engine.clone());
     let chat = workbenches::chat(engine.clone());
     let deep = deep_analyze::build_deep_analyze_tab(engine.clone());
     let restructure = restructure::build_restructure_tab(engine.clone());
@@ -145,7 +145,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     window.present();
     EngineClient::start(&engine);
     wait(|| engine.borrow().is_ready());
-    wait(|| button(&tools, "Preview").is_sensitive());
+    wait(|| !tools_ui.state.borrow().capabilities.is_empty());
 
     let query = entry(&catalog, "Search names, captions, chapters");
     query.set_text("photo-fixture");
@@ -211,10 +211,15 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
 
     stack.set_visible_child_name("tools");
-    entry(&tools, "Catalog file IDs, comma separated (up to 100)").set_text("1");
-    entry(&tools, "Existing absolute output folder").set_text(destination.to_str().unwrap());
+    tools_ui.use_destination(destination.to_str().unwrap());
+    let first_check = |root: &gtk::Widget| {
+        descendants(root).into_iter().find_map(|w| w.downcast::<gtk::CheckButton>().ok())
+    };
+    wait(|| first_check(&tools).is_some());
+    first_check(&tools).unwrap().set_active(true);
+    wait(|| button(&tools, "Preview").is_sensitive());
     button(&tools, "Preview").emit_clicked();
-    wait(|| button(&tools, "Execute preview").is_sensitive());
+    wait(|| button(&tools, "Export").is_sensitive());
     assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
     let dimension = descendants(&tools)
         .into_iter()
@@ -222,51 +227,45 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .next()
         .unwrap();
     dimension.set_value(1024.0);
-    assert!(!button(&tools, "Execute preview").is_sensitive());
+    assert!(!button(&tools, "Export").is_sensitive());
     button(&tools, "Preview").emit_clicked();
-    wait(|| button(&tools, "Execute preview").is_sensitive());
-    button(&tools, "Execute preview").emit_clicked();
+    wait(|| button(&tools, "Export").is_sensitive());
+    button(&tools, "Export").emit_clicked();
     wait(|| text(&tools).contains("Export complete"));
     let photo_export = destination.join("photo-fixture - Export.png");
     assert!(photo_export.is_file());
     assert_eq!(std::fs::read(&source).unwrap(), png);
-    button(&tools, "Last export").emit_clicked();
-    wait(|| text(&tools).contains("Last export operation"));
-    let photo_receipts = text(&tools);
-    button(&tools, "Undo last export").emit_clicked();
+    button(&tools, "Show last export").emit_clicked();
+    wait(|| text(&tools).contains("photo-fixture - Export.png"));
+    button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
         wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
         assert!(!photo_export.exists());
-        assert!(text(&tools).contains("Recoverable at"));
     } else {
-        assert!(!button(&tools, "Undo last export").is_sensitive());
-        assert!(text(&tools).contains("Export Undo unavailable"));
+        assert!(!button(&tools, "Undo").is_sensitive());
         assert!(photo_export.is_file());
-        assert!(photo_receipts.contains(photo_export.to_str().unwrap()));
-        assert!(text(&tools).contains(photo_export.to_str().unwrap()));
     }
     assert_eq!(std::fs::read(&source).unwrap(), png);
-    let dropdowns = descendants(&tools)
-        .into_iter()
-        .filter_map(|w| w.downcast::<gtk::DropDown>().ok())
-        .collect::<Vec<_>>();
-    dropdowns[0].set_selected(1);
-    dropdowns[1].set_selected(3);
+    button(&tools, "Chapters").emit_clicked();
+    button(&tools, "JSON").emit_clicked();
+    wait(|| first_check(&tools).is_some());
+    first_check(&tools).unwrap().set_active(true);
+    wait(|| button(&tools, "Preview").is_sensitive());
     button(&tools, "Preview").emit_clicked();
-    wait(|| button(&tools, "Execute preview").is_sensitive());
-    button(&tools, "Execute preview").emit_clicked();
+    wait(|| button(&tools, "Export").is_sensitive());
+    button(&tools, "Export").emit_clicked();
     wait(|| text(&tools).contains("Export complete"));
     let chapter_export = destination.join("photo-fixture - Chapters.json");
     assert!(std::fs::read_to_string(&chapter_export)
         .unwrap()
         .contains("Reviewed marker"));
-    button(&tools, "Undo last export").emit_clicked();
+    button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
         wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
         assert!(!chapter_export.exists());
     } else {
         assert!(chapter_export.is_file());
-        assert!(!button(&tools, "Undo last export").is_sensitive());
+        assert!(!button(&tools, "Undo").is_sensitive());
     }
     let preserved_files = count(&read, "files");
 

@@ -3,6 +3,7 @@
 mod chat;
 pub mod cleanup;
 pub mod deep_analyze;
+mod file_tools;
 pub mod library;
 mod library_pane;
 mod model_catalog;

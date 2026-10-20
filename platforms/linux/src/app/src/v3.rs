@@ -125,6 +125,19 @@ pub fn number_field(min: f64, max: f64, step: f64, digits: u32) -> gtk::SpinButt
     field
 }
 
+/// Labelled switch row, at least 28 tall.
+pub fn toggle_row(text: &str) -> (gtk::Box, gtk::Switch) {
+    let row = hbox(10);
+    row.add_css_class("v3-toggle-row");
+    let switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
+    switch.update_property(&[gtk::accessible::Property::Label(text)]);
+    let caption = label(text, &["v3-body"]);
+    caption.set_hexpand(true);
+    row.append(&caption);
+    row.append(&switch);
+    (row, switch)
+}
+
 /// Dashed empty-state notice: serif title and a subtitle.
 pub fn dashed_notice(title: &str, subtitle: &str) -> gtk::Box {
     let notice = vbox(6);
@@ -295,6 +308,10 @@ impl Segmented {
 
     pub fn selected(&self) -> usize {
         self.selected.get()
+    }
+
+    pub fn connect_changed(&self, handler: impl Fn(usize) + 'static) {
+        self.handlers.borrow_mut().push(Rc::new(handler));
     }
 
     /// Changes the selection; `notify` runs the change handlers.

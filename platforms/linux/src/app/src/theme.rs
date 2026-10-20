@@ -678,6 +678,8 @@ button.v3-mono-button { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sa
 .v3-role { font-size: 11.5px; font-weight: 600; }
 .v3-message-body { font-size: 13.5px; color: @fileid_text1; }
 .v3-citations { margin-left: 12px; }
+.v3-output-label { font-size: 12.5px; font-weight: 500; color: @fileid_text2; }
+.v3-state-115 { font-size: 11.5px; font-weight: 600; }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
