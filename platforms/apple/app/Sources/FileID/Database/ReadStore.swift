@@ -459,8 +459,7 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? []
         var seen = Set<String>()
         return rows.compactMap { row in
-            let name = Self.personTagName(title: row["title"], first: row["first_name"], middle: row["middle_name"],
-                                          last: row["last_name"], suffix: row["suffix"], legacy: row["name"])
+            let name = Self.personTagName(row: row)
             return name.isEmpty || !seen.insert(name.lowercased()).inserted ? nil : name
         }
     }
@@ -810,33 +809,26 @@ public final class ReadStore: @unchecked Sendable {
         public let fileCount: Int
         public let faceCount: Int
 
-        /// Structured name → legacy `name` → "Person <id>".
+        /// The name a file is tagged with: structured parts, else the legacy
+        /// `name`; empty when the person has no name.
+        public var tagName: String {
+            ReadStore.personTagName(title: title, first: firstName, middle: middleName,
+                                    last: lastName, suffix: suffix, legacy: name)
+        }
+
         public var displayName: String {
             if isUnknown { return "Unknown" }
-            var parts: [String] = []
-            if let t = title?.trimmingCharacters(in: .whitespaces), !t.isEmpty { parts.append(t) }
-            if let f = firstName?.trimmingCharacters(in: .whitespaces), !f.isEmpty { parts.append(f) }
-            if let m = middleName?.trimmingCharacters(in: .whitespaces), !m.isEmpty { parts.append(m) }
-            if let l = lastName?.trimmingCharacters(in: .whitespaces), !l.isEmpty { parts.append(l) }
-            if let s = suffix?.trimmingCharacters(in: .whitespaces), !s.isEmpty {
-                parts.append(s)
-            }
-            if !parts.isEmpty { return parts.joined(separator: " ") }
-            if let n = name, !n.isEmpty { return n }
-            return "Person \(id)"
+            let tag = tagName
+            return tag.isEmpty ? "Person \(id)" : tag
         }
 
         /// True when any name component is set or the person is marked Unknown.
-        public var hasAnyName: Bool {
-            if isUnknown { return true }
-            let parts = [title, firstName, middleName, lastName, suffix, name]
-            return parts.contains { !($0?.trimmingCharacters(in: .whitespaces).isEmpty ?? true) }
-        }
+        public var hasAnyName: Bool { isUnknown || !tagName.isEmpty }
     }
 
     public func persons(includeUnknown: Bool = false) -> [PersonRow] {
         guard let q = queue else { return [] }
-        let visible = "EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR COALESCE(p.is_unknown,0)=1 OR length(trim(COALESCE(p.name,'') || COALESCE(p.title,'') || COALESCE(p.first_name,'') || COALESCE(p.middle_name,'') || COALESCE(p.last_name,'') || COALESCE(p.suffix,'')))>0"
+        let visible = "EXISTS(SELECT 1 FROM face_prints visible_face WHERE visible_face.person_id=p.id) OR COALESCE(p.is_unknown,0)=1 OR \(Self.personHasNameSQL("p."))"
         let where_ = "WHERE (\(visible))" + (includeUnknown ? "" : " AND IFNULL(p.is_unknown,0)=0")
         do {
             return try q.read { db in
@@ -903,10 +895,7 @@ public final class ReadStore: @unchecked Sendable {
         return (try? q.read { db in
             try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM persons
-                WHERE IFNULL(is_unknown, 0) = 0
-                  AND TRIM(COALESCE(name, '') || COALESCE(title, '') ||
-                           COALESCE(first_name, '') || COALESCE(middle_name, '') ||
-                           COALESCE(last_name, '') || COALESCE(suffix, '')) <> ''
+                WHERE IFNULL(is_unknown, 0) = 0 AND \(Self.personHasNameSQL())
             """) ?? 0
         }) ?? 0
     }
@@ -1131,10 +1120,9 @@ public final class ReadStore: @unchecked Sendable {
                 // already passes the named cluster as `target`, so this is a no-op for
                 // them. (People drag-merge name loss)
                 let allIDs = [target] + validSources
-                let hasTypedName = "(COALESCE(TRIM(name),'')<>'' OR COALESCE(TRIM(title),'')<>'' OR COALESCE(TRIM(first_name),'')<>'' OR COALESCE(TRIM(middle_name),'')<>'' OR COALESCE(TRIM(last_name),'')<>'' OR COALESCE(TRIM(suffix),'')<>'')"
                 let idPlaceholders = allIDs.map { _ in "?" }.joined(separator: ",")
                 let named: Set<Int64> = Set(try Int64.fetchAll(db, sql:
-                    "SELECT id FROM persons WHERE id IN (\(idPlaceholders)) AND is_unknown = 0 AND \(hasTypedName)",
+                    "SELECT id FROM persons WHERE id IN (\(idPlaceholders)) AND is_unknown = 0 AND \(Self.personHasNameSQL())",
                     arguments: StatementArguments(allIDs.map { Int($0) })))
                 let survivor: Int64
                 if named.contains(target) {
@@ -1213,11 +1201,7 @@ public final class ReadStore: @unchecked Sendable {
                     if (r["is_unknown"] as Int? ?? 0) != 0 {
                         isNamed[id] = false
                     } else {
-                        let cols = ["name", "title", "first_name",
-                                    "middle_name", "last_name", "suffix"]
-                        isNamed[id] = cols.contains {
-                            (r[$0] as String?)?.trimmingCharacters(in: .whitespaces).isEmpty == false
-                        }
+                        isNamed[id] = !Self.personTagName(row: r).isEmpty
                     }
                 }
             }
@@ -1396,16 +1380,9 @@ public final class ReadStore: @unchecked Sendable {
         }
     }
 
-    /// Item 5: the person's name for file tagging — the non-empty
-    /// [title, first, middle, last, suffix] joined by single spaces, else the
-    /// legacy `name`. Byte-faithful with the Windows `ReadStore.FormatPersonTagName`
-    /// so a person is tagged IDENTICALLY on both platforms. (Deliberately NOT
-    /// `PersonRow.displayName`, which has a suffix double-space quirk and a
-    /// "Person N" fallback that must never become a file tag.)
-    static func personTagName(_ p: PersonRow) -> String {
-        personTagName(title: p.title, first: p.firstName, middle: p.middleName,
-                      last: p.lastName, suffix: p.suffix, legacy: p.name)
-    }
+    /// The non-empty [title, first, middle, last, suffix] joined by single
+    /// spaces, else the legacy `name`. Byte-faithful with the Windows
+    /// `ReadStore.FormatPersonTagName` so a person is tagged identically on both.
 
     static func personTagName(title: String?, first: String?, middle: String?,
                               last: String?, suffix: String?, legacy: String?) -> String {
@@ -1414,6 +1391,17 @@ public final class ReadStore: @unchecked Sendable {
             .filter { !$0.isEmpty }
         if !parts.isEmpty { return parts.joined(separator: " ") }
         return (legacy ?? "").trimmingCharacters(in: .whitespaces)
+    }
+
+    /// SQL twin of a non-empty `personTagName`.
+    static func personHasNameSQL(_ prefix: String = "") -> String {
+        let columns = ["name", "title", "first_name", "middle_name", "last_name", "suffix"]
+        return "TRIM(" + columns.map { "COALESCE(\(prefix)\($0),'')" }.joined(separator: " || ") + ") <> ''"
+    }
+
+    static func personTagName(row: Row) -> String {
+        personTagName(title: row["title"], first: row["first_name"], middle: row["middle_name"],
+                      last: row["last_name"], suffix: row["suffix"], legacy: row["name"])
     }
 
     /// Item 5: (url, names) for every file containing ≥1 NAMED person, so the
@@ -1437,9 +1425,7 @@ public final class ReadStore: @unchecked Sendable {
                 var order: [String] = []
                 for r in rows {
                     guard let path: String = r["path"] else { continue }
-                    let name = Self.personTagName(
-                        title: r["title"], first: r["first_name"], middle: r["middle_name"],
-                        last: r["last_name"], suffix: r["suffix"], legacy: r["name"])
+                    let name = Self.personTagName(row: r)
                     guard !name.isEmpty else { continue }
                     if byPath[path] == nil { order.append(path) }
                     if !(byPath[path]?.contains(name) ?? false) {

@@ -757,7 +757,7 @@ struct RestructureView: View {
         let hiddenCount = unlimited ? 0 : max(0, g.proposals.count - cap)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: bucketIcon(g.bucket))
+                Image(systemName: bucketIconName(g.bucket))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.gold)
                     .frame(width: 20, alignment: .center)
@@ -863,8 +863,6 @@ struct RestructureView: View {
             EmptyView()
         }
     }
-
-    private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
     // MARK: - Engine-routed plan + apply
 

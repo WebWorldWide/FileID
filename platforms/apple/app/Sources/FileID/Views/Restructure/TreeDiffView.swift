@@ -287,7 +287,7 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(tint))
-            Image(systemName: bucketIcon(row.bucket))
+            Image(systemName: bucketIconName(row.bucket))
                 .font(Theme.Font.body(11))
                 .foregroundStyle(tint)
             Text(row.bucket)
@@ -330,6 +330,4 @@ struct TreeDiffView: View {
             return "Reorganize — all \(row.totalFiles) file\(row.totalFiles == 1 ? "" : "s") moving."
         }
     }
-
-    private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 }

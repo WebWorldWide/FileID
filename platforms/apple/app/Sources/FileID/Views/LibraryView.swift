@@ -998,12 +998,7 @@ private struct FilePreviewSheet: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 20) {
                 infoSection("Details") {
-                    detail("Kind", file.kind.capitalized + " · " + file.extension.uppercased())
-                    if let date = file.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
-                    detail("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
-                    if let camera = file.cameraModel, !camera.isEmpty { detail("Camera", camera) }
-                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
-                    if let lat = file.locationLat, let lon = file.locationLon { detail("Location", String(format: "%.4f, %.4f", lat, lon)) }
+                    FileDetailRows(file: file, people: people)
                 }
                 if let caption = file.vlmDescription, !caption.isEmpty {
                     infoSection("Description") {
@@ -1061,10 +1056,10 @@ private struct FilePreviewSheet: View {
                 FinderTagsEditor(file: file, store: store, isFocused: $tagFieldFocused, onEdit: onEdit)
                 DisclosureGroup {
                     VStack(spacing: 0) {
-                        detail("Path", file.pathText)
-                        if file.hasText { detail("Text", "Detected (OCR)") }
-                        if let phash = file.phash { detail("pHash", String(phash, radix: 16)) }
-                        if let aesthetic = file.aesthetic { detail("Aesthetic", String(format: "%.2f", aesthetic)) }
+                        DetailRow("Path", file.pathText)
+                        if file.hasText { DetailRow("Text", "Detected (OCR)") }
+                        if let phash = file.phash { DetailRow("pHash", String(phash, radix: 16)) }
+                        if let aesthetic = file.aesthetic { DetailRow("Aesthetic", String(format: "%.2f", aesthetic)) }
                     }
                     .padding(.top, 6)
                 } label: {
@@ -1083,7 +1078,13 @@ private struct FilePreviewSheet: View {
         }
     }
 
-    private func detail(_ key: String, _ value: String) -> some View {
+}
+
+private struct DetailRow: View {
+    let key: String
+    let value: String
+    init(_ key: String, _ value: String) { self.key = key; self.value = value }
+    var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
             Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
@@ -1091,6 +1092,19 @@ private struct FilePreviewSheet: View {
         }
         .padding(.vertical, 5)
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+    }
+}
+
+private struct FileDetailRows: View {
+    let file: FileRow
+    let people: [String]
+    var body: some View {
+        DetailRow("Kind", file.kind.capitalized + " · " + file.extension.uppercased())
+        if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
+        DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
+        if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }
+        if !people.isEmpty { DetailRow("People", people.joined(separator: ", ")) }
+        if let lat = file.locationLat, let lon = file.locationLon { DetailRow("Location", String(format: "%.4f, %.4f", lat, lon)) }
     }
 }
 
@@ -1296,10 +1310,9 @@ private struct InlineMediaPlayer: View {
             player?.pause()
             player = nil
             failed = false
-            let asset = AVURLAsset(url: url)
-            let playable = (try? await asset.load(.isPlayable)) ?? false
+            let asset = await MediaPlayback.playableAsset(url)
             guard !Task.isCancelled else { return }
-            if playable { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) } else { failed = true }
+            if let asset { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) } else { failed = true }
         }
         .onDisappear { player?.pause() }
     }
@@ -1466,11 +1479,7 @@ private struct LibrarySelectedPane: View {
                 }
 
                 VStack(spacing: 0) {
-                    detail("Kind", row.kind.capitalized + " · " + row.extension.uppercased())
-                    if let date = row.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
-                    detail("Size", ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file))
-                    if let camera = row.cameraModel, !camera.isEmpty { detail("Camera", camera) }
-                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
+                    FileDetailRows(file: row, people: people)
                 }
 
                 if let caption = row.vlmDescription, !caption.isEmpty {
@@ -1527,15 +1536,5 @@ private struct LibrarySelectedPane: View {
             guard !Task.isCancelled else { return }
             thumbnail = image
         }
-    }
-
-    private func detail(_ key: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
-            Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(2).textSelection(.enabled)
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 6)
-        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 }
