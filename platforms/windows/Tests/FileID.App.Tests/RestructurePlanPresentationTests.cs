@@ -89,6 +89,12 @@ public class RestructurePlanPresentationTests
                 visibleSampleIsSafe));
     }
 
+    [Theory]
+    [InlineData("Photos", 28, "Photos")]
+    [InlineData(@"Photos\2024\06 June\Weekend trips", 15, @"…\Weekend trips")]
+    public void MapDestinationsTruncateAtTheStart(string name, int max, string expected)
+        => Assert.Equal(expected, FileID.Views.Restructure.SankeyFlowControl.TrimLabelStart(name, max));
+
     [Fact]
     public void StepStrip_FollowsTheMacOsPreviewReviewMoveFlow()
     {

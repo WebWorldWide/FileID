@@ -242,7 +242,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
             return;
         }
         if (action != "history") _presentation.Invalidate();
-        Status.Text = $"{response.Status} · {response.Message}";
+        Status.Text = ChatFrontendPolicy.StatusLine(response);
         Render(response, action);
         if (action == "send" && !WorkbenchRequests.IsChatBusy(response.Status)) _sendObservation?.Cancel();
         if (action == "send" && response.Status == "completed") _input.Text = "";

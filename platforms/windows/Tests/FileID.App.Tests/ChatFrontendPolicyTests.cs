@@ -42,6 +42,16 @@ public sealed class ChatFrontendPolicyTests
         Assert.False(ChatFrontendPolicy.ShouldReplaceCitations(action, Response("error")));
     }
 
+    [Fact]
+    public void StatusLineIsHiddenWhenItRepeatsTheLatestAnswer()
+    {
+        const string answer = "Found 3 matches for “beach” (photos).";
+        var messages = new[] { new ChatMessage("1", "user", "beach", 1), new ChatMessage("2", "assistant", answer, 2) };
+        var repeated = new ChatResponse("request", "conversation", "completed", answer, messages, Array.Empty<CatalogHit>());
+        Assert.Equal(string.Empty, ChatFrontendPolicy.StatusLine(repeated));
+        Assert.Equal("completed · snapshot", ChatFrontendPolicy.StatusLine(Response("completed")));
+    }
+
     private static ChatResponse Response(string status) =>
         new("request", "conversation", status, "snapshot", Array.Empty<ChatMessage>(), Array.Empty<CatalogHit>());
 }

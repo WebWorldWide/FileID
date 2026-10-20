@@ -25,8 +25,6 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
-                           AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Review duplicate groups. FileID verifies complete file bytes before trashing; trashed items stay recoverable."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -178,6 +176,19 @@
                                                                       Visibility="{x:Bind ShowPlaceholder, Mode=OneWay}" />
                                                             <Image Source="{x:Bind Thumbnail, Mode=OneWay}"
                                                                    Stretch="UniformToFill" />
+                                                            <Border Style="{StaticResource ImageBadgeStyle}"
+                                                                    BorderBrush="{StaticResource ImageBadgeGoldStrokeBrush}"
+                                                                    Margin="6"
+                                                                    HorizontalAlignment="Left"
+                                                                    VerticalAlignment="Top"
+                                                                    Visibility="{x:Bind IsKeeper, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                                                                <TextBlock Text="KEEPER"
+                                                                           FontFamily="{StaticResource BodyFontFamily}"
+                                                                           FontSize="10"
+                                                                           FontWeight="SemiBold"
+                                                                           CharacterSpacing="40"
+                                                                           Foreground="{StaticResource GoldBrush}" />
+                                                            </Border>
                                                         </Grid>
                                                     </Border>
                                                     <TextBlock Text="{x:Bind FileName}"

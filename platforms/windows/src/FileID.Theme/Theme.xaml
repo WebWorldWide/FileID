@@ -89,6 +89,18 @@
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}" />
     <SolidColorBrush x:Key="GoldWashBrush" Color="#12FFCC00" />
     <SolidColorBrush x:Key="PaneFillBrush" Color="#04FFFFFF" />
+    <!-- Image badges: black 0.62 backing, 1 px stroke in the badge colour at 0.6. -->
+    <SolidColorBrush x:Key="ImageBadgeBackingBrush" Color="#9E000000" />
+    <SolidColorBrush x:Key="ImageBadgeStrokeBrush" Color="#99FFFFFF" />
+    <SolidColorBrush x:Key="ImageBadgeAiStrokeBrush" Color="#99B19BCE" />
+    <SolidColorBrush x:Key="ImageBadgeGoldStrokeBrush" Color="#99FFCC00" />
+    <Style x:Key="ImageBadgeStyle" TargetType="Border">
+        <Setter Property="Padding" Value="5,1,5,1" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Background" Value="{StaticResource ImageBadgeBackingBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource ImageBadgeStrokeBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+    </Style>
     <SolidColorBrush x:Key="RailSelectedBrush" Color="#1FFFCC00" />
     <SolidColorBrush x:Key="RailSelectedStrokeBrush" Color="#73FFCC00" />
     <Color x:Key="GoldHoverColor">#FFFFD84D</Color>
@@ -201,9 +213,6 @@
          alpha 0x4D). -->
     <SolidColorBrush x:Key="TagChipKindForegroundBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="TagChipKindBackgroundBrush" Color="#808080" Opacity="0.30" />
-
-    <!-- Scrim — for badge pills atop tile thumbnails. ~60% black. -->
-    <SolidColorBrush x:Key="TileScrimBrush"              Color="#000000" Opacity="0.60" />
 
     <!-- Apply-bar gradient (Restructure floating bar). Gold → orange,
          pre-multiplied alpha so a GradientStop can use it directly. -->
