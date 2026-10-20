@@ -15,13 +15,17 @@ Expected values are literal (exact) or a tolerance object:
   {"$os": {"linux": A, "default": B}}   per-OS expectation
 A plain object matches a subset of keys; a list matches element by element.
 Strings expand {root}, {path:rel}, {nfc_path:rel}, {path_hash:rel}, {sha256:rel},
-{size:rel}, {mtime:rel}, {pid}, {state} and {conversation}; {"$var": "name.key"}
-substitutes a value saved by an earlier step's "save".
+{size:rel}, {mtime:rel}, {inode:rel}, {pid}, {state} and {conversation}; {"$var": "name.key"}
+substitutes a value saved by an earlier step's "save" (a name, or
+{"name", "path", "after"} to keep one field, optionally the text after a marker).
 
 A case may reuse another case's tree, sql and env with "extends".
-A case may list knownDivergences ({"engine", "reason", optional "os", "steps",
-"run"}). A divergent case is expected to fail on that engine; if it passes, the
-marker is stale and the run fails so the tracker stays honest.
+Cross-engine cases name "requires": ["swift", "rust"], a "start" engine and
+{"restart": "rust"} steps; they run only when --peer-engine supplies the other.
+A case may list knownDivergences ({"engine", "reason", optional "os" list and
+"run": false when running it is unsafe}). A divergent case is expected to fail on
+that engine; if it passes, the marker is stale and the run fails so the tracker
+stays honest.
 """
 from __future__ import annotations
 
@@ -63,7 +67,7 @@ def host_os():
 
 
 def engine_env(state):
-    """Environment that confines an engine's database, logs and models to `state`."""
+    """Environment that confines an engine's database, logs and state to `state`."""
     state = Path(state)
     database = state / "FileID/fileid.sqlite"
     environment = dict(os.environ)
@@ -72,10 +76,18 @@ def engine_env(state):
         "FILEID_DB": str(database),
         "XDG_DATA_HOME": str(state),
         "LOCALAPPDATA": str(state),
-        "FILEID_MODELS_DIR": str(state / "Models"),
-        "TZ": "UTC",
     })
     return environment
+
+
+def case_env(state, case):
+    """Per-case defaults: UTC day boundaries, an empty Rust model directory and an
+    empty CoreFoundation home (where the macOS engine looks for models), so results
+    never depend on the runner's clock zone or installed models."""
+    home = Path(state) / "home"
+    home.mkdir(exist_ok=True)
+    return {"TZ": "UTC", "FILEID_MODELS_DIR": str(Path(state) / "Models"), "CFFIXED_USER_HOME": str(home),
+            **case.get("env", {})}
 
 
 class Engine:
@@ -287,6 +299,8 @@ class Context:
             return Path(self.path(argument)).stat().st_size
         if name == "mtime":
             return Path(self.path(argument)).stat().st_mtime
+        if name == "inode":
+            return Path(self.path(argument)).stat().st_ino
         if name == "conversation":
             return self.conversation
         raise Failure(f"unknown placeholder {{{token}}}")
@@ -312,6 +326,8 @@ class Context:
         return value
 
     def select(self, expected):
+        if isinstance(expected, dict) and set(expected) == {"$var"}:
+            return self.lookup(expected["$var"])
         if isinstance(expected, dict) and set(expected) == {"$engine"}:
             options = expected["$engine"]
             return self.select(options.get(self.flavor, options.get("default")))
@@ -423,6 +439,7 @@ def insert_rows(ctx, rows):
                 "size_bytes": stat.st_size, "modified_at": stat.st_mtime, "scanned_at": 0,
                 "extension": target.suffix[1:].lower(),
                 "content_hash": hashlib.sha256(target.read_bytes()).digest(),
+                "file_ref": stat.st_ino,
             }
             values.update(ctx.expand(row))
             columns = ",".join(values)
@@ -473,8 +490,7 @@ def run_step(engine, ctx, step, binaries):
     timeout = step.get("timeout", TIMEOUT)
     if "restart" in step:
         engine.close()
-        engine = start(binaries[step["restart"]] if isinstance(step["restart"], str) else binaries["engine"], ctx)
-        return engine
+        return start(binaries, step["restart"] if isinstance(step["restart"], str) else ctx.flavor, ctx)
     if "command" in step:
         engine.send(ctx.expand(step["command"]))
         actual = await_event(engine, ctx, step, timeout, seen) if "await" in step else None
@@ -482,6 +498,10 @@ def run_step(engine, ctx, step, binaries):
         request = {"requestID": str(uuid.uuid4()), **ctx.expand(step["catalog"])}
         engine.send({"catalogRequest": {"request": request}})
         actual = engine.wait("catalogResponse", request["requestID"], timeout=timeout, seen=seen)
+    elif "tool" in step:
+        request = {"requestID": str(uuid.uuid4()), **ctx.expand(step["tool"])}
+        engine.send({"toolRequest": {"request": request}})
+        actual = engine.wait("toolResponse", request["requestID"], timeout=timeout, seen=seen)
     elif "chat" in step:
         request = {"requestID": str(uuid.uuid4()), "conversationID": ctx.conversation, **ctx.expand(step["chat"])}
         engine.send({"chatRequest": {"request": request}})
@@ -499,6 +519,13 @@ def run_step(engine, ctx, step, binaries):
         for relative, text in spec.get("contents", {}).items():
             if Path(ctx.path(relative)).read_text(encoding="utf-8") != text:
                 raise Failure(f"{relative} content changed")
+        for relative, digest in spec.get("sha256", {}).items():
+            if hashlib.sha256(Path(ctx.path(relative)).read_bytes()).hexdigest() != digest:
+                raise Failure(f"{relative} bytes changed")
+        for relative, width, height in spec.get("pngSize", []):
+            data = Path(ctx.path(relative)).read_bytes()
+            if data[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", data[16:24]) != (width, height):
+                raise Failure(f"{relative} is not a {width}x{height} PNG")
         return engine
     elif "shutdown" in step:
         code = engine.close()
@@ -506,18 +533,32 @@ def run_step(engine, ctx, step, binaries):
         return engine
     else:
         raise Failure(f"unknown step {sorted(step)}")
-    if "save" in step:
-        ctx.saved[step["save"]] = actual
+    saves = step.get("save", [])
+    for save in saves if isinstance(saves, list) else [saves]:
+        if isinstance(save, str):
+            ctx.saved[save] = actual
+            continue
+        value = actual
+        for part in save["path"].split(".") if save.get("path") else []:
+            value = value[int(part)] if isinstance(value, list) else value[part]
+        if "after" in save:
+            value = str(value).partition(save["after"])[2]
+        ctx.saved[save["name"]] = value
     if "expect" in step:
-        match(step["expect"], actual, ctx)
+        try:
+            match(step["expect"], actual, ctx)
+        except Failure as failure:
+            detail = canonical(actual)
+            raise Failure(f"{failure}\n         actual: {detail[:800]}{'…' if len(detail) > 800 else ''}") from None
     for name, expected in step.get("collect", {}).items():
         collected = [payload[name].get("_0", payload[name]) for payload in seen if name in payload]
         match(expected, collected, ctx, f"collect.{name}")
     return engine
 
 
-def start(binary, ctx):
-    engine = Engine(binary, ctx.state, env=ctx.case.get("env"))
+def start(binaries, flavor, ctx):
+    ctx.flavor = flavor
+    engine = Engine(binaries[flavor], ctx.state, env=case_env(ctx.state, ctx.case))
     ready = engine.wait("ready")
     ctx.pid = ready.get("pid")
     return engine
@@ -533,8 +574,8 @@ def divergence_for(case, flavor, os_name):
 def run_case(case, flavor, binaries, os_name, parent):
     with tempfile.TemporaryDirectory(prefix="FileIDConformance-", dir=parent) as temporary:
         ctx = Context(case, flavor, os_name, Path(temporary))
-        engine = start(binaries["engine"], ctx)
-        engine.close()
+        first = case.get("start", flavor)
+        start(binaries, first, ctx).close()
         rows = build_tree(ctx, case.get("tree", []))
         if rows:
             insert_rows(ctx, rows)
@@ -542,7 +583,7 @@ def run_case(case, flavor, binaries, os_name, parent):
             with sqlite3.connect(ctx.database) as database:
                 for statement in case["sql"]:
                     database.execute(ctx.expand(statement))
-        engine = start(binaries["engine"], ctx)
+        engine = start(binaries, first, ctx)
         try:
             for index, step in enumerate(case["steps"]):
                 label = step.get("label", f"step {index + 1}")
@@ -600,7 +641,7 @@ def main():
     parent = safe_parent(args.fixture_parent)
     binary = args.engine.resolve(strict=True)
     flavor = detect_flavor(binary, parent) if args.flavor == "auto" else args.flavor
-    binaries = {"engine": binary, flavor: binary}
+    binaries = {flavor: binary}
     if args.peer_engine:
         peer = args.peer_engine.resolve(strict=True)
         binaries[detect_flavor(peer, parent)] = peer
@@ -611,7 +652,8 @@ def main():
         missing = set(case.get("requires", [])) - set(binaries)
         if flavor not in case.get("engines", ["swift", "rust"]) or missing or args.os not in case.get("os", [args.os]):
             counts["skip"] += 1
-            print(f"SKIP   {name}")
+            reason = f"needs {', '.join(sorted(missing))} engine" if missing else "not applicable here"
+            print(f"SKIP   {name} ({reason})")
             continue
         divergence = divergence_for(case, flavor, args.os)
         if divergence and divergence.get("run") is False:
@@ -623,6 +665,8 @@ def main():
             error = None
         except Failure as failure:
             error = str(failure)
+        except Exception as failure:  # an engine crash or broken fixture fails only this case
+            error = f"{type(failure).__name__}: {failure}"
         if divergence and error:
             counts["known"] += 1
             print(f"KNOWN  {name} [{flavor}]: {divergence['reason']}\n         {error}")

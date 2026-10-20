@@ -1,54 +1,265 @@
 [
   {
     "name": "scan-tiny-tree-catalogs-every-file",
-    "description": "A scan of a generated tree classifies each kind, skips unknown extensions, records exact sizes, mtimes and SHA-256 content hashes, applies the per-OS path_hash rule, stores NFC path_search for a decomposed name and fails nothing.",
+    "description": "A scan of a generated tree classifies each kind, skips unknown extensions, records exact sizes, mtimes and SHA-256 content hashes and inode file_refs, applies the per-OS path_hash rule, stores NFC path_search for a decomposed name and fails nothing.",
     "knownDivergences": [
-      {"engine": "rust", "reason": "startScan aborts with models_not_installed unless mobileclip_s2 and arcface are installed; the macOS engine catalogs without models"}
+      {
+        "engine": "rust",
+        "reason": "startScan aborts with models_not_installed unless mobileclip_s2 and arcface are installed; the macOS engine catalogs without models"
+      }
     ],
     "tree": [
-      {"path": "docs/notes.txt", "content": "conformance notes\n", "mtime": 1789812000},
-      {"path": "docs/Café menu.txt", "content": "decomposed name\n", "mtime": 1789812060},
-      {"path": "docs/paper.pdf", "generate": "pdf", "mtime": 1789812120},
-      {"path": "images/red.png", "generate": "png", "dimensions": [32, 32], "mtime": 1789812180},
-      {"path": "images/UPPER Case.PNG", "generate": "png", "dimensions": [24, 16], "mtime": 1789812240},
-      {"path": "audio/tone.wav", "generate": "wav", "mtime": 1789812300},
-      {"path": "misc/blob.bin", "content": "opaque", "size": 4096, "mtime": 1789812360}
+      {
+        "path": "docs/notes.txt",
+        "content": "conformance notes\n",
+        "mtime": 1789812000
+      },
+      {
+        "path": "docs/Café menu.txt",
+        "content": "decomposed name\n",
+        "mtime": 1789812060
+      },
+      {
+        "path": "docs/paper.pdf",
+        "generate": "pdf",
+        "mtime": 1789812120
+      },
+      {
+        "path": "images/red.png",
+        "generate": "png",
+        "dimensions": [
+          32,
+          32
+        ],
+        "mtime": 1789812180
+      },
+      {
+        "path": "images/UPPER Case.PNG",
+        "generate": "png",
+        "dimensions": [
+          24,
+          16
+        ],
+        "mtime": 1789812240
+      },
+      {
+        "path": "audio/tone.wav",
+        "generate": "wav",
+        "mtime": 1789812300
+      },
+      {
+        "path": "misc/blob.bin",
+        "content": "opaque",
+        "size": 4096,
+        "mtime": 1789812360
+      }
     ],
     "steps": [
-      {"label": "scan", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 180, "abortOnError": true,
-       "expect": {"totalFiles": 6, "processedFiles": 6, "failedFiles": 0}},
-      {"label": "rows", "db": "SELECT path_text,kind,extension,size_bytes,modified_at,failed FROM files ORDER BY path_text",
-       "expect": {"$tol": "set", "value": [
-         ["{path:audio/tone.wav}", "audio", "wav", "{size:audio/tone.wav}", 1789812300, 0],
-         ["{path:docs/Café menu.txt}", "doc", "txt", 16, 1789812060, 0],
-         ["{path:docs/notes.txt}", "doc", "txt", 18, 1789812000, 0],
-         ["{path:docs/paper.pdf}", "pdf", "pdf", "{size:docs/paper.pdf}", 1789812120, 0],
-         ["{path:images/UPPER Case.PNG}", "image", "png", "{size:images/UPPER Case.PNG}", 1789812240, 0],
-         ["{path:images/red.png}", "image", "png", "{size:images/red.png}", 1789812180, 0]
-       ]}},
-      {"label": "path_hash", "db": "SELECT path_text,path_hash FROM files",
-       "expect": {"$tol": "set", "value": [
-         ["{path:audio/tone.wav}", "{path_hash:audio/tone.wav}"],
-         ["{path:docs/Café menu.txt}", "{path_hash:docs/Café menu.txt}"],
-         ["{path:docs/notes.txt}", "{path_hash:docs/notes.txt}"],
-         ["{path:docs/paper.pdf}", "{path_hash:docs/paper.pdf}"],
-         ["{path:images/UPPER Case.PNG}", "{path_hash:images/UPPER Case.PNG}"],
-         ["{path:images/red.png}", "{path_hash:images/red.png}"]
-       ]}},
-      {"label": "path_search", "db": "SELECT path_search FROM files WHERE path_text LIKE '%menu.txt'",
-       "expect": [["{nfc_path:docs/Café menu.txt}"]]},
-      {"label": "content_hash", "db": "SELECT path_text,content_hash FROM files",
-       "expect": {"$tol": "set", "value": [
-         ["{path:audio/tone.wav}", "{sha256:audio/tone.wav}"],
-         ["{path:docs/Café menu.txt}", "{sha256:docs/Café menu.txt}"],
-         ["{path:docs/notes.txt}", "{sha256:docs/notes.txt}"],
-         ["{path:docs/paper.pdf}", "{sha256:docs/paper.pdf}"],
-         ["{path:images/UPPER Case.PNG}", "{sha256:images/UPPER Case.PNG}"],
-         ["{path:images/red.png}", "{sha256:images/red.png}"]
-       ]}},
-      {"label": "rescan is incremental", "command": {"startScan": {"rootPath": "{root}"}}, "await": "scanComplete", "timeout": 120, "abortOnError": true,
-       "expect": {"failedFiles": 0}},
-      {"label": "no duplicate rows", "db": "SELECT COUNT(*), COUNT(DISTINCT path_hash) FROM files", "expect": [[6, 6]]}
+      {
+        "label": "scan",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 180,
+        "abortOnError": true,
+        "expect": {
+          "totalFiles": 6,
+          "processedFiles": 6,
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "rows",
+        "db": "SELECT path_text,kind,extension,size_bytes,modified_at,failed FROM files ORDER BY path_text",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "audio",
+              "wav",
+              "{size:audio/tone.wav}",
+              1789812300,
+              0
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "doc",
+              "txt",
+              16,
+              1789812060,
+              0
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "doc",
+              "txt",
+              18,
+              1789812000,
+              0
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "pdf",
+              "pdf",
+              "{size:docs/paper.pdf}",
+              1789812120,
+              0
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "image",
+              "png",
+              "{size:images/UPPER Case.PNG}",
+              1789812240,
+              0
+            ],
+            [
+              "{path:images/red.png}",
+              "image",
+              "png",
+              "{size:images/red.png}",
+              1789812180,
+              0
+            ]
+          ]
+        }
+      },
+      {
+        "label": "path_hash",
+        "db": "SELECT path_text,path_hash FROM files",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "{path_hash:audio/tone.wav}"
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "{path_hash:docs/Café menu.txt}"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "{path_hash:docs/notes.txt}"
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "{path_hash:docs/paper.pdf}"
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "{path_hash:images/UPPER Case.PNG}"
+            ],
+            [
+              "{path:images/red.png}",
+              "{path_hash:images/red.png}"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "path_search",
+        "db": "SELECT path_search FROM files WHERE path_text LIKE '%menu.txt'",
+        "expect": [
+          [
+            "{nfc_path:docs/Café menu.txt}"
+          ]
+        ]
+      },
+      {
+        "label": "content_hash",
+        "db": "SELECT path_text,content_hash FROM files",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "{sha256:audio/tone.wav}"
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "{sha256:docs/Café menu.txt}"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "{sha256:docs/notes.txt}"
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "{sha256:docs/paper.pdf}"
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "{sha256:images/UPPER Case.PNG}"
+            ],
+            [
+              "{path:images/red.png}",
+              "{sha256:images/red.png}"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "file_ref",
+        "db": "SELECT path_text,file_ref FROM files",
+        "expect": {
+          "$tol": "set",
+          "value": [
+            [
+              "{path:audio/tone.wav}",
+              "{inode:audio/tone.wav}"
+            ],
+            [
+              "{path:docs/Café menu.txt}",
+              "{inode:docs/Café menu.txt}"
+            ],
+            [
+              "{path:docs/notes.txt}",
+              "{inode:docs/notes.txt}"
+            ],
+            [
+              "{path:docs/paper.pdf}",
+              "{inode:docs/paper.pdf}"
+            ],
+            [
+              "{path:images/UPPER Case.PNG}",
+              "{inode:images/UPPER Case.PNG}"
+            ],
+            [
+              "{path:images/red.png}",
+              "{inode:images/red.png}"
+            ]
+          ]
+        }
+      },
+      {
+        "label": "rescan is incremental",
+        "command": {
+          "startScan": {
+            "rootPath": "{root}"
+          }
+        },
+        "await": "scanComplete",
+        "timeout": 120,
+        "abortOnError": true,
+        "expect": {
+          "failedFiles": 0
+        }
+      },
+      {
+        "label": "no duplicate rows",
+        "db": "SELECT COUNT(*), COUNT(DISTINCT path_hash) FROM files",
+        "expect": [
+          [
+            6,
+            6
+          ]
+        ]
+      }
     ]
   }
 ]

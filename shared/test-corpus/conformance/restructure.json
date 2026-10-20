@@ -357,17 +357,17 @@
     ]
   },
   {
-    "name": "restructure-apply-refuses-unhashed-rows",
-    "description": "A plan whose catalog rows carry no content hash cannot prove the files are the ones it planned, so apply moves nothing.",
+    "name": "restructure-apply-refuses-rows-without-identity",
+    "description": "A plan whose catalog rows carry neither a content hash nor a file_ref cannot prove the files are the ones it planned, so apply moves nothing.",
     "extends": "restructure-respect-stage",
     "knownDivergences": [
       {
         "engine": "swift",
-        "reason": "applyRestructure moves files whose catalog rows have no content hash instead of refusing them"
+        "reason": "applyRestructure moves files whose catalog rows have no content hash and no file_ref instead of refusing them"
       }
     ],
     "sql": [
-      "UPDATE files SET content_hash=NULL"
+      "UPDATE files SET content_hash=NULL, file_ref=NULL"
     ],
     "steps": [
       {
