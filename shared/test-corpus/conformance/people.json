@@ -92,9 +92,6 @@
   {
     "name": "people-merge-faceless-named-source",
     "description": "A named person with no faces (all reassigned away) can still be merged into an unnamed cluster, carrying its name.",
-    "knownDivergences": [
-      {"engine": "rust", "reason": "mergeClusters requires a face anchor on both people (persist_manual_merge_constraint) and refuses a faceless source"}
-    ],
     "sql": [
       "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg')",
       "INSERT INTO persons(id,created_at,is_unknown,representative_face_id,file_count) VALUES(1,123,1,1,1)",
@@ -109,9 +106,6 @@
   {
     "name": "people-merge-records-user-constraint",
     "description": "An explicit merge persists a user-merged verdict between the two people's anchor faces so a later recluster keeps them together.",
-    "knownDivergences": [
-      {"engine": "swift", "reason": "Database.mergePersons writes no face_verifications 'user-merged' row, so reclustering can split a user merge"}
-    ],
     "sql": [
       "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/1.jpg',1,1,0,'image','jpg'),(2,'{root}/2.jpg',2,1,0,'image','jpg')",
       "INSERT INTO persons(id,created_at,is_unknown,representative_face_id,file_count) VALUES(1,123,1,1,1)",
@@ -139,9 +133,6 @@
   {
     "name": "people-rename-missing-person-fails",
     "description": "Renaming a person that no longer exists reports a failure instead of a silent success.",
-    "knownDivergences": [
-      {"engine": "swift", "reason": "renamePerson reports succeeded=1 when the UPDATE matched no row"}
-    ],
     "steps": [
       {"label": "rename", "command": {"renamePerson": {"personID": 42, "firstName": "Ghost"}}, "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 0, "failed": 1}}
     ]
@@ -163,9 +154,6 @@
   {
     "name": "people-mark-unknown-missing-person-fails",
     "description": "Marking a missing person Unknown reports that item as failed while the existing one succeeds.",
-    "knownDivergences": [
-      {"engine": "swift", "reason": "markPersonsAsUnknown reports ok for an id whose UPDATE matched no row"}
-    ],
     "sql": [
       "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Sam',123)"
     ],
