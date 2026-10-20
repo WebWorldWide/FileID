@@ -43,9 +43,13 @@ pub fn is_generic_folder_name(raw: &str) -> bool {
     }
     for prefix in ["new folder", "untitled folder", "untitled"] {
         if let Some(rest) = name.strip_prefix(prefix) {
-            let rest = rest.trim();
-            if rest.is_empty() || rest.chars().all(|c| c.is_ascii_digit()) {
+            if rest.is_empty() {
                 return true;
+            }
+            if let Some(number) = rest.strip_prefix(' ') {
+                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+                    return true;
+                }
             }
         }
     }
@@ -126,10 +130,41 @@ pub fn is_usable_folder_name(name: &str) -> bool {
     if trimmed.chars().count() < 3 || trimmed.contains('_') {
         return false;
     }
-    !trimmed.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|word| {
-        let letters = word.chars().take_while(|c| c.is_alphabetic()).count();
-        let digits = word.chars().skip(letters).take_while(char::is_ascii_digit).count();
-        letters <= 5 && digits >= 3 && letters + digits == word.chars().count()
+    let lower: Vec<char> = trimmed.to_lowercase().chars().collect();
+    !has_camera_stem(&lower) && !has_short_prefixed_number(&lower)
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn ascii_digits(chars: &[char]) -> usize {
+    chars.iter().take_while(|c| c.is_ascii_digit()).count()
+}
+
+/// `\b(dsc|dscf|dscn|img|imgp|pxl|mvi|gopr|gp|dji|p\d{3}|_mg|mg)[_-]?\d{3,}`
+fn has_camera_stem(lower: &[char]) -> bool {
+    const PREFIXES: &[&str] = &["dsc", "dscf", "dscn", "img", "imgp", "pxl", "mvi", "gopr", "gp", "dji", "_mg", "mg"];
+    let digits_follow = |at: usize| {
+        let separated = matches!(lower.get(at), Some('_' | '-')) && ascii_digits(&lower[at + 1..]) >= 3;
+        separated || ascii_digits(&lower[at.min(lower.len())..]) >= 3
+    };
+    (0..lower.len()).filter(|&i| is_word_char(lower[i]) && (i == 0 || !is_word_char(lower[i - 1]))).any(|i| {
+        let rest = &lower[i..];
+        let named = PREFIXES.iter().any(|prefix| {
+            let len = prefix.chars().count();
+            rest.len() >= len && rest.iter().take(len).copied().eq(prefix.chars()) && digits_follow(i + len)
+        });
+        named || (rest.first() == Some(&'p') && ascii_digits(&rest[1..]) >= 3 && digits_follow(i + 4))
+    })
+}
+
+/// `\b[a-z]{0,4}\d{4,}\b`
+fn has_short_prefixed_number(lower: &[char]) -> bool {
+    lower.split(|c| !is_word_char(*c)).any(|word| {
+        let letters = word.iter().take_while(|c| c.is_ascii_lowercase()).count();
+        let digits = ascii_digits(&word[letters..]);
+        letters <= 4 && digits >= 4 && letters + digits == word.len()
     })
 }
 
@@ -210,25 +245,42 @@ pub fn format_corrections(files: &[FileForClassify], root: &Path) -> Vec<Propose
             destination: parent.join(target).join(name),
             category: target.clone(),
             confidence: Confidence::Auto,
-            reason: Some(format!("In a {folder_name} folder; moved to its sibling {target} folder.")),
+            reason: Some(format!(
+                "A {} file in a {} folder; moved to its sibling {target} folder.",
+                role_label(role),
+                role_label(current)
+            )),
         });
     }
     out
 }
 
+fn role_label(role: FormatRole) -> &'static str {
+    match role {
+        FormatRole::Raw => "RAW",
+        FormatRole::Video => "video",
+        FormatRole::Jpeg | FormatRole::Photo => "JPEG",
+    }
+}
+
 /// Loose photos and videos split into events wherever consecutive capture
 /// times are more than `gap` seconds apart. Events of at least `min_files` get
 /// a dated folder (`Photos/2026/2026-09-19`, or a range for multi-day events);
-/// the rest go to `Photos/<year>/<Month>`. Day names use `offset` (the machine's
-/// local offset in production) so an evening photo isn't filed under the next day.
-pub fn loose_event_destinations(
+/// the rest go to `Photos/<year>/<Month>`. Day names use `zone` per photo (the
+/// machine's local time zone in production, so daylight-saving time applies) so
+/// an evening photo isn't filed under the next day.
+pub fn loose_event_destinations<Tz>(
     files: &[FileForClassify],
     root: &Path,
     gap: f64,
     min_files: usize,
-    offset: chrono::FixedOffset,
-) -> HashMap<i64, (PathBuf, String)> {
-    use chrono::{Datelike, TimeZone};
+    zone: &Tz,
+) -> HashMap<i64, (PathBuf, String)>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Datelike;
     let mut loose: Vec<(&FileForClassify, f64)> = files
         .iter()
         .filter(|f| matches!(f.kind, FileKind::Image | FileKind::Video) && !is_organized(&f.source, root))
@@ -243,7 +295,7 @@ pub fn loose_event_destinations(
             _ => groups.push(vec![item]),
         }
     }
-    let local = |t: f64| offset.timestamp_opt(t as i64, 0).single();
+    let local = |t: f64| zone.timestamp_opt(t as i64, 0).single();
     let mut out = HashMap::new();
     for group in groups {
         let (Some(start), Some(end)) = (local(group[0].1), local(group[group.len() - 1].1)) else { continue };
@@ -373,8 +425,7 @@ pub fn apply(proposed: Vec<ProposedMove>, files: &[FileForClassify], root: &Path
     }
     let unmatched: Vec<FileForClassify> =
         files.iter().filter(|f| event_destination(f, &spans).is_none()).cloned().collect();
-    let offset = *chrono::Local::now().offset();
-    let loose = loose_event_destinations(&unmatched, root, 8.0 * 3_600.0, 5, offset);
+    let loose = loose_event_destinations(&unmatched, root, 8.0 * 3_600.0, 5, &chrono::Local);
     let mut index_by_id: HashMap<i64, usize> = kept.iter().enumerate().map(|(i, m)| (m.file_id, i)).collect();
     let mut loose_ids: Vec<&i64> = loose.keys().collect();
     loose_ids.sort();
@@ -503,6 +554,10 @@ mod tests {
         let fixes = format_corrections(&files, Path::new(ROOT));
         assert_eq!(fixes.len(), 1);
         assert_eq!(fixes[0].destination, Path::new(ROOT).join("Eckerts 10-4-26/Photos/RAWs/D9.ARW"));
+        assert_eq!(
+            fixes[0].reason.as_deref(),
+            Some("A RAW file in a JPEG folder; moved to its sibling RAWs folder.")
+        );
         assert!(keep(&fixes[0], FileKind::Image, Path::new(ROOT)));
     }
 
@@ -530,24 +585,88 @@ mod tests {
         files.extend((0..5).map(|i| file(10 + i, &format!("B{i}.JPG"), FileKind::Image, Some(oct4 + i as f64 * 1_800.0))));
         files.push(file(20, "Downloads/lonely.JPG", FileKind::Image, Some(oct4 + 40.0 * 86_400.0)));
         files.push(file(21, "Kyle Baseball Game 9-19-26/Photos/JPEGs/K.JPG", FileKind::Image, Some(sep19)));
-        let out = loose_event_destinations(&files, Path::new(ROOT), 8.0 * 3_600.0, 5, utc);
+        let out = loose_event_destinations(&files, Path::new(ROOT), 8.0 * 3_600.0, 5, &utc);
         let root = Path::new(ROOT);
         assert_eq!(out[&0].0, root.join("Photos/2026/2026-09-19/A0.JPG"));
         assert_eq!(out[&14].0, root.join("Photos/2026/2026-10-04/B4.JPG"));
         assert_eq!(out[&20].0, root.join("Photos/2026/November/lonely.JPG"));
         assert!(!out.contains_key(&21));
         let trip: Vec<_> = (0..6).map(|i| file(30 + i, &format!("trip{i}.JPG"), FileKind::Image, Some(sep19 + i as f64 * 5.0 * 3_600.0))).collect();
-        let out = loose_event_destinations(&trip, root, 8.0 * 3_600.0, 5, utc);
+        let out = loose_event_destinations(&trip, root, 8.0 * 3_600.0, 5, &utc);
         assert_eq!(out[&30].0, root.join("Photos/2026/2026-09-19 to 09-20/trip0.JPG"));
     }
 
     #[test]
     fn camera_names_and_tag_ids_are_not_folder_names() {
-        for n in ["Dsc01548 Sunglasses", "Consumer_electronics Computer", "IMG 4821"] {
+        for n in [
+            "Dsc01548 Sunglasses",
+            "Consumer_electronics Computer",
+            "IMG 4821",
+            "dsc01548abc",
+            "IMG-4821",
+            "DSCF0042 Lake",
+            "p1000123",
+            "GOPR0042",
+            "Trip 2026",
+            "abcd12345",
+        ] {
             assert!(!is_usable_folder_name(n), "{n}");
         }
-        for n in ["Dogs", "Lake Trip"] {
+        for n in ["Dogs", "Lake Trip", "Top 100", "Room 101", "Highway 101", "Photo 365", "abc123", "Canon1234", "abcde1234"] {
             assert!(is_usable_folder_name(n), "{n}");
         }
+    }
+
+    #[test]
+    fn generic_names_need_exact_numbered_form() {
+        for n in ["New Folder", "new folder 3", "Untitled Folder 12", "untitled 2"] {
+            assert!(is_generic_folder_name(n), "{n}");
+        }
+        for n in ["new folder3", "untitled  2", "untitled folder x", "New Folders"] {
+            assert!(!is_generic_folder_name(n), "{n}");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CentralTime;
+
+    impl CentralTime {
+        fn at(utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            use chrono::Datelike;
+            let hours = if (4..=10).contains(&utc.month()) { -5 } else { -6 };
+            chrono::FixedOffset::east_opt(hours * 3_600).unwrap()
+        }
+    }
+
+    impl chrono::TimeZone for CentralTime {
+        type Offset = chrono::FixedOffset;
+        fn from_offset(_: &chrono::FixedOffset) -> Self {
+            CentralTime
+        }
+        fn offset_from_local_date(&self, local: &chrono::NaiveDate) -> chrono::MappedLocalTime<chrono::FixedOffset> {
+            chrono::MappedLocalTime::Single(Self::at(&local.and_hms_opt(12, 0, 0).unwrap()))
+        }
+        fn offset_from_local_datetime(&self, local: &chrono::NaiveDateTime) -> chrono::MappedLocalTime<chrono::FixedOffset> {
+            chrono::MappedLocalTime::Single(Self::at(local))
+        }
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> chrono::FixedOffset {
+            Self::at(&utc.and_hms_opt(12, 0, 0).unwrap())
+        }
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            Self::at(utc)
+        }
+    }
+
+    #[test]
+    fn loose_event_days_use_each_photos_own_offset() {
+        let july20_0030_cdt = 1_784_525_400.0;
+        let files: Vec<_> =
+            (0..5).map(|i| file(i, &format!("S{i}.JPG"), FileKind::Image, Some(july20_0030_cdt + i as f64 * 300.0))).collect();
+        let root = Path::new(ROOT);
+        let summer = loose_event_destinations(&files, root, 8.0 * 3_600.0, 5, &CentralTime);
+        assert_eq!(summer[&0].0, root.join("Photos/2026/2026-07-20/S0.JPG"));
+        let winter_offset = chrono::FixedOffset::west_opt(6 * 3_600).unwrap();
+        let fixed = loose_event_destinations(&files, root, 8.0 * 3_600.0, 5, &winter_offset);
+        assert_eq!(fixed[&0].0, root.join("Photos/2026/2026-07-19/S0.JPG"));
     }
 }
