@@ -302,7 +302,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
             "platforms/apple/scripts/testflight.sh": "8a65cfb7fa84c67cb003e20dc387390986b70d650e3aead2d9c131adc9c42833",
             "platforms/apple/scripts/release.sh": "edb1fee77bdfc03b108ece894c52cce87f2551ffae04ed29d43b60533cdbec04",
             "platforms/apple/scripts/wipe_local_state.sh": "3f522f095384110849c618f10f62f75025eb6cabe4f6e66488aaea21a716df69",
-            "platforms/linux/build/build.sh": "b3fa065fd52b48578d43de536306849f92dabebf5f127a9af665836e8a5ab846",
+            "platforms/linux/build/build.sh": "12c0b2cf760248b5737bf2d680de0456300ebc8217f3660fdf9d1b5372c10795",
             "scripts/build-tools.sh": "44846aea1eadbe97166bacc47486701894542681114effddcb895762e7c81bf6",
             "shared/scripts/check_tls_pins.sh": "3096b3be8c3e93030cb5c69c1157c76413e51a333c785e70392feaf46c527024",
             "shared/scripts/compare_face_clustering.sh": "79af61febba1cfbe7eae6fcd4e4450b149ab32d35ef73aa13a4dfb5c6abd7d9f",
