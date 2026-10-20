@@ -1701,6 +1701,13 @@ public final class ReadStore: @unchecked Sendable {
         var skipped = 0
         var failed = 0
         let fm = FileManager.default
+        let queue: DatabaseQueue
+        do {
+            queue = try writeQueue()
+        } catch {
+            reportError("DB open for undo failed: \(error)")
+            return (0, 0, outcomes.count)
+        }
         for r in outcomes.reversed() {
             let newURL = URL(fileURLWithPath: r.newPath)
             let oldURL = URL(fileURLWithPath: r.oldPath)
@@ -1733,11 +1740,11 @@ public final class ReadStore: @unchecked Sendable {
                 // now-nonexistent path on failure. If it fails, roll the file
                 // back so disk and DB stay consistent and report it as failed.
                 do {
-                    let q = try writeQueue()
-                    try q.write { db in
+                    try queue.write { db in
                         try db.execute(
-                            sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
+                            sql: "UPDATE files SET path_text = ?, path_hash = ?, path_search = ? WHERE id = ?",
                             arguments: [oldURL.path,
+                                        StablePathHash.hash(oldURL.path),
                                         oldURL.path.precomposedStringWithCanonicalMapping,
                                         r.fileID]
                         )
@@ -1859,10 +1866,11 @@ public final class ReadStore: @unchecked Sendable {
                 try db.execute(
                     sql: """
                         UPDATE files
-                        SET path_text = ?, path_search = ?, vlm_proposed_name = NULL
+                        SET path_text = ?, path_hash = ?, path_search = ?, vlm_proposed_name = NULL
                         WHERE id = ?
                         """,
                     arguments: [target.path,
+                                StablePathHash.hash(target.path),
                                 target.path.precomposedStringWithCanonicalMapping,
                                 file.id]
                 )
