@@ -83,6 +83,19 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Restructure (shared Rust engine): `pipeline/restructure_respect.rs` ports the same rules and Keep accounting for Windows, Linux, CLI and TUI; 6 Rust tests mirror the Swift ones; strict Clippy clean.
 - [x] Restructure on a messy folder (42 Adlon photos from three events copied into one flat Downloads folder, CLIP present): before, 18 moves into date folders and tag-named groups ("Baseball_hat Hat") with 24 files left behind; now all 42 go to `Photos/2026/2026-09-19`, `…/2026-09-26`, `…/2026-10-04` — exactly the three source events. Loose photos are split into events by capture-time gaps (8 h, ≥5 files; smaller groups → `Photos/<year>/<Month>`), on macOS and in the shared Rust engine.
 
+## Lean, fast, one engine (owner request 2026-10-20: less code, more speed, better multi-platform architecture)
+
+Baseline lines: shared Rust engine 84k (30k tests), WinUI app 38k, Swift engine 25k, macOS app 22k, GTK app 23k, CLI 8k, TUI 8k. Two read-only audits ranked the cuts; the path follows the 2026-10-11 decision (one Rust engine, native adapters, presentation-only apps).
+
+- [ ] Rust engine internals (agent/engine-lean): stop the DB writer re-reading every new file for the legacy hash; collapse main.rs dispatch boilerplate (~400 lines); one rename-heal lookup; main.rs as a thin bin over the lib; dead code; model registry generated from manifest.json; parallel exact-duplicate hashing; RAM++ batch resize on workers; shared test DB helpers.
+- [ ] Shared read/client modules (agent/shared-read): fix the CLI path-hash bug (Linux rescans mark CLI-indexed paths with capitals as missing) and missing path_search; one engine module for duplicates (GTK Similar loses its O(N²) 20k cap), people, search quoting, plan loading; one required-models check and one license store; one engine client and in-process TUI downloads; decimal sizes everywhere.
+- [ ] macOS lean pass (agent/mac-lean): stale path_hash after app renames, per-file DB connections in undo, wrong RAM++ size text; ~1,600 lines of dead code; one model installer and Settings card; one ONNX session helper, thumbnail view, duration formatter, file-type table and player loader; no SQL on the main thread in Sidebar/People/Deep Analyze; engine replies resume instead of 100 ms polling.
+- [ ] Conformance suite (agent/conformance): one data-driven runner both engines must pass in CI; replaces audits as the parity check and gates any engine convergence.
+- [ ] macOS app becomes a read-only client: People, rename, trash and tag writes go through the engine commands it already implements (CI tests the engine path; the app's own writes differ).
+- [ ] Generate the Swift/C# (and Rust) IPC DTOs from ipc.schema.json (~2.5–3.5k lines) once the conformance suite is in.
+- [ ] Converge macOS onto the shared Rust engine subsystem by subsystem (People, rename/trash, restructure, catalog first), Apple ML behind in-process adapters; Swift engine retires last after conformance, catalog round-trip and Mac hardware measurements.
+- [ ] Re-measure scan on Adlon with the full model set once the machine is quiet. Last run (Kyle Baseball Game 9-19-26: 382 ARW + 339 JPEG, no CLIP/RAM++ installed, load average ~14): 721 files in 28.4 s, 543 MB peak, 62 s CPU of which 29 s kernel; RAW load stage 400–550 ms per file vs ~25 ms for JPEG.
+
 ## Next, in dependency order (see `NEXT_VERSION.md` M0–M6)
 
 1. **Linux inference runtime packaging**: Linux packages do not bundle llama-server yet. Review the archived `parity/completion-runtime` llama.cpp source builder (license, provenance, offline policy) to ship a pinned CPU/Vulkan build; whisper.cpp is no longer needed now that speech runs on llama.cpp.
