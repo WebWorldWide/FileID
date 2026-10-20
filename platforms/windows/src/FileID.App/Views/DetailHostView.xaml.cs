@@ -127,6 +127,10 @@ public sealed partial class DetailHostView : UserControl
         {
             return new Settings.SettingsView();
         }
+        if (!vm.ActiveTab.RequiresFolder)
+        {
+            return BuildWorkbench(vm.ActiveTab.Id);
+        }
         if (!vm.HasFolder)
         {
             return new OnboardingSplash();
@@ -141,6 +145,26 @@ public sealed partial class DetailHostView : UserControl
             _ => BuildPlaceholder("", vm.ActiveTab.Label, "Coming soon."),
         };
     }
+
+    // File Tools keeps its session (selection, plan, running export) across
+    // page switches, so it is built once and re-hosted like the old overlay.
+    private Workbenches.ToolsWorkbench? _toolsWorkbench;
+
+    private UIElement BuildWorkbench(string id)
+    {
+        Workbenches.WorkbenchPanel panel = id switch
+        {
+            "moments" => new Workbenches.CatalogWorkbench(),
+            "chat" => new Workbenches.ChatWorkbench(),
+            "models" => new Workbenches.ModelsWorkbench(),
+            _ => _toolsWorkbench ??= new Workbenches.ToolsWorkbench(HostWindowHandle()),
+        };
+        panel.HideTitle();
+        return panel;
+    }
+
+    private static System.IntPtr HostWindowHandle() =>
+        App.HostWindow is { } window ? WinRT.Interop.WindowNative.GetWindowHandle(window) : System.IntPtr.Zero;
 
     /// <summary>Atomically swap the hosted view: dispose any IDisposable
     /// outgoing child, clear the host (which fires the outgoing view's Unloaded

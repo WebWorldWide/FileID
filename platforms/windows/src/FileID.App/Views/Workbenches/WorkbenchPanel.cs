@@ -18,15 +18,18 @@ internal abstract class WorkbenchPanel : UserControl
     private CancellationTokenSource? _lifetime;
     private readonly ContentControl _inputHost = new();
 
+    private readonly TextBlock _heading;
+
     protected WorkbenchPanel(string title)
     {
-        Body.Children.Add(new TextBlock
+        _heading = new TextBlock
         {
             Text = title,
             FontSize = 24,
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             Foreground = (Brush)Application.Current.Resources["GoldBrush"]
-        });
+        };
+        Body.Children.Add(_heading);
         Body.Children.Add(Status);
         _inputHost.Content = Inputs;
         Body.Children.Add(_inputHost);
@@ -47,6 +50,9 @@ internal abstract class WorkbenchPanel : UserControl
             OnClosed();
         };
     }
+
+    /// <summary>The shell page header already names the page when the panel is hosted inline.</summary>
+    internal void HideTitle() => _heading.Visibility = Visibility.Collapsed;
 
     protected virtual void OnOpened() { }
     protected virtual void OnClosed() { }

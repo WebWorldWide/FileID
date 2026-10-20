@@ -1,16 +1,9 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SidebarFolderHeader — folder display + actions row.
-
-    Layout matches macOS Sidebar.swift:164. When no folder picked: shows
-    a "Pick a folder to begin" pill with a Pick button. When picked: shows
-    parent-path (secondary) + leaf-name (gold), plus three actions:
-        • Change folder…    (Ctrl+O)
-        • Clear folder
-        • Wipe (destructive red, confirmation, resets to a clean slate)
-
-    The collapse/expand sidebar toggle lives in MainWindow as a global
-    Ctrl+Shift+S accelerator + a button in this header for mouse users.
+    SidebarFolderHeader: the title-bar folder switcher popover (Prototype v3).
+    Hosted in TitleBar.FolderFlyout. Current folder with path and file count,
+    Add folder (Ctrl+O), Rescan, Clear folder and Wipe library (destructive,
+    confirmed). Layout matches the macOS TitleBar folderPopover.
 -->
 <UserControl
     x:Class="FileID.Views.Sidebar.SidebarFolderHeader"
@@ -20,106 +13,92 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="10">
-        <!-- Section header + collapse button. Section header uses the
-             standard "muted caption" pattern from Fluent's Settings UX. -->
-        <Grid>
+    <StackPanel Width="360">
+        <TextBlock Text="FOLDERS"
+                   Style="{StaticResource ShellSectionLabelStyle}"
+                   Margin="12,10,12,8"
+                   AutomationProperties.HeadingLevel="Level2" />
+
+        <Grid x:Name="FolderDisplayPanel"
+              Visibility="Collapsed"
+              Padding="12,9,12,9"
+              ColumnSpacing="10"
+              BorderBrush="{StaticResource HairlineSoftBrush}"
+              BorderThickness="0,1,0,0">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="14" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0"
-                       Text="LIBRARY FOLDER"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       FontWeight="SemiBold"
-                       CharacterSpacing="40"
-                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                       VerticalAlignment="Center"
-                       AutomationProperties.HeadingLevel="Level2" />
-            <Button Grid.Column="1"
-                    x:Name="CollapseButton"
-                    Click="OnCollapseClicked"
-                    Background="Transparent"
-                    BorderThickness="0"
-                    Padding="6,4"
-                    CornerRadius="6"
-                    ToolTipService.ToolTip="Hide sidebar (Ctrl+Shift+S)"
-                    AutomationProperties.Name="Hide sidebar">
-                <FontIcon FontSize="12" Glyph="&#xE76B;" />
-            </Button>
-        </Grid>
-
-        <!-- Folder display: parent path muted, leaf gold. -->
-        <Grid x:Name="FolderDisplayPanel" Visibility="Collapsed">
-            <StackPanel Spacing="2">
-                <TextBlock x:Name="ParentPathText"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                           TextTrimming="CharacterEllipsis" />
+                       Text="&#x25A0;"
+                       FontSize="12"
+                       Foreground="{StaticResource GoldBrush}"
+                       Margin="0,3,0,0" />
+            <StackPanel Grid.Column="1" Spacing="2">
                 <TextBlock x:Name="LeafNameText"
-                           Style="{StaticResource SubtitleTextBlockStyle}"
-                           Foreground="{ThemeResource GoldBrush}"
+                           FontFamily="{StaticResource BodyFontFamily}"
+                           FontSize="14"
+                           FontWeight="SemiBold"
+                           Foreground="{StaticResource Text1Brush}"
                            TextTrimming="CharacterEllipsis" />
+                <TextBlock x:Name="FolderPathText"
+                           Style="{StaticResource ShellMetaTextStyle}" />
             </StackPanel>
+            <TextBlock x:Name="FileCountText"
+                       Grid.Column="2"
+                       Style="{StaticResource ShellMetaTextStyle}"
+                       Foreground="{StaticResource Text2Brush}" />
         </Grid>
 
-        <!-- Empty state: gold pick button. -->
-        <Grid x:Name="EmptyPickerPanel">
-            <Button HorizontalAlignment="Stretch"
-                    Click="OnPickClicked"
-                    Height="40"
-                    Style="{StaticResource GoldButtonStyle}"
-                    AutomationProperties.Name="Pick a folder">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="14" Glyph="&#xE8B7;" />
-                    <TextBlock Text="Pick a folder" FontWeight="SemiBold" />
-                </StackPanel>
-            </Button>
-        </Grid>
+        <TextBlock x:Name="EmptyFolderText"
+                   Text="No folder picked yet."
+                   Style="{StaticResource ShellMetaTextStyle}"
+                   Margin="12,0,12,10" />
 
-        <!-- Action row, only visible when a folder is picked -->
-        <StackPanel x:Name="ActionsPanel" Spacing="6" Visibility="Collapsed">
-            <Button HorizontalAlignment="Stretch"
+        <StackPanel Orientation="Horizontal"
+                    Spacing="8"
+                    Padding="10"
+                    Background="{StaticResource PanelHeaderBrush}"
+                    BorderBrush="{StaticResource HairlineStrongBrush}"
+                    BorderThickness="0,1,0,0">
+            <Button Style="{StaticResource ShellSecondaryButtonStyle}"
+                    Content="Add folder…"
                     Click="OnPickClicked"
-                    Padding="12,8"
-                    BorderThickness="1"
-                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                    Background="{ThemeResource ControlFillColorDefaultBrush}"
-                    CornerRadius="8"
-                    ToolTipService.ToolTip="Change folder (Ctrl+O)"
-                    AutomationProperties.Name="Change folder"
-                    AutomationProperties.HelpText="Pick a different library folder (Ctrl+O)">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="12" Glyph="&#xE8DA;" Opacity="0.75" />
-                    <TextBlock Text="Change folder…" Style="{StaticResource CaptionTextBlockStyle}" />
-                </StackPanel>
-            </Button>
-            <Button HorizontalAlignment="Stretch"
-                    Click="OnClearClicked"
-                    Padding="12,8"
-                    BorderThickness="1"
-                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                    Background="Transparent"
-                    CornerRadius="8"
-                    AutomationProperties.Name="Clear folder">
-                <TextBlock Text="Clear folder"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-            </Button>
-            <Button HorizontalAlignment="Stretch"
-                    Click="OnWipeClicked"
-                    Padding="12,8"
-                    BorderThickness="1"
-                    BorderBrush="{ThemeResource DestructiveBorderBrush}"
-                    Background="{ThemeResource DestructiveBackgroundBrush}"
-                    CornerRadius="8"
-                    ToolTipService.ToolTip="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept."
-                    AutomationProperties.Name="Wipe library"
-                    AutomationProperties.HelpText="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept.">
-                <TextBlock Text="Wipe"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource DestructiveTextBrush}" />
+                    ToolTipService.ToolTip="Pick a library folder (Ctrl+O)"
+                    AutomationProperties.Name="Add folder"
+                    AutomationProperties.HelpText="Pick a library folder (Ctrl+O)" />
+            <Button x:Name="RescanButton"
+                    Style="{StaticResource ShellSecondaryButtonStyle}"
+                    Click="OnRescanClicked"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Rescan this folder (Ctrl+R)">
+                <TextBlock x:Name="RescanText"
+                           Text="Rescan"
+                           MaxWidth="200"
+                           TextTrimming="CharacterEllipsis" />
             </Button>
         </StackPanel>
+
+        <Grid x:Name="ActionsPanel"
+              Visibility="Collapsed"
+              Padding="10,8,10,8"
+              BorderBrush="{StaticResource HairlineSoftBrush}"
+              BorderThickness="0,1,0,0">
+            <Button Style="{StaticResource ShellGhostButtonStyle}"
+                    Content="Clear folder"
+                    Click="OnClearClicked"
+                    HorizontalAlignment="Left"
+                    ToolTipService.ToolTip="Drop the current folder selection. Doesn't touch the library."
+                    AutomationProperties.Name="Clear folder" />
+            <Button Style="{StaticResource ShellGhostButtonStyle}"
+                    Content="Wipe library…"
+                    Foreground="{StaticResource DangerBrush}"
+                    Click="OnWipeClicked"
+                    HorizontalAlignment="Right"
+                    ToolTipService.ToolTip="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept."
+                    AutomationProperties.Name="Wipe library"
+                    AutomationProperties.HelpText="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept." />
+        </Grid>
     </StackPanel>
 </UserControl>

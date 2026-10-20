@@ -46,10 +46,69 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         {
             if (Set(ref _activeTab, value))
             {
+                if (value.Area is { } area)
+                {
+                    _lastTabByArea[area] = value.Id;
+                }
                 _settings.ActiveTab = value.Id;
                 _settings.Save();
             }
         }
+    }
+
+    private readonly Dictionary<string, string> _lastTabByArea = new();
+
+    /// <summary>The page last used in <paramref name="area"/>, or the area's
+    /// first page (macOS Area.remembered).</summary>
+    public SidebarTab RememberedTab(string area)
+    {
+        if (_activeTab.Area == area) return _activeTab;
+        var pages = SidebarTab.InArea(area);
+        if (_lastTabByArea.TryGetValue(area, out var id))
+        {
+            foreach (var page in pages)
+            {
+                if (page.Id == id) return page;
+            }
+        }
+        return pages.Count > 0 ? pages[0] : SidebarTab.Library;
+    }
+
+    private string? _pendingChatDraft;
+    private string? _pendingLibraryQuery;
+
+    /// <summary>Raised after the title-bar search hands a draft to Chat.</summary>
+    public event EventHandler? ChatDraftRequested;
+
+    /// <summary>Raised after the title-bar search hands a query to Library.</summary>
+    public event EventHandler? LibraryQueryRequested;
+
+    public void RequestChatDraft(string draft)
+    {
+        _pendingChatDraft = draft;
+        ActiveTab = SidebarTab.Chat;
+        ChatDraftRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void RequestLibraryQuery(string query)
+    {
+        _pendingLibraryQuery = query;
+        ActiveTab = SidebarTab.Library;
+        LibraryQueryRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    public string? TakeChatDraft()
+    {
+        var draft = _pendingChatDraft;
+        _pendingChatDraft = null;
+        return draft;
+    }
+
+    public string? TakeLibraryQuery()
+    {
+        var query = _pendingLibraryQuery;
+        _pendingLibraryQuery = null;
+        return query;
     }
 
     private bool _sidebarVisible;

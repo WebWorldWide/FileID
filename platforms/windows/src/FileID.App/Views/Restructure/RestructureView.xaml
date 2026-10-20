@@ -107,7 +107,7 @@
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Spacing="6">
-            <TextBlock Text="Restructure" Style="{StaticResource TitleTextBlockStyle}"
+            <TextBlock Text="Restructure" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
                        AutomationProperties.HeadingLevel="Level1"/>
             <TextBlock TextWrapping="Wrap"
                        Style="{StaticResource BodyTextBlockStyle}"

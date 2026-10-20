@@ -1,16 +1,18 @@
-﻿// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, custom title
-// bar, min size), sidebar visibility binding, drag-drop folder, and the
-// app-level keyboard accelerators (Alt+1..6, Ctrl+O, Ctrl+R, Ctrl+F,
-// Ctrl+Shift+S).
+﻿// MainWindow code-behind — chrome (Mica/Acrylic, dark mode, the 48 px v3
+// title bar and its non-client passthrough regions, min size), sidebar
+// visibility binding, drag-drop folder, and the app-level keyboard
+// accelerators (Ctrl/Alt+1..9, Ctrl+K, Ctrl+O, Ctrl+R, Ctrl+F, Ctrl+Shift+S).
 
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using FileID.Services;
+using FileID.Theme.Motion;
 using FileID.ViewModels;
 using Microsoft.UI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -60,16 +62,7 @@ public sealed partial class MainWindow : Window
     private IntPtr _subclassedHwnd = IntPtr.Zero;
     private const uint DpiSubclassId = 0xF11E1D;
 
-    // ApplySidebarVisibility fires on every tab switch / folder change. Cache
-    // its two brushes at ctor (UI thread) instead of allocating a fresh
-    // SolidColorBrush per call — per-event DispatcherObject churn off the
-    // captured thread is the app's hazard class (CLAUDE.md).
-    private readonly Microsoft.UI.Xaml.Media.Brush _transparentBrush =
-        new Microsoft.UI.Xaml.Media.SolidColorBrush(Colors.Transparent);
-    private readonly Microsoft.UI.Xaml.Media.Brush _goldSidebarBrush =
-        FileID.Services.ThemeHelper.GetBrushSafe(
-            "GoldBrush",
-            new Microsoft.UI.Xaml.Media.SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xCC, 0x00)));
+    private const double SidebarWidth = 232;
 
     public MainWindow()
     {
@@ -265,7 +258,16 @@ public sealed partial class MainWindow : Window
         // SetTitleBar registers a zero-bounds drag region if the
         // element hasn't been laid out yet. Defer until Loaded so AppTitleBar
         // has measurable bounds when WinUI captures the non-client region.
-        AppTitleBar.Loaded += (_, _) => SetTitleBar(AppTitleBar);
+        AppTitleBar.Loaded += (_, _) =>
+        {
+            SetTitleBar(AppTitleBar);
+            UpdateTitleBarRegions();
+            if (TitleBarHost.XamlRoot is { } root)
+            {
+                root.Changed += (_, _) => DispatcherQueue.TryEnqueue(UpdateTitleBarRegions);
+            }
+        };
+        TitleBarHost.InteractiveLayoutChanged += (_, _) => DispatcherQueue.TryEnqueue(UpdateTitleBarRegions);
 
         // explicit AppWindow icon. The .exe already has the
         // icon embedded via <ApplicationIcon>, so taskbar / Alt-Tab
@@ -285,6 +287,41 @@ public sealed partial class MainWindow : Window
         catch (System.Exception ex)
         {
             DebugLog.Warn("AppWindow.SetIcon failed (non-fatal): " + ex.Message);
+        }
+    }
+
+    /// <summary>Reserve the caption-button column and register every title-bar
+    /// control as a non-client passthrough rect. Everything else in row 0
+    /// stays the drag region. Rects are physical pixels in client space.</summary>
+    private void UpdateTitleBarRegions()
+    {
+        try
+        {
+            if (_closeFinalized || TitleBarHost?.XamlRoot is not { } root) return;
+            var scale = root.RasterizationScale;
+            if (scale <= 0) scale = 1;
+            var rightInset = AppWindow.TitleBar.RightInset;
+            TitleBarHost.SetCaptionInset(rightInset > 0 ? rightInset / scale : 138);
+            TitleBarHost.UpdateLayout();
+
+            var rects = new List<Windows.Graphics.RectInt32>();
+            foreach (var element in TitleBarHost.InteractiveElements)
+            {
+                if (element.Visibility != Visibility.Visible || element.ActualWidth <= 0 || element.ActualHeight <= 0) continue;
+                var bounds = element.TransformToVisual(Content)
+                    .TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+                rects.Add(new Windows.Graphics.RectInt32(
+                    (int)Math.Round(bounds.X * scale),
+                    (int)Math.Round(bounds.Y * scale),
+                    (int)Math.Round(bounds.Width * scale),
+                    (int)Math.Round(bounds.Height * scale)));
+            }
+            InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
+                .SetRegionRects(NonClientRegionKind.Passthrough, rects.ToArray());
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("UpdateTitleBarRegions failed (non-fatal): " + ex.Message);
         }
     }
 
@@ -390,6 +427,7 @@ public sealed partial class MainWindow : Window
 
         if (AppWindowTitleBar.IsCustomizationSupported() && AppWindow?.TitleBar is { } tb)
         {
+            tb.PreferredHeightOption = TitleBarHeightOption.Tall;
             tb.ButtonBackgroundColor = Colors.Transparent;
             tb.ButtonInactiveBackgroundColor = Colors.Transparent;
             tb.ButtonForegroundColor = Color.FromArgb(0xFF, 0xE6, 0xE6, 0xE6);
@@ -534,6 +572,14 @@ public sealed partial class MainWindow : Window
                 args.Handled = true;
             });
 
+        // Ctrl+K — focus the title-bar "Search or ask" field (macOS Cmd+K).
+        AddAccelerator(VirtualKey.K, VirtualKeyModifiers.Control,
+            (_, args) =>
+            {
+                TitleBarHost.FocusSearch();
+                args.Handled = true;
+            });
+
         // Ctrl+F — focus search. The accelerator is reserved here so the
         // LibraryView wiring is a one-liner (raise an event the LibraryView
         // subscribes to).
@@ -546,18 +592,22 @@ public sealed partial class MainWindow : Window
                 args.Handled = true;
             });
 
-        // Alt+1..6 — jump to tab. Windows-native QoL addition (per
+        // Ctrl+1..9 jump to pages in area order (DESIGN_V3 shell, macOS
+        // Cmd+1..9); Alt+1..9 stays as the Windows-native alias (per
         // shared/docs/DECISIONS.md 2026-05-02 entry).
-        for (int i = 0; i < SidebarTab.All.Count; i++)
+        for (int i = 0; i < SidebarTab.Order.Count && i < 9; i++)
         {
             int idx = i;
             var key = (VirtualKey)((int)VirtualKey.Number1 + i);
-            AddAccelerator(key, VirtualKeyModifiers.Menu, (_, args) =>
+            foreach (var modifier in new[] { VirtualKeyModifiers.Control, VirtualKeyModifiers.Menu })
             {
-                if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
-                AppViewModel.Instance.ActiveTab = SidebarTab.All[idx];
-                args.Handled = true;
-            });
+                AddAccelerator(key, modifier, (_, args) =>
+                {
+                    if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
+                    AppViewModel.Instance.ActiveTab = SidebarTab.Order[idx];
+                    args.Handled = true;
+                });
+            }
         }
 
         // ShortcutsCheatSheet (F1 / Ctrl+?) removed for strict
@@ -783,52 +833,33 @@ public sealed partial class MainWindow : Window
     {
         // Guard the ctor-time call + any post-teardown PropertyChanged: the
         // named elements are only live between InitializeComponent and Close.
-        if (SidebarColumn is null || SidebarHost is null || SidebarToggleButton is null)
+        if (SidebarColumn is null || SidebarHost is null)
         {
             return;
         }
         var visible = AppViewModel.Instance.SidebarVisible;
         if (visible)
         {
-            // Restore MinWidth FIRST so the Width=260 assignment isn't clamped by
-            // the collapsed (MinWidth=0) state. See the collapse branch below for
-            // the full rationale.
-            SidebarColumn.MinWidth = 240;
-            SidebarColumn.Width = new GridLength(260);
+            // Restore MinWidth FIRST so the Width assignment isn't clamped by
+            // the collapsed (MinWidth=0) state.
+            SidebarColumn.MinWidth = SidebarWidth;
+            SidebarColumn.Width = new GridLength(SidebarWidth);
+            var wasHidden = SidebarHost.Visibility != Visibility.Visible;
             SidebarHost.Visibility = Visibility.Visible;
-            // Hamburger on transparent — "open sidebar is here, you can hide it."
-            SidebarToggleGlyph.Glyph = "";
-            SidebarToggleButton.Background = _transparentBrush;
-            ToolTipService.SetToolTip(SidebarToggleButton, "Hide sidebar (Ctrl+Shift+S)");
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SidebarToggleButton, "Hide sidebar");
+            if (wasHidden && !ReducedMotion.Instance.IsReduced)
+            {
+                Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(SidebarHost).Opacity = 0f;
+                SpringEasing.AnimateOpacity(SidebarHost, 1f, 0.38, 0.8);
+            }
         }
         else
         {
-            // MinWidth=240 (from XAML) overrides Width=0 silently — without
-            // clearing MinWidth FIRST, the column stays at 240px and the
-            // sidebar toggle no-ops visually. Reset on expand above.
+            // MinWidth (from XAML) overrides Width=0 silently — clear MinWidth
+            // FIRST or the column stays wide and the toggle no-ops visually.
             SidebarColumn.MinWidth = 0;
             SidebarColumn.Width = new GridLength(0);
             SidebarHost.Visibility = Visibility.Collapsed;
-            // Right-chevron on gold — unambiguous "click here to bring the
-            // sidebar back." Previously the button stayed visually identical
-            // when the sidebar was hidden, so users saw the chevron in
-            // SidebarFolderHeader vanish and assumed there was no return path.
-            SidebarToggleGlyph.Glyph = "";
-            SidebarToggleButton.Background = _goldSidebarBrush;
-            ToolTipService.SetToolTip(SidebarToggleButton, "Show sidebar (Ctrl+Shift+S)");
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SidebarToggleButton, "Show sidebar");
         }
-    }
-
-    /// <summary>
-    /// title-bar sidebar toggle button. Same effect as
-    /// Ctrl+Shift+S but visible at all times so the user always has a way
-    /// to bring the sidebar back after hiding it.
-    /// </summary>
-    private void OnSidebarToggleClicked(object sender, RoutedEventArgs e)
-    {
-        AppViewModel.Instance.ToggleSidebar();
     }
 
     // ─── Drag-drop folder ──────────────────────────────────────────────

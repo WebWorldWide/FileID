@@ -48,7 +48,7 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
         <StackPanel Spacing="4">
-            <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}"
+            <TextBlock Text="Library" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
                        AutomationProperties.HeadingLevel="Level1" />
             <TextBlock Text="Search across filenames, OCR text, and CLIP semantic embeddings."
                        Style="{StaticResource BodyTextBlockStyle}"

@@ -27,7 +27,7 @@
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">
-                <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}"
+                <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
                            AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Models, GPU acceleration, storage."
                            Style="{StaticResource BodyTextBlockStyle}"

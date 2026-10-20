@@ -1,10 +1,10 @@
-﻿// SidebarFolderHeader code-behind. Wires the picker / clear / wipe
-// actions to the AppViewModel and EngineClient. The visibility of the
-// "actions" vs "empty picker" sections is driven by AppViewModel.HasFolder
-// changes.
+﻿// SidebarFolderHeader code-behind. The title-bar folder popover: wires the
+// picker / rescan / clear / wipe actions to the AppViewModel and
+// EngineClient. Hosted in a Flyout, so it subscribes on Loaded (each open)
+// and asks the host to close before any picker or dialog appears.
 
 using System.ComponentModel;
-using System.IO;
+using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
@@ -17,10 +17,26 @@ public sealed partial class SidebarFolderHeader : UserControl
     public SidebarFolderHeader()
     {
         InitializeComponent();
-        Loaded += (_, _) => Sync();
-        AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged;
-        Unloaded += (_, _) => AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
+
+    /// <summary>Raised before an action runs so the hosting flyout can close.</summary>
+    public event EventHandler? DismissRequested;
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
+        AppViewModel.Instance.PropertyChanged += OnAppViewModelChanged;
+        Sync();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+        => AppViewModel.Instance.PropertyChanged -= OnAppViewModelChanged;
+
+    private XamlRoot? DialogRoot => XamlRoot ?? (App.HostWindow?.Content as FrameworkElement)?.XamlRoot;
+
+    private void RequestDismiss() => DismissRequested?.Invoke(this, EventArgs.Empty);
 
     private void OnAppViewModelChanged(object? sender, PropertyChangedEventArgs e)
         => DebugLog.SafeRun(nameof(OnAppViewModelChanged), () => OnAppViewModelChangedCore(sender, e));
@@ -40,21 +56,28 @@ public sealed partial class SidebarFolderHeader : UserControl
         var vm = AppViewModel.Instance;
         if (vm.HasFolder)
         {
-            EmptyPickerPanel.Visibility = Visibility.Collapsed;
+            EmptyFolderText.Visibility = Visibility.Collapsed;
             FolderDisplayPanel.Visibility = Visibility.Visible;
             ActionsPanel.Visibility = Visibility.Visible;
+            RescanButton.Visibility = Visibility.Visible;
 
             var path = vm.FolderPath ?? "";
-            // Parent path muted, leaf gold (matches macOS Sidebar.swift:164).
-            var parent = Path.GetDirectoryName(path);
-            ParentPathText.Text = string.IsNullOrEmpty(parent) ? "" : parent;
-            LeafNameText.Text = vm.FolderDisplay ?? path;
+            var leaf = vm.FolderDisplay ?? path;
+            LeafNameText.Text = leaf;
+            FolderPathText.Text = path;
+            ToolTipService.SetToolTip(FolderPathText, path);
+            var files = EngineClient.Instance.LastScanProcessedFiles;
+            FileCountText.Text = files > 0 ? $"{files:N0} files" : string.Empty;
+            RescanText.Text = $"Rescan {leaf}";
+            var phase = EngineClient.Instance.Phase ?? EngineClient.Instance.LastProgress?.Phase;
+            RescanButton.IsEnabled = phase is not (ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan);
         }
         else
         {
-            EmptyPickerPanel.Visibility = Visibility.Visible;
+            EmptyFolderText.Visibility = Visibility.Visible;
             FolderDisplayPanel.Visibility = Visibility.Collapsed;
             ActionsPanel.Visibility = Visibility.Collapsed;
+            RescanButton.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -70,6 +93,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             DebugLog.Info("OnPickClicked: picker already open; ignoring second click.");
             return;
         }
+        RequestDismiss();
         if (sender is Button btn) btn.IsEnabled = false;
         try
         {
@@ -105,7 +129,26 @@ public sealed partial class SidebarFolderHeader : UserControl
     }
 
     private void OnClearClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnClearClicked), () => AppViewModel.Instance.FolderPath = null);
+        => DebugLog.SafeRun(nameof(OnClearClicked), () =>
+        {
+            RequestDismiss();
+            AppViewModel.Instance.FolderPath = null;
+        });
+
+    private async void OnRescanClicked(object sender, RoutedEventArgs e)
+    {
+        RequestDismiss();
+        var vm = AppViewModel.Instance;
+        if (!vm.HasFolder) return;
+        try
+        {
+            await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Folder popover rescan failed: " + ex.Message);
+        }
+    }
 
     // re-entrancy guard. The wipe flow is multi-second (shutdown +
     // wait + file delete + respawn). A second click that lands while the
@@ -131,9 +174,10 @@ public sealed partial class SidebarFolderHeader : UserControl
         try
         {
             DebugLog.Info("[WIPE] OnWipeClicked entered");
+            RequestDismiss();
             var dialog = new ContentDialog
             {
-                XamlRoot = XamlRoot,
+                XamlRoot = DialogRoot,
                 Title = "Wipe everything?",
                 Content = "This deletes everything FileID has learned — tags, face clusters, captions, smart names — and returns the app to a clean slate. Your actual files are never touched, and your downloaded AI models are kept.\n\nThis can't be undone.",
                 PrimaryButtonText = "Wipe",
@@ -393,7 +437,7 @@ public sealed partial class SidebarFolderHeader : UserControl
     {
         var dialog = new ContentDialog
         {
-            XamlRoot = XamlRoot,
+            XamlRoot = DialogRoot,
             Title = title,
             Content = body,
             CloseButtonText = "OK",
@@ -401,9 +445,6 @@ public sealed partial class SidebarFolderHeader : UserControl
         };
         await dialog.ShowAsync();
     }
-
-    private void OnCollapseClicked(object sender, RoutedEventArgs e)
-        => DebugLog.SafeRun(nameof(OnCollapseClicked), () => AppViewModel.Instance.ToggleSidebar());
 
     private IntPtr GetParentHwnd()
     {

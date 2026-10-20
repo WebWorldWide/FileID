@@ -1,8 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    MainWindow — root window. LavaLamp behind everything; sidebar | divider |
-    detail in a horizontal split; drag-drop overlay laid on top of the
-    content row.
+    MainWindow — Prototype v3 shell. LavaLamp behind everything; the 48 px
+    title bar over a hairline-split sidebar | page (serif page header +
+    active page); drag-drop overlay laid on top of the content row.
 
     The drag-drop overlay only renders when DragOver is in flight; ditto a
     "drop a folder to scan" message.
@@ -14,6 +14,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:motion="using:FileID.Theme.Motion"
+    xmlns:shell="using:FileID.Views.Shell"
     xmlns:sidebar="using:FileID.Views.Sidebar"
     xmlns:views="using:FileID.Views"
     Title="FileID"
@@ -21,7 +22,7 @@
 
     <Grid x:Name="RootLayout">
         <Grid.RowDefinitions>
-            <RowDefinition Height="32" />
+            <RowDefinition Height="48" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -31,58 +32,18 @@
              CoreMessagingXP interaction that breaks on Win11 26200+. -->
         <motion:LavaLampBackground Grid.RowSpan="2" />
 
-        <!-- AppTitleBar: a transparent drag-region backdrop. Passed to
-             SetTitleBar() so its full bounds are draggable / double-click-
-             to-maximize. Must remain EMPTY of interactive children — any
-             Button inside this Grid would consume pointer events and break
-             window dragging. Visible chrome (icon, app name) lives in the
-             sibling Grid below with IsHitTestVisible=False so pointer
-             events pass through to the drag region. The sidebar toggle
-             button sits in its own sibling so it stays clickable without
-             eating drag events from the rest of the title bar. -->
+        <!-- AppTitleBar: the drag-region backdrop passed to SetTitleBar(), and
+             the bar's visible fill + bottom hairline. It stays EMPTY of
+             interactive children; the controls live in the sibling TitleBar,
+             whose rects MainWindow registers as non-client passthrough
+             regions so they stay clickable while the rest drags. -->
         <Grid x:Name="AppTitleBar"
               Grid.Row="0"
-              Background="Transparent" />
+              Background="{StaticResource TitleBarBrush}"
+              BorderBrush="{StaticResource HairlineBrush}"
+              BorderThickness="0,0,0,1" />
 
-        <!-- Sidebar toggle button: hit-testable sibling overlay. Only the
-             button's own 32×24 bounds capture pointer events; everything
-             outside it falls through to AppTitleBar and drags the window. -->
-        <Button x:Name="SidebarToggleButton"
-                Grid.Row="0"
-                Click="OnSidebarToggleClicked"
-                Background="Transparent"
-                BorderThickness="0"
-                Padding="8,4"
-                Width="32" Height="24"
-                Margin="6,0,0,0"
-                HorizontalAlignment="Left"
-                VerticalAlignment="Center"
-                AutomationProperties.Name="Toggle sidebar"
-                ToolTipService.ToolTip="Toggle sidebar (Ctrl+Shift+S)">
-            <FontIcon x:Name="SidebarToggleGlyph"
-                      FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                      Glyph="&#xE700;"
-                      FontSize="14"
-                      AutomationProperties.AccessibilityView="Raw" />
-        </Button>
-
-        <!-- App icon + name: visible but hit-test-invisible so window-drag
-             events on this area fall through to AppTitleBar below. -->
-        <StackPanel Grid.Row="0"
-                    Orientation="Horizontal"
-                    VerticalAlignment="Center"
-                    Margin="44,0,0,0"
-                    IsHitTestVisible="False">
-            <Image Source="ms-appx:///Assets/Logo/FileID-16.png"
-                   Width="16" Height="16"
-                   VerticalAlignment="Center"
-                   Margin="0,0,8,0" />
-            <TextBlock Text="FileID"
-                       VerticalAlignment="Center"
-                       FontSize="13"
-                       FontWeight="SemiBold"
-                       Opacity="0.55" />
-        </StackPanel>
+        <shell:TitleBar x:Name="TitleBarHost" Grid.Row="0" />
 
         <Grid Grid.Row="1"
               AllowDrop="True"
@@ -94,9 +55,9 @@
                      it can't squeeze the detail pane on narrow windows or
                      stretch absurdly on ultra-wide monitors. -->
                 <ColumnDefinition x:Name="SidebarColumn"
-                                  Width="260"
-                                  MinWidth="240"
-                                  MaxWidth="320" />
+                                  Width="232"
+                                  MinWidth="232"
+                                  MaxWidth="232" />
                 <ColumnDefinition Width="1" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
@@ -104,22 +65,17 @@
             <sidebar:Sidebar x:Name="SidebarHost" Grid.Column="0" />
 
             <Border Grid.Column="1"
-                    Background="{ThemeResource SurfaceBorderBrush}" />
+                    Background="{StaticResource HairlineBrush}" />
 
-            <Grid x:Name="DetailHost" Grid.Column="2">
+            <Grid x:Name="DetailHost"
+                  Grid.Column="2"
+                  Background="{StaticResource PageSurfaceBrush}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
-                <StackPanel Orientation="Horizontal" Spacing="8" Margin="16,8">
-                    <Button Content="Search &amp; Moments" Click="OnCatalogWorkbenchClicked" />
-                    <Button Content="File Tools" Click="OnToolsWorkbenchClicked" />
-                    <Button Content="Chat" Click="OnChatWorkbenchClicked" />
-                    <Button Content="Models" Click="OnModelsWorkbenchClicked" />
-                    <Button x:Name="CloseWorkbenchButton" Content="Back to tabs" Click="OnCloseWorkbenchClicked" Visibility="Collapsed" />
-                </StackPanel>
+                <shell:PageHeader x:Name="PageHeaderHost" Grid.Row="0" />
                 <views:DetailHostView x:Name="PrimaryDetailView" Grid.Row="1" />
-                <ContentControl x:Name="WorkbenchHost" Grid.Row="1" Visibility="Collapsed" />
             </Grid>
         </Grid>
 
