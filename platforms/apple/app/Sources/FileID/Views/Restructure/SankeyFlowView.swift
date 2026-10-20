@@ -62,14 +62,14 @@ struct SankeyFlowView: View {
             HStack(spacing: 6) {
                 Image(systemName: "tray.and.arrow.up.fill")
                     .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
                 Text("FROM")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(0.8)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
                 Text("\(layout.sources.count)")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
             }
             .frame(width: nodeColW, alignment: .leading)
             Spacer(minLength: 0)
@@ -84,14 +84,14 @@ struct SankeyFlowView: View {
             HStack(spacing: 6) {
                 Text("\(layout.destinations.count)")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
                 Text("TO")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(0.8)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
                 Image(systemName: "tray.and.arrow.down.fill")
                     .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
             }
             .frame(width: nodeColW, alignment: .trailing)
         }
@@ -320,13 +320,13 @@ struct SankeyFlowView: View {
             }
             VStack(alignment: .leading, spacing: 0) {
                 Text(node.label)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Theme.Font.body(12.5, .semibold))
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(isRollup ? .secondary : .primary)
+                    .truncationMode(.head)
+                    .foregroundStyle(isRollup ? Theme.text2 : Theme.text1)
                 Text("\(node.count) file\(node.count == 1 ? "" : "s")")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .font(Theme.Font.body(11.5, .medium).monospacedDigit())
+                    .foregroundStyle(Theme.text3)
             }
             Spacer(minLength: 0)
         }
@@ -360,7 +360,7 @@ struct SankeyFlowView: View {
         )
         .frame(height: slot.height)
         .contentShape(Rectangle())
-        .help("\(node.count) file\(node.count == 1 ? "" : "s") · tap to see them")
+        .help("\(node.label) · \(node.count) file\(node.count == 1 ? "" : "s") · click to see them")
         .animation(.easeOut(duration: 0.18), value: isFocused)
     }
 
@@ -487,7 +487,7 @@ struct SankeyFlowView: View {
                         .foregroundStyle(Theme.gold)
                     Text("file\(count == 1 ? "" : "s") moving")
                         .font(Theme.Font.body(12, .semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Theme.text1)
                     Spacer(minLength: 0)
                 }
                 HStack(spacing: 5) {
@@ -496,13 +496,13 @@ struct SankeyFlowView: View {
                         .truncationMode(.middle)
                     Image(systemName: "arrow.right")
                         .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
                     Text(bucket)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 .font(Theme.Font.mono(10.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text2)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .frame(width: tooltipW, alignment: .leading)

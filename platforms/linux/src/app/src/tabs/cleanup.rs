@@ -184,7 +184,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let filler = gtk::Box::builder().hexpand(true).build();
 
     let select_nonkeepers_btn = gtk::Button::builder()
-        .label("Select all non-keepers")
+        .label("Select extra copies")
         .css_classes(["pill"])
         .build();
     let clear_btn = gtk::Button::builder()
@@ -193,7 +193,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .sensitive(false)
         .build();
     let delete_btn = gtk::Button::builder()
-        .label("Delete 0 selected (Zero KB)")
+        .label("Delete selected")
         .css_classes(["destructive-action"])
         .sensitive(false)
         .build();
@@ -1026,7 +1026,7 @@ impl Cleanup {
             "No verified duplicate groups".to_string()
         } else {
             format!(
-                "{n_groups} verified duplicate group{} · {} reclaimable if you keep 1 per group",
+                "{n_groups} verified duplicate group{} · {} to reclaim",
                 plural(n_groups),
                 format_bytes(reclaimable),
             )
@@ -1039,10 +1039,14 @@ impl Cleanup {
         }
         self.subtitle.set_text(&subtitle);
 
-        self.delete_btn.set_label(&format!(
-            "Delete {total_sel} selected ({})",
-            format_bytes(total_sel_bytes)
-        ));
+        if total_sel == 0 {
+            self.delete_btn.set_label("Delete selected");
+        } else {
+            self.delete_btn.set_label(&format!(
+                "Delete {total_sel} selected · {}",
+                format_bytes(total_sel_bytes)
+            ));
+        }
         self.delete_btn
             .set_sensitive(total_sel > 0 && !self.deleting.get() && !self.restoring.get());
         self.clear_btn.set_sensitive(total_sel > 0);

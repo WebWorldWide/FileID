@@ -237,7 +237,7 @@ struct LibraryView: View {
                 .font(Theme.Font.body(13.5))
             VStack(alignment: .leading, spacing: 1) {
                 Text(title).font(Theme.Font.body(13.5, .semibold))
-                Text(detail).font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                Text(detail).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
             }
             Spacer()
             ProgressView().controlSize(.small).tint(Theme.ai)
@@ -280,7 +280,7 @@ struct LibraryView: View {
                      ? "Preparing semantic search… results will refresh automatically."
                      : "Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
                     .font(Theme.Font.body(11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
             Spacer()
             if hint == .preparing {
@@ -305,7 +305,7 @@ struct LibraryView: View {
                     .font(Theme.Font.body(13.5, .semibold))
                 Text("Ranked by visual similarity using on-device CLIP embeddings.")
                     .font(Theme.Font.body(11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
             Spacer()
             Button("Clear") { similarSeed = nil }
@@ -333,14 +333,14 @@ struct LibraryView: View {
                         .font(Theme.Font.body(14, .semibold))
                     Text("Tags + face detection. Smart names come later via Deep Analyze.")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 Text(p.total > 0
                      ? "\(p.processed) / \(p.total)  ·  \(p.discovered) found"
                      : "\(p.processed) processed  ·  \(p.discovered) found")
                     .font(Theme.Font.body(13.5).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
             if p.total > 0 {
                 ProgressView(value: Double(p.processed),
@@ -356,7 +356,7 @@ struct LibraryView: View {
                     .foregroundStyle(Theme.gold)
                 if let eta = p.etaSeconds, eta > 0 {
                     Text("about \(formatETA(eta)) left")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 if p.failed > 0 {
@@ -403,13 +403,13 @@ struct LibraryView: View {
                         .font(Theme.Font.body(14, .semibold))
                     Text("On-device AI is captioning images and proposing smart filenames.")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 if let p {
                     Text("\(p.processed) / \(p.total)")
                         .font(Theme.Font.body(13.5).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
             }
             if let p, p.total > 0 {
@@ -433,7 +433,7 @@ struct LibraryView: View {
                     Spacer()
                 }
                 .font(Theme.Font.body(12).monospacedDigit())
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.text3)
             }
             if let last {
                 Divider().opacity(0.3)
@@ -449,7 +449,7 @@ struct LibraryView: View {
                         }
                         Text(last.description)
                             .font(Theme.Font.body(12))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                             .lineLimit(3)
                     }
                     Spacer()
@@ -1147,7 +1147,7 @@ private struct FinderTagsEditor: View {
                 if tags.isEmpty {
                     Text("No Finder tags yet.")
                         .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 } else {
                     FlowLayout(spacing: 6) {
                         ForEach(tags, id: \.self) { tag in
@@ -1243,7 +1243,7 @@ private struct FinderTagsEditor: View {
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
             .buttonStyle(.plain)
             .help("Remove this tag")
@@ -1340,10 +1340,10 @@ private struct PDFPreview: View {
                 VStack(spacing: 8) {
                     Image(systemName: "doc.richtext")
                         .font(.system(size: 64))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                     Text("Loading PDF…")
                         .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
             }
         }
@@ -1386,13 +1386,13 @@ private struct UniversalPreview: View {
                 VStack(spacing: 10) {
                     Image(systemName: iconForExtension(url.pathExtension))
                         .font(.system(size: 96, weight: .light))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                     Text(url.lastPathComponent)
                         .font(Theme.Font.body(13.5))
                         .lineLimit(1).truncationMode(.middle)
                     Text("Open in default app for full preview")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
                 }
             }
         }

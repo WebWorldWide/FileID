@@ -176,15 +176,21 @@ struct GlassCard<Content: View>: View {
 struct BadgePill: View {
     let label:  String
     var color:  Color = Theme.gold
+    /// Over photos and video frames the tint wash alone disappears on bright
+    /// skies, so the pill sits on a dark backing like the Library kind badge.
+    var onImage = false
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.xs, style: .continuous)
         Text(label)
             .font(Theme.Font.body(11, .semibold))
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
-            .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.xs, style: .continuous))
+            .background(color.opacity(0.12), in: shape)
+            .background(onImage ? Color.black.opacity(0.62) : Color.clear, in: shape)
+            .overlay { if onImage { shape.stroke(color.opacity(0.6), lineWidth: 1) } }
     }
 }
 
