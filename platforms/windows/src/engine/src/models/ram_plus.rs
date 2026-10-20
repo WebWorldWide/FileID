@@ -28,7 +28,7 @@ use super::runtime::{
 
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
-const INPUT_SIZE: u32 = 384;
+pub const INPUT_SIZE: u32 = 384;
 const INV_255: f32 = 1.0 / 255.0;
 
 /// Default sigmoid-probability cutoff. RAM++ is calibrated with per-class
@@ -410,22 +410,22 @@ impl RamPlusTagger {
     /// tensor. Bilinear (not nearest) because tag quality is sensitive to
     /// resampling; matches the export script's PIL BILINEAR.
     fn preprocess(rgb: &[u8], width: u32, height: u32) -> Result<Array4<f32>> {
-        // Borrow the caller's buffer instead of cloning it (caller already
-        // validated rgb.len() == w*h*3). resize early-outs to a plain copy at
-        // equal dimensions, so calling it unconditionally is byte-identical to
-        // the old width==height==INPUT_SIZE short-circuit.
-        let src = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(width, height, rgb)
-            .ok_or_else(|| anyhow::anyhow!("RAM++ preprocess: bad RGB buffer"))?;
-        let resized = image::imageops::resize(
-            &src,
-            INPUT_SIZE,
-            INPUT_SIZE,
-            image::imageops::FilterType::Triangle,
-        );
+        let resized = Self::resize_to_input(rgb, width, height)?;
         let n = INPUT_SIZE as usize;
         let mut chw = Array4::<f32>::zeros((1, 3, n, n));
-        fill_imagenet_chw(&mut chw, 0, resized.as_raw(), n);
+        fill_imagenet_chw(&mut chw, 0, &resized, n);
         Ok(chw)
+    }
+
+    /// The model's square RGB8 input, resized from `rgb` (borrowed, not
+    /// cloned). `resize` is a plain copy at equal dimensions, so feeding the
+    /// result back through `preprocess` yields the same tensor. Lets batch
+    /// callers shrink frames on their own thread before queueing them.
+    pub fn resize_to_input(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+        let src = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(width, height, rgb)
+            .ok_or_else(|| anyhow::anyhow!("RAM++ preprocess: bad RGB buffer"))?;
+        Ok(image::imageops::resize(&src, INPUT_SIZE, INPUT_SIZE, image::imageops::FilterType::Triangle)
+            .into_raw())
     }
 }
 
@@ -480,6 +480,17 @@ mod tests {
 
     fn assert_close(actual: f32, expected: f32) {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn worker_resized_input_yields_the_same_tensor() {
+        let (w, h) = (1000u32, 750u32);
+        let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 251) as u8).collect();
+        let small = RamPlusTagger::resize_to_input(&rgb, w, h).unwrap();
+        assert_eq!(
+            RamPlusTagger::preprocess(&small, INPUT_SIZE, INPUT_SIZE).unwrap(),
+            RamPlusTagger::preprocess(&rgb, w, h).unwrap()
+        );
     }
 
     #[test]

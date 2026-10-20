@@ -25,8 +25,9 @@ const INTERIOR_CHUNK: usize = 64 * 1024;
 /// 32-byte SHA-256 content identity for `path` (whose length is `size`). Same
 /// bytes -> same hash, so a moved/renamed file re-binds to its existing
 /// catalog row instead of being recomputed. Opens long paths safely.
+#[cfg(test)]
 pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> {
-    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES)
+    Ok(content_hashes(path, size, false)?.0)
 }
 
 // Public library surface used by the CLI, TUI, and Linux app rather than the
@@ -186,26 +187,75 @@ pub fn group_exact_duplicates(
     group_exact_duplicates_until(candidates, || false)
 }
 
+/// Exact-duplicate hashing is IO-bound; a few readers saturate an SSD without
+/// turning a spinning disk into seek thrash.
+const EXACT_HASH_WORKERS: usize = 4;
+
+fn exact_hash_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get().clamp(1, EXACT_HASH_WORKERS))
+            .thread_name(|i| format!("fileid-exact-hash-{i}"))
+            .build()
+            .expect("exact-duplicate hashing pool")
+    })
+}
+
+/// Full-file SHA-256 grouping. Only files sharing an indexed size can be
+/// duplicates, so singleton sizes are never read. `should_cancel` is polled on
+/// the calling thread; once it fires, unread files count as skipped.
 #[allow(dead_code)]
 pub fn group_exact_duplicates_until(
     candidates: Vec<ExactDuplicateCandidate>,
     should_cancel: impl Fn() -> bool,
 ) -> ExactDuplicateGrouping {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut skipped = 0;
+    let mut by_size: BTreeMap<u64, Vec<ExactDuplicateCandidate>> = BTreeMap::new();
+    for candidate in candidates {
+        match u64::try_from(candidate.indexed_size) {
+            Ok(size) => by_size.entry(size).or_default().push(candidate),
+            Err(_) => skipped += 1,
+        }
+    }
+    let work: Vec<(u64, ExactDuplicateCandidate)> = by_size
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .flat_map(|(size, files)| files.into_iter().map(move |file| (size, file)))
+        .collect();
+    let hashes = parking_lot::Mutex::new(vec![None; work.len()]);
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(should_cancel());
+    let pool = exact_hash_pool();
+    pool.in_place_scope(|scope| {
+        for _ in 0..pool.current_num_threads().min(work.len()) {
+            scope.spawn(|_| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some((size, candidate)) = work.get(index) else { break };
+                if !cancelled.load(Ordering::Relaxed) {
+                    let hash = exact_file_sha256_until(&candidate.path, *size, || {
+                        cancelled.load(Ordering::Relaxed)
+                    });
+                    hashes.lock()[index] = hash.ok();
+                }
+                done.fetch_add(1, Ordering::Release);
+            });
+        }
+        while done.load(Ordering::Acquire) < work.len() {
+            if !cancelled.load(Ordering::Relaxed) && should_cancel() {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
     let mut by_digest: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> =
         BTreeMap::new();
-    let mut skipped = 0;
-    for candidate in candidates {
-        if should_cancel() {
-            skipped += 1;
-            continue;
-        }
-        let Ok(size) = u64::try_from(candidate.indexed_size) else {
-            skipped += 1;
-            continue;
-        };
-        match exact_file_sha256_until(&candidate.path, size, &should_cancel) {
-            Ok(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
-            Err(_) => skipped += 1,
+    for ((size, candidate), hash) in work.into_iter().zip(hashes.into_inner()) {
+        match hash {
+            Some(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
+            None => skipped += 1,
         }
     }
     let groups = by_digest
@@ -226,21 +276,20 @@ pub fn matches_known_hash_hex(path: &Path, size: u64, expected_hex: &str) -> std
         Ok(bytes) if bytes.len() == 32 => bytes,
         _ => return Ok(false),
     };
-    if content_hash(path, size)?.as_slice() == expected.as_slice() {
-        return Ok(true);
-    }
-    let legacy = legacy_content_hashes(path, size)?;
-    Ok(legacy.v2.as_slice() == expected.as_slice()
-        || legacy
-            .v1
-            .is_some_and(|hash| hash.as_slice() == expected.as_slice()))
+    let (current, legacy) = content_hashes(path, size, true)?;
+    let legacy = legacy.expect("legacy digests requested");
+    Ok([Some(current), Some(legacy.v2), legacy.v1]
+        .into_iter()
+        .flatten()
+        .any(|hash| hash.as_slice() == expected.as_slice()))
 }
 
 /// Every BLAKE3 digest a pre-SHA-256 build could have stamped for this file.
 /// Rows written by those builds (released v0.0.1 stamped BLAKE3) only
 /// rename-heal if the lookup reproduces the exact digest they hold; the heal
 /// upsert then re-stamps the current SHA-256 recipe, retiring the probe per row.
-pub(crate) struct LegacyHashes {
+#[derive(Clone, Debug)]
+pub struct LegacyHashes {
     /// The digest v0.0.1 stamped: full-file BLAKE3 at or under the cap,
     /// blake3(head ‖ interior samples ‖ tail ‖ size_le) over it.
     pub v2: [u8; 32],
@@ -251,18 +300,40 @@ pub(crate) struct LegacyHashes {
     pub v1: Option<[u8; 32]>,
 }
 
-/// Both legacy digests in one read: the shared head/tail bytes feed both
-/// hashers, only `v2` sees the interior samples. The recipes are frozen —
-/// they reproduce digests already sitting in shipped databases.
-pub(crate) fn legacy_content_hashes(path: &Path, size: u64) -> std::io::Result<LegacyHashes> {
-    legacy_hashes_with_threshold(path, size, FULL_HASH_MAX_BYTES)
+impl LegacyHashes {
+    /// Legacy digests of a file whose full contents are already in memory.
+    pub(crate) fn of_full_bytes(bytes: &[u8]) -> Self {
+        Self { v2: *blake3::hash(bytes).as_bytes(), v1: None }
+    }
 }
 
-/// Testable core: `content_hash` with the full-vs-composite threshold injected
-/// so the composite path can be exercised on small fixtures.
-fn hash_with_threshold(path: &Path, size: u64, full_max: u64) -> std::io::Result<[u8; 32]> {
+#[cfg(test)]
+pub(crate) fn legacy_content_hashes(path: &Path, size: u64) -> std::io::Result<LegacyHashes> {
+    Ok(content_hashes(path, size, true)?.1.expect("legacy digests requested"))
+}
+
+/// The current SHA-256 identity plus, when `legacy` is set, the frozen BLAKE3
+/// recipes, all from ONE read: the shared head/tail/interior bytes feed every
+/// hasher (only `v2` and SHA-256 see the interior samples).
+pub(crate) fn content_hashes(
+    path: &Path,
+    size: u64,
+    legacy: bool,
+) -> std::io::Result<([u8; 32], Option<LegacyHashes>)> {
+    hash_with_threshold(path, size, FULL_HASH_MAX_BYTES, legacy)
+}
+
+/// Testable core: the full-vs-composite threshold injected so the composite
+/// path can be exercised on small fixtures.
+fn hash_with_threshold(
+    path: &Path,
+    size: u64,
+    full_max: u64,
+    legacy: bool,
+) -> std::io::Result<([u8; 32], Option<LegacyHashes>)> {
     let mut f = std::fs::File::open(super::path_safety::to_extended_length(path))?;
     let mut sha = sha2::Sha256::new();
+    let mut v2 = legacy.then(blake3::Hasher::new);
     if size <= full_max {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
@@ -271,94 +342,55 @@ fn hash_with_threshold(path: &Path, size: u64, full_max: u64) -> std::io::Result
                 break;
             }
             sha.update(&buf[..n]);
-        }
-    } else {
-        // Clamp to the file size so a file between `full_max` and CHUNK
-        // doesn't seek before the start (the head+tail overlap on such files
-        // is harmless — the hash stays deterministic).
-        let span = size.min(CHUNK as u64) as usize;
-
-        let mut head = vec![0u8; span];
-        let n = read_fill(&mut f, &mut head)?;
-        sha.update(&head[..n]);
-
-        // Interior samples: a few evenly-spaced 64 KB chunks so two DISTINCT
-        // same-size files that happen to share their head+tail (camera bursts,
-        // container formats with identical headers/footers, padded archives)
-        // don't collide and trigger a false rename-heal. Deterministic offsets;
-        // skipped on files too small for interior reads to clear head/tail.
-        for off in interior_offsets(size, span) {
-            if f.seek(SeekFrom::Start(off)).is_ok() {
-                let mut mid = vec![0u8; INTERIOR_CHUNK];
-                let n = read_fill(&mut f, &mut mid)?;
-                sha.update(&mid[..n]);
+            if let Some(v2) = v2.as_mut() {
+                v2.update(&buf[..n]);
             }
         }
-
-        f.seek(SeekFrom::End(-(span as i64)))?;
-        let mut tail = vec![0u8; span];
-        let n = read_fill(&mut f, &mut tail)?;
-        sha.update(&tail[..n]);
-
-        // Size disambiguates files that share head+tail but differ in the middle.
-        sha.update(size.to_le_bytes());
+        let legacy = v2.map(|v2| LegacyHashes { v2: *v2.finalize().as_bytes(), v1: None });
+        return Ok((sha.finalize().into(), legacy));
     }
-    let digest = sha.finalize();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&digest);
-    Ok(out)
-}
-
-fn legacy_hashes_with_threshold(
-    path: &Path,
-    size: u64,
-    full_max: u64,
-) -> std::io::Result<LegacyHashes> {
-    let mut f = std::fs::File::open(super::path_safety::to_extended_length(path))?;
-    let mut v2 = blake3::Hasher::new();
-    if size <= full_max {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let n = f.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            v2.update(&buf[..n]);
+    let mut v1 = legacy.then(blake3::Hasher::new);
+    let mut feed = |bytes: &[u8], interior: bool| {
+        sha.update(bytes);
+        if let Some(v2) = v2.as_mut() {
+            v2.update(bytes);
         }
-        return Ok(LegacyHashes {
-            v2: *v2.finalize().as_bytes(),
-            v1: None,
-        });
-    }
-
-    let mut v1 = blake3::Hasher::new();
+        if let (false, Some(v1)) = (interior, v1.as_mut()) {
+            v1.update(bytes);
+        }
+    };
+    // Clamp to the file size so a file between `full_max` and CHUNK doesn't
+    // seek before the start (the head+tail overlap on such files is harmless —
+    // the hash stays deterministic).
     let span = size.min(CHUNK as u64) as usize;
+    let mut chunk = vec![0u8; span];
+    let n = read_fill(&mut f, &mut chunk)?;
+    feed(&chunk[..n], false);
 
-    let mut head = vec![0u8; span];
-    let n = read_fill(&mut f, &mut head)?;
-    v2.update(&head[..n]);
-    v1.update(&head[..n]);
-
+    // Interior samples: a few evenly-spaced 64 KB chunks so two DISTINCT
+    // same-size files that happen to share their head+tail (camera bursts,
+    // container formats with identical headers/footers, padded archives) don't
+    // collide and trigger a false rename-heal. Deterministic offsets; skipped on
+    // files too small for interior reads to clear head/tail.
+    let mut mid = vec![0u8; INTERIOR_CHUNK];
     for off in interior_offsets(size, span) {
         if f.seek(SeekFrom::Start(off)).is_ok() {
-            let mut mid = vec![0u8; INTERIOR_CHUNK];
             let n = read_fill(&mut f, &mut mid)?;
-            v2.update(&mid[..n]);
+            feed(&mid[..n], true);
         }
     }
 
     f.seek(SeekFrom::End(-(span as i64)))?;
-    let mut tail = vec![0u8; span];
-    let n = read_fill(&mut f, &mut tail)?;
-    v2.update(&tail[..n]);
-    v1.update(&tail[..n]);
+    let n = read_fill(&mut f, &mut chunk)?;
+    feed(&chunk[..n], false);
 
-    v2.update(&size.to_le_bytes());
-    v1.update(&size.to_le_bytes());
-    Ok(LegacyHashes {
+    // Size disambiguates files that share head+tail but differ in the middle.
+    feed(&size.to_le_bytes(), false);
+    let legacy = v2.zip(v1).map(|(v2, v1)| LegacyHashes {
         v2: *v2.finalize().as_bytes(),
         v1: Some(*v1.finalize().as_bytes()),
-    })
+    });
+    Ok((sha.finalize().into(), legacy))
 }
 
 fn interior_offsets(size: u64, span: usize) -> impl Iterator<Item = u64> {
@@ -465,6 +497,32 @@ mod tests {
     }
 
     #[test]
+    fn exact_grouping_skips_singleton_sizes_and_honours_cancel() {
+        let a = tmp_with(b"pair");
+        let b = tmp_with(b"pair");
+        let candidate = |id, path: &PathBuf, indexed_size| ExactDuplicateCandidate {
+            id,
+            path: path.clone(),
+            indexed_size,
+        };
+        let unreadable = PathBuf::from("/nonexistent/fileid-singleton");
+        let candidates = vec![
+            candidate(1, &a, 4),
+            candidate(2, &b, 4),
+            candidate(3, &unreadable, 99),
+            candidate(4, &unreadable, -1),
+        ];
+        let grouping = group_exact_duplicates(candidates.clone());
+        assert_eq!(grouping.groups.len(), 1);
+        assert_eq!(grouping.skipped, 1, "only the invalid size; the singleton is never read");
+        let cancelled = group_exact_duplicates_until(candidates, || true);
+        assert!(cancelled.groups.is_empty());
+        assert_eq!(cancelled.skipped, 3);
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
     fn known_hash_matcher_accepts_current_and_legacy_but_rejects_replacement() {
         let path = tmp_with(b"original");
         let current = hex::encode(content_hash(&path, 8).unwrap());
@@ -503,10 +561,10 @@ mod tests {
         let body: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
         let p = tmp_with(&body);
         let size = body.len() as u64;
-        let c1 = hash_with_threshold(&p, size, 64).unwrap();
-        let c2 = hash_with_threshold(&p, size, 64).unwrap();
+        let c1 = hash_with_threshold(&p, size, 64, false).unwrap().0;
+        let c2 = hash_with_threshold(&p, size, 64, false).unwrap().0;
         assert_eq!(c1, c2, "composite hash must be deterministic");
-        let full = hash_with_threshold(&p, size, u64::MAX).unwrap();
+        let full = hash_with_threshold(&p, size, u64::MAX, false).unwrap().0;
         assert_ne!(c1, full, "composite (head+tail+size) differs from full hash");
         let _ = std::fs::remove_file(&p);
     }
@@ -521,8 +579,8 @@ mod tests {
         b[4095] = 2; // tail differs
         let pa = tmp_with(&a);
         let pb = tmp_with(&b);
-        let ha = hash_with_threshold(&pa, 4096, 64).unwrap();
-        let hb = hash_with_threshold(&pb, 4096, 64).unwrap();
+        let ha = hash_with_threshold(&pa, 4096, 64, false).unwrap().0;
+        let hb = hash_with_threshold(&pb, 4096, 64, false).unwrap().0;
         assert_ne!(ha, hb);
         let _ = std::fs::remove_file(&pa);
         let _ = std::fs::remove_file(&pb);
@@ -580,6 +638,17 @@ mod tests {
         h.update(&size.to_le_bytes());
         let stamped_by_v001 = *h.finalize().as_bytes();
 
+        let mut sha = sha2::Sha256::new();
+        sha.update(&body[..MB]);
+        for k in 1..=4u64 {
+            let off = (size * k / 5) as usize;
+            sha.update(&body[off..off + 64 * 1024]);
+        }
+        sha.update(&body[body.len() - MB..]);
+        sha.update(size.to_le_bytes());
+        let current: [u8; 32] = sha.finalize().into();
+        assert_eq!(content_hash(&p, size).unwrap(), current, "one-pass SHA-256 composite recipe");
+
         let legacy = legacy_content_hashes(&p, size).unwrap();
         assert_eq!(
             legacy.v2, stamped_by_v001,
@@ -620,4 +689,5 @@ mod tests {
         );
         let _ = std::fs::remove_file(&p);
     }
+
 }

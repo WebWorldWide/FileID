@@ -2582,8 +2582,7 @@ mod tests {
     }
     #[test]
     fn naming_unknown_person_restores_known_cluster() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO persons (id, created_at, is_unknown) VALUES (42, 1, 1)",
             [],
@@ -2608,8 +2607,7 @@ mod tests {
 
     #[test]
     fn removed_person_rename_reports_failure() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute("INSERT INTO persons (id, created_at) VALUES (42, 1)", []).unwrap();
         conn.execute("DELETE FROM persons WHERE id=42", []).unwrap();
         let result = save_person_name(&conn, &ipc::RenamePersonPayload {

@@ -633,21 +633,11 @@ pub mod thumbnail {
     use anyhow::{Context, Result};
     use std::path::Path;
 
-    pub const THUMB_DIM: i32 = 512;
-
     #[derive(Debug, Clone)]
     pub struct Thumbnail {
         pub width: u32,
         pub height: u32,
         pub rgba: Vec<u8>,
-    }
-
-    pub fn render(path: &Path) -> Result<Thumbnail> {
-        render_at(path, THUMB_DIM)
-    }
-
-    pub fn render_at(path: &Path, dim: i32) -> Result<Thumbnail> {
-        render_oriented(path, dim)
     }
 
     /// Upright thumbnail, like macOS ImageIO with the EXIF transform applied:
@@ -786,7 +776,7 @@ pub mod thumbnail {
             let path = fixture.join("generated.png");
             image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 40, 60, 255]))
                 .save(&path).unwrap();
-            let thumb = render_at(&path, 8).unwrap();
+            let thumb = render_oriented(&path, 8).unwrap();
             assert_eq!((thumb.width, thumb.height), (8, 4));
             let rotated = fixture.join("portrait.jpg");
             std::fs::write(&rotated, jpeg_with_orientation(40, 20, Some(6))).unwrap();
@@ -798,7 +788,6 @@ pub mod thumbnail {
             assert_eq!((preview.width, preview.height), (6, 8), "RAW preview with its container orientation");
             assert_eq!(thumb.rgba.len(), 8 * 4 * 4);
             assert_eq!(&thumb.rgba[0..4], &[200, 40, 60, 255]);
-            assert!(render_at(&path, 0).is_err());
             assert!(render_oriented(&path, 0).is_err());
             std::fs::remove_dir_all(fixture).unwrap();
         }

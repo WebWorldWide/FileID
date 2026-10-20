@@ -125,19 +125,6 @@ pub const SCENE_COSINE_THRESHOLD: f32 = 0.15;
 /// searchable.
 pub const SCENE_TOP_K: usize = 4;
 
-/// Master switch for CLIP (MobileCLIP-S2). When true, the scan computes a
-/// per-file image embedding (stored in `clip_embeddings`) that powers both
-/// the Library's free-text semantic search ("a dog at the beach") AND the
-/// zero-shot scene tags below. When false, no embedding is computed and
-/// search degrades to FTS5 keyword/tag matching over filenames + OCR.
-pub const ENABLE_CLIP: bool = true;
-
-/// Whether the scan emits CLIP zero-shot scene tags (`source='auto'`).
-/// ON by default — these chips are the canonical auto-tagger for image and
-/// video files. Deep Analyze (Qwen / Gemma, `source='vlm'`) is opt-in and
-/// supersedes when present. Requires ENABLE_CLIP.
-pub const ENABLE_CLIP_SCENE_TAGS: bool = true;
-
 /// Prompts text-encoded per ONNX batch when building the label matrix.
 #[allow(dead_code)] // offline matrix build only (examples/gen_scene_matrix.rs)
 const BUILD_BATCH: usize = 64;
