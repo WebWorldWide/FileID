@@ -47,8 +47,10 @@ struct PeopleView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            headerBlock
-            Divider().opacity(0.15)
+            if showsHeader {
+                headerBlock
+                Divider().opacity(0.15)
+            }
             if let s = mergeStatus {
                 Text(s)
                     .font(Theme.Font.body(12))
@@ -527,11 +529,19 @@ struct PeopleView: View {
         }
     }
 
+    private var showsHeader: Bool {
+        !persons.isEmpty || totalFacePrints > 0 || mergeMode || unknownMode
+            || (engine.lastFaceClustering?.deferredFaces ?? 0) > 0
+    }
+
     private var emptyState: some View {
-        EmptyStateView(
+        let images = store.totalImages
+        return EmptyStateView(
             icon: "person.2.crop.square.stack",
-            title: "No people yet",
-            message: "Pick a folder in the sidebar and click Start Scan. As the scan runs, faces in your photos get detected and grouped — they'll appear here as cards you can name."
+            title: images > 0 ? "No faces found" : "No people yet",
+            message: images > 0
+                ? "FileID looked at \(images.formatted()) photo\(images == 1 ? "" : "s") in this library and didn't find any faces. People appear here when a scanned photo has one."
+                : "Scan a folder with photos. Faces are detected as the scan runs and grouped into people you can name."
         )
     }
 
