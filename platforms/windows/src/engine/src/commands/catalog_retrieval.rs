@@ -144,8 +144,21 @@ fn tag_hits(
     if words.is_empty() {
         return Ok(vec![]);
     }
-    let score = (0..words.len())
-        .map(|i| format!("EXISTS (SELECT 1 FROM tags t WHERE t.file_id=f.id AND t.source IN ('auto','user','vlm') AND (' ' || REPLACE(LOWER(t.tag),'_',' ')) LIKE ?{})", i + 5))
+    let forms: Vec<Vec<String>> = words.iter().map(|w| word_forms(w)).collect();
+    let mut next = 5;
+    let score = forms
+        .iter()
+        .map(|word| {
+            let likes = word
+                .iter()
+                .map(|_| {
+                    next += 1;
+                    format!("(' ' || REPLACE(LOWER(t.tag),'_',' ')) LIKE ?{}", next - 1)
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            format!("EXISTS (SELECT 1 FROM tags t WHERE t.file_id=f.id AND t.source IN ('auto','user','vlm') AND ({likes}))")
+        })
         .collect::<Vec<_>>()
         .join(" + ");
     let sql = format!(
@@ -154,13 +167,31 @@ fn tag_hits(
          FROM scored s WHERE s.score>0 AND s.score=(SELECT MAX(score) FROM scored) ORDER BY s.id DESC LIMIT 100"
     );
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];
-    for word in &words {
-        args.push(Box::new(format!("% {word}%")));
+    for form in forms.iter().flatten() {
+        args.push(Box::new(format!("% {form}%")));
     }
     Ok(conn
         .prepare(&sql)?
         .query_map(rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())), hit)?
         .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The word plus its singular stems, so "dogs" and "beaches" reach the singular
+/// scan tags. Mirrors macOS `CatalogStore.wordForms`.
+fn word_forms(word: &str) -> Vec<String> {
+    if word.chars().count() < 4 {
+        return vec![word.to_owned()];
+    }
+    if let Some(stem) = word.strip_suffix("ies") {
+        return vec![word.to_owned(), format!("{stem}y")];
+    }
+    if let Some(stem) = word.strip_suffix("es") {
+        return vec![word.to_owned(), stem.to_owned(), format!("{stem}e")];
+    }
+    match word.strip_suffix('s') {
+        Some(stem) if !word.ends_with("ss") => vec![word.to_owned(), stem.to_owned()],
+        _ => vec![word.to_owned()],
+    }
 }
 
 pub(super) type KnownPeople = Vec<(i64, Vec<String>)>;
@@ -196,6 +227,17 @@ mod tests {
         let hits = search(&conn, "grass", &["video".into()], &[], &[], None).unwrap();
         assert!(hits.is_empty(), "kind filter applies");
         assert!(search(&conn, "grass", &[], &[], &[], None).unwrap()[1].text.starts_with("Tags: grassland"));
+        assert_eq!(ids("dogs on grass"), vec![1], "plural words reach singular tags");
+    }
+    #[test]
+    fn plural_words_add_singular_stems() {
+        assert_eq!(word_forms("dogs"), ["dogs", "dog"]);
+        assert_eq!(word_forms("puppies"), ["puppies", "puppy"]);
+        assert_eq!(word_forms("beaches"), ["beaches", "beach", "beache"]);
+        assert_eq!(word_forms("faces"), ["faces", "fac", "face"]);
+        assert_eq!(word_forms("grass"), ["grass"]);
+        assert_eq!(word_forms("cats"), ["cats", "cat"]);
+        assert_eq!(word_forms("bus"), ["bus"]);
     }
     #[test]
     fn filters_apply_before_limits_and_exclude_failed_stale_and_unknown() {
