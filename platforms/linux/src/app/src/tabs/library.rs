@@ -22,12 +22,18 @@ use gtk::glib;
 use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
+use super::library_pane::SelectedPane;
 use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
-use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent, FileRow, QuerySpec};
+use crate::engine_client::{
+    texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
+    QUERY_MAX_ROWS,
+};
+use std::sync::atomic::Ordering;
 
 const QUERY_LIMIT: i64 = 600;
+const LIVE_RELOAD_MAX: i64 = 3000;
 const TILE_THUMB_PX: i32 = 256;
-const PREVIEW_PX: i32 = 1280;
+const PREVIEW_PX: i32 = 2400;
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Shared state ─────────────────────────────────────────────────────────
@@ -59,13 +65,14 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     ));
     factory.connect_unbind(|_, list_item| {
         if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
+            cancel_tile_token(li);
             if let Some(tile) = li.child() {
                 clear_tile(&tile);
             }
         }
     });
 
-    let grid = gtk::GridView::new(Some(selection), Some(factory));
+    let grid = gtk::GridView::new(Some(selection.clone()), Some(factory));
     grid.set_min_columns(1);
     grid.set_max_columns(12);
     grid.set_enable_rubberband(false);
@@ -74,12 +81,77 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     grid.connect_activate(clone!(
         #[strong]
         engine,
+        #[strong]
+        search_text,
+        #[strong]
+        kind_filter,
         move |gv, pos| {
             if let Some(model) = gv.model() {
-                open_preview(&engine, gv, model, pos);
+                let query = (search_text.borrow().clone(), kind_filter.borrow().clone());
+                open_preview(&engine, gv, snapshot_rows(&model), pos as usize, query);
             }
         }
     ));
+
+    // Single click selects and fills the Selected pane; double-click/Enter
+    // opens the preview; Esc clears the selection.
+    let restoring = Rc::new(Cell::new(false));
+    let pane = {
+        let on_preview: Rc<dyn Fn()> = Rc::new(clone!(
+            #[strong]
+            engine,
+            #[strong]
+            search_text,
+            #[strong]
+            kind_filter,
+            #[strong]
+            selection,
+            #[weak]
+            grid,
+            move || {
+                let pos = selection.selected();
+                if pos == gtk::INVALID_LIST_POSITION {
+                    return;
+                }
+                let query = (search_text.borrow().clone(), kind_filter.borrow().clone());
+                open_preview(&engine, &grid, snapshot_rows(&selection), pos as usize, query);
+            }
+        ));
+        let on_close: Rc<dyn Fn()> = Rc::new(clone!(
+            #[strong]
+            selection,
+            move || selection.set_selected(gtk::INVALID_LIST_POSITION)
+        ));
+        SelectedPane::new(engine.clone(), on_preview, on_close)
+    };
+    selection.connect_selected_notify(clone!(
+        #[strong]
+        pane,
+        #[strong]
+        restoring,
+        move |selection| {
+            if restoring.get() {
+                return;
+            }
+            match selection.selected_item().and_downcast::<BoxedAnyObject>() {
+                Some(object) => pane.show(object.borrow::<FileRow>().clone()),
+                None => pane.hide(),
+            }
+        }
+    ));
+    let escape = gtk::EventControllerKey::new();
+    escape.connect_key_pressed(clone!(
+        #[strong]
+        selection,
+        move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape && selection.selected() != gtk::INVALID_LIST_POSITION {
+                selection.set_selected(gtk::INVALID_LIST_POSITION);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        }
+    ));
+    grid.add_controller(escape);
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -102,37 +174,25 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content_stack.add_named(&scroller, Some("grid"));
     content_stack.add_named(&empty_page, Some("empty"));
 
-    // ── Header (title + count + search + pills) ──────────────────────────────
-    let title = gtk::Label::builder()
-        .label("Library")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
+    // ── Header (count + search + pills); the shell draws the page title ─────
     let count_label = gtk::Label::builder()
         .label("0 files")
         .xalign(0.0)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "numeric"])
         .build();
     let title_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    title_row.append(&title);
     title_row.append(&count_label);
-    let moments_button = gtk::Button::with_label("Search & Moments");
-    title_row.append(&moments_button);
-    moments_button.connect_clicked(clone!(
-        #[strong]
-        engine,
-        move |button| super::catalog::present(&engine, button),
-    ));
-    let tools_button = gtk::Button::with_label("File Tools");
-    title_row.append(&tools_button);
-    tools_button.connect_clicked(clone!(
-        #[strong]
-        engine,
-        move |button| super::tools::present(&engine, button),
-    ));
+    for (label, page) in [("Search & Moments", "moments"), ("File Tools", "tools")] {
+        let button = gtk::Button::builder()
+            .label(label)
+            .action_name("win.navigate")
+            .action_target(&page.to_variant())
+            .build();
+        title_row.append(&button);
+    }
 
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Search filenames, tags, text in images…")
@@ -154,6 +214,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             has_more: Rc::new(Cell::new(false)),
             loading_more: Rc::new(Cell::new(false)),
             total: Rc::new(Cell::new(0)),
+            last_query: RefCell::new(None),
+            selection: selection.clone(),
+            pane: pane.clone(),
+            restoring: restoring.clone(),
         });
         let near_end = ctx.clone();
         scroller.vadjustment().connect_value_changed(move |adj| {
@@ -237,7 +301,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .css_classes(["fileid-tab"])
         .build();
     root.append(&header);
-    root.append(&content_stack);
+    let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content_row.append(&content_stack);
+    content_row.append(&pane.revealer);
+    root.append(&content_row);
     // Re-read on every tab switch: the startup read can race the engine's DB
     // open, and renames/deletes done from other tabs must show on return.
     {
@@ -261,6 +328,7 @@ fn load_more(ctx: &Rc<ReloadCtx>) {
         kind: ctx.kind_filter.borrow().clone(),
         limit: QUERY_LIMIT,
         offset,
+        ..QuerySpec::default()
     };
     let rx = ctx.engine.borrow().query_files(spec);
     let ctx = ctx.clone();
@@ -298,16 +366,36 @@ struct ReloadCtx {
     has_more: Rc<Cell<bool>>,
     loading_more: Rc<Cell<bool>>,
     total: Rc<Cell<i64>>,
+    last_query: RefCell<Option<(String, Option<String>)>>,
+    selection: gtk::SingleSelection,
+    pane: Rc<SelectedPane>,
+    restoring: Rc<Cell<bool>>,
+}
+
+/// Rows to re-read on a refresh: the loaded pages when the query is the same
+/// (a live-scan reload must not throw a deep-scrolled user back to the top),
+/// one page when the search or kind changed. macOS caps this at 3000.
+fn reload_limit(same_query: bool, loaded: u32) -> i64 {
+    if same_query {
+        i64::from(loaded).clamp(QUERY_LIMIT, LIVE_RELOAD_MAX)
+    } else {
+        QUERY_LIMIT
+    }
 }
 
 fn run_reload(ctx: &Rc<ReloadCtx>) {
     let g = ctx.query_gen.get().wrapping_add(1);
     ctx.query_gen.set(g);
+    let query = (ctx.search_text.borrow().trim().to_owned(), ctx.kind_filter.borrow().clone());
+    let same_query = ctx.last_query.borrow().as_ref() == Some(&query);
+    let limit = reload_limit(same_query, ctx.model.n_items());
+    ctx.last_query.replace(Some(query));
     let spec = QuerySpec {
         search: ctx.search_text.borrow().clone(),
         kind: ctx.kind_filter.borrow().clone(),
-        limit: QUERY_LIMIT,
+        limit,
         offset: 0,
+        ..QuerySpec::default()
     };
     ctx.has_more.set(false);
     let searched = spec.search.trim().to_string();
@@ -333,7 +421,17 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         };
         // One items-changed signal for the whole page instead of one per row.
         let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
+        // Keep the selection (and the pane) on the same file across a refresh.
+        let selected_id = ctx.pane.current_id();
+        ctx.restoring.set(true);
         ctx.model.splice(0, ctx.model.n_items(), &items);
+        let position = selected_id.and_then(|id| rows.iter().position(|row| row.id == id));
+        ctx.selection
+            .set_selected(position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32));
+        ctx.restoring.set(false);
+        if position.is_none() {
+            ctx.pane.hide();
+        }
         ctx.total.set(total);
         ctx.has_more.set(total > rows.len() as i64);
         if total > rows.len() as i64 {
@@ -558,39 +656,84 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
             return;
         }
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
-        let want = key.clone();
-        let rx = if is_video {
-            engine
-                .borrow()
-                .request_video_thumbnail(key.path.clone(), TILE_THUMB_PX)
-        } else {
-            engine
-                .borrow()
-                .request_scaled_thumbnail(key.path.clone(), TILE_THUMB_PX)
+        let parts = TileRequest {
+            engine: engine.clone(),
+            list_item: list_item.downgrade(),
+            pic: pic.downgrade(),
+            play: play.downgrade(),
+            key,
+            is_video,
         };
-        let pic_weak = pic.downgrade();
-        let play_weak = play.downgrade();
-        let li_weak = list_item.downgrade();
-        glib::MainContext::default().spawn_local(async move {
-            let Ok(Some(decoded)) = rx.recv().await else {
-                return;
-            };
-            let tex = texture_from_decoded(decoded);
-            thumb_cache_put(want.clone(), tex.clone());
-            // Re-check: the tile may have been recycled while we were decoding.
-            if !tile_still_wants(&li_weak, &want) {
-                return;
-            }
-            if let Some(pic) = pic_weak.upgrade() {
-                pic.set_paintable(Some(&tex));
-            }
-            if let Some(play) = play_weak.upgrade() {
-                play.set_visible(is_video);
-            }
-        });
+        request_tile_thumbnail(list_item, parts, true);
     } else {
         pic.set_paintable(icon_paintable(icon_for_kind(&row.kind), 96).as_ref());
     }
+}
+
+struct TileRequest {
+    engine: Rc<RefCell<EngineClient>>,
+    list_item: glib::WeakRef<gtk::ListItem>,
+    pic: glib::WeakRef<gtk::Picture>,
+    play: glib::WeakRef<gtk::Image>,
+    key: ThumbCacheKey,
+    is_video: bool,
+}
+
+thread_local! {
+    static TILE_TOKENS: RefCell<HashMap<usize, CancelToken>> = RefCell::new(HashMap::new());
+}
+
+fn tile_token_key(list_item: &gtk::ListItem) -> usize {
+    list_item.as_ptr() as usize
+}
+
+/// A fresh cancel token for the tile; the previous binding's work is dropped.
+fn renew_tile_token(list_item: &gtk::ListItem) -> CancelToken {
+    let token = CancelToken::default();
+    let previous = TILE_TOKENS.with_borrow_mut(|tokens| tokens.insert(tile_token_key(list_item), token.clone()));
+    if let Some(previous) = previous {
+        previous.store(true, Ordering::Release);
+    }
+    token
+}
+
+fn cancel_tile_token(list_item: &gtk::ListItem) {
+    if let Some(token) = TILE_TOKENS.with_borrow_mut(|tokens| tokens.remove(&tile_token_key(list_item))) {
+        token.store(true, Ordering::Release);
+    }
+}
+
+fn request_tile_thumbnail(list_item: &gtk::ListItem, request: TileRequest, retry: bool) {
+    let cancel = renew_tile_token(list_item);
+    let rx = request
+        .engine
+        .borrow()
+        .request_tile(request.key.path.clone(), TILE_THUMB_PX, request.is_video, cancel);
+    glib::MainContext::default().spawn_local(async move {
+        let reply = rx.recv().await.unwrap_or(ThumbReply::Dropped);
+        let still_wanted = tile_still_wants(&request.list_item, &request.key);
+        let decoded = match reply {
+            ThumbReply::Image(decoded) => decoded,
+            ThumbReply::Dropped if retry && still_wanted => {
+                if let Some(list_item) = request.list_item.upgrade() {
+                    request_tile_thumbnail(&list_item, request, false);
+                }
+                return;
+            }
+            ThumbReply::Dropped | ThumbReply::Failed => return,
+        };
+        let tex = texture_from_decoded(decoded);
+        thumb_cache_put(request.key.clone(), tex.clone());
+        if !still_wanted {
+            return;
+        }
+        if let Some(pic) = request.pic.upgrade() {
+            pic.set_paintable(Some(&tex));
+        }
+        if let Some(play) = request.play.upgrade() {
+            play.set_visible(request.is_video);
+        }
+    });
 }
 
 fn clear_tile(tile: &gtk::Widget) {
@@ -605,27 +748,28 @@ fn clear_tile(tile: &gtk::Widget) {
 
 // ── Preview dialog ───────────────────────────────────────────────────────────
 
-/// The file preview dialog. Shows a large image + metadata and lets you page
-/// through the whole (filtered) library with the ‹ / › buttons or the ←/→ keys
-/// — matching the macOS/Windows preview navigation.
+/// The file preview dialog. Shows a large image + metadata and pages with the
+/// ‹ / › buttons or the arrow keys. It navigates a frozen snapshot by file id,
+/// upgraded to the whole filtered library, so live-scan reloads of the grid
+/// (newest first) never shift what next/previous opens.
 fn open_preview(
     engine: &Rc<RefCell<EngineClient>>,
     parent: &impl IsA<gtk::Widget>,
-    model: gtk::SelectionModel,
-    start: u32,
+    snapshot: Vec<FileRow>,
+    start: usize,
+    query: (String, Option<String>),
 ) {
-    let n = model.n_items();
-    if n == 0 {
+    if snapshot.is_empty() {
         return;
     }
-    let idx = Rc::new(Cell::new(start.min(n - 1)));
+    let idx = Rc::new(Cell::new(start.min(snapshot.len() - 1)));
+    let rows = Rc::new(RefCell::new(snapshot));
     let preview_generation = Rc::new(Cell::new(0u64));
 
     let dialog = adw::Dialog::new();
     dialog.set_content_width(1000);
     dialog.set_content_height(680);
 
-    // Header: ‹ prev · counter · next › — the navigation the preview was missing.
     let header = adw::HeaderBar::new();
     let prev_btn = gtk::Button::builder()
         .icon_name("go-previous-symbolic")
@@ -637,10 +781,22 @@ fn open_preview(
         .css_classes(["flat"])
         .tooltip_text("Next (→)")
         .build();
-    let counter = gtk::Label::builder().css_classes(["dim-label"]).build();
+    let counter = gtk::Label::builder().css_classes(["dim-label", "numeric"]).build();
     header.pack_start(&prev_btn);
     header.pack_start(&counter);
     header.pack_end(&next_btn);
+    let open_btn = gtk::Button::builder()
+        .icon_name("document-open-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text("Open in the default app")
+        .build();
+    let reveal_btn = gtk::Button::builder()
+        .icon_name("folder-open-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text("Show in Files")
+        .build();
+    header.pack_end(&open_btn);
+    header.pack_end(&reveal_btn);
 
     let pic = gtk::Picture::builder()
         .hexpand(true)
@@ -674,29 +830,60 @@ fn open_preview(
     toolbar.set_content(Some(&body));
     dialog.set_child(Some(&toolbar));
 
-    // Load the row at the current index into the dialog (title, image, metadata).
+    let current = {
+        let rows = rows.clone();
+        let idx = idx.clone();
+        move || rows.borrow().get(idx.get()).cloned()
+    };
+    open_btn.connect_clicked(clone!(
+        #[strong]
+        current,
+        move |button| {
+            if let Some(row) = current() {
+                open_default(button, &row.path);
+            }
+        }
+    ));
+    reveal_btn.connect_clicked(clone!(
+        #[strong]
+        current,
+        move |button| {
+            if let Some(row) = current() {
+                show_in_files(button, &row.path);
+            }
+        }
+    ));
+
+    let update_nav: Rc<dyn Fn()> = {
+        let rows = rows.clone();
+        let idx = idx.clone();
+        let counter = counter.clone();
+        let prev_btn = prev_btn.clone();
+        let next_btn = next_btn.clone();
+        Rc::new(move || {
+            let (pos, len) = (idx.get(), rows.borrow().len());
+            counter.set_label(&format!("{} of {}", pos + 1, len));
+            prev_btn.set_sensitive(pos > 0);
+            next_btn.set_sensitive(pos + 1 < len);
+        })
+    };
+
     let load: Rc<dyn Fn()> = {
         let engine = engine.clone();
-        let model = model.clone();
         let pic = pic.clone();
         let video = video.clone();
         let canvas = canvas.clone();
         let meta_scroll = meta_scroll.clone();
-        let counter = counter.clone();
         let dialog = dialog.clone();
-        let prev_btn = prev_btn.clone();
-        let next_btn = next_btn.clone();
-        let idx = idx.clone();
         let preview_generation = preview_generation.clone();
+        let update_nav = update_nav.clone();
+        let current = current.clone();
         Rc::new(move || {
-            let pos = idx.get();
-            let Some(row) = row_at(&model, pos) else {
+            let Some(row) = current() else {
                 return;
             };
             dialog.set_title(&row.name);
-            counter.set_label(&format!("{} of {}", pos + 1, model.n_items()));
-            prev_btn.set_sensitive(pos > 0);
-            next_btn.set_sensitive(pos + 1 < model.n_items());
+            update_nav();
             meta_scroll.set_child(Some(&build_meta(&row)));
             pic.set_paintable(None::<&gtk::gdk::Texture>);
             if let Some(stream) = video.media_stream() {
@@ -715,65 +902,79 @@ fn open_preview(
         })
     };
 
-    prev_btn.connect_clicked(clone!(
-        #[strong]
-        idx,
-        #[strong]
-        load,
-        move |_| {
-            if idx.get() > 0 {
-                idx.set(idx.get() - 1);
+    let step: Rc<dyn Fn(i64)> = {
+        let rows = rows.clone();
+        let idx = idx.clone();
+        let load = load.clone();
+        Rc::new(move |delta| {
+            let len = rows.borrow().len() as i64;
+            let next = idx.get() as i64 + delta;
+            if (0..len).contains(&next) {
+                idx.set(next as usize);
                 load();
             }
-        }
+        })
+    };
+    prev_btn.connect_clicked(clone!(
+        #[strong]
+        step,
+        move |_| step(-1)
     ));
     next_btn.connect_clicked(clone!(
         #[strong]
-        idx,
-        #[strong]
-        model,
-        #[strong]
-        load,
-        move |_| {
-            if idx.get() + 1 < model.n_items() {
-                idx.set(idx.get() + 1);
-                load();
-            }
-        }
+        step,
+        move |_| step(1)
     ));
-
-    // ←/→ arrow keys page through the library.
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed(clone!(
         #[strong]
-        idx,
-        #[strong]
-        model,
-        #[strong]
-        load,
-        move |_, key, _, _| {
-            match key {
-                gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
-                    if idx.get() > 0 {
-                        idx.set(idx.get() - 1);
-                        load();
-                    }
-                    glib::Propagation::Stop
-                }
-                gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
-                    if idx.get() + 1 < model.n_items() {
-                        idx.set(idx.get() + 1);
-                        load();
-                    }
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
+        step,
+        move |_, key, _, _| match key {
+            gtk::gdk::Key::Left | gtk::gdk::Key::Up => {
+                step(-1);
+                glib::Propagation::Stop
             }
+            gtk::gdk::Key::Right | gtk::gdk::Key::Down => {
+                step(1);
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
         }
     ));
     dialog.add_controller(keys);
 
     load();
+
+    let full = engine.borrow().query_files(QuerySpec {
+        search: query.0,
+        kind: query.1,
+        limit: QUERY_MAX_ROWS,
+        offset: 0,
+        channel: QueryChannel::Preview,
+    });
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        rows,
+        #[strong]
+        idx,
+        #[strong]
+        update_nav,
+        async move {
+            let Ok(Ok((library, _))) = full.recv().await else {
+                return;
+            };
+            let current_id = rows.borrow().get(idx.get()).map(|row| row.id);
+            let Some(position) = current_id.and_then(|id| library.iter().position(|row| row.id == id)) else {
+                return;
+            };
+            if library.len() > rows.borrow().len() {
+                rows.replace(library);
+                idx.set(position);
+                update_nav();
+            }
+        }
+    ));
+
     dialog.connect_closed(clone!(
         #[weak]
         video,
@@ -796,10 +997,40 @@ fn open_preview(
 }
 
 /// Resolve the `FileRow` at `pos` in the (selection) model.
-fn row_at(model: &gtk::SelectionModel, pos: u32) -> Option<FileRow> {
+fn row_at(model: &impl IsA<gio::ListModel>, pos: u32) -> Option<FileRow> {
     let boxed = model.item(pos)?.downcast::<BoxedAnyObject>().ok()?;
     let r = boxed.borrow::<FileRow>();
     Some(r.clone())
+}
+
+fn snapshot_rows(model: &impl IsA<gio::ListModel>) -> Vec<FileRow> {
+    (0..model.n_items()).filter_map(|pos| row_at(model, pos)).collect()
+}
+
+pub(super) fn open_default(widget: &impl IsA<gtk::Widget>, path: &str) {
+    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
+    let window = widget.root().and_downcast::<gtk::Window>();
+    launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
+}
+
+/// Show the file selected in the file manager (FileManager1.ShowItems through
+/// the portal-aware launcher), falling back to opening its folder.
+pub(super) fn show_in_files(widget: &impl IsA<gtk::Widget>, path: &str) {
+    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
+    let window = widget.root().and_downcast::<gtk::Window>();
+    let folder = std::path::Path::new(path).parent().map(gio::File::for_path);
+    let fallback_window = window.clone();
+    launcher.open_containing_folder(window.as_ref(), gio::Cancellable::NONE, move |result| {
+        if result.is_err() {
+            if let Some(folder) = folder {
+                gtk::FileLauncher::new(Some(&folder)).launch(
+                    fallback_window.as_ref(),
+                    gio::Cancellable::NONE,
+                    |_| {},
+                );
+            }
+        }
+    });
 }
 
 /// Build the metadata glass-card for one row (rebuilt on each navigation).
@@ -834,6 +1065,7 @@ fn build_meta(row: &FileRow) -> gtk::Box {
     if let Some(p) = row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
         meta.append(&meta_row("Smart name", &format!("{}.{}", p, row.extension)));
     }
+    super::library_pane::append_details(&meta, row.id);
     meta
 }
 
@@ -846,19 +1078,13 @@ fn load_preview_image(
     generation: u64,
 ) {
     if row.kind == "image" || row.kind == "video" {
-        let rx = if row.kind == "video" {
-            engine
-                .borrow()
-                .request_video_thumbnail(row.path.clone(), PREVIEW_PX)
-        } else {
-            engine
-                .borrow()
-                .request_scaled_thumbnail(row.path.clone(), PREVIEW_PX)
-        };
+        let rx = engine
+            .borrow()
+            .request_preview(row.path.clone(), PREVIEW_PX, row.kind == "video");
         let kind = row.kind.clone();
         let pic_weak = pic.downgrade();
         glib::MainContext::default().spawn_local(async move {
-            let decoded = rx.recv().await.ok().flatten();
+            let decoded = rx.recv().await.ok().and_then(ThumbReply::into_image);
             if active_generation.get() != generation {
                 return;
             }
@@ -912,4 +1138,17 @@ fn tile_still_wants(li_weak: &glib::WeakRef<gtk::ListItem>, want: &ThumbCacheKey
         .and_then(|o| o.downcast::<BoxedAnyObject>().ok())
         .map(|object| ThumbCacheKey::for_row(&object.borrow::<FileRow>()) == *want)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_reload_keeps_loaded_pages_until_the_query_changes() {
+        assert_eq!(reload_limit(true, 0), QUERY_LIMIT);
+        assert_eq!(reload_limit(true, 1800), 1800);
+        assert_eq!(reload_limit(true, 9000), LIVE_RELOAD_MAX);
+        assert_eq!(reload_limit(false, 1800), QUERY_LIMIT);
+    }
 }

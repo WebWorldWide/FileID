@@ -36,18 +36,11 @@ fn clear(b: &gtk::Box) {
         b.remove(&c);
     }
 }
-fn page(title: &str, body: &gtk::Box) -> gtk::Widget {
-    body.set_margin_top(16);
-    body.set_margin_bottom(16);
-    body.set_margin_start(16);
-    body.set_margin_end(16);
-    body.prepend(
-        &gtk::Label::builder()
-            .label(title)
-            .xalign(0.0)
-            .css_classes(["title-1"])
-            .build(),
-    );
+fn page(body: &gtk::Box) -> gtk::Widget {
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    body.set_margin_start(26);
+    body.set_margin_end(26);
     gtk::ScrolledWindow::builder()
         .child(body)
         .hexpand(true)
@@ -72,33 +65,21 @@ fn evidence(hit: &CatalogHit) -> String {
         hit.text
     )
 }
+/// Video and audio by the engine's own classifier, so every extension the
+/// scan treats as media (MTS, M2TS, 3GP, MPG, Opus, AIFF, ...) plays in place.
+fn is_playable_media(path: &str) -> bool {
+    use fileid_engine::pipeline::discovery::FileKind;
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(FileKind::from_extension(ext), FileKind::Video | FileKind::Audio))
+}
 fn open(hit: &CatalogHit, status: &gtk::Label) {
     if !std::path::Path::new(&hit.path).is_file() {
         status.set_label("File is unavailable offline or has moved.");
         return;
     }
-    let is_media = hit.kind != "page"
-        && matches!(
-            std::path::Path::new(&hit.path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_ascii_lowercase)
-                .as_deref(),
-            Some(
-                "mp4"
-                    | "mov"
-                    | "m4v"
-                    | "mkv"
-                    | "avi"
-                    | "webm"
-                    | "mp3"
-                    | "m4a"
-                    | "wav"
-                    | "flac"
-                    | "ogg"
-                    | "aac"
-            )
-        );
+    let is_media = hit.kind != "page" && is_playable_media(&hit.path);
     if is_media {
         play_inline(&hit.path, hit.start_seconds, status);
         return;
@@ -563,7 +544,7 @@ fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         }
         glib::ControlFlow::Continue
     });
-    (page("Search & Moments", &body), ui)
+    (page(&body), ui)
 }
 
 fn timeline_request(file_ids: Vec<i64>, mode: &str) -> CatalogRequest {
@@ -760,6 +741,7 @@ fn choose_indexed_files(ui: &Rc<ToolsUi>) {
             kind: None,
             limit: 1000,
             offset: 0,
+            channel: crate::engine_client::QueryChannel::Tools,
         });
     glib::MainContext::default().spawn_local(async move {
         match rx.recv().await {
@@ -1032,7 +1014,7 @@ fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         });
     }
     ui.update();
-    (page("File Tools", &body), ui)
+    (page(&body), ui)
 }
 
 fn dispatch_chat(
@@ -1161,12 +1143,22 @@ pub fn chat(engine: Engine) -> gtk::Widget {
             }
         }
     });
-    page("Chat", &body)
+    page(&body)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn camera_and_phone_media_play_in_place() {
+        for path in ["/v/clip.MTS", "/v/a.m2ts", "/v/b.3gp", "/v/c.mpg", "/a/d.opus", "/a/e.aiff", "/v/f.mp4"] {
+            assert!(is_playable_media(path), "{path}");
+        }
+        for path in ["/p/photo.jpg", "/d/notes.pdf", "/x/no_extension"] {
+            assert!(!is_playable_media(path), "{path}");
+        }
+    }
+
     fn job(kind: &str, state: &str) -> CatalogJob {
         CatalogJob {
             id: "job".into(),

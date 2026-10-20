@@ -81,15 +81,30 @@ pub fn build() -> gtk::DrawingArea {
     // the blobs drift too slowly for 60+ fps to be visible, and the full-window
     // Cairo repaint is real CPU on software renderers (WSLg/llvmpipe measured
     // >1.5 cores at display rate — half of that is pure waste).
+    // Disabled animations (reduce motion) or high contrast leave one static
+    // frame; turning animations back on redraws at once.
     let last_draw = std::cell::Cell::new(0i64);
     area.add_tick_callback(move |area, clock| {
         let now = clock.frame_time();
-        if now - last_draw.get() >= 33_000 {
+        if motion_allowed() && now - last_draw.get() >= 33_000 {
             last_draw.set(now);
             area.queue_draw();
         }
         glib::ControlFlow::Continue
     });
+    if let Some(settings) = gtk::Settings::default() {
+        let weak = area.downgrade();
+        settings.connect_gtk_enable_animations_notify(move |_| {
+            if let Some(area) = weak.upgrade() {
+                area.queue_draw();
+            }
+        });
+    }
 
     area
+}
+
+fn motion_allowed() -> bool {
+    let animations = gtk::Settings::default().map_or(true, |settings| settings.is_gtk_enable_animations());
+    animations && !crate::theme::high_contrast()
 }

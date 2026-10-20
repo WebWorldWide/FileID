@@ -1311,32 +1311,10 @@ where
 
 // ─── Static card builders ────────────────────────────────────────────────────
 
-fn build_header() -> gtk::Box {
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(14)
-        .build();
-    let icon = gtk::Image::from_icon_name("starred-symbolic");
-    icon.set_pixel_size(30);
-    icon.add_css_class("gold-accent");
-    icon.set_valign(gtk::Align::Start);
-    let text = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(4)
-        .build();
-    text.append(
-        &gtk::Label::builder()
-            .label("Deep Analyze")
-            .xalign(0.0)
-            .css_classes(["title-1"])
-            .build(),
-    );
-    text.append(&wrap_caption(
+fn build_header() -> gtk::Label {
+    wrap_caption(
         "Reads photos, videos, documents, PDFs, and audio metadata to write useful descriptions and smart filenames.",
-    ));
-    row.append(&icon);
-    row.append(&text);
-    row
+    )
 }
 
 fn build_explainer() -> gtk::Box {

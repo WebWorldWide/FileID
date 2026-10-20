@@ -29,6 +29,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -84,6 +85,31 @@ enum RawEvent {
     Health { request_id: String, pid: i32 },
 }
 
+/// Each caller keeps its own latest-wins slot, so the Library grid, the
+/// preview and the File Tools picker never cancel one another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum QueryChannel {
+    #[default]
+    Library,
+    Preview,
+    Tools,
+}
+
+impl QueryChannel {
+    const COUNT: usize = 3;
+
+    fn slot(self) -> usize {
+        match self {
+            QueryChannel::Library => 0,
+            QueryChannel::Preview => 1,
+            QueryChannel::Tools => 2,
+        }
+    }
+}
+
+/// The most rows one read returns (the preview's full-library list).
+pub const QUERY_MAX_ROWS: i64 = 20_000;
+
 #[derive(Debug, Clone, Default)]
 pub struct QuerySpec {
     pub search: String,
@@ -91,6 +117,7 @@ pub struct QuerySpec {
     pub limit: i64,
     /// Rows to skip; the Library pages in as the grid nears its end.
     pub offset: i64,
+    pub channel: QueryChannel,
 }
 
 #[derive(Debug, Clone)]
@@ -134,45 +161,74 @@ struct QueryJob {
     reply: QueryReply,
 }
 
+#[derive(Default)]
+struct QuerySlots {
+    pending: [Option<QueryJob>; QueryChannel::COUNT],
+    next: usize,
+}
+
+impl QuerySlots {
+    fn is_empty(&self) -> bool {
+        self.pending.iter().all(Option::is_none)
+    }
+
+    /// Round-robin across channels so a chatty Library cannot starve the rest.
+    fn take_next(&mut self) -> Option<QueryJob> {
+        for step in 0..QueryChannel::COUNT {
+            let index = (self.next + step) % QueryChannel::COUNT;
+            if let Some(job) = self.pending[index].take() {
+                self.next = (index + 1) % QueryChannel::COUNT;
+                return Some(job);
+            }
+        }
+        None
+    }
+}
+
 struct QueryWorkerState {
-    latest: Mutex<Option<QueryJob>>,
+    latest: Mutex<QuerySlots>,
     ready: Condvar,
     stopping: AtomicBool,
 }
 
 impl QueryWorkerState {
+    fn new() -> Self {
+        Self {
+            latest: Mutex::new(QuerySlots::default()),
+            ready: Condvar::new(),
+            stopping: AtomicBool::new(false),
+        }
+    }
+
     fn submit(&self, job: QueryJob) {
         if self.stopping.load(Ordering::Acquire) {
             return;
         }
-        *self.latest.lock().expect("query queue poisoned") = Some(job);
+        let slot = job.spec.channel.slot();
+        self.latest.lock().expect("query queue poisoned").pending[slot] = Some(job);
         self.ready.notify_one();
     }
 
     fn stop(&self) {
         self.stopping.store(true, Ordering::Release);
-        self.latest.lock().expect("query queue poisoned").take();
+        *self.latest.lock().expect("query queue poisoned") = QuerySlots::default();
         self.ready.notify_all();
     }
 }
 
 fn spawn_query_worker() -> Arc<QueryWorkerState> {
-    let state = Arc::new(QueryWorkerState {
-        latest: Mutex::new(None),
-        ready: Condvar::new(),
-        stopping: AtomicBool::new(false),
-    });
+    let state = Arc::new(QueryWorkerState::new());
     let worker_state = state.clone();
     thread::spawn(move || loop {
         let job = {
             let mut latest = worker_state.latest.lock().expect("query queue poisoned");
-            while latest.is_none() && !worker_state.stopping.load(Ordering::Acquire) {
+            while latest.is_empty() && !worker_state.stopping.load(Ordering::Acquire) {
                 latest = worker_state.ready.wait(latest).expect("query queue poisoned");
             }
             if worker_state.stopping.load(Ordering::Acquire) {
                 return;
             }
-            latest.take()
+            latest.take_next()
         };
         let Some(job) = job else { continue };
         let _ = job.reply.send_blocking(query_files_from_db(&job.spec));
@@ -180,7 +236,40 @@ fn spawn_query_worker() -> Arc<QueryWorkerState> {
     state
 }
 
-const RESPAWN_CAP: u32 = 5;
+const RESPAWN_DELAYS: [Duration; 3] = [Duration::from_secs(1), Duration::from_secs(4), Duration::from_secs(16)];
+const RESPAWN_WINDOW: Duration = Duration::from_secs(60);
+const STABLE_READY: Duration = Duration::from_secs(30);
+
+/// macOS `EngineClient` respawn budget: three restarts per 60 s, backing off
+/// 1/4/16 s. Only 30 s of continuous Ready refills it; clearing it on every
+/// Ready would let a ready-then-crash engine loop forever.
+#[derive(Debug, Default)]
+struct RespawnBudget {
+    attempts: Vec<Instant>,
+    last_ready_at: Option<Instant>,
+}
+
+impl RespawnBudget {
+    fn record_ready(&mut self, now: Instant) {
+        self.last_ready_at = Some(now);
+    }
+
+    fn next_delay(&mut self, now: Instant) -> Option<Duration> {
+        if self
+            .last_ready_at
+            .is_some_and(|ready| now.saturating_duration_since(ready) >= STABLE_READY)
+        {
+            self.attempts.clear();
+        }
+        self.last_ready_at = None;
+        self.attempts
+            .retain(|at| now.saturating_duration_since(*at) < RESPAWN_WINDOW);
+        let delay = *RESPAWN_DELAYS.get(self.attempts.len())?;
+        self.attempts.push(now);
+        Some(delay)
+    }
+}
+
 const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
 const RAW_EVENT_CAP: usize = 8;
@@ -196,10 +285,11 @@ pub struct EngineClient {
     raw_tx: Sender<RawEvent>,
     raw_rx: Option<Receiver<RawEvent>>,
     subscribers: Vec<Sender<EngineState>>,
-    thumb_tx: Option<Sender<ThumbJob>>,
+    thumbs: Arc<ThumbQueue>,
+    preview: Arc<PreviewSlot>,
     query_worker: Arc<QueryWorkerState>,
     next_id: u64,
-    respawns: u32,
+    respawn_budget: RespawnBudget,
     ready: bool,
     /// Bumped on every spawn; a health answer counts only for the live one.
     generation: u64,
@@ -222,10 +312,11 @@ impl EngineClient {
             raw_tx,
             raw_rx: Some(raw_rx),
             subscribers: Vec::new(),
-            thumb_tx: None,
+            thumbs: Arc::new(ThumbQueue::new()),
+            preview: Arc::new(PreviewSlot::new()),
             query_worker: spawn_query_worker(),
             next_id: 0,
-            respawns: 0,
+            respawn_budget: RespawnBudget::default(),
             ready: false,
             generation: 0,
             pending_health: None,
@@ -302,7 +393,8 @@ impl EngineClient {
         self.ready = false;
         self.pending_health = None;
         self.subscribers.clear();
-        self.thumb_tx.take();
+        self.thumbs.stop();
+        self.preview.stop();
         self.query_worker.stop();
         self.stdin.take();
         if let Some(mut child) = self.child.take() {
@@ -326,14 +418,14 @@ impl EngineClient {
     /// Boot the engine and thumbnail workers and start the main-context
     /// fan-out pump, which also drives health probes and respawns.
     pub fn start(this: &Rc<RefCell<Self>>) {
-        let (thumb_tx, thumb_rx) = async_channel::bounded::<ThumbJob>(THUMB_QUEUE_CAP);
-        for _ in 0..THUMB_WORKERS {
-            let worker_rx = thumb_rx.clone();
-            thread::spawn(move || thumbnail_worker(worker_rx));
-        }
         let raw_rx = {
             let mut client = this.borrow_mut();
-            client.thumb_tx = Some(thumb_tx);
+            for _ in 0..THUMB_WORKERS {
+                let queue = client.thumbs.clone();
+                thread::spawn(move || thumbnail_worker(&queue));
+            }
+            let preview = client.preview.clone();
+            thread::spawn(move || preview_worker(&preview));
             client.raw_rx.take().expect("EngineClient::start called twice")
         };
         spawn_process(this);
@@ -347,9 +439,7 @@ impl EngineClient {
                         // A `ready` can race in from the previous generation
                         // during a respawn; only our own nonce settles it.
                         let probe = {
-                            let mut client = client.borrow_mut();
-                            client.respawns = 0;
-                            client.begin_health_probe()
+                            client.borrow_mut().begin_health_probe()
                         };
                         if let Some((request_id, generation)) = probe {
                             let mut client = client.borrow_mut();
@@ -363,9 +453,12 @@ impl EngineClient {
                         continue;
                     }
                     RawEvent::Health { request_id, pid } => {
-                        if !client.borrow_mut().settle_health_probe(&request_id, pid) {
+                        let mut settled = client.borrow_mut();
+                        if !settled.settle_health_probe(&request_id, pid) {
                             continue;
                         }
+                        settled.respawn_budget.record_ready(Instant::now());
+                        drop(settled);
                         EngineState::Ready
                     }
                     RawEvent::State(state) => state,
@@ -462,37 +555,59 @@ impl EngineClient {
         Ok(())
     }
 
-    /// Queue a Library read on the single latest-request-wins query worker;
-    /// a superseded request's receiver closes without a result.
+    /// Queue a read on the query worker. Within one `QueryChannel` the latest
+    /// request wins and a superseded receiver closes without a result.
     pub fn query_files(&self, spec: QuerySpec) -> Receiver<Result<(Vec<FileRow>, i64)>> {
         let (reply, rx) = async_channel::bounded(1);
         self.query_worker.submit(QueryJob { spec, reply });
         rx
     }
 
+    /// First-in-first-out decode on the shared bounded workers.
     pub fn request_scaled_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
-        self.enqueue_thumb_work(ThumbWork::Image { path, dim })
+        self.background_plain(ThumbWork::Image { path, dim })
     }
 
     pub fn request_video_thumbnail(&self, path: String, dim: i32) -> Receiver<Option<DecodedImage>> {
-        self.enqueue_thumb_work(ThumbWork::VideoKeyframe { path, dim })
+        self.background_plain(ThumbWork::VideoKeyframe { path, dim })
     }
 
-    fn enqueue_thumb_work(&self, work: ThumbWork) -> Receiver<Option<DecodedImage>> {
+    fn background_plain(&self, work: ThumbWork) -> Receiver<Option<DecodedImage>> {
         let (reply, rx) = async_channel::bounded(1);
-        let job = ThumbJob { work, reply };
-        match &self.thumb_tx {
-            Some(sender) => {
-                if let Err(async_channel::TrySendError::Full(job) | async_channel::TrySendError::Closed(job)) =
-                    sender.try_send(job)
-                {
-                    let _ = job.reply.try_send(None);
-                }
-            }
-            None => {
-                let _ = job.reply.try_send(None);
-            }
-        }
+        self.thumbs.push_background(ThumbJob { work, reply: ReplyTo::Plain(reply), cancel: None });
+        rx
+    }
+
+    /// A grid tile's thumbnail: newest request first, the oldest evicted with
+    /// `Dropped` when the queue is full, and skipped once `cancel` is set.
+    pub fn request_tile(&self, path: String, dim: i32, video: bool, cancel: CancelToken) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
+        let (reply, rx) = async_channel::bounded(1);
+        self.thumbs.push_tile(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: Some(cancel) });
+        rx
+    }
+
+    /// Any bounded decode (face crops) on the shared workers, in order.
+    pub fn request_decode(
+        &self,
+        decode: impl FnOnce() -> Option<DecodedImage> + Send + 'static,
+        cancel: CancelToken,
+    ) -> Receiver<ThumbReply> {
+        let (reply, rx) = async_channel::bounded(1);
+        self.thumbs.push_background(ThumbJob {
+            work: ThumbWork::Custom(Box::new(decode)),
+            reply: ReplyTo::Full(reply),
+            cancel: Some(cancel),
+        });
+        rx
+    }
+
+    /// A preview image on its own latest-wins worker, never queued behind
+    /// grid tiles; a newer request supersedes an unstarted one.
+    pub fn request_preview(&self, path: String, dim: i32, video: bool) -> Receiver<ThumbReply> {
+        let work = if video { ThumbWork::VideoKeyframe { path, dim } } else { ThumbWork::Image { path, dim } };
+        let (reply, rx) = async_channel::bounded(1);
+        self.preview.submit(ThumbJob { work, reply: ReplyTo::Full(reply), cancel: None });
         rx
     }
 }
@@ -584,23 +699,19 @@ fn retire_exited_child(this: &Rc<RefCell<EngineClient>>) {
 }
 
 fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
-    let attempt = {
-        let mut client = this.borrow_mut();
-        client.respawns += 1;
-        client.respawns
-    };
-    if attempt > RESPAWN_CAP {
+    let delay = this.borrow_mut().respawn_budget.next_delay(Instant::now());
+    let Some(delay) = delay else {
         let raw_tx = this.borrow().raw_tx.clone();
         emit_from_main(
             &raw_tx,
             RawEvent::State(EngineState::Failed(
-                "engine crashed repeatedly — giving up. Restart the app.".into(),
+                "Engine exited 3 times within 60 s; relaunch the app.".into(),
             )),
         );
         return;
-    }
+    };
     let weak = Rc::downgrade(this);
-    glib::timeout_add_local_once(Duration::from_millis(400 * u64::from(attempt)), move || {
+    glib::timeout_add_local_once(delay, move || {
         if let Some(client) = weak.upgrade() {
             if !client.borrow().shutting_down.load(Ordering::Relaxed) {
                 spawn_process(&client);
@@ -819,7 +930,7 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
     let fts = fts_match(search);
     let has_fts = !fts.is_empty();
     let kind = spec.kind.as_deref().filter(|kind| !kind.is_empty());
-    let limit = if spec.limit > 0 { spec.limit.min(1000) } else { 500 };
+    let limit = if spec.limit > 0 { spec.limit.min(QUERY_MAX_ROWS) } else { 500 };
     let mut stmt = conn.prepare(&format!(
         "SELECT f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, \
          f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, \
@@ -904,27 +1015,214 @@ fn fts_match(text: &str) -> String {
         .join(" ")
 }
 
+pub type CancelToken = Arc<AtomicBool>;
+
+#[derive(Debug)]
+pub enum ThumbReply {
+    Image(DecodedImage),
+    Failed,
+    /// Evicted, cancelled or superseded before it was decoded.
+    Dropped,
+}
+
+impl ThumbReply {
+    pub fn into_image(self) -> Option<DecodedImage> {
+        match self {
+            ThumbReply::Image(image) => Some(image),
+            ThumbReply::Failed | ThumbReply::Dropped => None,
+        }
+    }
+}
+
 enum ThumbWork {
     Image { path: String, dim: i32 },
     VideoKeyframe { path: String, dim: i32 },
-    #[cfg(test)]
-    Probe(Box<dyn FnOnce() -> Option<DecodedImage> + Send>),
+    Custom(Box<dyn FnOnce() -> Option<DecodedImage> + Send>),
+}
+
+impl ThumbWork {
+    fn run(self) -> Option<DecodedImage> {
+        match self {
+            ThumbWork::Image { path, dim } => image_thumbnail(Path::new(&path), dim),
+            ThumbWork::VideoKeyframe { path, dim } => video_thumbnail(Path::new(&path), dim),
+            ThumbWork::Custom(decode) => decode(),
+        }
+    }
+}
+
+enum ReplyTo {
+    Plain(Sender<Option<DecodedImage>>),
+    Full(Sender<ThumbReply>),
+}
+
+impl ReplyTo {
+    fn send(&self, reply: ThumbReply) {
+        match self {
+            ReplyTo::Plain(tx) => {
+                let _ = tx.try_send(reply.into_image());
+            }
+            ReplyTo::Full(tx) => {
+                let _ = tx.try_send(reply);
+            }
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            ReplyTo::Plain(tx) => tx.is_closed(),
+            ReplyTo::Full(tx) => tx.is_closed(),
+        }
+    }
 }
 
 struct ThumbJob {
     work: ThumbWork,
-    reply: Sender<Option<DecodedImage>>,
+    reply: ReplyTo,
+    cancel: Option<CancelToken>,
 }
 
-fn thumbnail_worker(rx: Receiver<ThumbJob>) {
-    while let Ok(job) = rx.recv_blocking() {
-        let decoded = match job.work {
-            ThumbWork::Image { path, dim } => image_thumbnail(Path::new(&path), dim),
-            ThumbWork::VideoKeyframe { path, dim } => video_thumbnail(Path::new(&path), dim),
-            #[cfg(test)]
-            ThumbWork::Probe(run) => run(),
+impl ThumbJob {
+    fn abandoned(&self) -> bool {
+        self.reply.is_closed() || self.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    }
+
+    fn finish(self) {
+        if self.abandoned() {
+            self.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        let reply = match self.work.run() {
+            Some(image) => ThumbReply::Image(image),
+            None => ThumbReply::Failed,
         };
-        let _ = job.reply.send_blocking(decoded);
+        self.reply.send(reply);
+    }
+}
+
+#[derive(Default)]
+struct ThumbQueues {
+    tiles: VecDeque<ThumbJob>,
+    background: VecDeque<ThumbJob>,
+}
+
+struct ThumbQueue {
+    queues: Mutex<ThumbQueues>,
+    ready: Condvar,
+    stopping: AtomicBool,
+}
+
+impl ThumbQueue {
+    fn new() -> Self {
+        Self { queues: Mutex::new(ThumbQueues::default()), ready: Condvar::new(), stopping: AtomicBool::new(false) }
+    }
+
+    fn push_tile(&self, job: ThumbJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            job.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        let evicted = {
+            let mut queues = self.queues.lock().expect("thumbnail queue poisoned");
+            queues.tiles.push_back(job);
+            if queues.tiles.len() > THUMB_QUEUE_CAP {
+                queues.tiles.pop_front()
+            } else {
+                None
+            }
+        };
+        if let Some(evicted) = evicted {
+            evicted.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_one();
+    }
+
+    fn push_background(&self, job: ThumbJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            job.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        self.queues.lock().expect("thumbnail queue poisoned").background.push_back(job);
+        self.ready.notify_one();
+    }
+
+    /// Tiles newest-first (what is on screen now), then background work.
+    fn next(&self) -> Option<ThumbJob> {
+        let mut queues = self.queues.lock().expect("thumbnail queue poisoned");
+        loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(job) = queues.tiles.pop_back().or_else(|| queues.background.pop_front()) {
+                return Some(job);
+            }
+            queues = self.ready.wait(queues).expect("thumbnail queue poisoned");
+        }
+    }
+
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        let drained = std::mem::take(&mut *self.queues.lock().expect("thumbnail queue poisoned"));
+        for job in drained.tiles.into_iter().chain(drained.background) {
+            job.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_all();
+    }
+}
+
+fn thumbnail_worker(queue: &ThumbQueue) {
+    while let Some(job) = queue.next() {
+        job.finish();
+    }
+}
+
+struct PreviewSlot {
+    latest: Mutex<Option<ThumbJob>>,
+    ready: Condvar,
+    stopping: AtomicBool,
+}
+
+impl PreviewSlot {
+    fn new() -> Self {
+        Self { latest: Mutex::new(None), ready: Condvar::new(), stopping: AtomicBool::new(false) }
+    }
+
+    fn submit(&self, job: ThumbJob) {
+        if self.stopping.load(Ordering::Acquire) {
+            job.reply.send(ThumbReply::Dropped);
+            return;
+        }
+        let superseded = self.latest.lock().expect("preview slot poisoned").replace(job);
+        if let Some(superseded) = superseded {
+            superseded.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_one();
+    }
+
+    fn next(&self) -> Option<ThumbJob> {
+        let mut latest = self.latest.lock().expect("preview slot poisoned");
+        loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(job) = latest.take() {
+                return Some(job);
+            }
+            latest = self.ready.wait(latest).expect("preview slot poisoned");
+        }
+    }
+
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Some(job) = self.latest.lock().expect("preview slot poisoned").take() {
+            job.reply.send(ThumbReply::Dropped);
+        }
+        self.ready.notify_all();
+    }
+}
+
+fn preview_worker(slot: &PreviewSlot) {
+    while let Some(job) = slot.next() {
+        job.finish();
     }
 }
 
@@ -952,6 +1250,39 @@ mod tests {
         let (tx, rx) = async_channel::unbounded();
         drain_engine_stdout(Cursor::new(stream), tx);
         std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_ready_then_crash_flap_exhausts_the_respawn_budget() {
+        let mut budget = RespawnBudget::default();
+        let start = Instant::now();
+        let mut delays = Vec::new();
+        for cycle in 0..4u64 {
+            let at = start + Duration::from_secs(cycle * 5);
+            budget.record_ready(at);
+            delays.push(budget.next_delay(at + Duration::from_secs(1)));
+        }
+        assert_eq!(
+            delays,
+            [Some(Duration::from_secs(1)), Some(Duration::from_secs(4)), Some(Duration::from_secs(16)), None]
+        );
+    }
+
+    #[test]
+    fn a_stable_engine_refills_the_budget_and_old_attempts_age_out() {
+        let mut budget = RespawnBudget::default();
+        let start = Instant::now();
+        for _ in 0..3 {
+            assert!(budget.next_delay(start).is_some());
+        }
+        assert!(budget.next_delay(start).is_none());
+        budget.record_ready(start + Duration::from_secs(10));
+        assert_eq!(budget.next_delay(start + Duration::from_secs(41)), Some(Duration::from_secs(1)));
+        let mut aging = RespawnBudget::default();
+        for _ in 0..3 {
+            aging.next_delay(start);
+        }
+        assert_eq!(aging.next_delay(start + Duration::from_secs(61)), Some(Duration::from_secs(1)));
     }
 
     #[test]
@@ -1192,17 +1523,31 @@ mod tests {
 
     #[test]
     fn query_queue_is_bounded_and_latest_request_wins() {
-        let state = QueryWorkerState {
-            latest: Mutex::new(None),
-            ready: Condvar::new(),
-            stopping: AtomicBool::new(false),
-        };
+        let state = QueryWorkerState::new();
         let (first_reply, first_rx) = async_channel::bounded(1);
         state.submit(QueryJob { spec: QuerySpec { search: "first".into(), ..QuerySpec::default() }, reply: first_reply });
         let (second_reply, _second_rx) = async_channel::bounded(1);
         state.submit(QueryJob { spec: QuerySpec { search: "second".into(), ..QuerySpec::default() }, reply: second_reply });
         assert!(matches!(first_rx.try_recv(), Err(async_channel::TryRecvError::Closed)));
-        assert_eq!(state.latest.lock().unwrap().as_ref().unwrap().spec.search, "second");
+        assert_eq!(state.latest.lock().unwrap().pending[0].as_ref().unwrap().spec.search, "second");
+    }
+
+    #[test]
+    fn query_channels_do_not_cancel_each_other_and_take_turns() {
+        let state = QueryWorkerState::new();
+        let submit = |search: &str, channel| {
+            let (reply, rx) = async_channel::bounded(1);
+            state.submit(QueryJob { spec: QuerySpec { search: search.into(), channel, ..QuerySpec::default() }, reply });
+            rx
+        };
+        let tools = submit("picker", QueryChannel::Tools);
+        let _library = submit("grid", QueryChannel::Library);
+        let _preview = submit("siblings", QueryChannel::Preview);
+        assert!(!tools.is_closed());
+        let mut slots = state.latest.lock().unwrap();
+        let order: Vec<_> = std::iter::from_fn(|| slots.take_next()).map(|job| job.spec.search).collect();
+        assert_eq!(order, ["grid", "siblings", "picker"]);
+        assert!(slots.is_empty());
     }
 
     #[test]
@@ -1223,27 +1568,72 @@ mod tests {
         assert!(SUBSCRIBER_EVENT_CAP > 0 && SUBSCRIBER_EVENT_CAP <= 4);
     }
 
+    fn probe_job(run: impl FnOnce() -> Option<DecodedImage> + Send + 'static) -> (ThumbJob, Receiver<ThumbReply>, CancelToken) {
+        let (reply, rx) = async_channel::bounded(1);
+        let cancel = CancelToken::default();
+        (ThumbJob { work: ThumbWork::Custom(Box::new(run)), reply: ReplyTo::Full(reply), cancel: Some(cancel.clone()) }, rx, cancel)
+    }
+
     #[test]
-    fn thumbnail_queue_has_a_hard_admission_bound() {
-        let (sender, _receiver) = async_channel::bounded(THUMB_QUEUE_CAP);
-        for _ in 0..THUMB_QUEUE_CAP {
-            let (reply, _rx) = async_channel::bounded(1);
-            assert!(sender.try_send(ThumbJob { work: ThumbWork::Probe(Box::new(|| None)), reply }).is_ok());
+    fn a_full_tile_queue_evicts_the_oldest_and_serves_the_newest_first() {
+        let queue = ThumbQueue::new();
+        let mut replies = Vec::new();
+        for _ in 0..=THUMB_QUEUE_CAP {
+            let (job, rx, _) = probe_job(|| None);
+            queue.push_tile(job);
+            replies.push(rx);
         }
-        let (reply, _rx) = async_channel::bounded(1);
-        assert!(matches!(
-            sender.try_send(ThumbJob { work: ThumbWork::Probe(Box::new(|| None)), reply }),
-            Err(async_channel::TrySendError::Full(_))
-        ));
+        assert!(matches!(replies[0].try_recv(), Ok(ThumbReply::Dropped)));
+        assert_eq!(queue.queues.lock().unwrap().tiles.len(), THUMB_QUEUE_CAP);
+        let newest = queue.next().unwrap();
+        newest.finish();
+        assert!(matches!(replies[THUMB_QUEUE_CAP].try_recv(), Ok(ThumbReply::Failed)));
+    }
+
+    #[test]
+    fn a_still_bound_tile_is_not_starved_by_a_fling() {
+        let queue = ThumbQueue::new();
+        for _ in 0..(THUMB_QUEUE_CAP * 3) {
+            let (job, _rx, cancel) = probe_job(|| None);
+            cancel.store(true, Ordering::Release);
+            queue.push_tile(job);
+        }
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        let (wanted, rx, _) = probe_job(move || {
+            flag.store(true, Ordering::SeqCst);
+            None
+        });
+        queue.push_tile(wanted);
+        queue.next().unwrap().finish();
+        assert!(ran.load(Ordering::SeqCst));
+        assert!(matches!(rx.try_recv(), Ok(ThumbReply::Failed)));
+    }
+
+    #[test]
+    fn cancelled_and_superseded_work_is_skipped_without_decoding() {
+        let queue = ThumbQueue::new();
+        let (job, rx, cancel) = probe_job(|| panic!("cancelled work must not decode"));
+        queue.push_background(job);
+        cancel.store(true, Ordering::Release);
+        queue.next().unwrap().finish();
+        assert!(matches!(rx.try_recv(), Ok(ThumbReply::Dropped)));
+
+        let slot = PreviewSlot::new();
+        let (first, first_rx, _) = probe_job(|| panic!("superseded preview must not decode"));
+        let (second, _second_rx, _) = probe_job(|| None);
+        slot.submit(first);
+        slot.submit(second);
+        assert!(matches!(first_rx.try_recv(), Ok(ThumbReply::Dropped)));
     }
 
     #[test]
     fn thumbnail_decode_concurrency_never_exceeds_worker_count() {
-        let (sender, receiver) = async_channel::bounded(THUMB_QUEUE_CAP);
+        let queue = Arc::new(ThumbQueue::new());
         let workers: Vec<_> = (0..THUMB_WORKERS)
             .map(|_| {
-                let receiver = receiver.clone();
-                thread::spawn(move || thumbnail_worker(receiver))
+                let queue = queue.clone();
+                thread::spawn(move || thumbnail_worker(&queue))
             })
             .collect();
         let active = Arc::new(AtomicUsize::new(0));
@@ -1251,21 +1641,20 @@ mod tests {
         let mut replies = Vec::new();
         for _ in 0..(THUMB_WORKERS * 4) {
             let (active, peak) = (active.clone(), peak.clone());
-            let (reply, rx) = async_channel::bounded(1);
-            replies.push(rx);
-            let probe = move || {
+            let (job, rx, _) = probe_job(move || {
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(now, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(10));
                 active.fetch_sub(1, Ordering::SeqCst);
                 None
-            };
-            sender.send_blocking(ThumbJob { work: ThumbWork::Probe(Box::new(probe)), reply }).unwrap();
+            });
+            queue.push_background(job);
+            replies.push(rx);
         }
-        drop(sender);
         for reply in replies {
-            assert!(reply.recv_blocking().unwrap().is_none());
+            assert!(matches!(reply.recv_blocking().unwrap(), ThumbReply::Failed));
         }
+        queue.stop();
         for worker in workers {
             worker.join().unwrap();
         }
@@ -1317,7 +1706,7 @@ mod tests {
         let query = |search: &str, kind: Option<&str>, limit: i64| {
             query_files_at_path(
                 &db_path,
-                &QuerySpec { search: search.to_owned(), kind: kind.map(str::to_owned), limit, offset: 0 },
+                &QuerySpec { search: search.to_owned(), kind: kind.map(str::to_owned), limit, ..QuerySpec::default() },
             )
             .unwrap()
         };

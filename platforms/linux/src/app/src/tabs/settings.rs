@@ -297,10 +297,10 @@ fn build_model_row(
         Some(model) => {
             let bytes: u64 = model.files.iter().map(|file| file.approx_bytes).sum();
             format!(
-                "{} · {} files · about {} MB · pinned downloads from huggingface.co",
+                "{} · {} files · about {} · pinned downloads from huggingface.co",
                 kind,
                 model.files.len(),
-                bytes / 1_048_576
+                super::util::file_size(bytes)
             )
         }
         None => format!("{kind} · model directory unavailable"),
@@ -374,7 +374,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         &gtk::Label::builder()
             .label("Local models and runtimes")
             .xalign(0.0)
-            .css_classes(["title-1"])
+            .css_classes(["title-3"])
             .build(),
     );
     root.append(&gtk::Label::builder()

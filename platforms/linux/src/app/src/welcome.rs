@@ -59,12 +59,7 @@ pub fn should_show() -> bool {
 }
 
 fn fmt_gb(bytes: u64) -> String {
-    let gb = bytes as f64 / 1_073_741_824.0;
-    if gb >= 1.0 {
-        format!("{gb:.1} GB")
-    } else {
-        format!("{:.0} MB", bytes as f64 / 1_048_576.0)
-    }
+    crate::tabs::util::file_size(bytes)
 }
 
 pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>>) {

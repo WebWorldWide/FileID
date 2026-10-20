@@ -11,8 +11,10 @@
 
 mod app_settings;
 mod engine_client;
+mod fonts;
 mod lavalamp;
 mod model_license;
+mod shell;
 mod spring;
 mod tabs;
 mod theme;
@@ -34,6 +36,7 @@ fn main() -> glib::ExitCode {
         )
         .with_target(false)
         .init();
+    fonts::register();
 
     let app = adw::Application::builder()
         .application_id(APP_ID)
