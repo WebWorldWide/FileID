@@ -257,6 +257,15 @@ final class GPURequestBatcher: @unchecked Sendable {
         self.maxBatch = maxBatch
         self.gather = gather
         queue = DispatchQueue(label: label, qos: .userInitiated)
+        Self.capCache()
+    }
+
+    /// Varying batch sizes leave freed buffers MLX cannot reuse; uncapped, a
+    /// 300-file scan with RAM++ reached a 12.8 GB footprint on a 16 GB Mac.
+    /// Only lowers the limit, so a tighter Deep Analyze cap stays in place.
+    static func capCache(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        let mb = environment["FILEID_MLX_CACHE_MB"].flatMap { Int($0) }.map { max(0, $0) } ?? 256
+        if Memory.cacheLimit > mb * 1_048_576 { Memory.cacheLimit = mb * 1_048_576 }
     }
 
     func submit(_ tensor: [Float]) -> [Float]? {
