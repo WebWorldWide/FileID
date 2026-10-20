@@ -1,5 +1,15 @@
 # FileID — State
 
+## 2026-10-20 — Audit fixes, every macOS page on v3, GTK and WinUI v3 shells
+
+A four-way audit (macOS defects; shared-engine, GTK and WinUI parity) had every finding re-checked by a second reviewer trying to refute it; 57 of 62 held.
+
+macOS: the NSCollectionView grid refreshes tiles whose rows or tags change under the same IDs (stale names and Reveal targets after undo/rename), opens a preview only when both clicks of a double-click land on the same tile (the Selected pane's reflow moved tiles between clicks), has its own keyboard cursor in select mode, shows smart names in gold with the text glyph, and resolves layer colours for Increase Contrast and the window's backing scale. Refreshes keep loaded pages (up to 3,000) instead of returning to 300. Restructure no longer strips the respect stage's own loose-event and format-correction moves (a new plan-level test: 5 DCIM photos into their dated event and 3 misfiled ARWs into RAWs all survive), and the library root is never an Anchor. Chat matches plural words to singular tags. Every remaining page is on v3: Search & Moments with Examined/Chapters/Speech tracks and a click-to-seek playhead, Chat with a Sources pane, Best Takes, File Tools, and Restructure's Preview · Review · Move step cells; all design-system controls take keyboard focus with a gold ring, have 28 pt targets and honour Reduce Motion. Benchmark peak memory is now decimal GB (the 2026-10-15 figures were GiB: 1.1 → 1.2 GB and 3.6 → 3.9 GB).
+
+GTK: v3 shell (title bar, area sidebar with spring pill, scan card, page headers, corner scale, bundled fonts, high contrast) plus 16 audit fixes, including a respawn loop that never gave up, thumbnail work that starved visible tiles, a Selected pane, and decimal sizes. WinUI: v3 shell with the workbenches as pages, CI green. The measured layout for porting the pages is in `DESIGN_V3_PORT.md`.
+
+Verified: Swift suite 619 tests (174 shared, 46 app, 399 engine); GTK strict Clippy, 95 tests; WinUI build, tests and format on CI. Not verified on screen: populated Moments/Takes/Tools/Restructure states, keyboard and VoiceOver by hand, the GTK and WinUI shells on their hosts.
+
 ## 2026-10-15 (evening) — Library at scale, Restructure that respects folders, in-app playback, cross-platform engine
 
 Owner feedback drove this pass: scrolling was slow, the grid only ever showed the first 200 files, Restructure "sucks", videos opened in QuickTime, window buttons sat off-centre, and the engine and UI performance work had to reach Windows and Linux.

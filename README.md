@@ -111,8 +111,8 @@ The target is ≥140 files/s on comparable mid-tier hardware. Today's limits are
 
 | Model | Load | Reading speed (prefill) | Writing speed (decode) | Per image | Peak memory |
 |---|---|---|---|---|---|
-| Qwen3.5 0.8B, 4-bit | 3.1 s | 611 tokens/s | 45 tokens/s | 3.5 s | 1.1 GB |
-| Qwen3-VL 4B, 4-bit | 3.5 s | 145 tokens/s | 24 tokens/s | 4.4 s | 3.6 GB |
+| Qwen3.5 0.8B, 4-bit | 3.1 s | 611 tokens/s | 45 tokens/s | 3.5 s | 1.2 GB |
+| Qwen3-VL 4B, 4-bit | 3.5 s | 145 tokens/s | 24 tokens/s | 4.4 s | 3.9 GB |
 
 Chat sends the model compact numbered evidence instead of JSON. That cut time-to-first-word on the 0.8B model from 1.07 s to **0.58 s**.
 
