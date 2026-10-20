@@ -2,13 +2,8 @@
   {
     "name": "cross-catalog-chapter-edit-and-undo",
     "description": "One catalog passes Swift → Rust → Swift: a chapter saved by Swift is found by Rust evidence search, edited by Rust and restored by Swift Undo, while face provenance, refresh failures and corrections survive both engines.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
     "start": "swift",
     "sql": [
       "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/Family Birthday.mov',1,100,10,0,'video','mov')",
@@ -20,1099 +15,139 @@
       "INSERT INTO face_refresh_failures(face_id,embedding_model,processing_version,source_revision,source_path,source_size,source_modified,bbox,attempts,retry_after,reason,updated_at) VALUES(4,'next-weight','next-processing','100:fixture','/internal/Portrait.jpg',100,10,'0.1,0.1,0.2,0.2',2,280,'no_embedding',160)"
     ],
     "steps": [
-      {
-        "label": "swift saves chapter",
-        "catalog": {
-          "action": "saveChapter",
-          "chapter": {
-            "id": "gift",
-            "fileID": 1,
-            "startSeconds": 8.0,
-            "endSeconds": 12.0,
-            "title": "Gift Opening",
-            "summary": "Grandma opens presents",
-            "sourceRevision": "untrusted",
-            "modelVersion": "untrusted",
-            "confidence": 0.0,
-            "userEdited": false,
-            "stale": true
-          }
-        },
-        "expect": {
-          "status": "ok",
-          "chapters": [
-            {
-              "userEdited": true
-            }
-          ]
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust first hit is the chapter",
-        "catalog": {
-          "action": "search",
-          "query": "Grandma presents"
-        },
-        "expect": {
-          "hits": [
-            {
-              "fileID": 1,
-              "startSeconds": 8.0
-            }
-          ]
-        }
-      },
-      {
-        "label": "rust edits chapter",
-        "catalog": {
-          "action": "saveChapter",
-          "chapter": {
-            "id": "gift",
-            "fileID": 1,
-            "startSeconds": 10.0,
-            "endSeconds": 12.0,
-            "title": "Gift Unwrapped",
-            "summary": "Grandma opens presents",
-            "sourceRevision": "untrusted",
-            "modelVersion": "untrusted",
-            "confidence": 0.0,
-            "userEdited": false,
-            "stale": true
-          }
-        },
-        "expect": {
-          "status": "ok",
-          "chapters": [
-            {
-              "startSeconds": 10.0,
-              "title": "Gift Unwrapped"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift undo restores",
-        "catalog": {
-          "action": "undoChapterEdit",
-          "fileID": 1
-        },
-        "expect": {
-          "status": "ok",
-          "chapters": [
-            {
-              "startSeconds": 8.0,
-              "title": "Gift Opening",
-              "stale": false,
-              "modelVersion": "user"
-            }
-          ]
-        }
-      },
-      {
-        "label": "person name",
-        "db": "SELECT name FROM persons WHERE id=7",
-        "expect": [
-          [
-            "Confirmed Person"
-          ]
-        ]
-      },
-      {
-        "label": "refresh failure",
-        "db": "SELECT embedding_model,processing_version,attempts,retry_after,reason FROM face_refresh_failures WHERE face_id=4",
-        "expect": [
-          [
-            "next-weight",
-            "next-processing",
-            2,
-            280.0,
-            "no_embedding"
-          ]
-        ]
-      },
-      {
-        "label": "face provenance",
-        "db": "SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4",
-        "expect": [
-          [
-            7,
-            "fixture-weight-hash",
-            "fixture-alignment",
-            "fixture-revision",
-            512
-          ]
-        ]
-      },
-      {
-        "label": "user correction",
-        "db": "SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'",
-        "expect": [
-          [
-            "manual face marker",
-            1,
-            0
-          ]
-        ]
-      },
-      {
-        "label": "face embedding projection",
-        "db": "SELECT model,dimension,hex(vector)=hex((SELECT arcface_embedding FROM face_prints WHERE id=4)) FROM catalog_embeddings WHERE entity_id='faceprint:4'",
-        "expect": [
-          [
-            "fixture-weight-hash|fixture-alignment",
-            128,
-            1
-          ]
-        ]
-      }
+      {"label": "swift saves chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "gift", "fileID": 1, "startSeconds": 8.0, "endSeconds": 12.0, "title": "Gift Opening", "summary": "Grandma opens presents", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": false, "stale": true}}, "expect": {"status": "ok", "chapters": [{"userEdited": true}]}},
+      {"restart": "rust"},
+      {"label": "rust first hit is the chapter", "catalog": {"action": "search", "query": "Grandma presents"}, "expect": {"hits": [{"fileID": 1, "startSeconds": 8.0}]}},
+      {"label": "rust edits chapter", "catalog": {"action": "saveChapter", "chapter": {"id": "gift", "fileID": 1, "startSeconds": 10.0, "endSeconds": 12.0, "title": "Gift Unwrapped", "summary": "Grandma opens presents", "sourceRevision": "untrusted", "modelVersion": "untrusted", "confidence": 0.0, "userEdited": false, "stale": true}}, "expect": {"status": "ok", "chapters": [{"startSeconds": 10.0, "title": "Gift Unwrapped"}]}},
+      {"restart": "swift"},
+      {"label": "swift undo restores", "catalog": {"action": "undoChapterEdit", "fileID": 1}, "expect": {"status": "ok", "chapters": [{"startSeconds": 8.0, "title": "Gift Opening", "stale": false, "modelVersion": "user"}]}},
+      {"label": "person name", "db": "SELECT name FROM persons WHERE id=7", "expect": [["Confirmed Person"]]},
+      {"label": "refresh failure", "db": "SELECT embedding_model,processing_version,attempts,retry_after,reason FROM face_refresh_failures WHERE face_id=4", "expect": [["next-weight", "next-processing", 2, 280.0, "no_embedding"]]},
+      {"label": "face provenance", "db": "SELECT person_id,embedding_model,processing_version,source_revision,length(arcface_embedding) FROM face_prints WHERE id=4", "expect": [[7, "fixture-weight-hash", "fixture-alignment", "fixture-revision", 512]]},
+      {"label": "user correction", "db": "SELECT region_json,user_edited,stale FROM catalog_observations WHERE id='faceprint:4'", "expect": [["manual face marker", 1, 0]]},
+      {"label": "face embedding projection", "db": "SELECT model,dimension,hex(vector)=hex((SELECT arcface_embedding FROM face_prints WHERE id=4)) FROM catalog_embeddings WHERE entity_id='faceprint:4'", "expect": [["fixture-weight-hash|fixture-alignment", 128, 1]]}
     ]
   },
   {
     "name": "cross-chat-history-and-filters",
     "description": "One conversation passes Swift → Rust → Swift: history persists, contextual media follow-ups resolve against the earlier subject on both engines, clear deletes it, and source files are never touched.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
     "start": "swift",
     "tree": [
-      {
-        "path": "birthday.txt",
-        "content": "Birthday gift opening"
-      }
+      {"path": "birthday.txt", "content": "Birthday gift opening"}
     ],
     "sql": [
       "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'{path:birthday.txt}',1,21,0,'doc','txt','Birthday gift opening')",
       "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(2,'/offline/birthday.mov',2,21,0,'video','mov','Birthday gift opening'),(3,'/offline/birthday.jpg',3,21,0,'image','jpg','Birthday gift opening')"
     ],
     "steps": [
-      {
-        "label": "swift asks",
-        "chat": {
-          "action": "send",
-          "text": "Please find my birthday files",
-          "useModel": false
-        },
-        "expect": {
-          "status": "completed",
-          "hits": {
-            "$tol": "set",
-            "value": [
-              {
-                "fileID": 1
-              },
-              {
-                "fileID": 2
-              },
-              {
-                "fileID": 3
-              }
-            ]
-          },
-          "messages": {
-            "$tol": "count",
-            "value": 2
-          }
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust sees history",
-        "chat": {
-          "action": "history"
-        },
-        "expect": {
-          "messages": {
-            "$tol": "count",
-            "value": 2
-          }
-        }
-      },
-      {
-        "label": "rust follow-up",
-        "chat": {
-          "action": "send",
-          "text": "only videos",
-          "useModel": false
-        },
-        "expect": {
-          "hits": [
-            {
-              "fileID": 2
-            }
-          ],
-          "message": "Found 1 match for “birthday” (videos).",
-          "messages": {
-            "$tol": "count",
-            "value": 4
-          }
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift sees history",
-        "chat": {
-          "action": "history"
-        },
-        "expect": {
-          "messages": {
-            "$tol": "count",
-            "value": 4
-          }
-        }
-      },
-      {
-        "label": "swift follow-up",
-        "chat": {
-          "action": "send",
-          "text": "now photos",
-          "useModel": false
-        },
-        "expect": {
-          "hits": [
-            {
-              "fileID": 3
-            }
-          ],
-          "message": "Found 1 match for “birthday” (photos).",
-          "messages": {
-            "$tol": "count",
-            "value": 6
-          }
-        }
-      },
-      {
-        "label": "clear",
-        "chat": {
-          "action": "clear"
-        },
-        "expect": {
-          "messages": []
-        }
-      },
-      {
-        "label": "source untouched",
-        "fs": {
-          "contents": {
-            "birthday.txt": "Birthday gift opening"
-          }
-        }
-      },
-      {
-        "label": "chat deleted",
-        "db": "SELECT (SELECT COUNT(*) FROM catalog_chat),(SELECT COUNT(*) FROM files)",
-        "expect": [
-          [
-            0,
-            3
-          ]
-        ]
-      }
+      {"label": "swift asks", "chat": {"action": "send", "text": "Please find my birthday files", "useModel": false}, "expect": {"status": "completed", "hits": {"$tol": "set", "value": [{"fileID": 1}, {"fileID": 2}, {"fileID": 3}]}, "messages": {"$tol": "count", "value": 2}}},
+      {"restart": "rust"},
+      {"label": "rust sees history", "chat": {"action": "history"}, "expect": {"messages": {"$tol": "count", "value": 2}}},
+      {"label": "rust follow-up", "chat": {"action": "send", "text": "only videos", "useModel": false}, "expect": {"hits": [{"fileID": 2}], "message": "Found 1 match for “birthday” (videos).", "messages": {"$tol": "count", "value": 4}}},
+      {"restart": "swift"},
+      {"label": "swift sees history", "chat": {"action": "history"}, "expect": {"messages": {"$tol": "count", "value": 4}}},
+      {"label": "swift follow-up", "chat": {"action": "send", "text": "now photos", "useModel": false}, "expect": {"hits": [{"fileID": 3}], "message": "Found 1 match for “birthday” (photos).", "messages": {"$tol": "count", "value": 6}}},
+      {"label": "clear", "chat": {"action": "clear"}, "expect": {"messages": []}},
+      {"label": "source untouched", "fs": {"contents": {"birthday.txt": "Birthday gift opening"}}},
+      {"label": "chat deleted", "db": "SELECT (SELECT COUNT(*) FROM catalog_chat),(SELECT COUNT(*) FROM files)", "expect": [[0, 3]]}
     ]
   },
   {
     "name": "cross-tools-swift-preview-rust-execute-jpeg",
     "description": "A JPEG photo export previewed by swift is executed by rust and undone by swift; the source is never modified.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
     "start": "swift",
     "tree": [
-      {
-        "path": "Picture.png",
-        "generate": "png",
-        "dimensions": [
-          16,
-          8
-        ],
-        "row": {
-          "id": 1,
-          "kind": "image"
-        }
-      }
+      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {
-        "label": "swift capabilities",
-        "tool": {
-          "action": "capabilities"
-        },
-        "expect": {
-          "status": "ok",
-          "capabilities": {
-            "$tol": "present"
-          }
-        }
-      },
-      {
-        "label": "swift preview",
-        "tool": {
-          "action": "preview",
-          "fileIDs": [
-            1
-          ],
-          "destination": "{root}",
-          "recipe": {
-            "kind": "photo",
-            "format": "jpeg",
-            "maxDimension": 16
-          }
-        },
-        "save": [
-          {
-            "name": "op",
-            "path": "operationID"
-          },
-          {
-            "name": "out",
-            "path": "outputs.0.outputPath"
-          }
-        ],
-        "expect": {
-          "status": "ok",
-          "outputs": {
-            "$tol": "count",
-            "value": 1
-          }
-        }
-      },
-      {
-        "label": "preview writes nothing",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust executes",
-        "tool": {
-          "action": "execute",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "completed",
-              "outputPath": {
-                "$var": "out"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "exported",
-        "fs": {
-          "exists": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          }
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "status": "ok",
-          "operationID": {
-            "$var": "op"
-          }
-        }
-      },
-      {
-        "label": "swift undo",
-        "tool": {
-          "action": "undo",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "undone"
-            }
-          ]
-        }
-      },
-      {
-        "label": "undone history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "operationID": {
-            "$var": "op"
-          },
-          "outputs": [
-            {
-              "state": "undone",
-              "message": {
-                "$tol": "present"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "output removed, source intact",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          }
-        }
-      },
-      {
-        "label": "no catalog assets",
-        "db": "SELECT COUNT(*) FROM catalog_assets",
-        "expect": [
-          [
-            0
-          ]
-        ]
-      }
+      {"label": "swift capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
+      {"label": "swift preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "jpeg", "maxDimension": 16}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
+      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
+      {"restart": "rust"},
+      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+      {"restart": "swift"},
+      {"label": "swift history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+      {"label": "swift undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   },
   {
     "name": "cross-tools-rust-preview-swift-execute-tiff",
     "description": "A TIFF photo export previewed by rust is executed by swift and undone by rust; the source is never modified.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
     "start": "rust",
     "tree": [
-      {
-        "path": "Picture.png",
-        "generate": "png",
-        "dimensions": [
-          16,
-          8
-        ],
-        "row": {
-          "id": 1,
-          "kind": "image"
-        }
-      }
+      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {
-        "label": "rust capabilities",
-        "tool": {
-          "action": "capabilities"
-        },
-        "expect": {
-          "status": "ok",
-          "capabilities": {
-            "$tol": "present"
-          }
-        }
-      },
-      {
-        "label": "rust preview",
-        "tool": {
-          "action": "preview",
-          "fileIDs": [
-            1
-          ],
-          "destination": "{root}",
-          "recipe": {
-            "kind": "photo",
-            "format": "tiff",
-            "maxDimension": 16
-          }
-        },
-        "save": [
-          {
-            "name": "op",
-            "path": "operationID"
-          },
-          {
-            "name": "out",
-            "path": "outputs.0.outputPath"
-          }
-        ],
-        "expect": {
-          "status": "ok",
-          "outputs": {
-            "$tol": "count",
-            "value": 1
-          }
-        }
-      },
-      {
-        "label": "preview writes nothing",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift executes",
-        "tool": {
-          "action": "execute",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "completed",
-              "outputPath": {
-                "$var": "out"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "exported",
-        "fs": {
-          "exists": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          }
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "status": "ok",
-          "operationID": {
-            "$var": "op"
-          }
-        }
-      },
-      {
-        "label": "rust undo",
-        "tool": {
-          "action": "undo",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "undone"
-            }
-          ]
-        }
-      },
-      {
-        "label": "undone history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "operationID": {
-            "$var": "op"
-          },
-          "outputs": [
-            {
-              "state": "undone",
-              "message": {
-                "$tol": "present"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "output removed, source intact",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          }
-        }
-      },
-      {
-        "label": "no catalog assets",
-        "db": "SELECT COUNT(*) FROM catalog_assets",
-        "expect": [
-          [
-            0
-          ]
-        ]
-      }
+      {"label": "rust capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
+      {"label": "rust preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "tiff", "maxDimension": 16}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
+      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
+      {"restart": "swift"},
+      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+      {"restart": "rust"},
+      {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+      {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   },
   {
     "name": "cross-tools-swift-preview-rust-execute-png-enlarge",
     "description": "A PNG photo export with upscaling previewed by swift is executed by rust and undone by swift; the source is never modified.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
     "start": "swift",
     "tree": [
-      {
-        "path": "Picture.png",
-        "generate": "png",
-        "dimensions": [
-          16,
-          8
-        ],
-        "row": {
-          "id": 1,
-          "kind": "image"
-        }
-      }
+      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {
-        "label": "swift capabilities",
-        "tool": {
-          "action": "capabilities"
-        },
-        "expect": {
-          "status": "ok",
-          "capabilities": {
-            "$tol": "present"
-          }
-        }
-      },
-      {
-        "label": "swift preview",
-        "tool": {
-          "action": "preview",
-          "fileIDs": [
-            1
-          ],
-          "destination": "{root}",
-          "recipe": {
-            "kind": "photo",
-            "format": "png",
-            "maxDimension": 64,
-            "allowUpscale": true
-          }
-        },
-        "save": [
-          {
-            "name": "op",
-            "path": "operationID"
-          },
-          {
-            "name": "out",
-            "path": "outputs.0.outputPath"
-          }
-        ],
-        "expect": {
-          "status": "ok",
-          "outputs": {
-            "$tol": "count",
-            "value": 1
-          }
-        }
-      },
-      {
-        "label": "preview writes nothing",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust executes",
-        "tool": {
-          "action": "execute",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "completed",
-              "outputPath": {
-                "$var": "out"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "exported",
-        "fs": {
-          "exists": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          },
-          "pngSize": [
-            [
-              {
-                "$var": "out"
-              },
-              64,
-              32
-            ]
-          ]
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "status": "ok",
-          "operationID": {
-            "$var": "op"
-          }
-        }
-      },
-      {
-        "label": "swift undo",
-        "tool": {
-          "action": "undo",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "undone"
-            }
-          ]
-        }
-      },
-      {
-        "label": "undone history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "operationID": {
-            "$var": "op"
-          },
-          "outputs": [
-            {
-              "state": "undone",
-              "message": {
-                "$tol": "present"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "output removed, source intact",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          }
-        }
-      },
-      {
-        "label": "no catalog assets",
-        "db": "SELECT COUNT(*) FROM catalog_assets",
-        "expect": [
-          [
-            0
-          ]
-        ]
-      }
+      {"label": "swift capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
+      {"label": "swift preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "allowUpscale": true}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
+      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
+      {"restart": "rust"},
+      {"label": "rust executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}, "pngSize": [[{"$var": "out"}, 64, 32]]}},
+      {"restart": "swift"},
+      {"label": "swift history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+      {"label": "swift undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   },
   {
     "name": "cross-tools-rust-preview-swift-execute-png-enlarge",
     "description": "A PNG photo export with upscaling previewed by rust is executed by swift and undone by rust; the source is never modified.",
-    "requires": [
-      "swift",
-      "rust"
-    ],
-    "engines": [
-      "swift"
-    ],
+    "requires": ["swift", "rust"],
+    "engines": ["swift"],
     "start": "rust",
     "tree": [
-      {
-        "path": "Picture.png",
-        "generate": "png",
-        "dimensions": [
-          16,
-          8
-        ],
-        "row": {
-          "id": 1,
-          "kind": "image"
-        }
-      }
+      {"path": "Picture.png", "generate": "png", "dimensions": [16, 8], "row": {"id": 1, "kind": "image"}}
     ],
     "steps": [
-      {
-        "label": "rust capabilities",
-        "tool": {
-          "action": "capabilities"
-        },
-        "expect": {
-          "status": "ok",
-          "capabilities": {
-            "$tol": "present"
-          }
-        }
-      },
-      {
-        "label": "rust preview",
-        "tool": {
-          "action": "preview",
-          "fileIDs": [
-            1
-          ],
-          "destination": "{root}",
-          "recipe": {
-            "kind": "photo",
-            "format": "png",
-            "maxDimension": 64,
-            "allowUpscale": true
-          }
-        },
-        "save": [
-          {
-            "name": "op",
-            "path": "operationID"
-          },
-          {
-            "name": "out",
-            "path": "outputs.0.outputPath"
-          }
-        ],
-        "expect": {
-          "status": "ok",
-          "outputs": {
-            "$tol": "count",
-            "value": 1
-          }
-        }
-      },
-      {
-        "label": "preview writes nothing",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ]
-        }
-      },
-      {
-        "restart": "swift"
-      },
-      {
-        "label": "swift executes",
-        "tool": {
-          "action": "execute",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "completed",
-              "outputPath": {
-                "$var": "out"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "exported",
-        "fs": {
-          "exists": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          },
-          "pngSize": [
-            [
-              {
-                "$var": "out"
-              },
-              64,
-              32
-            ]
-          ]
-        }
-      },
-      {
-        "restart": "rust"
-      },
-      {
-        "label": "rust history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "status": "ok",
-          "operationID": {
-            "$var": "op"
-          }
-        }
-      },
-      {
-        "label": "rust undo",
-        "tool": {
-          "action": "undo",
-          "operationID": {
-            "$var": "op"
-          },
-          "destination": "{root}"
-        },
-        "expect": {
-          "status": "ok",
-          "outputs": [
-            {
-              "state": "undone"
-            }
-          ]
-        }
-      },
-      {
-        "label": "undone history",
-        "tool": {
-          "action": "history"
-        },
-        "expect": {
-          "operationID": {
-            "$var": "op"
-          },
-          "outputs": [
-            {
-              "state": "undone",
-              "message": {
-                "$tol": "present"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "label": "output removed, source intact",
-        "fs": {
-          "absent": [
-            {
-              "$var": "out"
-            }
-          ],
-          "sha256": {
-            "Picture.png": "{sha256:Picture.png}"
-          }
-        }
-      },
-      {
-        "label": "no catalog assets",
-        "db": "SELECT COUNT(*) FROM catalog_assets",
-        "expect": [
-          [
-            0
-          ]
-        ]
-      }
+      {"label": "rust capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": {"$tol": "present"}}},
+      {"label": "rust preview", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "allowUpscale": true}}, "save": [{"name": "op", "path": "operationID"}, {"name": "out", "path": "outputs.0.outputPath"}], "expect": {"status": "ok", "outputs": {"$tol": "count", "value": 1}}},
+      {"label": "preview writes nothing", "fs": {"absent": [{"$var": "out"}]}},
+      {"restart": "swift"},
+      {"label": "swift executes", "tool": {"action": "execute", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "completed", "outputPath": {"$var": "out"}}]}},
+      {"label": "exported", "fs": {"exists": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}, "pngSize": [[{"$var": "out"}, 64, 32]]}},
+      {"restart": "rust"},
+      {"label": "rust history", "tool": {"action": "history"}, "expect": {"status": "ok", "operationID": {"$var": "op"}}},
+      {"label": "rust undo", "tool": {"action": "undo", "operationID": {"$var": "op"}, "destination": "{root}"}, "expect": {"status": "ok", "outputs": [{"state": "undone"}]}},
+      {"label": "undone history", "tool": {"action": "history"}, "expect": {"operationID": {"$var": "op"}, "outputs": [{"state": "undone", "message": {"$tol": "present"}}]}},
+      {"label": "output removed, source intact", "fs": {"absent": [{"$var": "out"}], "sha256": {"Picture.png": "{sha256:Picture.png}"}}},
+      {"label": "no catalog assets", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
     ]
   }
 ]

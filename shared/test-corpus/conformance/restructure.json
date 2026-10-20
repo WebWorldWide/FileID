@@ -3,226 +3,25 @@
     "name": "restructure-respect-stage",
     "description": "Five same-day loose camera photos become a dated event, three RAWs misfiled in an event's JPEGs folder move to the RAWs sibling, and files already in organized folders stay.",
     "tree": [
-      {
-        "path": "DCIM/100MSDCF/DSC00001.JPG",
-        "content": "dsc1",
-        "row": {
-          "id": 1,
-          "kind": "image",
-          "created_at": 1791108000
-        }
-      },
-      {
-        "path": "DCIM/100MSDCF/DSC00002.JPG",
-        "content": "dsc2",
-        "row": {
-          "id": 2,
-          "kind": "image",
-          "created_at": 1791108600
-        }
-      },
-      {
-        "path": "DCIM/100MSDCF/DSC00003.JPG",
-        "content": "dsc3",
-        "row": {
-          "id": 3,
-          "kind": "image",
-          "created_at": 1791109200
-        }
-      },
-      {
-        "path": "DCIM/100MSDCF/DSC00004.JPG",
-        "content": "dsc4",
-        "row": {
-          "id": 4,
-          "kind": "image",
-          "created_at": 1791109800
-        }
-      },
-      {
-        "path": "DCIM/100MSDCF/DSC00005.JPG",
-        "content": "dsc5",
-        "row": {
-          "id": 5,
-          "kind": "image",
-          "created_at": 1791110400
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K1.JPG",
-        "content": "k1",
-        "row": {
-          "id": 10,
-          "kind": "image",
-          "created_at": 1789812000
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K2.JPG",
-        "content": "k2",
-        "row": {
-          "id": 11,
-          "kind": "image",
-          "created_at": 1789812600
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K3.JPG",
-        "content": "k3",
-        "row": {
-          "id": 12,
-          "kind": "image",
-          "created_at": 1789813200
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW",
-        "content": "d1",
-        "row": {
-          "id": 13,
-          "kind": "image",
-          "created_at": 1789813800
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/D2.ARW",
-        "content": "d2",
-        "row": {
-          "id": 14,
-          "kind": "image",
-          "created_at": 1789814400
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW",
-        "content": "d3",
-        "row": {
-          "id": 15,
-          "kind": "image",
-          "created_at": 1789815000
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW",
-        "content": "r1",
-        "row": {
-          "id": 16,
-          "kind": "image",
-          "created_at": 1789812000
-        }
-      },
-      {
-        "path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K2.ARW",
-        "content": "r2",
-        "row": {
-          "id": 17,
-          "kind": "image",
-          "created_at": 1789812600
-        }
-      },
-      {
-        "path": "Recipes/lasagna.txt",
-        "content": "layers",
-        "row": {
-          "id": 20,
-          "kind": "doc",
-          "created_at": 1700000000
-        }
-      },
-      {
-        "path": "Recipes/pesto.txt",
-        "content": "basil",
-        "row": {
-          "id": 21,
-          "kind": "doc",
-          "created_at": 1700000600
-        }
-      }
+      {"path": "DCIM/100MSDCF/DSC00001.JPG", "content": "dsc1", "row": {"id": 1, "kind": "image", "created_at": 1791108000}},
+      {"path": "DCIM/100MSDCF/DSC00002.JPG", "content": "dsc2", "row": {"id": 2, "kind": "image", "created_at": 1791108600}},
+      {"path": "DCIM/100MSDCF/DSC00003.JPG", "content": "dsc3", "row": {"id": 3, "kind": "image", "created_at": 1791109200}},
+      {"path": "DCIM/100MSDCF/DSC00004.JPG", "content": "dsc4", "row": {"id": 4, "kind": "image", "created_at": 1791109800}},
+      {"path": "DCIM/100MSDCF/DSC00005.JPG", "content": "dsc5", "row": {"id": 5, "kind": "image", "created_at": 1791110400}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K1.JPG", "content": "k1", "row": {"id": 10, "kind": "image", "created_at": 1789812000}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K2.JPG", "content": "k2", "row": {"id": 11, "kind": "image", "created_at": 1789812600}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/K3.JPG", "content": "k3", "row": {"id": 12, "kind": "image", "created_at": 1789813200}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "content": "d1", "row": {"id": 13, "kind": "image", "created_at": 1789813800}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/D2.ARW", "content": "d2", "row": {"id": 14, "kind": "image", "created_at": 1789814400}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW", "content": "d3", "row": {"id": 15, "kind": "image", "created_at": 1789815000}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K1.ARW", "content": "r1", "row": {"id": 16, "kind": "image", "created_at": 1789812000}},
+      {"path": "Kyle Baseball Game 9-19-26/Photos/RAWs/K2.ARW", "content": "r2", "row": {"id": 17, "kind": "image", "created_at": 1789812600}},
+      {"path": "Recipes/lasagna.txt", "content": "layers", "row": {"id": 20, "kind": "doc", "created_at": 1700000000}},
+      {"path": "Recipes/pesto.txt", "content": "basil", "row": {"id": 21, "kind": "doc", "created_at": 1700000600}}
     ],
     "steps": [
-      {
-        "label": "plan",
-        "command": {
-          "planRestructure": {
-            "libraryRoot": "{root}"
-          }
-        },
-        "await": "restructurePlan",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "libraryRoot": "{root}",
-          "moves": {
-            "$tol": "set",
-            "value": [
-              {
-                "fileID": 1,
-                "source": "{path:DCIM/100MSDCF/DSC00001.JPG}",
-                "destination": "{path:Photos/2026/2026-10-04/DSC00001.JPG}",
-                "category": "2026-10-04",
-                "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event."
-              },
-              {
-                "fileID": 2,
-                "source": "{path:DCIM/100MSDCF/DSC00002.JPG}",
-                "destination": "{path:Photos/2026/2026-10-04/DSC00002.JPG}",
-                "category": "2026-10-04"
-              },
-              {
-                "fileID": 3,
-                "source": "{path:DCIM/100MSDCF/DSC00003.JPG}",
-                "destination": "{path:Photos/2026/2026-10-04/DSC00003.JPG}",
-                "category": "2026-10-04"
-              },
-              {
-                "fileID": 4,
-                "source": "{path:DCIM/100MSDCF/DSC00004.JPG}",
-                "destination": "{path:Photos/2026/2026-10-04/DSC00004.JPG}",
-                "category": "2026-10-04"
-              },
-              {
-                "fileID": 5,
-                "source": "{path:DCIM/100MSDCF/DSC00005.JPG}",
-                "destination": "{path:Photos/2026/2026-10-04/DSC00005.JPG}",
-                "category": "2026-10-04"
-              },
-              {
-                "fileID": 13,
-                "source": "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}",
-                "destination": "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}",
-                "category": "RAWs",
-                "reason": "A RAW file in a JPEG folder; moved to its sibling RAWs folder."
-              },
-              {
-                "fileID": 14,
-                "source": "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D2.ARW}",
-                "destination": "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW}",
-                "category": "RAWs"
-              },
-              {
-                "fileID": 15,
-                "source": "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}",
-                "destination": "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW}",
-                "category": "RAWs"
-              }
-            ]
-          }
-        }
-      },
-      {
-        "label": "plan moved nothing",
-        "fs": {
-          "exists": [
-            "DCIM/100MSDCF/DSC00001.JPG",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW",
-            "Recipes/lasagna.txt"
-          ],
-          "absent": [
-            "Photos",
-            "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"
-          ]
-        }
-      }
+      {"label": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"libraryRoot": "{root}", "moves": {"$tol": "set", "value": [{"fileID": 1, "source": "{path:DCIM/100MSDCF/DSC00001.JPG}", "destination": "{path:Photos/2026/2026-10-04/DSC00001.JPG}", "category": "2026-10-04", "reason": "One of 5 photos taken on Oct 4, 2026; kept together as an event."}, {"fileID": 2, "source": "{path:DCIM/100MSDCF/DSC00002.JPG}", "destination": "{path:Photos/2026/2026-10-04/DSC00002.JPG}", "category": "2026-10-04"}, {"fileID": 3, "source": "{path:DCIM/100MSDCF/DSC00003.JPG}", "destination": "{path:Photos/2026/2026-10-04/DSC00003.JPG}", "category": "2026-10-04"}, {"fileID": 4, "source": "{path:DCIM/100MSDCF/DSC00004.JPG}", "destination": "{path:Photos/2026/2026-10-04/DSC00004.JPG}", "category": "2026-10-04"}, {"fileID": 5, "source": "{path:DCIM/100MSDCF/DSC00005.JPG}", "destination": "{path:Photos/2026/2026-10-04/DSC00005.JPG}", "category": "2026-10-04"}, {"fileID": 13, "source": "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}", "destination": "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}", "category": "RAWs", "reason": "A RAW file in a JPEG folder; moved to its sibling RAWs folder."}, {"fileID": 14, "source": "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D2.ARW}", "destination": "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D2.ARW}", "category": "RAWs"}, {"fileID": 15, "source": "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW}", "destination": "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW}", "category": "RAWs"}]}}},
+      {"label": "plan moved nothing", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Recipes/lasagna.txt"], "absent": ["Photos", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW"]}}
     ]
   },
   {
@@ -230,130 +29,13 @@
     "description": "Applying the respect-stage plan moves the files and their catalog rows; undo restores both, byte for byte.",
     "extends": "restructure-respect-stage",
     "steps": [
-      {
-        "label": "plan",
-        "save": "plan",
-        "command": {
-          "planRestructure": {
-            "libraryRoot": "{root}"
-          }
-        },
-        "await": "restructurePlan",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "moves": {
-            "$tol": "count",
-            "value": 8
-          }
-        }
-      },
-      {
-        "label": "apply",
-        "command": {
-          "applyRestructure": {
-            "libraryRoot": "{root}",
-            "moves": {
-              "$var": "plan.moves"
-            },
-            "useSymlinks": false
-          }
-        },
-        "await": "restructureApplyResult",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "applied": 8,
-          "failed": 0
-        }
-      },
-      {
-        "label": "moved on disk",
-        "fs": {
-          "exists": [
-            "Photos/2026/2026-10-04/DSC00001.JPG",
-            "Photos/2026/2026-10-04/DSC00005.JPG",
-            "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW",
-            "Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW",
-            "Recipes/lasagna.txt",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/K1.JPG"
-          ],
-          "absent": [
-            "DCIM/100MSDCF/DSC00001.JPG",
-            "DCIM/100MSDCF/DSC00005.JPG",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW"
-          ]
-        }
-      },
-      {
-        "label": "moved in catalog",
-        "db": "SELECT id,path_text FROM files WHERE id IN (1,13,20) ORDER BY id",
-        "expect": [
-          [
-            1,
-            "{path:Photos/2026/2026-10-04/DSC00001.JPG}"
-          ],
-          [
-            13,
-            "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}"
-          ],
-          [
-            20,
-            "{path:Recipes/lasagna.txt}"
-          ]
-        ]
-      },
-      {
-        "label": "undo",
-        "command": {
-          "undoRestructure": {
-            "libraryRoot": "{root}"
-          }
-        },
-        "await": "restructureApplyResult",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "applied": 8,
-          "failed": 0
-        }
-      },
-      {
-        "label": "restored on disk",
-        "fs": {
-          "exists": [
-            "DCIM/100MSDCF/DSC00001.JPG",
-            "DCIM/100MSDCF/DSC00005.JPG",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW"
-          ],
-          "absent": [
-            "Photos/2026/2026-10-04/DSC00001.JPG",
-            "Photos/2026/2026-10-04/DSC00005.JPG",
-            "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW",
-            "Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW"
-          ],
-          "contents": {
-            "DCIM/100MSDCF/DSC00001.JPG": "dsc1",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"
-          }
-        }
-      },
-      {
-        "label": "restored in catalog",
-        "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id",
-        "expect": [
-          [
-            1,
-            "{path:DCIM/100MSDCF/DSC00001.JPG}"
-          ],
-          [
-            13,
-            "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"
-          ]
-        ]
-      }
+      {"label": "plan", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "moved on disk", "fs": {"exists": ["Photos/2026/2026-10-04/DSC00001.JPG", "Photos/2026/2026-10-04/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW", "Recipes/lasagna.txt", "Kyle Baseball Game 9-19-26/Photos/JPEGs/K1.JPG"], "absent": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW"]}},
+      {"label": "moved in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,13,20) ORDER BY id", "expect": [[1, "{path:Photos/2026/2026-10-04/DSC00001.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW}"], [20, "{path:Recipes/lasagna.txt}"]]},
+      {"label": "undo", "command": {"undoRestructure": {"libraryRoot": "{root}"}}, "await": "restructureApplyResult", "timeout": 120, "abortOnError": true, "expect": {"applied": 8, "failed": 0}},
+      {"label": "restored on disk", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "DCIM/100MSDCF/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D3.ARW"], "absent": ["Photos/2026/2026-10-04/DSC00001.JPG", "Photos/2026/2026-10-04/DSC00005.JPG", "Kyle Baseball Game 9-19-26/Photos/RAWs/D1.ARW", "Kyle Baseball Game 9-19-26/Photos/RAWs/D3.ARW"], "contents": {"DCIM/100MSDCF/DSC00001.JPG": "dsc1", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW": "d1"}}},
+      {"label": "restored in catalog", "db": "SELECT id,path_text FROM files WHERE id IN (1,13) ORDER BY id", "expect": [[1, "{path:DCIM/100MSDCF/DSC00001.JPG}"], [13, "{path:Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW}"]]}
     ]
   },
   {
@@ -361,63 +43,15 @@
     "description": "A plan whose catalog rows carry neither a content hash nor a file_ref cannot prove the files are the ones it planned, so apply moves nothing.",
     "extends": "restructure-respect-stage",
     "knownDivergences": [
-      {
-        "engine": "swift",
-        "reason": "applyRestructure moves files whose catalog rows have no content hash and no file_ref instead of refusing them"
-      }
+      {"engine": "swift", "reason": "applyRestructure moves files whose catalog rows have no content hash and no file_ref instead of refusing them"}
     ],
     "sql": [
       "UPDATE files SET content_hash=NULL, file_ref=NULL"
     ],
     "steps": [
-      {
-        "label": "plan",
-        "save": "plan",
-        "command": {
-          "planRestructure": {
-            "libraryRoot": "{root}"
-          }
-        },
-        "await": "restructurePlan",
-        "timeout": 120,
-        "abortOnError": true,
-        "expect": {
-          "moves": {
-            "$tol": "count",
-            "value": 8
-          }
-        }
-      },
-      {
-        "label": "apply",
-        "command": {
-          "applyRestructure": {
-            "libraryRoot": "{root}",
-            "moves": {
-              "$var": "plan.moves"
-            },
-            "useSymlinks": false
-          }
-        },
-        "await": "restructureApplyResult",
-        "timeout": 120,
-        "expect": {
-          "applied": 0,
-          "failed": 8
-        }
-      },
-      {
-        "label": "nothing moved",
-        "fs": {
-          "exists": [
-            "DCIM/100MSDCF/DSC00001.JPG",
-            "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"
-          ],
-          "absent": [
-            "Photos"
-          ]
-        }
-      }
+      {"label": "plan", "save": "plan", "command": {"planRestructure": {"libraryRoot": "{root}"}}, "await": "restructurePlan", "timeout": 120, "abortOnError": true, "expect": {"moves": {"$tol": "count", "value": 8}}},
+      {"label": "apply", "command": {"applyRestructure": {"libraryRoot": "{root}", "moves": {"$var": "plan.moves"}, "useSymlinks": false}}, "await": "restructureApplyResult", "timeout": 120, "expect": {"applied": 0, "failed": 8}},
+      {"label": "nothing moved", "fs": {"exists": ["DCIM/100MSDCF/DSC00001.JPG", "Kyle Baseball Game 9-19-26/Photos/JPEGs/D1.ARW"], "absent": ["Photos"]}}
     ]
   }
 ]

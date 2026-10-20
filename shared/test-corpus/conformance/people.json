@@ -9,10 +9,8 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,face_quality) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f',0.4),(2,2,2,X'00','[0,0,1,1]',X'0000803f',0.9),(3,3,2,X'00','[0,0,1,1]',NULL,1.0)"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"action": "mergeClusters", "succeeded": 1, "failed": 0}},
-      {"label": "persons", "db": "SELECT id,name,title,first_name,middle_name,last_name,suffix,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
-       "expect": [[1, null, null, "Alex", null, "Rivera", null, 0, 2, 3]]},
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"action": "mergeClusters", "succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,title,first_name,middle_name,last_name,suffix,is_unknown,representative_face_id,file_count FROM persons ORDER BY id", "expect": [[1, null, null, "Alex", null, "Rivera", null, 0, 2, 3]]},
       {"label": "faces", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 1], [3, 1]]}
     ]
   },
@@ -26,10 +24,8 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 1, "failed": 0}},
-      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
-       "expect": [[1, "Grandma", "Grandma", 0, 1, 2]]}
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id", "expect": [[1, "Grandma", "Grandma", 0, 1, 2]]}
     ]
   },
   {
@@ -42,10 +38,8 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 1, "failed": 0}},
-      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
-       "expect": [[1, "Alex", "Alex", 0, 1, 2]]}
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id", "expect": [[1, "Alex", "Alex", 0, 1, 2]]}
     ]
   },
   {
@@ -59,10 +53,8 @@
       "CREATE TRIGGER fixture_fail BEFORE DELETE ON persons WHEN OLD.id=2 BEGIN SELECT RAISE(ABORT,'fixture failure'); END"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 0, "failed": 1}},
-      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
-       "expect": [[1, null, null, 1, null, 1], [2, null, "Alex", 0, null, 1]]},
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id", "expect": [[1, null, null, 1, null, 1], [2, null, "Alex", 0, null, 1]]},
       {"label": "faces", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 2]]},
       {"label": "no verdicts", "db": "SELECT COUNT(*) FROM face_verifications", "expect": [[0]]}
     ]
@@ -77,12 +69,9 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "missing destination", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 99}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 0, "failed": 1}},
-      {"label": "missing source", "command": {"mergeClusters": {"sourcePersonID": 99, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 0, "failed": 1}},
-      {"label": "persons", "db": "SELECT id,first_name,is_unknown,file_count FROM persons ORDER BY id",
-       "expect": [[1, null, 1, 1], [2, "Alex", 0, 1]]},
+      {"label": "missing destination", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 99}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "missing source", "command": {"mergeClusters": {"sourcePersonID": 99, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "persons", "db": "SELECT id,first_name,is_unknown,file_count FROM persons ORDER BY id", "expect": [[1, null, 1, 1], [2, "Alex", 0, 1]]},
       {"label": "faces", "db": "SELECT id,person_id FROM face_prints ORDER BY id", "expect": [[1, 1], [2, 2]]}
     ]
   },
@@ -95,8 +84,7 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 1, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 1, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
       {"label": "persons", "db": "SELECT id,first_name,representative_face_id,file_count FROM persons", "expect": [[1, "Alex", 1, 1]]},
       {"label": "faces", "db": "SELECT id,person_id FROM face_prints", "expect": [[1, 1]]}
     ]
@@ -114,10 +102,8 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 1, "failed": 0}},
-      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
-       "expect": [[1, "Alex", "Alex", 0, 1, 1]]}
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,first_name,is_unknown,representative_face_id,file_count FROM persons ORDER BY id", "expect": [[1, "Alex", "Alex", 0, 1, 1]]}
     ]
   },
   {
@@ -133,10 +119,8 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]'),(2,2,2,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 1, "failed": 0}},
-      {"label": "verdict", "db": "SELECT person_a,person_b,same_person,vlm_model,face_a,face_b FROM face_verifications",
-       "expect": [[1, 2, 1, "user-merged", 1, 2]]}
+      {"label": "merge", "command": {"mergeClusters": {"sourcePersonID": 2, "destinationPersonID": 1}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "verdict", "db": "SELECT person_a,person_b,same_person,vlm_model,face_a,face_b FROM face_verifications", "expect": [[1, 2, 1, "user-merged", 1, 2]]}
     ]
   },
   {
@@ -146,14 +130,10 @@
       "INSERT INTO persons(id,name,middle_name,created_at,is_unknown) VALUES(1,'Old','Q',123,1)"
     ],
     "steps": [
-      {"label": "rename", "command": {"renamePerson": {"personID": 1, "title": "Dr.", "firstName": " Jane ", "middleName": "", "lastName": "Doe", "suffix": null}},
-       "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 1, "failed": 0}},
-      {"label": "named", "db": "SELECT name,title,first_name,middle_name,last_name,suffix,is_unknown FROM persons",
-       "expect": [["Dr. Jane Doe", "Dr.", "Jane", null, "Doe", null, 0]]},
-      {"label": "blank rename", "command": {"renamePerson": {"personID": 1, "firstName": "  "}},
-       "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
-      {"label": "cleared", "db": "SELECT name,title,first_name,middle_name,last_name,suffix,is_unknown FROM persons",
-       "expect": [[null, null, null, null, null, null, 0]]}
+      {"label": "rename", "command": {"renamePerson": {"personID": 1, "title": "Dr.", "firstName": " Jane ", "middleName": "", "lastName": "Doe", "suffix": null}}, "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 1, "failed": 0}},
+      {"label": "named", "db": "SELECT name,title,first_name,middle_name,last_name,suffix,is_unknown FROM persons", "expect": [["Dr. Jane Doe", "Dr.", "Jane", null, "Doe", null, 0]]},
+      {"label": "blank rename", "command": {"renamePerson": {"personID": 1, "firstName": "  "}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "cleared", "db": "SELECT name,title,first_name,middle_name,last_name,suffix,is_unknown FROM persons", "expect": [[null, null, null, null, null, null, 0]]}
     ]
   },
   {
@@ -163,8 +143,7 @@
       {"engine": "swift", "reason": "renamePerson reports succeeded=1 when the UPDATE matched no row"}
     ],
     "steps": [
-      {"label": "rename", "command": {"renamePerson": {"personID": 42, "firstName": "Ghost"}},
-       "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 0, "failed": 1}}
+      {"label": "rename", "command": {"renamePerson": {"personID": 42, "firstName": "Ghost"}}, "await": "bulkActionResult", "expect": {"action": "renamePerson", "succeeded": 0, "failed": 1}}
     ]
   },
   {
@@ -176,10 +155,8 @@
       "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,1,X'00','[0,0,1,1]')"
     ],
     "steps": [
-      {"label": "mark", "command": {"markPersonsAsUnknown": {"personIDs": [1]}}, "await": "bulkActionResult",
-       "expect": {"action": "markPersonsAsUnknown", "succeeded": 1, "failed": 0}},
-      {"label": "persons", "db": "SELECT id,name,title,first_name,middle_name,last_name,suffix,is_unknown,representative_face_id,file_count FROM persons ORDER BY id",
-       "expect": [[1, null, null, null, null, null, null, 1, 1, 1], [2, "Sam", null, "Sam", null, null, null, 0, null, 0]]},
+      {"label": "mark", "command": {"markPersonsAsUnknown": {"personIDs": [1]}}, "await": "bulkActionResult", "expect": {"action": "markPersonsAsUnknown", "succeeded": 1, "failed": 0}},
+      {"label": "persons", "db": "SELECT id,name,title,first_name,middle_name,last_name,suffix,is_unknown,representative_face_id,file_count FROM persons ORDER BY id", "expect": [[1, null, null, null, null, null, null, 1, 1, 1], [2, "Sam", null, "Sam", null, null, null, 0, null, 0]]},
       {"label": "faces", "db": "SELECT id,person_id FROM face_prints", "expect": [[1, 1]]}
     ]
   },
@@ -193,8 +170,7 @@
       "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Sam',123)"
     ],
     "steps": [
-      {"label": "mark", "command": {"markPersonsAsUnknown": {"personIDs": [1, 42]}}, "await": "bulkActionResult",
-       "expect": {"succeeded": 1, "failed": 1, "messages": {"$tol": "set", "value": [{"fileID": 1, "ok": true}, {"fileID": 42, "ok": false}]}}}
+      {"label": "mark", "command": {"markPersonsAsUnknown": {"personIDs": [1, 42]}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 1, "messages": {"$tol": "set", "value": [{"fileID": 1, "ok": true}, {"fileID": 42, "ok": false}]}}}
     ]
   }
 ]
