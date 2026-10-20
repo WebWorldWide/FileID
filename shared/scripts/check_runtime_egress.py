@@ -77,7 +77,7 @@ RAW_NETWORK_FILES = {
     "platforms/windows/src/engine/src/commands/prewarm.rs",
     "platforms/windows/src/engine/src/commands/bulk.rs",
     "platforms/windows/src/engine/src/commands/video_export.rs",
-    "platforms/windows/src/engine/src/main.rs",
+    "platforms/windows/src/engine/src/server.rs",
     "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
     "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
     "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
@@ -161,7 +161,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/commands/restructure.rs": "09371656ac3f142ed68e740dc22e1fccfc0cd01b4a232ccaa2166307acc8d652",
   "platforms/windows/src/engine/src/commands/trash.rs": "f98ca164edc02f6a172e8934cd5c9125f34756a04434e4d83354af66293b02b2",
   "platforms/windows/src/engine/src/downloader.rs": "85da28fe6478033c761fdc7c756279cb819730adcb7be6355ca5a34025a2b9d8",
-  "platforms/windows/src/engine/src/main.rs": "4ba09d79f2422cc251c7884550d5a3eff767b3951028478588524def9da84cdc",
+  "platforms/windows/src/engine/src/server.rs": "e03292cd8bed796df1fa15f87a2af187bf14ce5c696e299865bbd7d1fa46a44e",
   "platforms/windows/src/engine/src/models/runtime.rs": "1f72535377b16ccbd07104406448353ba4cac5b87bc8d2035f3d1f7611809d4e",
   "platforms/windows/src/engine/src/models/vlm.rs": "2ce0b8372ef35f3ba545df750fb62e981a5808fd08a12f284e1fe9d84f484fe7",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "40e260d05d96072d0d48222a21d6d5e8a34d1e6d11650d9254b9c17352a50267",
@@ -611,7 +611,7 @@ def source_boundary_violations(root: Path) -> list[str]:
     failures.extend(_rust_loopback_violations(root))
     for relative in (
         "platforms/windows/src/engine/src/commands/prewarm.rs",
-        "platforms/windows/src/engine/src/main.rs",
+        "platforms/windows/src/engine/src/server.rs",
     ):
         plumbing_path = root / relative
         if not plumbing_path.is_file():

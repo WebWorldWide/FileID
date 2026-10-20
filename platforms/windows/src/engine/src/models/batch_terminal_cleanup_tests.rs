@@ -238,7 +238,7 @@ fn batch_cleanup_actual_handler_terminals_and_dispatch_guard_await_finalization(
     assert!(helper.contains("server.take()"));
     assert!(!helper.contains("complete.failed ="));
     assert!(!helper.contains("complete.cancelled ="));
-    let main = include_str!("../main.rs");
+    let main = include_str!("../server.rs");
     let begin = main.find("CommandPayload::DeepAnalyzeAll(payload) =>").unwrap();
     let end = begin
         + main[begin..]

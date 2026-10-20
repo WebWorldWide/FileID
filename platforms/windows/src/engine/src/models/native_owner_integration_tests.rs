@@ -204,7 +204,7 @@ fn shipping_owner_original_server_and_shutdown_seams_do_not_hide_cleanup_failure
     assert!(server.contains("OwnedProcess::spawn(&mut cmd, Some(resources.clone()), ProcessTracker::shared())"));
     assert!(!server.contains("async fn stop_child"));
     assert!(server.contains("child.shutdown().await?"));
-    let main = include_str!("../main.rs");
+    let main = include_str!("../server.rs");
     let start = main.find("main_shutdown.await;").unwrap();
     let end = main[start..].find("FileIDEngine exiting cleanly").unwrap() + start;
     let body = &main[start..end];

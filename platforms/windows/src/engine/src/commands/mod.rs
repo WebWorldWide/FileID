@@ -1,5 +1,5 @@
 //! IPC command handlers, split by domain. Each submodule owns a coherent
-//! group of `handle_*` functions; the dispatcher in `main::handle_line`
+//! group of `handle_*` functions; the dispatcher in `server::handle_line`
 //! pattern-matches the inbound command and calls the relevant handler here.
 
 pub(crate) mod bulk;
