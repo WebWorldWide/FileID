@@ -178,8 +178,8 @@ struct TakeWorkbench: View {
                 }
             }
             VStack(alignment: .leading, spacing: 10) {
-                LabeledSegment("Name") { DSTextField(placeholder: "Group name, e.g. Alex at bat", text: $title, height: Theme.Metrics.control) }
-                LabeledSegment("Goal") { DSTextField(placeholder: "What should happen, e.g. Alex gets a hit", text: $goal, height: Theme.Metrics.control) }
+                fieldRow("Name") { DSTextField(placeholder: "Group name, e.g. Alex at bat", text: $title, height: Theme.Metrics.control) }
+                fieldRow("Goal") { DSTextField(placeholder: "What should happen, e.g. Alex gets a hit", text: $goal, height: Theme.Metrics.control) }
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
             if !pool.isEmpty {
@@ -226,6 +226,15 @@ struct TakeWorkbench: View {
                 MetaText(pool.isEmpty ? "Find clips on the left to add them." : "Scores are drafts from sampled frames. Originals are never changed.", size: 11.5)
                     .lineLimit(2)
             }
+        }
+    }
+
+    private func fieldRow<Field: View>(_ label: String, @ViewBuilder field: () -> Field) -> some View {
+        HStack(spacing: 12) {
+            Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
+                .frame(width: 44, alignment: .leading)
+                .accessibilityHidden(true)
+            field()
         }
     }
 

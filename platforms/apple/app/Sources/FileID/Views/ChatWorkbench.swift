@@ -187,7 +187,7 @@ struct ChatWorkbench: View {
                     .padding(.horizontal, 10).padding(.vertical, 7)
                     .frame(minHeight: Theme.Metrics.controlLarge)
                     .background(Color.black.opacity(0.3), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(inputFocused ? Theme.gold.opacity(0.7) : Theme.hairlineStrong, lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                     .overlay { if inputFocused { RoundedRectangle(cornerRadius: Theme.Radius.s + 3, style: .continuous).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
                 if busy {
                     Button("Stop") { control("cancel") }

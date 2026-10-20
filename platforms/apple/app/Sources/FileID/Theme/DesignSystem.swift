@@ -644,7 +644,7 @@ struct DSTextField: View {
         .padding(.horizontal, 10)
         .frame(height: height)
         .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
-        .overlay(rounded(Theme.Radius.s).stroke(focused ? Theme.gold.opacity(0.7) : Theme.hairlineStrong, lineWidth: 1))
+        .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
         .overlay { if focused { rounded(Theme.Radius.s + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
         .contentShape(rounded(Theme.Radius.s))
         .onTapGesture { focused = true }
@@ -670,7 +670,7 @@ struct DSNumberField<F: ParseableFormatStyle>: View where F.FormatOutput == Stri
             .padding(.horizontal, 8)
             .frame(width: width, height: height)
             .background(Color.black.opacity(0.3), in: rounded(Theme.Radius.s))
-            .overlay(rounded(Theme.Radius.s).stroke(focused ? Theme.gold.opacity(0.7) : Theme.hairlineStrong, lineWidth: 1))
+            .overlay(rounded(Theme.Radius.s).stroke(Theme.hairlineStrong, lineWidth: 1))
             .overlay { if focused { rounded(Theme.Radius.s + 3).stroke(Theme.focusRing, lineWidth: 2).padding(-3).allowsHitTesting(false) } }
     }
 }

@@ -173,7 +173,7 @@ struct ToolsWorkbench: View {
                 }
                 if session.kind == "photo" {
                     optionRow("Longest side") {
-                        DSNumberField(placeholder: "Longest side in pixels", value: $session.maxDimension, format: .number, width: 90)
+                        DSNumberField(placeholder: "Longest side in pixels", value: $session.maxDimension, format: .number.grouping(.never), width: 90)
                         MetaText("px, up to 8192", size: 12)
                     }
                 }
@@ -213,7 +213,7 @@ struct ToolsWorkbench: View {
             PanelFooter {
                 SectionLabel("Save to")
                 Text(session.destination.isEmpty ? "No folder chosen" : session.destination)
-                    .font(Theme.Font.mono(12)).foregroundStyle(session.destination.isEmpty ? Theme.text3 : Theme.text1)
+                    .font(session.destination.isEmpty ? Theme.Font.body(12.5) : Theme.Font.mono(12)).foregroundStyle(session.destination.isEmpty ? Theme.text3 : Theme.text1)
                     .lineLimit(1).truncationMode(.head)
                     .help(session.destination)
                 Spacer(minLength: 8)
