@@ -170,7 +170,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/engine/src/models/vlm.rs": "2ce0b8372ef35f3ba545df750fb62e981a5808fd08a12f284e1fe9d84f484fe7",
   "platforms/windows/src/engine/src/models/vlm_server.rs": "40e260d05d96072d0d48222a21d6d5e8a34d1e6d11650d9254b9c17352a50267",
   "platforms/windows/src/engine/src/pipeline/deep_analyze.rs": "9c50f760d9d372179a3ad1df6e76a41a7d806b0b3102cab8b27198c9baa2071b",
-  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "680e893b176cd64462a1f29cd990353309f1b58b066a0c81593c1a9ac6ef46f3",
+  "platforms/windows/src/engine/src/pipeline/doc_extract.rs": "8fc6f2593007af3b7783ec527aa2875cc8bb6500b099cd246fe31e0645b62e04",
   "platforms/windows/src/engine/src/pipeline/restructure_apply.rs": "f2df458226b36379c7368d67f254475c5a20f2b3c7006db902a91f54874a2bbf",
   "platforms/windows/src/engine/src/platform.rs": "f953f532d035a0bb80e1837dd59a6a1434ad99d433e0c5e8a6e58fcbec728a26",
   "platforms/windows/src/engine/src/shell/heic.rs": "9e21d1bb73da451e67f410aa18dcf034316bc3b88ca4f2c732c32c06fe1171cf",
