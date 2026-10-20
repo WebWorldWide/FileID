@@ -127,9 +127,31 @@ struct RestructureApplyTests {
     private func insertRow(_ db: Database, id: Int64, path: String) async throws {
         try await db.pool.write { d in
             try d.execute(
-                sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES (?,?,?,4,0,'image','jpg')",
+                sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, content_hash) VALUES (?,?,?,4,0,'image','jpg',X'00')",
                 arguments: [id, path, StablePathHash.hash(path)])
         }
+    }
+
+    @Test("A row with neither file_ref nor content hash is refused, not moved")
+    func applyRefusesUnverifiableRow() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("restructure-unverifiable-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("lib")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let src = root.appendingPathComponent("a.jpg")
+        try Data("aaaa".utf8).write(to: src)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: src.path)
+        try await db.pool.write { d in try d.execute(sql: "UPDATE files SET content_hash = NULL, file_ref = NULL") }
+        let dest = root.appendingPathComponent("Sorted/a.jpg")
+        let result = try await Restructure.apply(
+            proposals: [RestructureProposal(fileID: 1, oldPath: src.path, newPath: dest.path, bucket: "Sorted")],
+            database: db, libraryRoot: root, undoJournal: tmp.appendingPathComponent("undo.jsonl"))
+        #expect(result.moved == 0)
+        #expect(result.failed == 1)
+        #expect(FileManager.default.fileExists(atPath: src.path))
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
     }
 
     /// Two proposals to the SAME destination both apply via
