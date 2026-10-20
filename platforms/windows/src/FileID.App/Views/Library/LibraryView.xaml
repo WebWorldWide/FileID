@@ -68,6 +68,7 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
             <TextBox x:Name="SearchBox"
@@ -96,8 +97,15 @@
                  tab always exposes this so users don't have to discover
                  Ctrl+Click. Toggling fills the selection bar; clicking
                  again clears. -->
+            <TextBlock x:Name="ShownCountText"
+                       Grid.Column="2"
+                       VerticalAlignment="Center"
+                       FontFamily="{StaticResource BodyFontFamily}"
+                       FontSize="12"
+                       Foreground="{StaticResource Text3Brush}" />
+
             <Button x:Name="SelectAllButton"
-                    Grid.Column="2"
+                    Grid.Column="3"
                     Click="OnSelectAllClicked"
                     ToolTipService.ToolTip="Select all visible files (Ctrl+A)"
                     AutomationProperties.Name="Select all visible files"
@@ -112,7 +120,7 @@
                  UndoStack is empty; shows a tappable pill with the last
                  destructive op's label when entries exist. -->
             <Button x:Name="UndoButton"
-                    Grid.Column="3"
+                    Grid.Column="4"
                     Click="OnUndoLastClicked"
                     Visibility="Collapsed"
                     ToolTipService.ToolTip="Undo last destructive action (Ctrl+Z)"

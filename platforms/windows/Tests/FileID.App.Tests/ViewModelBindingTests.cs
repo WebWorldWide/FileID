@@ -603,6 +603,32 @@ public class LibraryMergeTests
     }
 
     [Fact]
+    public void ShownCount_ReadsXOfYOrResults()
+    {
+        var previous = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        try
+        {
+            Assert.Equal("300 of 3,412 shown", FileID.Views.Library.LibraryView.ShownCount(300, 3412));
+            Assert.Equal("12 results", FileID.Views.Library.LibraryView.ShownCount(12, null));
+            Assert.Equal("1 result", FileID.Views.Library.LibraryView.ShownCount(1, null));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    [Fact]
+    public void CountForKind_SumsAllOrPicksOneKind()
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { ["image"] = 10, ["video"] = 3 };
+        Assert.Equal(13, LibraryViewModel.CountForKind(counts, null));
+        Assert.Equal(3, LibraryViewModel.CountForKind(counts, "video"));
+        Assert.Equal(0, LibraryViewModel.CountForKind(counts, "pdf"));
+    }
+
+    [Fact]
     public void AppendRange_RaisesOneAddAtTheOldEnd()
     {
         var items = new BatchObservableCollection<FileTile> { Tile(1) };

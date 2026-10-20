@@ -400,6 +400,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             DispatcherQueue.TryEnqueue(UpdateSelectionBar);
         }
+        if (e.PropertyName is nameof(LibraryViewModel.TotalCount))
+        {
+            DispatcherQueue.TryEnqueue(SyncShownCount);
+        }
     }
 
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -407,6 +411,21 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+        SyncShownCount();
+    }
+
+    /// <summary>macOS filter bar: "N of M shown" for the paged listing, the hit
+    /// count while searching.</summary>
+    internal static string ShownCount(int shown, int? total) =>
+        total is { } all
+            ? $"{shown:N0} of {all:N0} shown"
+            : $"{shown:N0} result{(shown == 1 ? "" : "s")}";
+
+    private void SyncShownCount()
+    {
+        if (_unloaded) return;
+        int shown = ViewModel.Items.Count;
+        ShownCountText.Text = shown == 0 && ViewModel.TotalCount is null or 0 ? string.Empty : ShownCount(shown, ViewModel.TotalCount);
     }
 
     public string StatusText
