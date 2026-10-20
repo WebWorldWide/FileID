@@ -49,21 +49,21 @@
                           VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <Button Click="OnResetKeepersClicked"
-                            AutomationProperties.Name="Reset keepers"
-                            AutomationProperties.HelpText="Re-mark the first member of every group as keeper, clearing any user overrides."
-                            ToolTipService.ToolTip="Re-mark the first member of every group as keeper, clearing any user overrides.">
+                            AutomationProperties.Name="Select extra copies"
+                            AutomationProperties.HelpText="Keep the first copy in every group and select every other copy for deletion."
+                            ToolTipService.ToolTip="Keep the first copy in every group and select every other copy for deletion.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                            <FontIcon FontSize="13" Glyph="&#xE7A7;" />
-                            <TextBlock Text="Reset" />
+                            <FontIcon FontSize="13" Glyph="&#xE762;" />
+                            <TextBlock Text="Select extra copies" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                     <Button Click="OnTrashNonKeepersClicked"
-                            AutomationProperties.Name="Trash non-keepers"
-                            AutomationProperties.HelpText="Move every non-keeper duplicate to the Recycle Bin."
-                            ToolTipService.ToolTip="Move every non-keeper duplicate to the Recycle Bin.">
+                            AutomationProperties.Name="{x:Bind DeleteButtonText, Mode=OneWay}"
+                            AutomationProperties.HelpText="Move the selected extra copies to the Recycle Bin."
+                            ToolTipService.ToolTip="Move the selected extra copies to the Recycle Bin. They stay recoverable from there.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE74D;" />
-                            <TextBlock Text="Trash non-keepers" />
+                            <TextBlock Text="{x:Bind DeleteButtonText, Mode=OneWay}" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                     <Button Click="OnRefreshClicked"
@@ -72,7 +72,7 @@
                             ToolTipService.ToolTip="Re-scan the database for byte-identical duplicate files.">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE72C;" />
-                            <TextBlock Text="Refresh" />
+                            <TextBlock Text="Refresh" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                 </StackPanel>

@@ -192,7 +192,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     private void OnGroupOrMemberChangedCore(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
-        if (e.PropertyName is nameof(DuplicateMember.IsKeeper) or nameof(DuplicateGroup.IsSkipped))
+        if (e.PropertyName is nameof(DuplicateMember.IsKeeper) or nameof(DuplicateGroup.IsSkipped) or nameof(DuplicateMember.IsSelectedForTrash))
         {
             DispatcherQueue.TryEnqueue(() => OnPropertyChanged(nameof(HeaderStats)));
         }
@@ -330,7 +330,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var skippedText = skipped > 0 ? $" · {skipped:N0} skipped" : string.Empty;
         if (eligibleGroups == 0) return "No verified duplicate groups" + skippedText;
         return $"{eligibleGroups:N0} verified duplicate group{(eligibleGroups == 1 ? "" : "s")} · "
-            + $"{FormatSize(bytes)} reclaimable if you keep 1 per group{skippedText}";
+            + $"{FormatSize(bytes)} to reclaim{skippedText}";
     }
 
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
@@ -701,5 +701,35 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged(string name)
-        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        if (name == nameof(HeaderStats))
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeleteButtonText)));
+        }
+    }
+
+    /// <summary>macOS Cleanup delete button: "Delete selected" when nothing is
+    /// selected, else "Delete N selected · size" (extra copies in active groups).</summary>
+    public string DeleteButtonText
+    {
+        get
+        {
+            int files = 0;
+            long bytes = 0;
+            foreach (var g in ViewModel.Groups)
+            {
+                if (g.IsSkipped) continue;
+                foreach (var m in CleanupSelectionPolicy.SelectedVictims(g))
+                {
+                    files++;
+                    bytes += m.SizeBytes;
+                }
+            }
+            return FormatDeleteButton(files, bytes);
+        }
+    }
+
+    internal static string FormatDeleteButton(int files, long bytes)
+        => files == 0 ? "Delete selected" : $"Delete {files:N0} selected · {FormatSize(bytes)}";
 }
