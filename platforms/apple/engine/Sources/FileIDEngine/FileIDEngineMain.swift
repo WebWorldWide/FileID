@@ -1118,6 +1118,10 @@ struct FileIDEngineMain {
                 continue
             }
             let oldURL = URL(fileURLWithPath: state.path)
+            guard state.fileRef != nil else {
+                messages.append(item(rename.fileID, ok: false, "Source identity is unavailable; rescan before renaming."))
+                continue
+            }
             guard !Restructure.fileRefSwapped(
                 dbRef: state.fileRef, currentRef: Discovery.inode(of: oldURL)) else {
                 messages.append(item(rename.fileID, ok: false, "File changed since it was indexed."))
@@ -1302,18 +1306,24 @@ struct FileIDEngineMain {
         let parts = [clean(title), clean(firstName), clean(middleName), clean(lastName), clean(suffix)].compactMap { $0 }
         let display = parts.joined(separator: " ")
         do {
-            try await database.pool.write { db in
+            let changed = try await database.pool.write { db -> Int in
                 try db.execute(sql: """
                     UPDATE persons
                     SET title = ?, first_name = ?, middle_name = ?, last_name = ?, suffix = ?, name = ?, is_unknown = 0
                     WHERE id = ?
                     """, arguments: [clean(title), clean(firstName), clean(middleName), clean(lastName), clean(suffix), display.isEmpty ? nil : display, personID])
+                return db.changesCount
+            }
+            guard changed > 0 else {
+                return BulkActionResult(action: "renamePerson", succeeded: 0, failed: 1, messages: [item(personID, ok: false, missingPersonMessage)])
             }
             return BulkActionResult(action: "renamePerson", succeeded: 1, failed: 0, messages: [item(personID, ok: true)])
         } catch {
             return BulkActionResult(action: "renamePerson", succeeded: 0, failed: 1, messages: [item(personID, ok: false, error.localizedDescription)])
         }
     }
+
+    static let missingPersonMessage = "This person no longer exists; refresh People and try again."
 
     static func markPersonsAsUnknown(database: Database, personIDs: [Int64]) async -> BulkActionResult {
         do {
@@ -1327,7 +1337,7 @@ struct FileIDEngineMain {
                                 last_name = NULL, suffix = NULL, is_unknown = 1
                             WHERE id = ?
                             """, arguments: [id])
-                        messages.append(item(id, ok: true))
+                        messages.append(db.changesCount > 0 ? item(id, ok: true) : item(id, ok: false, missingPersonMessage))
                     } catch {
                         messages.append(item(id, ok: false, error.localizedDescription))
                     }

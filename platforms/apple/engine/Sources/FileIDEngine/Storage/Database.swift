@@ -587,7 +587,74 @@ public final class Database: @unchecked Sendable {
 
     enum PersonMergeFailure: LocalizedError {
         case invalidSelection
-        var errorDescription: String? { "A selected person no longer exists or the selection is invalid. Refresh People before merging." }
+        case ambiguousAnchor
+        var errorDescription: String? {
+            switch self {
+            case .invalidSelection: "A selected person no longer exists or the selection is invalid. Refresh People before merging."
+            case .ambiguousAnchor: "A saved face verdict matches more than one face; rescan before merging."
+            }
+        }
+    }
+
+    /// Mirrors the shared engine's manual-merge verdict: a `user-merged` edge
+    /// between both people's anchor faces keeps a later recluster from splitting
+    /// the merge, and a "different people" verdict that currently separates
+    /// exactly these two clusters is dropped. A person with no faces has no
+    /// anchor, so no edge is written and the merge still proceeds.
+    static func persistManualMergeConstraint(_ db: GRDB.Database, source: Int64, destination: Int64) throws {
+        func anchor(_ person: Int64) throws -> Row? {
+            try Row.fetchOne(db, sql: """
+                SELECT fp.id, fp.file_id, fp.bbox FROM face_prints fp
+                WHERE fp.person_id = ?1
+                ORDER BY (fp.id = (SELECT representative_face_id FROM persons WHERE id = ?1)) DESC,
+                         (fp.arcface_embedding IS NOT NULL) DESC,
+                         COALESCE(fp.face_quality, 0) DESC, fp.id ASC
+                LIMIT 1
+                """, arguments: [person])
+        }
+        func resolve(legacy: Int64?, file: Int64?, bbox: String?) throws -> Int64? {
+            if let file, let bbox {
+                let ids = try Int64.fetchAll(db, sql: "SELECT id FROM face_prints WHERE file_id = ? AND bbox = ? ORDER BY id LIMIT 2",
+                                             arguments: [file, bbox])
+                if ids.count > 1 { throw PersonMergeFailure.ambiguousAnchor }
+                if let id = ids.first { return id }
+            }
+            guard let legacy else { return nil }
+            return try Int64.fetchOne(db, sql: "SELECT id FROM face_prints WHERE id = ?", arguments: [legacy])
+        }
+        func owner(_ face: Int64) throws -> Int64? {
+            try Int64.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id = ? AND person_id IS NOT NULL", arguments: [face])
+        }
+        guard let sourceAnchor = try anchor(source), let destinationAnchor = try anchor(destination) else { return }
+        let expected = [min(source, destination), max(source, destination)]
+        var contradictory = Set<[Int64]>()
+        for row in try Row.fetchAll(db, sql: """
+            SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b
+            FROM face_verifications
+            WHERE same_person = 0
+              AND ((face_a IS NOT NULL AND face_b IS NOT NULL)
+                   OR (file_a IS NOT NULL AND bbox_a IS NOT NULL AND file_b IS NOT NULL AND bbox_b IS NOT NULL))
+            """) {
+            guard let faceA = try resolve(legacy: row["face_a"], file: row["file_a"], bbox: row["bbox_a"]),
+                  let faceB = try resolve(legacy: row["face_b"], file: row["file_b"], bbox: row["bbox_b"]),
+                  let ownerA = try owner(faceA), let ownerB = try owner(faceB), ownerA != ownerB,
+                  [min(ownerA, ownerB), max(ownerA, ownerB)] == expected else { continue }
+            contradictory.insert([row["person_a"], row["person_b"]])
+        }
+        for pair in contradictory {
+            try db.execute(sql: "DELETE FROM face_verifications WHERE person_a = ? AND person_b = ? AND same_person = 0",
+                           arguments: [pair[0], pair[1]])
+        }
+        let (low, high) = source < destination ? (sourceAnchor, destinationAnchor) : (destinationAnchor, sourceAnchor)
+        let faceLow: Int64 = low["id"], fileLow: Int64 = low["file_id"], bboxLow: String = low["bbox"]
+        let faceHigh: Int64 = high["id"], fileHigh: Int64 = high["file_id"], bboxHigh: String = high["bbox"]
+        try db.execute(sql: """
+            INSERT OR REPLACE INTO face_verifications
+                (person_a, person_b, same_person, confidence, vlm_model, verified_at,
+                 face_a, face_b, file_a, bbox_a, file_b, bbox_b)
+            VALUES (?, ?, 1, 1.0, 'user-merged', ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [expected[0], expected[1], Date().timeIntervalSince1970,
+                             faceLow, faceHigh, fileLow, bboxLow, fileHigh, bboxHigh])
     }
 
     /// Reassign every face_print of `sources` to `target`, delete source
@@ -620,6 +687,9 @@ public final class Database: @unchecked Sendable {
                 let last: String? = source["last_name"]
                 let suffix: String? = source["suffix"]
                 try db.execute(sql: "UPDATE persons SET name=?,title=?,first_name=?,middle_name=?,last_name=?,suffix=?,is_unknown=0 WHERE id=?", arguments: [name,title,first,middle,last,suffix,target])
+            }
+            for source in validSources {
+                try Self.persistManualMergeConstraint(db, source: source, destination: target)
             }
             try db.execute(sql: "UPDATE face_prints SET person_id=? WHERE person_id IN(SELECT value FROM json_each(?))", arguments: [target,sourceJSON])
             try db.execute(sql: "DELETE FROM persons WHERE id IN(SELECT value FROM json_each(?))", arguments: [sourceJSON])
