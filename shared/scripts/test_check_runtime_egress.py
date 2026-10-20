@@ -243,12 +243,10 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
             "platforms/cli/src/runtime.rs",
-            "platforms/cli/src/scan_models.rs",
             "platforms/linux/src/app/src/engine_client.rs",
             "platforms/linux/src/app/src/tabs/settings.rs",
-            "platforms/tui/src/models.rs",
-            "platforms/tui/src/scan.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
+            "platforms/windows/src/engine/src/client.rs",
             # The reviewed files below match deliberately broad raw-network
             # patterns on non-network constructs — restructure.rs imports the
             # Win32 FILE_SHARE_READ *filesystem* constant, and
