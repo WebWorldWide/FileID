@@ -40,7 +40,7 @@
         <Grid x:Name="AppTitleBar"
               Grid.Row="0"
               Background="{StaticResource TitleBarBrush}"
-              BorderBrush="{StaticResource HairlineBrush}"
+              BorderBrush="{ThemeResource HairlineBrush}"
               BorderThickness="0,0,0,1" />
 
         <shell:TitleBar x:Name="TitleBarHost" Grid.Row="0" />
@@ -65,7 +65,7 @@
             <sidebar:Sidebar x:Name="SidebarHost" Grid.Column="0" />
 
             <Border Grid.Column="1"
-                    Background="{StaticResource HairlineBrush}" />
+                    Background="{ThemeResource HairlineBrush}" />
 
             <Grid x:Name="DetailHost"
                   Grid.Column="2"

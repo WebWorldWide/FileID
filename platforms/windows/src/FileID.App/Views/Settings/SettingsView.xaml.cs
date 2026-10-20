@@ -506,9 +506,8 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         get
         {
             var s = Services.ThumbnailService.Stats;
-            double diskMb = s.DiskBytes / (1024.0 * 1024.0);
             return $"ok={s.RenderedOk} failed={s.RenderedFailed} fallback={s.FallbackUsed} dropped={s.DroppedDispatcher}\n" +
-                   $"disk: hits={s.DiskHits} writes={s.DiskWrites} sweeps={s.DiskSweeps} cached={diskMb:0.#} MB";
+                   $"disk: hits={s.DiskHits} writes={s.DiskWrites} sweeps={s.DiskSweeps} cached={FileID.Services.ByteFormat.File(s.DiskBytes)}";
         }
     }
 
@@ -808,16 +807,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     internal string ErrorLabel(string? lastError) =>
         "Failed: " + (lastError ?? "unknown error");
 
-    private static string FormatBytes(ulong b)
-    {
-        const double KB = 1024.0;
-        const double MB = 1024.0 * 1024.0;
-        const double GB = 1024.0 * 1024.0 * 1024.0;
-        if (b >= GB) return $"{b / GB:0.00} GB";
-        if (b >= MB) return $"{b / MB:0.0} MB";
-        if (b >= KB) return $"{b / KB:0} KB";
-        return $"{b} B";
-    }
+    private static string FormatBytes(ulong b) => FileID.Services.ByteFormat.File(b);
 
     private static string FormatEta(double seconds)
     {

@@ -392,12 +392,7 @@ public sealed class SankeyFlowControl : Control
             _sourceRects[g.Key] = rect;
             _rectIdleFill[rect] = sourceBrush;
 
-            var label = new TextBlock
-            {
-                Text = $"{TrimLabel(g.Key, 22)}  ({g.Count()})",
-                FontSize = 12,
-                Foreground = ResolveBrush("TextFillColorPrimaryBrush", Colors.White),
-            };
+            var label = NodeLabel(TrimLabel(g.Key, 22), g.Count(), g.Key);
             Canvas.SetLeft(label, margin + boxWidth + labelGutter);
             Canvas.SetTop(label, pos.y + Math.Max(0, pos.height / 2 - 8));
             _canvas.Children.Add(label);
@@ -423,14 +418,8 @@ public sealed class SankeyFlowControl : Control
             _categoryRects[g.Key] = rect;
             _rectIdleFill[rect] = rect.Fill;
 
-            var label = new TextBlock
-            {
-                Text = $"{g.Key}  ({g.Count()})",
-                FontSize = 12,
-                Foreground = ResolveBrush("TextFillColorPrimaryBrush", Colors.White),
-                TextAlignment = TextAlignment.Right,
-            };
-            label.Measure(new Size(220, 20));
+            var label = NodeLabel(TrimLabelStart(g.Key, 28), g.Count(), g.Key);
+            label.Measure(new Size(260, 20));
             Canvas.SetLeft(label, w - margin - boxWidth - labelGutter - label.DesiredSize.Width);
             Canvas.SetTop(label, pos.y + Math.Max(0, pos.height / 2 - 8));
             _canvas.Children.Add(label);
@@ -582,6 +571,33 @@ public sealed class SankeyFlowControl : Control
 
     private static string TrimLabel(string s, int max)
         => s.Length <= max ? s : string.Concat(s.AsSpan(0, max - 1), "…");
+
+    /// <summary>Keeps the end of a destination path (macOS: the dated folder
+    /// stays visible), e.g. "…/Photos/2024/06".</summary>
+    internal static string TrimLabelStart(string s, int max)
+        => s.Length <= max ? s : string.Concat("…", s.AsSpan(s.Length - (max - 1)));
+
+    /// <summary>Node name in text1 at 12 plus its count in text3 at 11.5;
+    /// the tooltip carries the full path.</summary>
+    private static StackPanel NodeLabel(string name, int count, string fullPath)
+    {
+        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        label.Children.Add(new TextBlock
+        {
+            Text = name,
+            FontSize = 12,
+            Foreground = ResolveBrush("Text1Brush", Colors.White),
+        });
+        label.Children.Add(new TextBlock
+        {
+            Text = count.ToString("N0"),
+            FontSize = 11.5,
+            Foreground = ResolveBrush("Text3Brush", Color.FromArgb(0xFF, 0xA6, 0xAC, 0xB3)),
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        ToolTipService.SetToolTip(label, fullPath);
+        return label;
+    }
 
     private static Brush ResolveBrush(string key, Color fallback)
         => FileID.Services.ThemeHelper.GetBrushSafe(key, new SolidColorBrush(fallback));

@@ -263,24 +263,9 @@ public sealed partial class WelcomeSheet : UserControl
     internal string VlmInstallSize(ulong approxBytes, ModelInstallStatus status) =>
         status == ModelInstallStatus.Installed ? string.Empty : VlmSize(approxBytes);
 
-    internal string VlmSize(ulong approxBytes)
-    {
-        const double GB = 1024.0 * 1024.0 * 1024.0;
-        const double MB = 1024.0 * 1024.0;
-        if (approxBytes >= GB) return $"~{approxBytes / GB:0.0} GB";
-        return $"~{approxBytes / MB:0} MB";
-    }
+    internal string VlmSize(ulong approxBytes) => "~" + Services.ByteFormat.File(approxBytes);
 
-    private static string FormatBytes(ulong b)
-    {
-        const double KB = 1024.0;
-        const double MB = 1024.0 * 1024.0;
-        const double GB = 1024.0 * 1024.0 * 1024.0;
-        if (b >= GB) return $"{b / GB:0.00} GB";
-        if (b >= MB) return $"{b / MB:0.0} MB";
-        if (b >= KB) return $"{b / KB:0} KB";
-        return $"{b} B";
-    }
+    private static string FormatBytes(ulong b) => Services.ByteFormat.File(b);
 
     private static string FormatEta(double seconds)
     {
@@ -385,9 +370,7 @@ public sealed partial class WelcomeSheet : UserControl
         // happened — DirectML is optimal so the byte count is misleading).
         if (status == ModelInstallStatus.Installed && !isRealInstall) return string.Empty;
         if (approxBytes <= 0) return string.Empty;
-        if (approxBytes >= 1024UL * 1024 * 1024)
-            return $"~{approxBytes / (1024.0 * 1024 * 1024):0.#} GB";
-        return $"~{approxBytes / (1024 * 1024)} MB";
+        return "~" + Services.ByteFormat.File(approxBytes);
     }
 
     // Per-row install re-entry guard. PrewarmAsync only flips Status to

@@ -665,6 +665,56 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
     /// Distinct file kinds present in the library — drives the kind filter
     /// segmented control in the Library tab.
     /// </summary>
+    /// <summary>Library Selected pane details (macOS LibrarySelectedPane): camera,
+    /// captured date (created, else modified), caption and confirmed people.</summary>
+    public async Task<FileDetails?> FileDetailsAsync(long fileId, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return null;
+            string? camera = null;
+            double? captured = null;
+            string? caption = null;
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT camera_model, COALESCE(created_at, modified_at), vlm_description
+                    FROM files WHERE id = $id
+                    """;
+                cmd.Parameters.AddWithValue("$id", fileId);
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+                camera = reader.IsDBNull(0) ? null : reader.GetString(0);
+                captured = reader.IsDBNull(1) ? null : reader.GetDouble(1);
+                caption = reader.IsDBNull(2) ? null : reader.GetString(2);
+            }
+
+            var people = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT DISTINCT p.id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name
+                    FROM face_prints f JOIN persons p ON p.id = f.person_id
+                    WHERE f.file_id = $id AND IFNULL(p.is_unknown, 0) = 0
+                    ORDER BY p.id
+                    """;
+                cmd.Parameters.AddWithValue("$id", fileId);
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    string? Col(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+                    var name = FormatPersonTagName(Col(1), Col(2), Col(3), Col(4), Col(5), Col(6));
+                    if (!string.IsNullOrEmpty(name) && seen.Add(name)) people.Add(name);
+                }
+            }
+            return new FileDetails(camera, captured, caption, people);
+        }
+        finally { _gate.Release(); }
+    }
+
     public async Task<IReadOnlyDictionary<string, int>> KindCountsAsync(CancellationToken ct)
     {
         if (_connection == null) return new Dictionary<string, int>();
@@ -846,6 +896,12 @@ internal sealed record FileRow(
     string? ProposedName = null);
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
+
+internal sealed record FileDetails(
+    string? CameraModel,
+    double? CapturedAt,
+    string? Caption,
+    System.Collections.Generic.IReadOnlyList<string> People);
 
 /// <summary>one row of pending VLM-proposed rename, used to seed
 /// the Deep Analyze "Pending renames" bulk-apply sheet.</summary>

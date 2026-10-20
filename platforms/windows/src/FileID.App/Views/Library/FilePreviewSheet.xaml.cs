@@ -1,11 +1,11 @@
 ﻿// FilePreviewSheet code-behind. Kind-dispatched preview matching the macOS
 // LibraryView.swift:902-1112 preview sheet:
-//   image  → BitmapImage at 1024 px (shell IThumbnailProvider chain).
+//   image  → BitmapImage at display size (shell IThumbnailProvider chain).
 //   video  → MediaPlayerElement with transport controls (in-app playback;
 //            macOS opens default app, we do better).
 //   audio  → MediaPlayerElement audio mode (in-app playback).
-//   pdf    → 1024 px shell thumbnail (page 1, matches macOS PDFKit).
-//   doc    → 1024 px shell thumbnail (Office providers render natively).
+//   pdf    → display-size shell thumbnail (page 1, matches macOS PDFKit).
+//   doc    → display-size shell thumbnail (Office providers render natively).
 //   other  → kind glyph + "Open in default app" affordance.
 //
 // Lifecycle: SetFile is called once on open and again on every prev/next
@@ -313,19 +313,39 @@ public sealed partial class FilePreviewSheet : UserControl
     }
 
     /// <summary>Use the Windows shell IThumbnailProvider chain to render
-    /// the file at 1024 px. Same API Explorer uses, so HEIC / RAW / Office
+    /// the file at display size. Same API Explorer uses, so HEIC / RAW / Office
     /// / .pages / PDF all render correctly when their providers are
     /// installed. Falls back to the placeholder if the provider returns
     /// nothing.</summary>
-    /// <summary>Bounded MRU cache of the 1024px preview BitmapImages, keyed by
-    /// path|modifiedAt. Arrow-keying back and forth over the same siblings would
-    /// otherwise re-run the shell extract + ~4 MB decode every step (this is the
-    /// 1024px preview path — separate from ThumbnailService's 192px L1/L2). All
-    /// access is UI-thread-affine: BitmapImage is a DispatcherObject, so this is
-    /// only ever read/written from the dispatcher-marshaled paths below.</summary>
-    private const int PreviewCacheCap = 4;
+    /// <summary>Bounded MRU cache of display-size preview BitmapImages, keyed by
+    /// path|modifiedAt|decode width and budgeted by decoded bytes. Arrow-keying
+    /// back and forth over the same siblings would otherwise re-run the shell
+    /// extract + decode every step (separate from ThumbnailService's 192px
+    /// L1/L2). All access is UI-thread-affine: BitmapImage is a DispatcherObject,
+    /// so this is only ever read/written from the dispatcher-marshaled paths.</summary>
+    private const int PreviewCacheCap = 8;
+    private const long PreviewCacheBudgetBytes = 96L * 1024 * 1024;
+    private const int MaxPreviewDecodePixels = 4096;
+    private const uint MaxShellThumbnailDip = 2560;
     private const uint MaxDirectPreviewEncodedBytes = 32 * 1024 * 1024;
-    private readonly LinkedList<KeyValuePair<string, BitmapImage>> _previewCache = new();
+    private readonly LinkedList<(string Key, BitmapImage Image, long Bytes)> _previewCache = new();
+
+    /// <summary>The preview area's width in DIPs (macOS decodes at display size;
+    /// a fixed 1024 physical px was soft at 150–200% scaling). UI thread only.</summary>
+    private double PreviewTargetDip()
+    {
+        double width = 0;
+        try { width = PreviewCanvas.ActualWidth - 40; }
+        catch (Exception ex) { Services.DebugLog.Warn("FilePreviewSheet: preview width unavailable: " + ex.Message); }
+        return width > 64 ? width : 1024;
+    }
+
+    /// <summary>Physical decode width for <paramref name="dip"/>, capped.</summary>
+    internal static int PreviewDecodePixels(double dip, double rasterizationScale)
+    {
+        var scale = rasterizationScale > 0 ? rasterizationScale : 1;
+        return (int)Math.Clamp(Math.Ceiling(Math.Max(1, dip) * scale), 1, MaxPreviewDecodePixels);
+    }
 
     private async Task LoadShellThumbnailAsync(string path, string kind, double? modifiedAt, int navGen)
     {
@@ -336,7 +356,9 @@ public sealed partial class FilePreviewSheet : UserControl
         // before any await and marshal the BitmapImage construction +
         // PreviewImage.Source/Visibility assignment inside one TryEnqueue.
         var dispatcher = DispatcherQueue;
-        var cacheKey = modifiedAt.HasValue ? $"{path}|{modifiedAt.Value:R}" : path;
+        var targetDip = PreviewTargetDip();
+        var decodePixels = PreviewDecodePixels(targetDip, XamlRoot?.RasterizationScale ?? 1);
+        var cacheKey = (modifiedAt.HasValue ? $"{path}|{modifiedAt.Value:R}" : path) + $"|{decodePixels}";
         if (dispatcher != null && TryShowCachedPreview(cacheKey, dispatcher, navGen))
         {
             return;
@@ -347,7 +369,7 @@ public sealed partial class FilePreviewSheet : UserControl
             var file = await Windows.Storage.StorageFile.GetFileFromPathAsync(path);
             thumb = await file.GetThumbnailAsync(
                 Windows.Storage.FileProperties.ThumbnailMode.SingleItem,
-                1024,
+                (uint)Math.Clamp(Math.Ceiling(targetDip), 1, MaxShellThumbnailDip),
                 Windows.Storage.FileProperties.ThumbnailOptions.UseCurrentScale);
             if (thumb is { Size: > 0 } && dispatcher != null)
             {
@@ -360,11 +382,9 @@ public sealed partial class FilePreviewSheet : UserControl
                     {
                         // Stale navigation — don't overwrite a newer file's preview.
                         if (_isClosed || _navGen != navGen) { tcs.TrySetResult(false); return; }
-                        // Cap the decoded surface at the displayed 1024 px edge
-                        // regardless of what the shell hands back, so the 4-entry
-                        // preview cache stays within its ~16 MB budget instead of
-                        // holding native-resolution (e.g. 48 MP) decodes.
-                        var bmp = new BitmapImage { DecodePixelWidth = 1024 };
+                        // Decode at the displayed width in physical pixels, never
+                        // native resolution (e.g. 48 MP), so the cache budget holds.
+                        var bmp = new BitmapImage { DecodePixelWidth = decodePixels };
                         await bmp.SetSourceAsync(captured);
                         PreviewImage.Source = bmp;
                         PreviewImage.Visibility = Visibility.Visible;
@@ -402,7 +422,7 @@ public sealed partial class FilePreviewSheet : UserControl
             try { thumb?.Dispose(); } catch { }
         }
         if (kind == "image" && dispatcher is not null
-            && await TryLoadDirectImageAsync(path, cacheKey, dispatcher, navGen))
+            && await TryLoadDirectImageAsync(path, cacheKey, decodePixels, dispatcher, navGen))
         {
             return;
         }
@@ -427,6 +447,7 @@ public sealed partial class FilePreviewSheet : UserControl
     private async Task<bool> TryLoadDirectImageAsync(
         string path,
         string cacheKey,
+        int decodePixels,
         Microsoft.UI.Dispatching.DispatcherQueue dispatcher,
         int navGen)
     {
@@ -463,7 +484,7 @@ public sealed partial class FilePreviewSheet : UserControl
                         completion.TrySetResult(false);
                         return;
                     }
-                    var image = new BitmapImage { DecodePixelWidth = 1024 };
+                    var image = new BitmapImage { DecodePixelWidth = decodePixels };
                     await image.SetSourceAsync(memory);
                     if (_isClosed || _navGen != navGen)
                     {
@@ -503,7 +524,7 @@ public sealed partial class FilePreviewSheet : UserControl
         for (var node = _previewCache.First; node != null; node = node.Next)
         {
             if (node.Value.Key != cacheKey) continue;
-            var bmp = node.Value.Value;
+            var bmp = node.Value.Image;
             _previewCache.Remove(node);
             _previewCache.AddFirst(node);
             dispatcher.TryEnqueue(() =>
@@ -525,9 +546,14 @@ public sealed partial class FilePreviewSheet : UserControl
         {
             if (node.Value.Key == cacheKey) { _previewCache.Remove(node); break; }
         }
-        _previewCache.AddFirst(new KeyValuePair<string, BitmapImage>(cacheKey, bmp));
-        while (_previewCache.Count > PreviewCacheCap)
+        long bytes = Math.Max(1L, (long)bmp.PixelWidth * bmp.PixelHeight * 4);
+        _previewCache.AddFirst((cacheKey, bmp, bytes));
+        long total = 0;
+        foreach (var entry in _previewCache) total += entry.Bytes;
+        while (_previewCache.Count > 1
+               && (_previewCache.Count > PreviewCacheCap || total > PreviewCacheBudgetBytes))
         {
+            total -= _previewCache.Last!.Value.Bytes;
             _previewCache.RemoveLast();
         }
     }
@@ -933,13 +959,7 @@ public sealed partial class FilePreviewSheet : UserControl
         _ => "", // Folder / generic
     };
 
-    private static string FormatSize(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
-        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
-    }
+    private static string FormatSize(long bytes) => FileID.Services.ByteFormat.File(bytes);
 
     private async void OnAnalyzeClicked(object sender, RoutedEventArgs e)
     {

@@ -53,13 +53,14 @@ internal static class RestructurePlanPresentation
            && TryGetCompleteConfidenceCounts(plan, out var counts)
            && counts.Auto > 0;
 
-    internal static bool HasMissingContentSignals(
-        int contentEligibleFiles,
+    /// <summary>macOS shouldShowMissingContentModels: the library has files to
+    /// analyze but the scan stored no CLIP and no text embeddings, so a plan
+    /// can only sort by date and name.</summary>
+    internal static bool ShouldShowMissingContentModels(
+        int analyzableFiles,
         int clipEmbeddings,
         int textEmbeddings)
-        => contentEligibleFiles > 0
-           && ((long)clipEmbeddings + textEmbeddings) * 5
-           < (long)contentEligibleFiles * 4;
+        => analyzableFiles > 0 && clipEmbeddings == 0 && textEmbeddings == 0;
 
     internal static bool IsDriveRoot(string? path)
     {

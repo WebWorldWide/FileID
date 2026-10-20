@@ -56,6 +56,9 @@ public class RestructureQualityQueryTests
         Assert.Equal(5, stats.ContentEligible);
         Assert.Equal(2, stats.ClipEmbeddings);
         Assert.Equal(2, stats.TextEmbeddings);
+        Assert.Equal(9, stats.AllFiles);
+        Assert.Equal(3, stats.AllClipEmbeddings);
+        Assert.Equal(2, stats.AllTextEmbeddings);
     }
 
     private static void Execute(SqliteConnection connection, string sql)

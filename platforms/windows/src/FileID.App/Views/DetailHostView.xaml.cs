@@ -159,7 +159,6 @@ public sealed partial class DetailHostView : UserControl
             "models" => new Workbenches.ModelsWorkbench(),
             _ => _toolsWorkbench ??= new Workbenches.ToolsWorkbench(HostWindowHandle()),
         };
-        panel.HideTitle();
         return panel;
     }
 

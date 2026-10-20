@@ -24,6 +24,36 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
+    <!-- Contrast-sensitive tokens (DESIGN_V3_PORT Tokens): text, hairlines,
+         borders and panels follow Windows high-contrast themes. Reference
+         them with {ThemeResource} so a theme switch updates live. -->
+    <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Default">
+            <SolidColorBrush x:Key="Text1Brush" Color="#FFF0F1F2" />
+            <SolidColorBrush x:Key="Text2Brush" Color="#FFCFD3D8" />
+            <SolidColorBrush x:Key="Text3Brush" Color="#FFA6ACB3" />
+            <SolidColorBrush x:Key="LabelBrush" Color="#FFAEB4BB" />
+            <SolidColorBrush x:Key="PanelBrush" Color="#C718181B" />
+            <SolidColorBrush x:Key="HairlineBrush" Color="#14FFFFFF" />
+            <SolidColorBrush x:Key="HairlineSoftBrush" Color="#0FFFFFFF" />
+            <SolidColorBrush x:Key="HairlineStrongBrush" Color="#24FFFFFF" />
+            <SolidColorBrush x:Key="ControlBorderBrush" Color="#2EFFFFFF" />
+            <SolidColorBrush x:Key="ShellControlBorderBrush" Color="#29FFFFFF" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+            <SolidColorBrush x:Key="Text1Brush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="Text2Brush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="Text3Brush" Color="{ThemeResource SystemColorGrayTextColor}" />
+            <SolidColorBrush x:Key="LabelBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="PanelBrush" Color="{ThemeResource SystemColorWindowColor}" />
+            <SolidColorBrush x:Key="HairlineBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="HairlineSoftBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="HairlineStrongBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="ControlBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="ShellControlBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+        </ResourceDictionary>
+    </ResourceDictionary.ThemeDictionaries>
+
     <!-- ─── Color literals ───────────────────────────────────────────── -->
     <!--
         Kept as <Color> resources separately from the brushes so animations
@@ -54,19 +84,25 @@
     <Color x:Key="WarningColor">#FFE0A340</Color>
     <SolidColorBrush x:Key="Bg0Brush" Color="{StaticResource Bg0Color}" />
     <SolidColorBrush x:Key="Bg1Brush" Color="{StaticResource Bg1Color}" />
-    <SolidColorBrush x:Key="Text1Brush" Color="{StaticResource Text1Color}" />
-    <SolidColorBrush x:Key="Text2Brush" Color="{StaticResource Text2Color}" />
-    <SolidColorBrush x:Key="Text3Brush" Color="{StaticResource Text3Color}" />
-    <SolidColorBrush x:Key="LabelBrush" Color="{StaticResource LabelColor}" />
     <SolidColorBrush x:Key="OnGoldBrush" Color="{StaticResource OnGoldColor}" />
     <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource DangerColor}" />
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}" />
-    <SolidColorBrush x:Key="PanelBrush" Color="#C718181B" />
-    <SolidColorBrush x:Key="HairlineBrush" Color="#14FFFFFF" />
-    <SolidColorBrush x:Key="HairlineSoftBrush" Color="#0FFFFFFF" />
-    <SolidColorBrush x:Key="HairlineStrongBrush" Color="#24FFFFFF" />
-    <SolidColorBrush x:Key="ControlBorderBrush" Color="#2EFFFFFF" />
     <SolidColorBrush x:Key="GoldWashBrush" Color="#12FFCC00" />
+    <SolidColorBrush x:Key="PaneFillBrush" Color="#04FFFFFF" />
+    <!-- Image badges: black 0.62 backing, 1 px stroke in the badge colour at 0.6. -->
+    <SolidColorBrush x:Key="ImageBadgeBackingBrush" Color="#9E000000" />
+    <SolidColorBrush x:Key="ImageBadgeStrokeBrush" Color="#99FFFFFF" />
+    <SolidColorBrush x:Key="ImageBadgeAiStrokeBrush" Color="#99B19BCE" />
+    <SolidColorBrush x:Key="ImageBadgeGoldStrokeBrush" Color="#99FFCC00" />
+    <Style x:Key="ImageBadgeStyle" TargetType="Border">
+        <Setter Property="Padding" Value="5,1,5,1" />
+        <Setter Property="CornerRadius" Value="4" />
+        <Setter Property="Background" Value="{StaticResource ImageBadgeBackingBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource ImageBadgeStrokeBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <SolidColorBrush x:Key="RailSelectedBrush" Color="#1FFFCC00" />
+    <SolidColorBrush x:Key="RailSelectedStrokeBrush" Color="#73FFCC00" />
     <Color x:Key="GoldHoverColor">#FFFFD84D</Color>
     <SolidColorBrush x:Key="GoldHoverBrush" Color="{StaticResource GoldHoverColor}" />
     <SolidColorBrush x:Key="TitleBarBrush" Color="#9E0B0B0C" />
@@ -76,7 +112,6 @@
     <SolidColorBrush x:Key="PanelHeaderBrush" Color="#05FFFFFF" />
     <SolidColorBrush x:Key="ShellControlFillBrush" Color="#47000000" />
     <SolidColorBrush x:Key="ShellControlFillStrongBrush" Color="#52000000" />
-    <SolidColorBrush x:Key="ShellControlBorderBrush" Color="#29FFFFFF" />
     <SolidColorBrush x:Key="SecondaryButtonFillBrush" Color="#0DFFFFFF" />
     <SolidColorBrush x:Key="NavSelectedBrush" Color="#1FFFCC00" />
     <SolidColorBrush x:Key="ShellChipSelectedBrush" Color="#24FFCC00" />
@@ -178,9 +213,6 @@
          alpha 0x4D). -->
     <SolidColorBrush x:Key="TagChipKindForegroundBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="TagChipKindBackgroundBrush" Color="#808080" Opacity="0.30" />
-
-    <!-- Scrim — for badge pills atop tile thumbnails. ~60% black. -->
-    <SolidColorBrush x:Key="TileScrimBrush"              Color="#000000" Opacity="0.60" />
 
     <!-- Apply-bar gradient (Restructure floating bar). Gold → orange,
          pre-multiplied alpha so a GradientStop can use it directly. -->
@@ -326,7 +358,7 @@
         <Setter Property="FontSize" Value="{StaticResource SectionLabelFontSize}" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="CharacterSpacing" Value="55" />
-        <Setter Property="Foreground" Value="{StaticResource LabelBrush}" />
+        <Setter Property="Foreground" Value="{ThemeResource LabelBrush}" />
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
         <Setter Property="TextWrapping" Value="NoWrap" />
     </Style>
@@ -334,7 +366,7 @@
     <Style x:Key="ShellMetaTextStyle" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{StaticResource BodyFontFamily}" />
         <Setter Property="FontSize" Value="12" />
-        <Setter Property="Foreground" Value="{StaticResource Text3Brush}" />
+        <Setter Property="Foreground" Value="{ThemeResource Text3Brush}" />
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
     </Style>
 
@@ -342,7 +374,7 @@
         <Setter Property="FontFamily" Value="{StaticResource DisplayFontFamily}" />
         <Setter Property="FontSize" Value="{StaticResource PageTitleFontSize}" />
         <Setter Property="FontWeight" Value="Normal" />
-        <Setter Property="Foreground" Value="{StaticResource Text1Brush}" />
+        <Setter Property="Foreground" Value="{ThemeResource Text1Brush}" />
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
         <Setter Property="TextWrapping" Value="NoWrap" />
         <Setter Property="MaxLines" Value="1" />
@@ -350,7 +382,7 @@
 
     <Style x:Key="ShellButtonStyle" TargetType="Button">
         <Setter Property="Background" Value="Transparent" />
-        <Setter Property="Foreground" Value="{StaticResource Text1Brush}" />
+        <Setter Property="Foreground" Value="{ThemeResource Text1Brush}" />
         <Setter Property="BorderBrush" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="FontFamily" Value="{StaticResource BodyFontFamily}" />
@@ -420,12 +452,12 @@
 
     <Style x:Key="ShellSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
         <Setter Property="Background" Value="{StaticResource SecondaryButtonFillBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource HairlineStrongBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource HairlineStrongBrush}" />
         <Setter Property="BorderThickness" Value="1" />
     </Style>
 
     <Style x:Key="ShellGhostButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
-        <Setter Property="Foreground" Value="{StaticResource Text3Brush}" />
+        <Setter Property="Foreground" Value="{ThemeResource Text3Brush}" />
         <Setter Property="FontSize" Value="12.5" />
         <Setter Property="Padding" Value="6,0,6,0" />
         <Setter Property="MinHeight" Value="24" />
@@ -438,9 +470,9 @@
         <Setter Property="MinHeight" Value="30" />
         <Setter Property="Padding" Value="0" />
         <Setter Property="Background" Value="{StaticResource ShellControlFillStrongBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource ShellControlBorderBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource ShellControlBorderBrush}" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Foreground" Value="{StaticResource Text2Brush}" />
+        <Setter Property="Foreground" Value="{ThemeResource Text2Brush}" />
     </Style>
 
     <Style x:Key="ShellNavRowStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
@@ -455,7 +487,7 @@
 
     <Style x:Key="ShellFlyoutPresenterStyle" TargetType="FlyoutPresenter">
         <Setter Property="Background" Value="{StaticResource PopoverBrush}" />
-        <Setter Property="BorderBrush" Value="{StaticResource HairlineStrongBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource HairlineStrongBrush}" />
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="Padding" Value="0" />
         <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusL}" />
