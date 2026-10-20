@@ -44,6 +44,7 @@ struct RestructureView: View {
     /// irreversible inside the app, so a double-click must never run apply
     /// twice — the bar buttons disable while this is set.
     @State private var applying = false
+    @State private var cancelRequested = false
     /// Moves frozen at the instant the apply-confirmation dialog is
     /// presented. A background re-plan (e.g. Deep Analyze finishing mid-review)
     /// rewrites proposals/selectedIDs/engine.restructurePlan while the dialog
@@ -171,146 +172,70 @@ struct RestructureView: View {
     }
 
     var body: some View {
-        // Prominence: the apply bar now lives in normal flow at the TOP of the
-        // tab — a persistent bar above the plan content — instead of floating
-        // over the bottom of the scroll view, so the primary action is visible
-        // the moment a plan lands, with no scrolling required. (owner request)
+        // The step cells stay pinned above the scrolling plan so the Move
+        // action is visible the moment a plan lands. (owner request)
         VStack(alignment: .leading, spacing: 0) {
-            if applyBarVisible {
-                RestructureApplyBar(
-                    selectedCount: storedPlanMoveCount > 0
-                        ? (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount)
-                        : selectedIDs.count,
-                    totalCount: storedPlanMoveCount > 0
-                        ? storedPlanMoveCount : proposals.count,
-                    canApply: (storedPlanMoveCount > 0
-                        && (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount) > 0)
-                        || !selectedIDs.isEmpty,
-                    isApplying: applying,
-                    onApply: {
-                        guard !applying else { return }
-                        if storedPlanMoveCount > 0 {
-                            pendingMoves = []
-                            pendingPlanID = storedPlanID
-                            // Only the Auto tier actually applies from a stored
-                            // plan (applyStoredPlan filters to auto-only) — the
-                            // confirmation must promise exactly that, not the
-                            // full stored count.
-                            pendingApplyCount = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
-                        } else {
-                            pendingMoves = eligibleMoves() // Freeze reviewed set
-                            pendingPlanID = nil
-                            pendingApplyCount = pendingMoves.count
+            if libraryRoot != nil {
+                stepCells
+                    .padding(.horizontal, Theme.Metrics.pageInsetX)
+                    .padding(.top, 16).padding(.bottom, 12)
+                    .transition(.opacity)
+                    // The engine butler performs real on-disk moves (macOS has
+                    // no shortcut-preview mode), so the confirmation states the
+                    // real behavior before anything moves.
+                    .confirmationDialog(
+                        "Move \(pendingApplyCount) file\(pendingApplyCount == 1 ? "" : "s")?",
+                        isPresented: $confirmApply,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Move files", role: .destructive) {
+                            applyViaEngine()
                         }
-                        guard pendingApplyCount > 0 else { return }
-                        confirmApply = true
-                    },
-                    onCancel: { engine.cancelRestructure() }
-                )
-                .padding(.horizontal, 18)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
-                .transition(.move(edge: .top).combined(with: .opacity))
-                // The apply action routes through the engine
-                // butler, which performs real on-disk moves (it has no macOS
-                // symlink-preview mode). The apply bar is now a single honest
-                // "Apply moves" action; this confirmation states the real,
-                // irreversible behavior so the user always confirms first.
-                .confirmationDialog(
-                    "Apply \(pendingApplyCount) move\(pendingApplyCount == 1 ? "" : "s")?",
-                    isPresented: $confirmApply,
-                    titleVisibility: .visible
-                ) {
-                    Button("Apply real moves", role: .destructive) {
-                        applyViaEngine()
+                        Button("Cancel", role: .cancel) { }
+                    } message: {
+                        Text("FileID will move the selected files into the new structure on disk and update its library. You can put everything back with Undo move right afterward, but review the structure first.")
                     }
-                    Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("FileID will move the selected files into the new structure on disk and update its library. You can reverse the whole run with “Undo last run” right afterward — but review the structure first.")
-                }
+                Hairline()
             }
-            ZStack(alignment: .bottom) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        header
-                        if storedPlanMoveCount > 0 {
-                            largePlanCard
-                        } else if libraryRoot == nil
-                            || (!summary.hasContent && proposals.isEmpty) {
-                            emptyState
-                        } else {
-                            if !proposals.isEmpty || summary.hasContent {
-                                RestructureStatHero(summary: summary,
-                                                      hoverBus: hoverBus)
-                                if shouldShowMissingContentModels {
-                                    missingContentModelsBanner
-                                } else if shouldShowDeepAnalyzeHint {
-                                    deepAnalyzeHintBanner
-                                }
-                                HStack {
-                                    viewModeToggle
-                                    Spacer()
-                                }
-                            }
-                            if !proposals.isEmpty {
-                                if viewMode == .cards {
-                                    unifiedHeroSurface
-                                } else {
-                                    treeCard
-                                }
-                            } else if summary.hasContent {
-                                nothingToMoveCard
-                            }
-                            if summary.staysPutFiles > 0 {
-                                staysPutSection
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    header
+                    if storedPlanMoveCount > 0 {
+                        largePlanCard
+                    } else if libraryRoot == nil
+                        || (!summary.hasContent && proposals.isEmpty) {
+                        emptyState
+                    } else {
+                        if !proposals.isEmpty || summary.hasContent {
+                            RestructureStatHero(summary: summary, hoverBus: hoverBus)
+                            if shouldShowMissingContentModels {
+                                missingContentModelsBanner
+                            } else if shouldShowDeepAnalyzeHint {
+                                deepAnalyzeHintBanner
                             }
                         }
-                        if let s = status {
-                            statusBanner(s, isError: statusIsError)
+                        if !proposals.isEmpty {
+                            mapPanel
+                            recommendationsPanel
+                        } else if summary.hasContent {
+                            nothingToMoveCard
                         }
-                        // Reserve room for the floating "Undo last run" bar —
-                        // the apply bar itself no longer floats over content.
-                        Color.clear.frame(height: engine.canUndoRestructure ? 72 : 0)
+                        if summary.staysPutFiles > 0 {
+                            staysPutSection
+                        }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 18)
-                    .padding(.bottom, 12)
-                }
-                // After an apply that moved files, offer a one-click reversal. The
-                // engine replays its on-disk undo journal to put every file back.
-                if engine.canUndoRestructure {
-                    HStack(spacing: 10) {
-                        Image(systemName: "arrow.uturn.backward.circle.fill")
-                            .foregroundStyle(Theme.gold)
-                        Text("Files were moved on disk — you can put them back.")
-                            .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Undo last run") {
-                            guard let root = libraryRoot, !applying else { return }
-                            applying = true
-                            status = "Undoing the last restructure…"
-                            statusIsError = false
-                            // A failed send (engine respawning) would otherwise wedge
-                            // `applying` true forever — no result event ever arrives to
-                            // clear it, leaving the button permanently disabled. (app)
-                            if !engine.undoRestructure(libraryRoot: root.path) {
-                                applying = false
-                                status = "Engine is unavailable — try again in a moment."
-                                statusIsError = true
-                            }
-                        }
-                        .buttonStyle(.dsPrimary)
-                        .tint(Theme.gold)
-                        .disabled(applying)
+                    if let s = status {
+                        statusBanner(s, isError: statusIsError)
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 14)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                .padding(.horizontal, Theme.Metrics.pageInsetX)
+                .padding(.top, Theme.Metrics.pageInsetY)
+                .padding(.bottom, 24)
             }
+            .focusSection()
         }
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: applyBarVisible)
-        .animation(.spring(response: 0.4, dampingFraction: 0.8), value: engine.canUndoRestructure)
+        .animation(Theme.springStandard, value: applyBarVisible)
+        .animation(Theme.springStandard, value: engine.canUndoRestructure)
         .sheet(item: $drillDown) { scope in
             drillDownSheet(scope)
         }
@@ -410,10 +335,133 @@ struct RestructureView: View {
         }
     }
 
-    // MARK: - Unified surface
+    // MARK: - Step cells
 
     private var applyBarVisible: Bool {
         libraryRoot != nil && (storedPlanMoveCount > 0 || !proposals.isEmpty)
+    }
+
+    private var planReady: Bool { !loading && (storedPlanMoveCount > 0 || !proposals.isEmpty || summary.hasContent) }
+    private var plannedMoveCount: Int { storedPlanMoveCount > 0 ? storedPlanMoveCount : proposals.count }
+    private var applyCount: Int {
+        storedPlanMoveCount > 0 ? (storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount) : selectedIDs.count
+    }
+
+    private func beginApply() {
+        guard !applying else { return }
+        if storedPlanMoveCount > 0 {
+            pendingMoves = []
+            pendingPlanID = storedPlanID
+            // A stored plan only applies its Auto tier, so the confirmation
+            // promises exactly that count.
+            pendingApplyCount = storedPlanConfidenceCounts?.auto ?? storedPlanMoveCount
+        } else {
+            pendingMoves = eligibleMoves()
+            pendingPlanID = nil
+            pendingApplyCount = pendingMoves.count
+        }
+        guard pendingApplyCount > 0 else { return }
+        confirmApply = true
+    }
+
+    private func undoLastMove() {
+        guard let root = libraryRoot, !applying else { return }
+        applying = true
+        status = "Putting the moved files back…"
+        statusIsError = false
+        // A failed send never gets a result event, so release the guard here.
+        if !engine.undoRestructure(libraryRoot: root.path) {
+            applying = false
+            status = "The engine is unavailable. Try again in a moment."
+            statusIsError = true
+        }
+    }
+
+    private var stepCells: some View {
+        let moved = engine.canUndoRestructure
+        let previewState: RestructureStepState = loading ? .current : (planReady || moved ? .done : .current)
+        let reviewState: RestructureStepState = !planReady ? .upcoming : (applyCount > 0 || moved ? .done : .current)
+        let moveState: RestructureStepState = applying ? .current : (moved ? .done : (planReady && applyCount > 0 ? .current : .upcoming))
+        return HStack(spacing: 0) {
+            RestructureStepCell(number: 1, title: "Preview", state: previewState,
+                                detail: loading ? "Reading every folder and picking a home for each file…"
+                                    : (planReady ? "\(plannedMoveCount.formatted()) move\(plannedMoveCount == 1 ? "" : "s") planned · \(sankeyHeaderStat)" : "Plan a tidier layout for this folder. Nothing moves yet.")) {
+                if loading {
+                    IndeterminateBar().frame(maxWidth: 160)
+                } else {
+                    Button(planReady ? "Plan again" : "Plan") { requestPlan() }
+                        .buttonStyle(planReady ? AnyButtonStyle(DSGhostButtonStyle()) : AnyButtonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget)))
+                        .disabled(applying)
+                        .help("Compute a fresh plan from the current library")
+                }
+            }
+            VHairline()
+            RestructureStepCell(number: 2, title: "Review", state: reviewState,
+                                detail: !planReady ? "Check each group of moves and skip any you don't want."
+                                    : (storedPlanMoveCount > 0
+                                        ? "Large plan: only the \(applyCount.formatted()) confident moves apply. The rest stay put."
+                                        : "\(applyCount.formatted()) of \(plannedMoveCount.formatted()) moves selected")) {
+                if planReady && !proposals.isEmpty {
+                    Button("Review all moves") { drillDown = .all }
+                        .buttonStyle(.dsGhost)
+                        .disabled(applying)
+                }
+            }
+            VHairline()
+            RestructureStepCell(number: 3, title: "Move", state: moveState,
+                                detail: applying ? (cancelRequested ? "Stopping after the current file…" : "Moving files on disk…")
+                                    : (moved ? "Files were moved on disk. You can put them back." : "Moves the selected files on disk and updates the library.")) {
+                if applying {
+                    IndeterminateBar().frame(maxWidth: 120)
+                    Button(cancelRequested ? "Stopping…" : "Cancel") {
+                        guard !cancelRequested else { return }
+                        cancelRequested = true
+                        engine.cancelRestructure()
+                    }
+                    .buttonStyle(DSDangerButtonStyle(height: Theme.Metrics.hitTarget))
+                    .disabled(cancelRequested)
+                    .help("Stops after the file being moved. Files already moved stay moved and can be put back.")
+                } else {
+                    if planReady && applyCount > 0 {
+                        Button("Move \(applyCount.formatted()) file\(applyCount == 1 ? "" : "s")") { beginApply() }
+                            .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
+                            .help("Moves the selected files into the new structure on disk. You confirm first.")
+                    }
+                    if moved {
+                        Button { undoLastMove() } label: { Label("Undo move", systemImage: "arrow.uturn.backward") }
+                            .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
+                            .help("Put every file from the last move back where it was")
+                    }
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
+        .focusSection()
+        .onChange(of: applying) { _, now in if !now { cancelRequested = false } }
+    }
+
+    // MARK: - Notices
+
+    private func notice<Actions: View>(tone: Color, title: String, body: String, @ViewBuilder actions: () -> Actions) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            Rectangle().fill(tone).frame(width: 3).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(Theme.Font.body(13.5, .semibold)).foregroundStyle(Theme.text1)
+                Text(body).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 12)
+            Spacer(minLength: 8)
+            actions().padding(.trailing, 14)
+        }
+        .background(tone.opacity(0.05), in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
+        .accessibilityElement(children: .contain)
     }
 
     private var shouldShowDeepAnalyzeHint: Bool {
@@ -424,11 +472,11 @@ struct RestructureView: View {
         return captionedFraction < 0.4
     }
 
-    /// The scan produced NO content embeddings (CLIP + BGE both absent / not installed),
-    /// so the plan can only sort by date + name. This is the #1 cause of a plan that
-    /// "just dumps everything into year folders" — surface it loudly with a fix.
+    /// The scan produced no content embeddings (CLIP + BGE absent), so the
+    /// plan can only sort by date and name: the usual cause of a plan that
+    /// files everything into year folders.
     private var shouldShowMissingContentModels: Bool {
-        guard let c = embeddingCounts else { return false }   // not measured yet
+        guard let c = embeddingCounts else { return false }
         guard totalAnalyzableFiles > 0 else { return false }
         return c.clip == 0 && c.text == 0
     }
@@ -439,26 +487,11 @@ struct RestructureView: View {
     }
 
     private var missingContentModelsBanner: some View {
-        HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .fill(Theme.warning.opacity(0.18))
-                    .frame(width: 38, height: 38)
-                Image(systemName: "wand.and.stars.inverse")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Theme.warning)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(clipModelInstalled ? "Rescan so Restructure can see what's in your photos" : "Organizing by date only — the image model isn't installed")
-                    .font(Theme.Font.body(13.5, .semibold))
-                Text(clipModelInstalled
-                     ? "The image model is installed, but this library was scanned before it was, so no photo has been read yet. A rescan reads them; files already up to date are skipped."
-                     : "Without the image (CLIP) and document (BGE) models FileID can't see what your files contain, so loose files fall back to year and month folders. Install them in Settings ▸ AI Models, then rescan.")
-                    .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
+        notice(tone: Theme.warning,
+               title: clipModelInstalled ? "Rescan so Restructure can see what's in your photos" : "Sorting by date only: the image model isn't installed",
+               body: clipModelInstalled
+                ? "The image model is installed, but this library was scanned before it was. A rescan reads the photos; files already up to date are skipped."
+                : "Without the image (CLIP) and document (BGE) models FileID can't see what files contain, so loose files fall back to year and month folders. Install them in Settings, then rescan.") {
             Button {
                 if clipModelInstalled, let root = libraryRoot {
                     engine.startScan(rootURL: root)
@@ -467,218 +500,124 @@ struct RestructureView: View {
                 }
             } label: {
                 Label(clipModelInstalled ? "Rescan" : "Open Settings", systemImage: clipModelInstalled ? "arrow.counterclockwise" : "gearshape")
-                    .font(Theme.Font.body(12, .semibold))
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.85)))
-                    .foregroundStyle(.black)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.warning, height: Theme.Metrics.hitTarget))
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(Theme.warning.opacity(0.08))
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .stroke(Theme.warning.opacity(0.25), lineWidth: 1))
-        )
     }
 
     @ViewBuilder
     private var deepAnalyzeHintBanner: some View {
         let captioned = Int((captionedFraction * Double(totalAnalyzableFiles)).rounded())
         let pct = Int((captionedFraction * 100).rounded())
-        HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .fill(Theme.ai.opacity(0.18))
-                    .frame(width: 38, height: 38)
-                Image(systemName: "sparkles")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Theme.ai)
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Sharper proposals with Deep Analyze")
-                    .font(Theme.Font.body(13.5, .semibold))
-                Text(captioned == 0
-                      ? "Right now we're sorting by folder name + people only. Running Deep Analyze reads the contents of each file (captions, OCR text, scene tags) so receipts go to Documents, screenshots to Photos, and so on."
-                      : "Captioned \(captioned) of \(totalAnalyzableFiles) (\(pct)%). Running Deep Analyze on the rest gives bucketing more to work with.")
-                    .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 6) {
+        notice(tone: Theme.ai,
+               title: "Sharper proposals with Deep Analyze",
+               body: captioned == 0
+                ? "Right now files are sorted by folder name and people. Deep Analyze reads what each file shows (captions, text, scene tags), so receipts go to Documents and screenshots to Photos."
+                : "Captioned \(captioned.formatted()) of \(totalAnalyzableFiles.formatted()) (\(pct)%). Analyzing the rest gives the plan more to work with.") {
+            HStack(spacing: 6) {
+                Button("Not now") { dismissedDeepAnalyzeHint = true }
+                    .buttonStyle(.dsGhost)
                 Button {
-                    let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
-                    engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
-                } label: {
-                    Label("Run Deep Analyze", systemImage: "sparkles")
-                        .font(Theme.Font.body(12, .semibold))
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(
-                            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.ai.opacity(0.85))
-                        )
-                        .foregroundStyle(.black)
+                    engine.deepAnalyzeAll(modelKind: DeepAnalyzeSettings.shared.activeKind.rawValue, skipExisting: true)
+                } label: { Label("Run Deep Analyze", systemImage: "sparkles") }
+                    .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
+            }
+        }
+    }
+
+    // MARK: - Map and recommendations
+
+    private var viewModeBinding: Binding<ViewMode> {
+        Binding(get: { viewMode }, set: { viewModeRaw = $0.rawValue })
+    }
+
+    private var mapPanel: some View {
+        Panel {
+            PanelHeader(viewMode == .cards ? "Folder map" : "Now → After") {
+                MetaText(sankeyHeaderStat, size: 12).monospacedDigit()
+                SegmentedBar(selection: viewModeBinding, options: [(.cards, "Map"), (.tree, "Tree")])
+                    .help("Map traces where files go; Tree shows the folders now and after side by side")
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                MetaText(viewMode == .cards
+                         ? "Hover a folder or ribbon to trace its files. Click to see the exact list."
+                         : "Click any folder to see its files.", size: 12)
+                if viewMode == .cards {
+                    SankeyFlowView(
+                        proposals: proposals,
+                        // `folder` is the full source path, so same-named
+                        // folders stay distinct.
+                        onTapSource: { folder in drillDown = .sourceFolder(folder) },
+                        onTapDestination: { bucket in drillDown = .destBucket(bucket) },
+                        onTapSourceRollup: { folders in drillDown = .sourceFolders(folders) },
+                        onTapDestRollup: { buckets in drillDown = .destBuckets(buckets) },
+                        hoverBus: hoverBus
+                    )
+                } else {
+                    TreeDiffView(
+                        proposals: proposals,
+                        summary: summary,
+                        onTapSource: { folder in drillDown = .sourceFolder(folder) },
+                        onTapDestination: { bucket in drillDown = .destBucket(bucket) },
+                        hoverBus: hoverBus
+                    )
                 }
-                .buttonStyle(.plain)
-                Button("Dismiss") {
-                    dismissedDeepAnalyzeHint = true
-                }
-                .buttonStyle(.plain)
-                .font(Theme.Font.body(11))
-                .foregroundStyle(.tertiary)
             }
+            .padding(14)
         }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                        .stroke(Theme.ai.opacity(0.30), lineWidth: 1)
-                )
-        )
     }
 
-    @ViewBuilder
-    private var unifiedHeroSurface: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sankeyHeroSection
-            Divider().opacity(0.18)
-            recommendationsList
-        }
-        // Background lives on its own subtree so the cached blur +
-        // shadow don't re-rasterize when interactive children update.
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                        .stroke(Color.white.opacity(0.07), lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.28), radius: 22, y: 8)
-        )
-    }
-
-    @ViewBuilder
-    private var sankeyHeroSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "arrow.triangle.branch")
-                    .foregroundStyle(Theme.gold)
-                    .font(Theme.Font.body(13.5, .semibold))
-                Text("Folder map")
-                    .font(Theme.Font.body(16, .semibold))
-                Spacer()
-                Text(sankeyHeaderStat)
-                    .font(Theme.Font.mono(11))
-                    .foregroundStyle(.secondary)
+    private var recommendationsPanel: some View {
+        Panel {
+            PanelHeader("Recommendations") {
+                MetaText("Skip a group to leave it out of the move", size: 12)
             }
-            Text("Hover any folder, ribbon, or card to trace where its files are going. Tap to drill into the exact list.")
-                .font(Theme.Font.body(12))
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            SankeyFlowView(
-                proposals: proposals,
-                onTapSource: { folder in
-                    // `folder` is now the FULL source path (SankeyFlowView
-                    // passes node.identityKey), so use it directly — the old
-                    // basename reverse-map collapsed same-basename folders to the
-                    // first match, making the others unreachable for review.
-                    drillDown = .sourceFolder(folder)
-                },
-                onTapDestination: { bucket in
-                    drillDown = .destBucket(bucket)
-                },
-                onTapSourceRollup: { folders in
-                    drillDown = .sourceFolders(folders)
-                },
-                onTapDestRollup: { buckets in
-                    drillDown = .destBuckets(buckets)
-                },
-                hoverBus: hoverBus
-            )
-            .padding(.top, 4)
-        }
-        .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 14)
-    }
-
-    @ViewBuilder
-    private var recommendationsList: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "sparkles")
-                    .foregroundStyle(Theme.gold)
-                    .font(Theme.Font.body(13.5, .semibold))
-                Text("Recommendations")
-                    .font(Theme.Font.body(16, .semibold))
-                Spacer()
-                Text("Tap Skip to exclude a group from the next apply.")
-                    .font(Theme.Font.body(11))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 22).padding(.top, 18).padding(.bottom, 12)
-
             VStack(spacing: 0) {
                 if summary.anchorFolders > 0 {
                     RestructureRecommendationRow(
                         outcome: .keep,
-                        headline: "Keep \(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") untouched",
-                        bodyText: "These folders already have clear names and matching contents. \(summary.staysPutFiles) file\(summary.staysPutFiles == 1 ? "" : "s") staying exactly where they are.",
+                        headline: "Keep \(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") as they are",
+                        bodyText: "Clear names and matching contents. \(summary.staysPutFiles.formatted()) file\(summary.staysPutFiles == 1 ? "" : "s") stay exactly where they are.",
                         fileCount: summary.staysPutFiles,
                         folderCount: summary.anchorFolders,
                         isApproved: true,
                         isInformational: true,
                         hoverBus: hoverBus,
-                        onHover: { hovering in
-                            hoverBus.set(hovering ? .outcome(.keep) : nil)
-                        },
+                        onHover: { hovering in hoverBus.set(hovering ? .outcome(.keep) : nil) },
                         expandedContent: { EmptyView() }
                     )
                 }
                 if summary.mixedFolders > 0 {
-                    if summary.anchorFolders > 0 {
-                        Divider().opacity(0.14).padding(.leading, 76)
-                    }
-                    let approved = !skippedOutcomes.contains(.tidy)
-                    let expanded = expandedOutcome == .tidy
+                    if summary.anchorFolders > 0 { Hairline(color: Theme.hairlineSoft) }
                     RestructureRecommendationRow(
                         outcome: .tidy,
-                        headline: "Tidy \(summary.mixedFolders) folder\(summary.mixedFolders == 1 ? "" : "s") — move \(summary.movedOutFiles) misplaced file\(summary.movedOutFiles == 1 ? "" : "s")",
-                        bodyText: "Mostly-organized folders with a few files that don't fit the theme. The folder stays; the misplaced files go to where they belong.",
+                        headline: "Tidy \(summary.mixedFolders) folder\(summary.mixedFolders == 1 ? "" : "s"): move \(summary.movedOutFiles.formatted()) misplaced file\(summary.movedOutFiles == 1 ? "" : "s")",
+                        bodyText: "Mostly organized folders with a few files that don't fit. The folder stays; the misplaced files move to where they belong.",
                         fileCount: summary.movedOutFiles,
                         folderCount: summary.mixedFolders,
-                        isApproved: approved,
-                        isExpanded: expanded,
+                        isApproved: !skippedOutcomes.contains(.tidy),
+                        isExpanded: expandedOutcome == .tidy,
                         hoverBus: hoverBus,
                         onToggleApproval: { toggleSkip(.tidy) },
                         onToggleExpand: { toggleExpand(.tidy) },
-                        onHover: { hovering in
-                            hoverBus.set(hovering ? .outcome(.tidy) : nil)
-                        },
+                        onHover: { hovering in hoverBus.set(hovering ? .outcome(.tidy) : nil) },
                         expandedContent: { inlineFileList(for: .outcome(.tidy)) }
                     )
                 }
                 if summary.junkFolders > 0 {
-                    if summary.anchorFolders > 0 || summary.mixedFolders > 0 {
-                        Divider().opacity(0.14).padding(.leading, 76)
-                    }
-                    let approved = !skippedOutcomes.contains(.reorganize)
-                    let expanded = expandedOutcome == .reorganize
+                    if summary.anchorFolders > 0 || summary.mixedFolders > 0 { Hairline(color: Theme.hairlineSoft) }
                     RestructureRecommendationRow(
                         outcome: .reorganize,
-                        headline: "Reorganize \(summary.junkFolders) folder\(summary.junkFolders == 1 ? "" : "s") — sort \(summary.dissolvedFiles) file\(summary.dissolvedFiles == 1 ? "" : "s")",
-                        bodyText: "Folders with generic names like \"Untitled\" or \"Camera Roll\" — files will be sorted into clear categories: People, Places, Documents, or Photos by year.",
+                        headline: "Reorganize \(summary.junkFolders) folder\(summary.junkFolders == 1 ? "" : "s"): sort \(summary.dissolvedFiles.formatted()) file\(summary.dissolvedFiles == 1 ? "" : "s")",
+                        bodyText: "Folders with generic names like \"Untitled\" or \"Camera Roll\". Their files are sorted into People, Places, Documents, events or Photos by year.",
                         fileCount: summary.dissolvedFiles,
                         folderCount: summary.junkFolders,
-                        isApproved: approved,
-                        isExpanded: expanded,
+                        isApproved: !skippedOutcomes.contains(.reorganize),
+                        isExpanded: expandedOutcome == .reorganize,
                         hoverBus: hoverBus,
                         onToggleApproval: { toggleSkip(.reorganize) },
                         onToggleExpand: { toggleExpand(.reorganize) },
-                        onHover: { hovering in
-                            hoverBus.set(hovering ? .outcome(.reorganize) : nil)
-                        },
+                        onHover: { hovering in hoverBus.set(hovering ? .outcome(.reorganize) : nil) },
                         expandedContent: { inlineFileList(for: .outcome(.reorganize)) }
                     )
                 }
@@ -686,162 +625,91 @@ struct RestructureView: View {
         }
     }
 
-    /// Status banner shown after an apply / convert run. Quiet pill
-    /// at the bottom of the page — replaces the prior GlassCard so
-    /// it doesn't compete with the unified surface above.
-    @ViewBuilder
     private func statusBanner(_ message: String, isError: Bool = false) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(isError ? Theme.warning : Theme.gold)
-            Text(message)
-                .font(Theme.Font.body(13.5))
-            Spacer()
-        }
-        .padding(.horizontal, 16).padding(.vertical, 12)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(.ultraThinMaterial)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .stroke(Theme.gold.opacity(0.25), lineWidth: 1)
-        )
+        notice(tone: isError ? Theme.warning : Theme.delight, title: isError ? "Something went wrong" : "Done", body: message) { EmptyView() }
     }
 
     // MARK: - Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply.")
-                        .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-            }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("FileID keeps your well-named folders and proposes a tidier home for the rest. Nothing moves until you choose Move.")
+                .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
+                .fixedSize(horizontal: false, vertical: true)
             if let root = libraryRoot {
-                HStack(spacing: 4) {
-                    Image(systemName: "folder.fill")
-                        .font(Theme.Font.body(11))
-                        .foregroundStyle(.secondary)
-                    Text("Library root: \(root.path)")
-                        .font(Theme.Font.mono(11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.head)
-                }
+                Text(root.path)
+                    .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                    .lineLimit(1).truncationMode(.head)
+                    .help(root.path)
+                    .accessibilityLabel("Library folder \(root.path)")
             }
         }
     }
 
     private var nothingToMoveCard: some View {
-        GlassCard {
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.seal.fill")
-                    .font(Theme.Font.body(20, .semibold))
-                    .foregroundStyle(Theme.delight)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Nothing to move").font(Theme.Font.body(14, .semibold))
-                    Text("Your library is already organized — every folder is a recognized anchor.")
-                        .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-        }
+        notice(tone: Theme.delight, title: "Nothing to move",
+               body: "This library is already organized: every folder has a clear name and matching contents.") { EmptyView() }
     }
 
     private var largePlanCard: some View {
-        GlassCard {
-            HStack(spacing: 12) {
-                Image(systemName: "externaldrive.badge.checkmark")
-                    .font(Theme.Font.body(20, .semibold))
-                    .foregroundStyle(Theme.gold)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Large plan ready").font(Theme.Font.body(14, .semibold))
-                    // The engine's stored-plan apply only ever moves the "auto"
-                    // confidence tier — most rows in a plan this size were never
-                    // shown to the user, so Review/Ask/unknown-confidence rows
-                    // stay put for individual review rather than being applied
-                    // sight-unseen.
-                    if let counts = storedPlanConfidenceCounts {
-                        let heldBack = counts.review + counts.ask + counts.unknown
-                        Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Ready to apply \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) Review, Needs approval, or unknown-confidence move\(heldBack == 1 ? "" : "s") stay put for you to review first.")
-                            .font(Theme.Font.body(13.5))
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("The engine stored all \(storedPlanMoveCount.formatted()) moves as one bounded, undoable run. Applying streams only the confident (Auto) moves without loading every file path into the app.")
-                            .font(Theme.Font.body(13.5))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Spacer()
-            }
+        let body: String
+        if let counts = storedPlanConfidenceCounts {
+            let heldBack = counts.review + counts.ask + counts.unknown
+            body = "All \(storedPlanMoveCount.formatted()) moves are stored as one undoable run. Move applies the \(counts.auto.formatted()) confident move\(counts.auto == 1 ? "" : "s"); \(heldBack.formatted()) that need review stay put."
+        } else {
+            body = "All \(storedPlanMoveCount.formatted()) moves are stored as one undoable run. Move applies only the confident moves."
         }
+        return notice(tone: Theme.gold, title: "Large plan ready", body: body) { EmptyView() }
     }
 
-    /// One row inside the "Staying put" disclosure. Hovering it
-    /// writes `sourceFolder(name)` to the hover bus so the matching
-    /// node in the Sankey lights up — the disclosure becomes a
-    /// pointer into the diagram instead of a dead list.
-    ///
-    /// A standalone view (not an inline @ViewBuilder) so its read of
-    /// `hoverBus` subscribes only this row — not the whole RestructureView
-    /// body, which would otherwise re-pass the full proposal array to the
-    /// Sankey/tree on every mouse-move.
+    /// One row inside "Staying put". Hovering it lights the matching node in
+    /// the map. A standalone view so its hover-bus read only re-renders the
+    /// row, not the whole page.
     private struct StaysPutRow: View {
         let entry: (folder: String, count: Int)
         let hoverBus: RestructureHoverBus
         var body: some View {
             let isHovered = hoverBus.touchesSource(entry.folder)
-            HStack(spacing: 8) {
-                Image(systemName: "folder.fill")
-                    .font(Theme.Font.body(12))
-                    .foregroundStyle(Theme.delight.opacity(isHovered ? 1.0 : 0.8))
-                Text(entry.folder)
-                    .font(Theme.Font.mono(11))
-                    .foregroundStyle(isHovered ? Color.primary : .secondary)
+            HStack(spacing: 10) {
+                Circle().fill(Theme.delight.opacity(isHovered ? 1 : 0.7)).frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+                Text(entry.folder).font(Theme.Font.mono(12)).foregroundStyle(isHovered ? Theme.text1 : Theme.text2)
+                    .lineLimit(1).truncationMode(.middle)
                 Spacer()
-                Text("\(entry.count) file\(entry.count == 1 ? "" : "s")")
-                    .font(Theme.Font.mono(10.5))
-                    .foregroundStyle(.tertiary)
+                Text("\(entry.count.formatted()) file\(entry.count == 1 ? "" : "s")").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
             }
-            .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .fill(Theme.delight.opacity(isHovered ? 0.10 : 0))
-            )
+            .padding(.horizontal, 14).padding(.vertical, 6)
+            .background(Theme.delight.opacity(isHovered ? 0.08 : 0), ignoresSafeAreaEdges: [])
+            .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             .contentShape(Rectangle())
-            .onHover { hovering in
-                hoverBus.set(hovering ? .sourceFolder(entry.folder) : nil)
-            }
-            .animation(.easeInOut(duration: 0.18), value: isHovered)
+            .onHover { hovering in hoverBus.set(hovering ? .sourceFolder(entry.folder) : nil) }
+            .accessibilityElement(children: .combine)
         }
     }
 
     private var staysPutSection: some View {
-        GlassCard {
-            DisclosureGroup(isExpanded: $staysPutExpanded) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("These folders are recognized as anchors — meaningful name plus matching contents. Their files stay exactly where they are.")
-                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
-                        .padding(.top, 4)
-                    if !summary.staysPutBreakdown.isEmpty {
-                        Divider().opacity(0.3)
-                        ForEach(Array(summary.staysPutBreakdown.enumerated()), id: \.offset) { _, entry in
-                            StaysPutRow(entry: entry, hoverBus: hoverBus)
-                        }
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "lock.fill")
-                        .foregroundStyle(Theme.delight)
-                    Text("Staying put").font(Theme.Font.body(14, .semibold))
-                    Text("\(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") · \(summary.staysPutFiles) file\(summary.staysPutFiles == 1 ? "" : "s")")
-                        .font(Theme.Font.mono(11))
-                        .foregroundStyle(.secondary)
+        Panel {
+            Button { withAnimation(Theme.springStandard) { staysPutExpanded.toggle() } } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.text3)
+                        .rotationEffect(.degrees(staysPutExpanded ? 90 : 0))
+                    SectionLabel("Staying put")
+                    MetaText("\(summary.anchorFolders) folder\(summary.anchorFolders == 1 ? "" : "s") · \(summary.staysPutFiles.formatted()) file\(summary.staysPutFiles == 1 ? "" : "s")", size: 12)
                     Spacer()
+                }
+                .padding(.horizontal, 14)
+                .frame(height: 38)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(DSRowButtonStyle(radius: 0))
+            .accessibilityLabel("Staying put, \(summary.anchorFolders) folders")
+            .accessibilityValue(staysPutExpanded ? "Expanded" : "Collapsed")
+            if staysPutExpanded {
+                Hairline()
+                MetaText("Folders with a meaningful name and matching contents. Their files stay exactly where they are.")
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                ForEach(Array(summary.staysPutBreakdown.enumerated()), id: \.offset) { _, entry in
+                    StaysPutRow(entry: entry, hoverBus: hoverBus)
                 }
             }
         }
@@ -853,105 +721,77 @@ struct RestructureView: View {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
                 title: "Pick a folder to scan",
-                message: "Choose a library folder in the sidebar and scan it first. Restructure proposes a cleaner hierarchy inside that same root, and nothing moves until you review and apply it."
+                message: "Choose a library folder in the sidebar and scan it first. Restructure proposes a cleaner layout inside that same folder, and nothing moves until you review it and choose Move."
             )
         } else if loading {
-            // Computing state lives on a clipped LavaLamp surface so
-            // the page never goes flat while the engine works. Same
-            // gold/orange canvas + frosted material as the rest of
-            // the app — the only "loading" UI in the tree that earns
-            // its motion budget.
-            ZStack {
-                Theme.panel
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1)
+            Panel {
                 VStack(spacing: 10) {
                     IndeterminateBar().frame(width: 220)
-                    Text("Computing proposals…")
-                        .font(Theme.Font.display(24))
-                    Text("Looking at every folder, classifying it, and picking a tidy home for every file.")
-                        .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                    Text("Planning…").font(Theme.Font.display(28)).foregroundStyle(Theme.text1)
+                    Text("Looking at every folder, deciding which to keep, and picking a home for every other file.")
+                        .font(Theme.Font.body(12.5)).foregroundStyle(Theme.text3)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 380)
                 }
-                .padding(28)
+                .padding(32)
+                .frame(maxWidth: .infinity, minHeight: 220)
             }
-            .frame(maxWidth: .infinity, minHeight: 240)
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                    .stroke(Theme.gold.opacity(0.18), lineWidth: 1)
-            )
+            .accessibilityElement(children: .combine)
         } else {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
                 title: "Nothing to restructure yet",
-                message: "Pick a folder in the sidebar and click Start Scan. Once images are tagged, the assistant will propose a clean folder layout you can apply."
+                message: "Scan this folder first. Once files are tagged, Restructure proposes a clean layout you can review and move."
             )
         }
     }
 
     // MARK: - File list
 
-    /// Render a destination bucket + its file list. The inline
-    /// preview card and the inline expanded recommendation card cap
-    /// at 50 rows + a "+ X more" hint to keep the page short.
-    /// The drill-down sheet calls this with `unlimited: true` so
-    /// every file is visible — that's the whole point of "drill
-    /// down". `LazyVStack` upstream handles the virtualization, so
-    /// even buckets with thousands of files scroll smoothly.
+    /// A destination bucket and its file list. Inline lists cap at 50 rows;
+    /// the drill-down sheet passes `unlimited` so every file is reachable.
     @ViewBuilder
     private func bucketSection(_ g: Group, unlimited: Bool = false) -> some View {
         let allSelected = g.proposals.allSatisfy { selectedIDs.contains($0.fileID) }
         let cap = 50
-        let visible: ArraySlice<Proposal> = unlimited
-            ? ArraySlice(g.proposals)
-            : g.proposals.prefix(cap)
+        let visible: ArraySlice<Proposal> = unlimited ? ArraySlice(g.proposals) : g.proposals.prefix(cap)
         let hiddenCount = unlimited ? 0 : max(0, g.proposals.count - cap)
         VStack(alignment: .leading, spacing: 0) {
-            // Folder header — visually distinct from the files below.
-            // Bigger icon, two-line label, gold tint = "this is the
-            // destination folder."
             HStack(alignment: .center, spacing: 10) {
                 Image(systemName: bucketIcon(g.bucket))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.gold)
-                    .font(Theme.Font.body(16, .semibold))
-                    .frame(width: 22, alignment: .center)
+                    .frame(width: 20, alignment: .center)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(g.bucket).font(Theme.Font.body(13.5, .semibold))
-                    Text("Folder · \(g.proposals.count) file\(g.proposals.count == 1 ? "" : "s") moving in")
-                        .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                    Text(g.bucket).font(Theme.Font.mono(12.5, .medium)).foregroundStyle(Theme.text1)
+                    Text("\(g.proposals.count.formatted()) file\(g.proposals.count == 1 ? "" : "s") moving in")
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                 }
                 Spacer()
-                Button(allSelected ? "Deselect all" : "Select all") {
+                Button(allSelected ? "Skip all" : "Select all") {
                     if allSelected {
                         for p in g.proposals { selectedIDs.remove(p.fileID) }
                     } else {
                         for p in g.proposals { selectedIDs.insert(p.fileID) }
                     }
                 }
-                .buttonStyle(.borderless)
-                .font(Theme.Font.body(12))
+                .buttonStyle(.dsGhost)
+                .accessibilityLabel(allSelected ? "Skip all files going to \(g.bucket)" : "Select all files going to \(g.bucket)")
             }
-            .padding(.bottom, 8)
-            // File list — indented with a thin vertical tree guide on
-            // the left. Reads as "these files live inside that folder".
-            VStack(alignment: .leading, spacing: 4) {
+            .padding(.bottom, 6)
+            VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(visible)) { p in
                     proposalRow(p)
                 }
                 if hiddenCount > 0 {
-                    Text("+ \(hiddenCount) more file\(hiddenCount == 1 ? "" : "s")")
-                        .font(Theme.Font.body(11)).foregroundStyle(.tertiary)
-                        .padding(.leading, 4)
+                    MetaText("+ \(hiddenCount.formatted()) more file\(hiddenCount == 1 ? "" : "s")", size: 11.5)
+                        .padding(.leading, 8).padding(.top, 4)
                 }
             }
-            .padding(.leading, 28)
+            .padding(.leading, 26)
             .overlay(alignment: .leading) {
-                // Tree guide — same idiom as Finder column view.
-                Rectangle()
-                    .fill(Color.secondary.opacity(0.25))
-                    .frame(width: 1)
-                    .padding(.leading, 11)
+                Rectangle().fill(Theme.hairlineStrong).frame(width: 1).padding(.leading, 10)
             }
         }
     }
@@ -960,46 +800,39 @@ struct RestructureView: View {
         let on = selectedIDs.contains(p.fileID)
         let filename = p.filename
         let sourceName = p.sourceName
-        let icon = Self.fileIcon(forFilename: filename)
-        return HStack(spacing: 8) {
-            Image(systemName: on ? "checkmark.square.fill" : "square")
-                .foregroundStyle(on ? Theme.gold : .secondary)
-                .onTapGesture {
-                    if on { selectedIDs.remove(p.fileID) } else { selectedIDs.insert(p.fileID) }
-                }
-            // File icon — distinguishes a file row from the folder
-            // header above it at a glance.
-            Image(systemName: icon)
-                .foregroundStyle(.secondary)
-                .font(Theme.Font.body(12))
-                .frame(width: 14, alignment: .center)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(filename)
-                    .font(Theme.Font.mono(11))
-                    .lineLimit(1).truncationMode(.head)
-                Text("from \(sourceName.isEmpty ? "root" : sourceName)")
-                    .font(Theme.Font.body(11))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1).truncationMode(.head)
-                // Item D1: the engine's plain-language "why filed here".
-                if let reason = p.reason, !reason.isEmpty {
-                    Text(reason)
-                        .font(Theme.Font.body(11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.tail)
-                }
-            }
-            Spacer()
-            confidenceBadge(p.confidence)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
+        return Button {
             if on { selectedIDs.remove(p.fileID) } else { selectedIDs.insert(p.fileID) }
+        } label: {
+            HStack(spacing: 10) {
+                DSCheck(on: on)
+                Image(systemName: Self.fileIcon(forFilename: filename))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.text3)
+                    .frame(width: 14, alignment: .center)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(filename)
+                        .font(Theme.Font.mono(12)).foregroundStyle(on ? Theme.text1 : Theme.text3)
+                        .lineLimit(1).truncationMode(.head)
+                    Text("from \(sourceName.isEmpty ? "root" : sourceName)")
+                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                        .lineLimit(1).truncationMode(.head)
+                    if let reason = p.reason, !reason.isEmpty {
+                        Text(reason)
+                            .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text2)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
+                }
+                Spacer()
+                confidenceBadge(p.confidence)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .frame(minHeight: Theme.Metrics.hitTarget)
         }
-        .accessibilityElement(children: .combine)
+        .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("Move \(filename) from \(p.sourceFolder) to \(p.bucket)")
-        .accessibilityAddTraits([.isButton, on ? .isSelected : []])
-        .accessibilityHint(on ? "Selected. Tap to skip." : "Tap to include in the next apply.")
+        .accessibilityAddTraits(on ? .isSelected : [])
+        .accessibilityHint(on ? "Included in the move. Press to skip it." : "Skipped. Press to include it in the move.")
     }
 
     /// Item D1: at-a-glance confidence badge for a proposed move. The research's
@@ -1300,44 +1133,6 @@ struct RestructureView: View {
 
     // MARK: - View-mode toggle + Sankey + recommendations
 
-    /// Cards/Tree segmented toggle in a glass pill. Always visible
-    /// when there's content to show.
-    @ViewBuilder
-    private var viewModeToggle: some View {
-        HStack(spacing: 0) {
-            modeButton(.cards, label: "Cards", icon: "rectangle.stack")
-            modeButton(.tree,  label: "Tree",  icon: "list.bullet.indent")
-            Spacer()
-            Text(viewMode == .cards
-                  ? "Recommendations + flow diagram"
-                  : "Side-by-side folder trees (power user)")
-                .font(Theme.Font.body(11))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 4)
-    }
-
-    @ViewBuilder
-    private func modeButton(_ mode: ViewMode, label: String, icon: String) -> some View {
-        let active = viewMode == mode
-        Button {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                viewModeRaw = mode.rawValue
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(Theme.Font.body(12))
-                Text(label).font(Theme.Font.body(12, .semibold))
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(active ? Theme.gold : Color.clear)
-            )
-            .foregroundStyle(active ? .black : Color.primary.opacity(0.7))
-        }
-        .buttonStyle(.plain)
-    }
-
     private var sankeyHeaderStat: String {
         let srcCount = Set(proposals.map(\.sourceFolder)).count
         let dstCount = Set(proposals.map(\.bucket)).count
@@ -1345,7 +1140,7 @@ struct RestructureView: View {
     }
 
     private func toggleExpand(_ outcome: RestructureOutcome) {
-        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+        withAnimation(Theme.springStandard) {
             if expandedOutcome == outcome {
                 expandedOutcome = nil
             } else {
@@ -1365,25 +1160,19 @@ struct RestructureView: View {
            let cachedGroups = inlineGroupsByOutcome[outcome] {
             let matchedCount = inlineMatchedCountByOutcome[outcome] ?? 0
             let totalCap = 30
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(cachedGroups.enumerated()), id: \.element.id) { idx, g in
-                    if idx > 0 { Divider().opacity(0.18) }
+                    if idx > 0 { Hairline(color: Theme.hairlineSoft) }
                     bucketSection(g)
                 }
                 if matchedCount > totalCap {
                     HStack {
                         Spacer()
-                        Button {
-                            drillDown = scope
-                        } label: {
-                            Label("See all \(matchedCount) files in detail",
-                                  systemImage: "arrow.up.right.square")
-                                .font(Theme.Font.body(12, .semibold))
+                        Button { drillDown = scope } label: {
+                            Label("See all \(matchedCount.formatted()) files", systemImage: "arrow.up.right.square")
                         }
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(.secondary)
+                        .buttonStyle(.dsGhost)
                     }
-                    .padding(.top, 4)
                 }
             }
         } else {
@@ -1415,33 +1204,6 @@ struct RestructureView: View {
         }
     }
 
-    /// Tree-diff dual-pane (power-user view).
-    private var treeCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Image(systemName: "list.bullet.indent")
-                        .foregroundStyle(Theme.gold)
-                    Text("Side-by-side tree").font(Theme.Font.body(14, .semibold))
-                    Spacer()
-                    Text("Tap any folder to see its files.")
-                        .font(Theme.Font.body(11)).foregroundStyle(.tertiary)
-                }
-                TreeDiffView(
-                    proposals: proposals,
-                    summary: summary,
-                    onTapSource: { folder in
-                        drillDown = .sourceFolder(folder)
-                    },
-                    onTapDestination: { bucket in
-                        drillDown = .destBucket(bucket)
-                    },
-                    hoverBus: hoverBus
-                )
-            }
-        }
-    }
-
     // MARK: - Drill-down sheet
 
     @ViewBuilder
@@ -1452,46 +1214,36 @@ struct RestructureView: View {
         let groups = drillDownGroups
         let matchedCount = groups.reduce(0) { $0 + $1.proposals.count }
         let title = drillDownTitle(scope, count: matchedCount)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: drillDownIcon(scope))
-                    .foregroundStyle(Theme.gold)
-                    .font(Theme.Font.body(16, .semibold))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(Theme.Font.body(14, .semibold))
-                    Text("\(matchedCount) file\(matchedCount == 1 ? "" : "s") affected. Tap any row to include or skip it before applying.")
-                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    SectionLabel("Restructure / Review")
+                    Text(title).font(Theme.Font.display(28)).foregroundStyle(Theme.text1).lineLimit(1)
+                    MetaText("\(matchedCount.formatted()) file\(matchedCount == 1 ? "" : "s"). Click a row, or press Space on it, to include or skip it.")
                 }
                 Spacer()
                 Button("Done") { drillDown = nil }
+                    .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .keyboardShortcut(.defaultAction)
             }
-            Divider().opacity(0.3)
+            .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.top, 20).padding(.bottom, 14)
+            Hairline()
             if groups.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 36)).foregroundStyle(Theme.delight)
-                    Text("Nothing to show.").font(Theme.Font.body(13.5, .semibold))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(40)
+                DashedNotice(title: "Nothing to show")
+                    .padding(Theme.Metrics.pageInsetX)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        // Buckets pre-grouped in `rebuildDrillDownGroups`.
-                        // Inside the drill-down we render `unlimited: true`
-                        // so big buckets aren't truncated — the LazyVStack
-                        // keeps it cheap.
+                    LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(Array(groups.enumerated()), id: \.element.id) { idx, g in
-                            if idx > 0 { Divider().opacity(0.18) }
+                            if idx > 0 { Hairline(color: Theme.hairlineSoft) }
                             bucketSection(g, unlimited: true)
                         }
                     }
-                    .padding(8)
+                    .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 16)
                 }
             }
         }
-        .padding(20)
         .frame(minWidth: 600, minHeight: 480)
         .background(LavaLampBackground())
         .preferredColorScheme(.dark)
@@ -1538,17 +1290,6 @@ struct RestructureView: View {
             return "From \(fs.count) smaller folder\(fs.count == 1 ? "" : "s")"
         case .destBuckets(let bs):
             return "Going to \(bs.count) smaller bucket\(bs.count == 1 ? "" : "s")"
-        }
-    }
-
-    private func drillDownIcon(_ scope: DrillDownScope) -> String {
-        switch scope {
-        case .all:                       return "list.bullet.indent"
-        case .outcome(let o):            return o.icon
-        case .sourceFolder:              return "folder.fill"
-        case .destBucket:                return "tray.and.arrow.down.fill"
-        case .sourceFolders:             return "rectangle.3.offgrid.fill"
-        case .destBuckets:               return "rectangle.3.offgrid.fill"
         }
     }
 }

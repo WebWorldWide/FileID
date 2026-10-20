@@ -119,22 +119,23 @@ struct SankeyFlowView: View {
                     // 2. Source column.
                     ForEach(layout.sources) { node in
                         if let slot = layout.srcSlots[node.id] {
-                            nodeView(node, slot: slot,
-                                      isFocused: isNodeFocused(node))
+                            Button {
+                                if node.id == Self.otherSourceID {
+                                    onTapSourceRollup(layout.rollupSourceFolders)
+                                } else {
+                                    // The full path (identityKey), not the basename:
+                                    // same-named folders would otherwise drill into
+                                    // the first match.
+                                    onTapSource(node.identityKey)
+                                }
+                            } label: {
+                                nodeView(node, slot: slot, isFocused: isNodeFocused(node))
+                            }
+                            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+                            .accessibilityLabel("From \(node.label)")
+                            .accessibilityHint("Shows the files moving out of this folder")
                                 .frame(width: nodeColW)
                                 .position(x: nodeColW / 2, y: slot.midY)
-                                .onTapGesture {
-                                    if node.id == Self.otherSourceID {
-                                        onTapSourceRollup(layout.rollupSourceFolders)
-                                    } else {
-                                        // Pass the FULL path (identityKey),
-                                        // not the basename `label` — two source
-                                        // folders sharing a basename otherwise both
-                                        // drill into the first match. Mirrors the
-                                        // hover path + TreeDiffView's callback.
-                                        onTapSource(node.identityKey)
-                                    }
-                                }
                                 .onHover { hovering in
                                     hoverBus.set(
                                         hovering && node.id != Self.otherSourceID
@@ -148,18 +149,21 @@ struct SankeyFlowView: View {
                     // 3. Destination column.
                     ForEach(layout.destinations) { node in
                         if let slot = layout.dstSlots[node.id] {
-                            nodeView(node, slot: slot,
-                                      isFocused: isNodeFocused(node))
+                            Button {
+                                if node.id == Self.otherDestID {
+                                    onTapDestRollup(layout.rollupDestBuckets)
+                                } else {
+                                    onTapDestination(node.label)
+                                }
+                            } label: {
+                                nodeView(node, slot: slot, isFocused: isNodeFocused(node))
+                            }
+                            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+                            .accessibilityLabel("To \(node.label)")
+                            .accessibilityHint("Shows the files moving into this folder")
                                 .frame(width: nodeColW)
                                 .position(x: totalW - nodeColW / 2,
                                             y: slot.midY)
-                                .onTapGesture {
-                                    if node.id == Self.otherDestID {
-                                        onTapDestRollup(layout.rollupDestBuckets)
-                                    } else {
-                                        onTapDestination(node.label)
-                                    }
-                                }
                                 .onHover { hovering in
                                     hoverBus.set(
                                         hovering && node.id != Self.otherDestID
