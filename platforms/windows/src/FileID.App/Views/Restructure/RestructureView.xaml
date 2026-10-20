@@ -99,8 +99,9 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Padding="32,32,32,24" RowSpacing="20">
+    <Grid Padding="26,16,26,20" RowSpacing="16">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
@@ -115,7 +116,112 @@
                        Text="FileID looks at your folders, keeps the well-named ones, and proposes a tidier home for the rest. Nothing moves until you apply."/>
         </StackPanel>
 
-        <ScrollViewer Grid.Row="1"
+        <!-- Prototype v3 step strip (DESIGN_V3_PORT Restructure): Preview ·
+             Review · Move, pinned above the scrolling content. -->
+        <Border Grid.Row="1"
+                x:Name="StepStrip"
+                CornerRadius="{StaticResource CornerRadiusL}"
+                Background="{ThemeResource PanelBrush}"
+                BorderBrush="{ThemeResource HairlineStrongBrush}"
+                BorderThickness="1">
+          <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="1" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="1" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid x:Name="PreviewStepCell" Grid.Column="0" Padding="14,12,14,12" ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="PreviewStepRail" Width="3" Margin="-14,-12,0,-12" HorizontalAlignment="Left"
+                        Background="{StaticResource GoldBrush}" Visibility="Collapsed" />
+                <Grid x:Name="PreviewStepBadge" Width="20" Height="20" VerticalAlignment="Top" Margin="0,1,0,0">
+                    <Ellipse x:Name="PreviewStepBadgeRing" StrokeThickness="1.5" Stroke="{ThemeResource HairlineStrongBrush}" />
+                    <TextBlock x:Name="PreviewStepBadgeText" Text="1" FontFamily="{StaticResource MonoFontFamily}"
+                               FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{ThemeResource Text3Brush}" />
+                </Grid>
+                <StackPanel Grid.Column="1" Spacing="8">
+                    <TextBlock x:Name="PreviewStepTitle" Text="Preview" FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="13.5" FontWeight="SemiBold" Foreground="{ThemeResource Text3Brush}" />
+                    <TextBlock x:Name="PreviewStepDetail" FontFamily="{StaticResource BodyFontFamily}" FontSize="12"
+                               Foreground="{ThemeResource Text3Brush}" TextWrapping="Wrap" MaxLines="2"
+                               TextTrimming="CharacterEllipsis" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" MinHeight="28">
+                        <Button x:Name="PreviewStepPlanButton" Style="{StaticResource ShellPrimaryButtonStyle}"
+                                Height="28" MinHeight="28" Content="Plan" Click="OnPlanClicked" />
+                        <ProgressBar x:Name="PreviewStepProgress" Width="160" IsIndeterminate="True"
+                                     VerticalAlignment="Center" Visibility="Collapsed"
+                                     Foreground="{StaticResource GoldProgressBrush}" />
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+            <Border Grid.Column="1" Background="{ThemeResource HairlineBrush}" />
+            <Grid x:Name="ReviewStepCell" Grid.Column="2" Padding="14,12,14,12" ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="ReviewStepRail" Width="3" Margin="-14,-12,0,-12" HorizontalAlignment="Left"
+                        Background="{StaticResource GoldBrush}" Visibility="Collapsed" />
+                <Grid x:Name="ReviewStepBadge" Width="20" Height="20" VerticalAlignment="Top" Margin="0,1,0,0">
+                    <Ellipse x:Name="ReviewStepBadgeRing" StrokeThickness="1.5" Stroke="{ThemeResource HairlineStrongBrush}" />
+                    <TextBlock x:Name="ReviewStepBadgeText" Text="2" FontFamily="{StaticResource MonoFontFamily}"
+                               FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{ThemeResource Text3Brush}" />
+                </Grid>
+                <StackPanel Grid.Column="1" Spacing="8">
+                    <TextBlock x:Name="ReviewStepTitle" Text="Review" FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="13.5" FontWeight="SemiBold" Foreground="{ThemeResource Text3Brush}" />
+                    <TextBlock x:Name="ReviewStepDetail" FontFamily="{StaticResource BodyFontFamily}" FontSize="12"
+                               Foreground="{ThemeResource Text3Brush}" TextWrapping="Wrap" MaxLines="2"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+            </Grid>
+            <Border Grid.Column="3" Background="{ThemeResource HairlineBrush}" />
+            <Grid x:Name="MoveStepCell" Grid.Column="4" Padding="14,12,14,12" ColumnSpacing="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="MoveStepRail" Width="3" Margin="-14,-12,0,-12" HorizontalAlignment="Left"
+                        Background="{StaticResource GoldBrush}" Visibility="Collapsed" />
+                <Grid x:Name="MoveStepBadge" Width="20" Height="20" VerticalAlignment="Top" Margin="0,1,0,0">
+                    <Ellipse x:Name="MoveStepBadgeRing" StrokeThickness="1.5" Stroke="{ThemeResource HairlineStrongBrush}" />
+                    <TextBlock x:Name="MoveStepBadgeText" Text="3" FontFamily="{StaticResource MonoFontFamily}"
+                               FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{ThemeResource Text3Brush}" />
+                </Grid>
+                <StackPanel Grid.Column="1" Spacing="8">
+                    <TextBlock x:Name="MoveStepTitle" Text="Move" FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="13.5" FontWeight="SemiBold" Foreground="{ThemeResource Text3Brush}" />
+                    <TextBlock x:Name="MoveStepDetail" FontFamily="{StaticResource BodyFontFamily}" FontSize="12"
+                               Foreground="{ThemeResource Text3Brush}" TextWrapping="Wrap" MaxLines="2"
+                               TextTrimming="CharacterEllipsis" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" MinHeight="28">
+                        <Button x:Name="MoveStepButton" Style="{StaticResource ShellPrimaryButtonStyle}"
+                                Height="28" MinHeight="28" Content="Move files" IsEnabled="False"
+                                Click="OnApplyMovesClicked"
+                                ToolTipService.ToolTip="Moves the selected files into the new structure on disk. You confirm first." />
+                        <Button x:Name="MoveStepUndoButton" Style="{StaticResource ShellSecondaryButtonStyle}"
+                                Height="28" MinHeight="28" Visibility="Collapsed" Click="OnUndoClicked"
+                                ToolTipService.ToolTip="Put every file from the last move back where it was">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <FontIcon Glyph="&#xE7A7;" FontSize="11" />
+                                <TextBlock Text="Undo move" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+          </Grid>
+        </Border>
+
+        <ScrollViewer Grid.Row="2"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled">
             <StackPanel Spacing="16">
@@ -582,7 +688,7 @@
         </ScrollViewer>
 
         <!-- floating ApplyBar — port of macOS RestructureApplyBar.swift. -->
-        <Border Grid.Row="2"
+        <Border Grid.Row="3"
                 CornerRadius="16"
                 BorderBrush="{ThemeResource GoldDimBrush}"
                 BorderThickness="1">

@@ -89,6 +89,26 @@ public class RestructurePlanPresentationTests
                 visibleSampleIsSafe));
     }
 
+    [Fact]
+    public void StepStrip_FollowsTheMacOsPreviewReviewMoveFlow()
+    {
+        var noPlan = FileID.Views.Restructure.RestructureView.StepStates(false, false, 0, false, false);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Current, noPlan.Preview);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Upcoming, noPlan.Review);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Upcoming, noPlan.Move);
+
+        var unselected = FileID.Views.Restructure.RestructureView.StepStates(true, false, 0, false, false);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Done, unselected.Preview);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Current, unselected.Review);
+
+        var ready = FileID.Views.Restructure.RestructureView.StepStates(true, false, 12, false, false);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Done, ready.Review);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Current, ready.Move);
+
+        var moved = FileID.Views.Restructure.RestructureView.StepStates(true, false, 0, false, true);
+        Assert.Equal(FileID.Views.Restructure.RestructureView.StepState.Done, moved.Move);
+    }
+
     [Theory]
     [InlineData(3400, 0UL, 3400)]
     [InlineData(3400, 120UL, 3280)]

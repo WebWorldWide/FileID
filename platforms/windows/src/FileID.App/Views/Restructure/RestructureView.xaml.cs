@@ -153,6 +153,7 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
+            RefreshStepStrip();
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
             try
@@ -539,7 +540,110 @@ public sealed partial class RestructureView : UserControl
         StepChip1Bg.Background = hasWork
             ? FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush")
             : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
+        SyncStepStrip(plan, selected, total);
     }
+
+    internal enum StepState { Upcoming, Current, Done }
+
+    private void RefreshStepStrip()
+    {
+        var plan = EngineClient.Instance.LastRestructurePlan;
+        int selected = 0;
+        foreach (var row in _allFileRows.Values) if (row.IsSelected) selected++;
+        SyncStepStrip(plan, selected, plan?.Moves.Count ?? 0);
+    }
+
+    /// <summary>macOS step strip: Preview is current until a plan exists,
+    /// Review is current while nothing is selected, Move is current with a
+    /// selected plan or while moving, and everything is done after a move.</summary>
+    internal static (StepState Preview, StepState Review, StepState Move) StepStates(
+        bool hasPlan, bool planning, int selected, bool moving, bool moved)
+    {
+        var preview = planning || !hasPlan ? (moved ? StepState.Done : StepState.Current) : StepState.Done;
+        var review = moved || (hasPlan && selected > 0)
+            ? StepState.Done
+            : hasPlan && !planning ? StepState.Current : StepState.Upcoming;
+        var move = moved && !moving
+            ? StepState.Done
+            : moving || (hasPlan && !planning && selected > 0) ? StepState.Current : StepState.Upcoming;
+        return (preview, review, move);
+    }
+
+    private void SyncStepStrip(RestructurePlan? plan, int selected, int total)
+    {
+        bool planning = PlanStatusText.Text.StartsWith("Computing plan", StringComparison.Ordinal);
+        bool moved = EngineClient.Instance.CanUndoRestructure;
+        var states = StepStates(plan is not null, planning, selected, _applying, moved);
+
+        int sources = plan is null ? 0 : DistinctAllSourceFolders(plan);
+        int destinations = plan is null ? 0 : plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        PreviewStepDetail.Text = plan is null
+            ? "FileID proposes a tidier home for loose files. Nothing moves yet."
+            : $"{total:N0} move{(total == 1 ? "" : "s")} planned · {sources:N0} source{(sources == 1 ? "" : "s")} → {destinations:N0} destination{(destinations == 1 ? "" : "s")}";
+        PreviewStepPlanButton.Content = plan is null ? "Plan" : "Plan again";
+        if (ThemeHelper.GetStyleSafe(plan is null ? "ShellPrimaryButtonStyle" : "ShellGhostButtonStyle") is { } planStyle)
+        {
+            PreviewStepPlanButton.Style = planStyle;
+        }
+        PreviewStepProgress.Visibility = planning ? Visibility.Visible : Visibility.Collapsed;
+        ReviewStepDetail.Text = plan is null
+            ? "Check each group below; skip any you want left alone."
+            : $"{selected:N0} of {total:N0} move{(total == 1 ? "" : "s")} selected";
+        MoveStepDetail.Text = moved && !_applying
+            ? "Files moved. Undo puts every file back."
+            : _applying ? "Moving files…" : "Moves the selected files on disk. You confirm first.";
+        MoveStepButton.Content = selected > 0 ? $"Move {selected:N0} file{(selected == 1 ? "" : "s")}" : "Move files";
+        MoveStepButton.IsEnabled = selected > 0 && !_applying;
+        MoveStepUndoButton.Visibility = moved && !_applying ? Visibility.Visible : Visibility.Collapsed;
+
+        PaintStep(PreviewStepCell, PreviewStepRail, PreviewStepBadgeRing, PreviewStepBadgeText, PreviewStepTitle, 1, "Preview", PreviewStepDetail.Text, states.Preview);
+        PaintStep(ReviewStepCell, ReviewStepRail, ReviewStepBadgeRing, ReviewStepBadgeText, ReviewStepTitle, 2, "Review", ReviewStepDetail.Text, states.Review);
+        PaintStep(MoveStepCell, MoveStepRail, MoveStepBadgeRing, MoveStepBadgeText, MoveStepTitle, 3, "Move", MoveStepDetail.Text, states.Move);
+    }
+
+    private void PaintStep(Grid cell, Border rail, Microsoft.UI.Xaml.Shapes.Ellipse ring, TextBlock badge, TextBlock title,
+                           int number, string name, string detail, StepState state)
+    {
+        _stepBrushes ??= new StepBrushes(
+            ThemeHelper.GetBrushSafe("GoldBrush"),
+            ThemeHelper.GetBrushSafe("DelightBrush"),
+            ThemeHelper.GetBrushSafe("OnGoldBrush"),
+            ThemeHelper.GetBrushSafe("Text1Brush"),
+            ThemeHelper.GetBrushSafe("Text3Brush"),
+            ThemeHelper.GetBrushSafe("HairlineStrongBrush"),
+            ThemeHelper.GetBrushSafe("GoldWashBrush"),
+            new SolidColorBrush(Microsoft.UI.Colors.Transparent));
+        var b = _stepBrushes;
+        cell.Background = state == StepState.Current ? b.Wash : b.Clear;
+        rail.Visibility = state == StepState.Current ? Visibility.Visible : Visibility.Collapsed;
+        ring.Fill = state == StepState.Done ? b.Delight : b.Clear;
+        ring.Stroke = state switch
+        {
+            StepState.Done => b.Delight,
+            StepState.Current => b.Gold,
+            _ => b.HairlineStrong,
+        };
+        badge.Text = state == StepState.Done ? "\u2713" : number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        badge.Foreground = state switch
+        {
+            StepState.Done => b.OnGold,
+            StepState.Current => b.Gold,
+            _ => b.Text3,
+        };
+        title.Foreground = state == StepState.Upcoming ? b.Text3 : b.Text1;
+        var spoken = state switch
+        {
+            StepState.Done => "done",
+            StepState.Current => "current",
+            _ => "not started",
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cell, $"Step {number} of 3, {name}, {spoken}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(cell, detail);
+    }
+
+    private sealed record StepBrushes(Brush Gold, Brush Delight, Brush OnGold, Brush Text1, Brush Text3, Brush HairlineStrong, Brush Wash, Brush Clear);
+
+    private StepBrushes? _stepBrushes;
 
     private void OnRecommendationElementPrepared(
         ItemsRepeater sender,
@@ -900,6 +1004,7 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
+            RefreshStepStrip();
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
             try
@@ -933,6 +1038,7 @@ public sealed partial class RestructureView : UserControl
         }
         if (sel.Count == 0) return;
         _applying = true;
+        RefreshStepStrip();
         _applyingPlan = plan;   // Record the in-flight plan (see SyncPlan)
         _applyRequestInFlight = true;
         _awaitingFreshPlan = false;
@@ -1006,6 +1112,7 @@ public sealed partial class RestructureView : UserControl
         UndoButton.IsEnabled = CanStartRestructureUndo(
             canUndo, ChangeLog.Instance.IsUndoInFlight,
             _undoRequestInFlight || EngineClient.Instance.UndoRestructureInFlight);
+        RefreshStepStrip();
     }
 
     internal static bool CanStartRestructureUndo(
