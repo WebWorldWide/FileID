@@ -65,33 +65,21 @@ fn evidence(hit: &CatalogHit) -> String {
         hit.text
     )
 }
+/// Video and audio by the engine's own classifier, so every extension the
+/// scan treats as media (MTS, M2TS, 3GP, MPG, Opus, AIFF, ...) plays in place.
+fn is_playable_media(path: &str) -> bool {
+    use fileid_engine::pipeline::discovery::FileKind;
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(FileKind::from_extension(ext), FileKind::Video | FileKind::Audio))
+}
 fn open(hit: &CatalogHit, status: &gtk::Label) {
     if !std::path::Path::new(&hit.path).is_file() {
         status.set_label("File is unavailable offline or has moved.");
         return;
     }
-    let is_media = hit.kind != "page"
-        && matches!(
-            std::path::Path::new(&hit.path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(str::to_ascii_lowercase)
-                .as_deref(),
-            Some(
-                "mp4"
-                    | "mov"
-                    | "m4v"
-                    | "mkv"
-                    | "avi"
-                    | "webm"
-                    | "mp3"
-                    | "m4a"
-                    | "wav"
-                    | "flac"
-                    | "ogg"
-                    | "aac"
-            )
-        );
+    let is_media = hit.kind != "page" && is_playable_media(&hit.path);
     if is_media {
         play_inline(&hit.path, hit.start_seconds, status);
         return;
@@ -1161,6 +1149,16 @@ pub fn chat(engine: Engine) -> gtk::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn camera_and_phone_media_play_in_place() {
+        for path in ["/v/clip.MTS", "/v/a.m2ts", "/v/b.3gp", "/v/c.mpg", "/a/d.opus", "/a/e.aiff", "/v/f.mp4"] {
+            assert!(is_playable_media(path), "{path}");
+        }
+        for path in ["/p/photo.jpg", "/d/notes.pdf", "/x/no_extension"] {
+            assert!(!is_playable_media(path), "{path}");
+        }
+    }
+
     fn job(kind: &str, state: &str) -> CatalogJob {
         CatalogJob {
             id: "job".into(),
