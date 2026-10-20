@@ -9,8 +9,6 @@ pub mod restructure;
 pub mod settings;
 pub(crate) mod util;
 
-mod catalog;
-mod tools;
 mod workbench_state;
 pub mod workbenches;
 

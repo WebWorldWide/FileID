@@ -124,20 +124,14 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .spacing(12)
         .build();
     title_row.append(&count_label);
-    let moments_button = gtk::Button::with_label("Search & Moments");
-    title_row.append(&moments_button);
-    moments_button.connect_clicked(clone!(
-        #[strong]
-        engine,
-        move |button| super::catalog::present(&engine, button),
-    ));
-    let tools_button = gtk::Button::with_label("File Tools");
-    title_row.append(&tools_button);
-    tools_button.connect_clicked(clone!(
-        #[strong]
-        engine,
-        move |button| super::tools::present(&engine, button),
-    ));
+    for (label, page) in [("Search & Moments", "moments"), ("File Tools", "tools")] {
+        let button = gtk::Button::builder()
+            .label(label)
+            .action_name("win.navigate")
+            .action_target(&page.to_variant())
+            .build();
+        title_row.append(&button);
+    }
 
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Search filenames, tags, text in images…")

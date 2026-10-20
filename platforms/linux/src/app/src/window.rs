@@ -695,7 +695,23 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
         ));
     }
     window.add_controller(controller);
+
+    // Pages ask the shell to switch pages through `win.navigate` ("moments",
+    // "tools", ...) without knowing about the window.
+    let navigate = gtk::gio::SimpleAction::new(NAVIGATE_ACTION, Some(glib::VariantTy::STRING));
+    let act = act.clone();
+    navigate.connect_activate(move |_, parameter| {
+        let page = parameter
+            .and_then(|value| value.str())
+            .and_then(shell::page);
+        if let Some(page) = page {
+            act(Action::Navigate(page.id));
+        }
+    });
+    window.add_action(&navigate);
 }
+
+const NAVIGATE_ACTION: &str = "navigate";
 
 fn drop_hint() -> gtk::Box {
     let hint = gtk::Box::builder()
