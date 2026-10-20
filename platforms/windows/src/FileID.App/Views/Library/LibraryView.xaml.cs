@@ -117,6 +117,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         _gridKeyHandler = new Microsoft.UI.Xaml.Input.KeyEventHandler(OnGridPreviewKeyDown);
         GridScroller.AddHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler, handledEventsToo: true);
         GridScroller.ViewChanged += OnGridScrolled;
+        SelectedPane.Store = _store;
+        SelectedPane.CloseRequested += (_, _) => ClosePane();
+        SelectedPane.OpenPreviewRequested += OnPaneOpenPreviewRequested;
+        SelectedPane.FindSimilarRequested += OnPaneFindSimilarRequested;
 
         Loaded += async (_, _) =>
         {
@@ -412,6 +416,17 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
         SyncShownCount();
+        // A reorder is Remove+Insert of the same instance, so check after the
+        // merge settles rather than closing on the Remove.
+        if (SelectedPane.Tile is { } paneTile
+            && (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset
+                || e.OldItems?.Contains(paneTile) == true))
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!_unloaded && IsPaneOpen && !ViewModel.Items.Contains(paneTile)) ClosePane();
+            });
+        }
     }
 
     /// <summary>macOS filter bar: "N of M shown" for the paged listing, the hit
@@ -476,6 +491,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnEscapeAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnEscapeAccelerator), () =>
         {
+            if (IsPaneOpen)
+            {
+                ClosePane();
+                args.Handled = true;
+                return;
+            }
             if (ViewModel.SelectedCount > 0)
             {
                 ViewModel.ClearSelection();
@@ -896,21 +917,62 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             else
             {
-                // Plain click — only update selection if user is mid-multi-select;
-                // otherwise let double-tap open the preview without setting any
-                // selection.
-                if (ViewModel.SelectedCount > 0)
+                // Plain click (macOS parity): select just this tile and open the
+                // Selected pane; double-click still opens the full preview.
+                using (ViewModel.BulkSelectionScope())
                 {
-                    using (ViewModel.BulkSelectionScope())
-                    {
-                        foreach (var t in ViewModel.Items) t.IsSelected = false;
-                        tile.IsSelected = true;
-                    }
-                    _lastClickedTile = tile;
+                    foreach (var t in ViewModel.Items) t.IsSelected = false;
+                    tile.IsSelected = true;
                 }
+                _lastClickedTile = tile;
+                ShowPane(tile);
             }
 
             UpdateSelectionBar();
+        });
+
+    private const double PaneWidth = 312;
+
+    private void ShowPane(FileTile tile)
+    {
+        bool wasHidden = PaneHost.Visibility != Visibility.Visible;
+        SelectedPane.Show(tile);
+        PaneColumn.Width = new GridLength(PaneWidth);
+        PaneHost.Visibility = Visibility.Visible;
+        if (wasHidden && !FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(PaneHost);
+            Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.SetIsTranslationEnabled(PaneHost, true);
+            visual.Opacity = 0f;
+            visual.Properties.InsertVector3("Translation", new System.Numerics.Vector3(24, 0, 0));
+            FileID.Theme.Motion.SpringEasing.AnimateOpacity(PaneHost, 1f, 0.40, 0.80);
+            FileID.Theme.Motion.SpringEasing.AnimateScalar(PaneHost, "Translation.X", 0f, 0.40, 0.80);
+        }
+    }
+
+    private void ClosePane()
+    {
+        if (_unloaded) return;
+        PaneHost.Visibility = Visibility.Collapsed;
+        PaneColumn.Width = new GridLength(0);
+    }
+
+    private bool IsPaneOpen => PaneHost.Visibility == Visibility.Visible;
+
+    private async void OnPaneOpenPreviewRequested(object? sender, EventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnPaneOpenPreviewRequested), async () =>
+        {
+            if (SelectedPane.Tile is not { } tile) return;
+            int index = ViewModel.Items.IndexOf(tile);
+            if (index < 0) return;
+            await OpenPreview(tile, index);
+        });
+
+    private async void OnPaneFindSimilarRequested(object? sender, EventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnPaneFindSimilarRequested), async () =>
+        {
+            if (SelectedPane.Tile is not { } tile) return;
+            await ViewModel.FindSimilarAsync(tile.Id, System.Threading.CancellationToken.None);
         });
 
     private void UpdateSelectionBar()
