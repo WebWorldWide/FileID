@@ -187,26 +187,75 @@ pub fn group_exact_duplicates(
     group_exact_duplicates_until(candidates, || false)
 }
 
+/// Exact-duplicate hashing is IO-bound; a few readers saturate an SSD without
+/// turning a spinning disk into seek thrash.
+const EXACT_HASH_WORKERS: usize = 4;
+
+fn exact_hash_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_cpus::get().clamp(1, EXACT_HASH_WORKERS))
+            .thread_name(|i| format!("fileid-exact-hash-{i}"))
+            .build()
+            .expect("exact-duplicate hashing pool")
+    })
+}
+
+/// Full-file SHA-256 grouping. Only files sharing an indexed size can be
+/// duplicates, so singleton sizes are never read. `should_cancel` is polled on
+/// the calling thread; once it fires, unread files count as skipped.
 #[allow(dead_code)]
 pub fn group_exact_duplicates_until(
     candidates: Vec<ExactDuplicateCandidate>,
     should_cancel: impl Fn() -> bool,
 ) -> ExactDuplicateGrouping {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut skipped = 0;
+    let mut by_size: BTreeMap<u64, Vec<ExactDuplicateCandidate>> = BTreeMap::new();
+    for candidate in candidates {
+        match u64::try_from(candidate.indexed_size) {
+            Ok(size) => by_size.entry(size).or_default().push(candidate),
+            Err(_) => skipped += 1,
+        }
+    }
+    let work: Vec<(u64, ExactDuplicateCandidate)> = by_size
+        .into_iter()
+        .filter(|(_, files)| files.len() > 1)
+        .flat_map(|(size, files)| files.into_iter().map(move |file| (size, file)))
+        .collect();
+    let hashes = parking_lot::Mutex::new(vec![None; work.len()]);
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let cancelled = AtomicBool::new(should_cancel());
+    let pool = exact_hash_pool();
+    pool.in_place_scope(|scope| {
+        for _ in 0..pool.current_num_threads().min(work.len()) {
+            scope.spawn(|_| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some((size, candidate)) = work.get(index) else { break };
+                if !cancelled.load(Ordering::Relaxed) {
+                    let hash = exact_file_sha256_until(&candidate.path, *size, || {
+                        cancelled.load(Ordering::Relaxed)
+                    });
+                    hashes.lock()[index] = hash.ok();
+                }
+                done.fetch_add(1, Ordering::Release);
+            });
+        }
+        while done.load(Ordering::Acquire) < work.len() {
+            if !cancelled.load(Ordering::Relaxed) && should_cancel() {
+                cancelled.store(true, Ordering::Relaxed);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
     let mut by_digest: BTreeMap<(u64, [u8; 32]), Vec<ExactDuplicateCandidate>> =
         BTreeMap::new();
-    let mut skipped = 0;
-    for candidate in candidates {
-        if should_cancel() {
-            skipped += 1;
-            continue;
-        }
-        let Ok(size) = u64::try_from(candidate.indexed_size) else {
-            skipped += 1;
-            continue;
-        };
-        match exact_file_sha256_until(&candidate.path, size, &should_cancel) {
-            Ok(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
-            Err(_) => skipped += 1,
+    for ((size, candidate), hash) in work.into_iter().zip(hashes.into_inner()) {
+        match hash {
+            Some(hash) => by_digest.entry((size, hash)).or_default().push(candidate),
+            None => skipped += 1,
         }
     }
     let groups = by_digest
@@ -448,6 +497,32 @@ mod tests {
     }
 
     #[test]
+    fn exact_grouping_skips_singleton_sizes_and_honours_cancel() {
+        let a = tmp_with(b"pair");
+        let b = tmp_with(b"pair");
+        let candidate = |id, path: &PathBuf, indexed_size| ExactDuplicateCandidate {
+            id,
+            path: path.clone(),
+            indexed_size,
+        };
+        let unreadable = PathBuf::from("/nonexistent/fileid-singleton");
+        let candidates = vec![
+            candidate(1, &a, 4),
+            candidate(2, &b, 4),
+            candidate(3, &unreadable, 99),
+            candidate(4, &unreadable, -1),
+        ];
+        let grouping = group_exact_duplicates(candidates.clone());
+        assert_eq!(grouping.groups.len(), 1);
+        assert_eq!(grouping.skipped, 1, "only the invalid size; the singleton is never read");
+        let cancelled = group_exact_duplicates_until(candidates, || true);
+        assert!(cancelled.groups.is_empty());
+        assert_eq!(cancelled.skipped, 3);
+        let _ = std::fs::remove_file(a);
+        let _ = std::fs::remove_file(b);
+    }
+
+    #[test]
     fn known_hash_matcher_accepts_current_and_legacy_but_rejects_replacement() {
         let path = tmp_with(b"original");
         let current = hex::encode(content_hash(&path, 8).unwrap());
@@ -614,4 +689,5 @@ mod tests {
         );
         let _ = std::fs::remove_file(&p);
     }
+
 }
