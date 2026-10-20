@@ -2,10 +2,9 @@ use super::*;
 use crate::ipc::sink::Sink;
 
 fn database() -> Connection {
-    let conn = Connection::open_in_memory().unwrap();
-    crate::db::migrations::apply(&conn).unwrap();
-    conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/party.mov',1,100,10,0,'video','mov')", []).unwrap();
-    conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(2,'/internal/cake.jpg',2,100,10,0,'image','jpg')", []).unwrap();
+    let conn = crate::db::test_support::memory_db();
+    crate::db::test_support::insert_file(&conn, 1, "/internal/party.mov", "video");
+    crate::db::test_support::insert_file(&conn, 2, "/internal/cake.jpg", "image");
     conn
 }
 
@@ -376,8 +375,7 @@ fn media_fixture(lavfi: &str) -> Option<(PathBuf, Arc<Mutex<Connection>>)> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
-    let conn = Connection::open_in_memory().unwrap();
-    crate::db::migrations::apply(&conn).unwrap();
+    let conn = crate::db::test_support::memory_db();
     conn.execute(
         "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,?2,?3,0,'video','mp4')",
         params![path.to_str().unwrap(), metadata.len() as i64, modified],
@@ -596,8 +594,7 @@ async fn speech_pass_transcribes_audio_chunks_and_resumes_by_chunk() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
-    let conn = Connection::open_in_memory().unwrap();
-    crate::db::migrations::apply(&conn).unwrap();
+    let conn = crate::db::test_support::memory_db();
     conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,?2,?3,0,'video','mp4')",
         params![path.to_str().unwrap(), metadata.len() as i64, modified]).unwrap();
     let database = Arc::new(Mutex::new(conn));
@@ -741,8 +738,7 @@ async fn next_moment_window_decodes_while_the_model_runs() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
-    let mut conn = Connection::open_in_memory().unwrap();
-    crate::db::migrations::apply(&conn).unwrap();
+    let mut conn = crate::db::test_support::memory_db();
     conn.execute(
         "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,?1,1,19,?2,0,'video','mp4')",
         params![path.to_str().unwrap(), modified],

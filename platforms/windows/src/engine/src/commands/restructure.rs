@@ -2182,8 +2182,7 @@ mod tests {
         let incoming = root.join("incoming");
         std::fs::create_dir_all(&incoming).unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let mut moves = Vec::new();
         for (index, confidence) in ["auto", "ask", "review"].iter().enumerate() {
             let source = incoming.join(format!("{index}.jpg"));
@@ -2255,8 +2254,7 @@ mod tests {
         let incoming = root.join("incoming");
         std::fs::create_dir_all(&incoming).unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let total = 10usize;
         let mut moves = Vec::with_capacity(total);
         for index in 0..total {
@@ -2324,8 +2322,7 @@ mod tests {
     #[test]
     #[ignore = "explicit million-file disk-backed planner regression"]
     fn million_file_large_plan_is_disk_backed_and_preview_bounded() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for start in (1..=1_000_000_i64).step_by(10_000) {
             let end = (start + 9_999).min(1_000_000);
             conn.execute(
@@ -2367,8 +2364,7 @@ mod tests {
     /// must sweep those orphans, or they accumulate without bound.
     #[test]
     fn large_plan_sweeps_stale_planning_scratch() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
         let dir = std::env::temp_dir().join(format!(
             "fileid-stale-scratch-{}-{}",
@@ -2443,8 +2439,7 @@ mod tests {
         let src = root.join("a.jpg");
         std::fs::write(&src, b"data").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) \
              VALUES (1, ?1, 0, 4, 0.0, 'image', 'jpg', 0)",
@@ -2499,8 +2494,7 @@ mod tests {
         std::fs::write(&source, b"auto").unwrap();
         let source_text = source.to_string_lossy().into_owned();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO files
                 (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
@@ -2589,8 +2583,7 @@ mod tests {
         let vanished_source = incoming.join("vanished.jpg");
         std::fs::write(&vanished_source, b"vanished").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for (id, path) in [(1, &healthy_source), (2, &vanished_source)] {
             conn.execute(
                 "INSERT INTO files
@@ -2695,8 +2688,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let cancel = Arc::new(AtomicBool::new(true));
         let apply = RestructureApply::new(
             Arc::new(parking_lot::Mutex::new(conn)),
@@ -2752,8 +2744,7 @@ mod tests {
 
     #[test]
     fn plan_query_rejects_named_unknown_and_same_name_identity_ambiguity() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute_batch(
             "INSERT INTO files
                 (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
@@ -2845,8 +2836,7 @@ mod tests {
             .join("March")
             .join("a.jpg");
         let actionable = root.join("Inbox").join("b.jpg");
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for (id, path) in [(1_i64, canonical), (2_i64, actionable)] {
             conn.execute(
                 "INSERT INTO files
@@ -2960,8 +2950,7 @@ mod tests {
         let incoming = root.join("incoming");
         let plan_dir = root.join("plans");
         std::fs::create_dir_all(&incoming).unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let mut moves = Vec::new();
         for index in 0..4 {
             let source = incoming.join(format!("{index}.jpg"));
@@ -3257,8 +3246,7 @@ mod tests {
     async fn respect_moves_survive_the_plan_and_their_folders_are_not_kept() {
         let root = std::env::temp_dir().join(format!("fileid-respect-plan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let sep19 = 1_789_840_800.0;
         let mar1 = 1_772_388_000.0;
         let mut rows: Vec<(String, f64)> = (0..5)

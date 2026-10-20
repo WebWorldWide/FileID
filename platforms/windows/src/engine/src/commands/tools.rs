@@ -722,7 +722,7 @@ mod tests {
                 .save(&source)
                 .unwrap();
             let conn = crate::db::open_writer(&root.join("catalog.sqlite")).unwrap();
-            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,?1,1,100,0,'image','png')",[source.to_str().unwrap()]).unwrap();
+            crate::db::test_support::insert_file(&conn, 1, source.to_str().unwrap(), "image");
             Self { root, source, conn }
         }
 

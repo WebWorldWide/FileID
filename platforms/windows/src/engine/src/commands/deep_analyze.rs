@@ -1112,8 +1112,7 @@ mod tests {
     }
 
     fn in_memory_db() -> Arc<Mutex<rusqlite::Connection>> {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).expect("migrations apply");
+        let conn = crate::db::test_support::memory_db();
         Arc::new(Mutex::new(conn))
     }
 

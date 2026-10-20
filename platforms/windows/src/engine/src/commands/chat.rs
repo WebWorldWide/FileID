@@ -412,8 +412,7 @@ mod tests {
     use super::*;
     #[test]
     fn history_search_and_clear_preserve_catalog_files() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'/offline/birthday.mov',1,100,0,'video','mov','Birthday gift opening')",[]).unwrap();
         let mut request = ChatRequest {
             request_id: "r".into(),
@@ -477,8 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_stops_the_running_summary_for_its_conversation() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let database = Arc::new(Mutex::new(conn));
         let request = |action: &str| ChatRequest {
             request_id: format!("{action}-request"),
@@ -508,8 +506,7 @@ mod tests {
 
     #[test]
     fn refinement_filters_files_and_evidence_before_limits() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         for id in 1..=150 {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,100,0,?3,'mov','Birthday gift opening')",params![id,format!("/offline/birthday-{id}.mov"),if id == 1 { "video" } else { "image" }]).unwrap();
         }
@@ -556,8 +553,7 @@ mod tests {
 
     #[test]
     fn invalid_requests_cannot_write_history_or_change_files() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         for text in [String::new(), "x".repeat(2001)] {
             let request = ChatRequest {
                 request_id: "r".into(),

@@ -123,8 +123,7 @@ mod tests {
 
     #[test]
     fn visual_grouping_skips_exact_duplicates_derived_versions_and_distant_takes() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         for (id, time, hash) in [(1, 1000.0, 1_u8), (2, 1060.0, 2), (3, 1090.0, 3),
                                  (4, 1120.0, 1), (5, 3000.0, 5), (6, 1080.0, 6), (7, 1070.0, 7)] {
             conn.execute(

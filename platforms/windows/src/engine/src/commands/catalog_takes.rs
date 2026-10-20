@@ -443,10 +443,9 @@ mod tests {
     use super::*;
 
     fn fixture() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for id in 1..=2 {
-            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(?1,?2,?3,100,10,0,'video','mov')",params![id,format!("/internal/{id}.mov"),id]).unwrap();
+            crate::db::test_support::insert_file(&conn, id, &format!("/internal/{id}.mov"), "video");
         }
         conn
     }

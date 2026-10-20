@@ -1035,16 +1035,14 @@ mod tests {
 
     #[test]
     fn fresh_catalog_skips_rename_heal_for_the_entire_scan() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        crate::db::migrations::apply(&conn.lock()).unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn, ScanCoordinator::new());
         assert!(!writer.rename_heal_enabled);
     }
 
     #[test]
     fn existing_catalog_keeps_rename_heal_enabled() {
-        let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
-        crate::db::migrations::apply(&conn.lock()).unwrap();
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         conn.lock()
             .execute(
                 "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) VALUES ('C:/a.jpg', 1, 1, 0, 'image', 'jpg', 0)",
@@ -1158,17 +1156,11 @@ mod tests {
         assert_eq!(moved[0].1.as_ptr(), original);
     }
 
-    fn in_memory_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).expect("migrations apply");
-        conn
-    }
-
     /// Re-ingesting the same path twice produces exactly one row. Guards
     /// against the ON CONFLICT clause regressing to INSERT OR IGNORE.
     #[test]
     fn duplicate_path_resolves_to_single_row() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let f = fixture(r"C:\Users\adam\Pictures\IMG_0001.jpg");
         insert_one(&conn, &f).unwrap();
         insert_one(&conn, &f).unwrap();
@@ -1180,7 +1172,7 @@ mod tests {
 
     #[test]
     fn reappearing_file_clears_soft_missing_state() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let f = fixture(r"C:\library\returned.jpg");
         insert_one(&conn, &f).unwrap();
         conn.execute(
@@ -1205,7 +1197,7 @@ mod tests {
     /// redundant-SELECT elimination.
     #[test]
     fn insert_returning_id_yields_same_id_on_conflict() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let f = fixture(r"C:\Users\adam\Pictures\IMG_RETURNING.jpg");
         let path_text = f.path.to_string_lossy();
         let path_hash = crate::util::path_safety::stable_path_hash(&path_text);
@@ -1247,7 +1239,7 @@ mod tests {
     /// scalars; the ?21/?22 stage-ran gates protect the NOT NULL booleans.
     #[test]
     fn stage_skipped_rescan_preserves_prior_metadata() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(r"C:\lib\IMG_META.jpg");
         a.phash = Some(0x1234_5678);
         a.camera_model = Some("Canon".into());
@@ -1302,7 +1294,7 @@ mod tests {
 
     #[test]
     fn successful_rescan_restores_aesthetic_on_existing_row() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let path = r"C:\lib\restored.jpg";
         let dormant = fixture(path);
         insert_one(&conn, &dormant).unwrap();
@@ -1323,7 +1315,7 @@ mod tests {
     /// size/modified_at writes them. Guards against INSERT OR IGNORE.
     #[test]
     fn duplicate_path_updates_size_and_modified() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut f = fixture(r"C:\a.jpg");
         insert_one(&conn, &f).unwrap();
         f.size_bytes = 9999;
@@ -1352,7 +1344,7 @@ mod tests {
             // …then sample with repetition to force duplicates.
             order in proptest::collection::vec(0usize..6, 1..50),
         ) {
-            let conn = in_memory_db();
+            let conn = crate::db::test_support::memory_db();
             for idx in &order {
                 let path = &paths[idx % paths.len()];
                 insert_one(&conn, &fixture(path)).unwrap();
@@ -1515,7 +1507,7 @@ mod tests {
     /// file_ref is NULL but the matched row has one.
     #[test]
     fn heal_lookup_flags_ref_match_but_not_hash_only() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(r"C:\lib\old\IMG.jpg");
         a.content_hash = Some([7u8; 32]);
         a.file_ref = Some(0xABCD);
@@ -1548,7 +1540,7 @@ mod tests {
     /// digest (?2) differs, or the row never heals.
     #[test]
     fn heal_lookup_matches_legacy_recipe_digest_via_fallback() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut old = fixture(r"C:\lib\old\HUGE.tif");
         old.content_hash = Some([0x22; 32]); // legacy BLAKE3 digest stamped by main
         ingest_with_heal(&conn, &old);
@@ -1595,7 +1587,7 @@ mod tests {
         let copy = dir.join("IMG_1558(1).HEIC");
         std::fs::write(&copy, b"same-bytes").unwrap();
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(orig.to_str().unwrap());
         a.content_hash = Some([0x11; 32]);
         a.file_ref = Some(1001);
@@ -1624,7 +1616,7 @@ mod tests {
         // Old path is never created on disk → "gone" → a real move.
         let old_path = dir.join("gone").join("orig.jpg");
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(old_path.to_str().unwrap());
         a.content_hash = Some([0x22; 32]);
         a.file_ref = None; // cross-volume move: only content_hash identity
@@ -1666,7 +1658,7 @@ mod tests {
     fn one_batch_heals_a_moved_row_once() {
         let dir = unique_tmp_dir("batch_move");
         let old_path = dir.join("gone").join("orig.jpg");
-        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let mut seed = fixture(old_path.to_str().unwrap());
         seed.content_hash = Some([0x33; 32]);
         let seed_id = ingest_with_heal(&conn.lock(), &seed);
@@ -1712,7 +1704,7 @@ mod tests {
         std::fs::write(&p1, b"payload").unwrap();
         std::fs::write(&p2, b"payload").unwrap();
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         // Row A at P1 (same content hash), P1 present → no heal.
         let mut a = fixture(p1.to_str().unwrap());
         a.content_hash = Some([0x33; 32]);
@@ -1766,7 +1758,7 @@ mod tests {
         // Old path is never created on disk → "gone" → a real move.
         let old_path = dir.join("gone").join("before.png");
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(old_path.to_str().unwrap());
         a.file_ref = Some(0xDEAD_BEEF);
         let id_a = ingest_with_heal(&conn, &a);
@@ -1798,7 +1790,7 @@ mod tests {
         let new_path = dir.join("after.png");
         std::fs::write(&new_path, b"y").unwrap(); // a DISTINCT coexisting file
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(old_path.to_str().unwrap());
         a.file_ref = Some(0xDEAD_BEEF);
         let id_a = ingest_with_heal(&conn, &a);
@@ -1830,7 +1822,7 @@ mod tests {
         // Old path never created on disk → "gone" → would heal if size matched.
         let old_path = dir.join("gone").join("before.png");
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(old_path.to_str().unwrap());
         a.file_ref = Some(0xC0FF_EE00);
         a.size_bytes = 1000; // original file's size
@@ -1862,7 +1854,7 @@ mod tests {
         let hi: u64 = 0xFFFF_0000_0000_0001; // > i64::MAX
         assert!(hi > i64::MAX as u64, "fixture must exercise the high-bit path");
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let mut a = fixture(dir.join("a.png").to_str().unwrap());
         a.file_ref = Some(hi);
         let id_a = ingest_with_heal(&conn, &a); // must NOT error on the u64 bind
@@ -1887,7 +1879,7 @@ mod tests {
     /// a macOS-installed trigger set → SQLITE_CORRUPT on every re-process.
     #[test]
     fn fts_follows_content_tables_via_triggers() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
              VALUES ('C:\\t\\a.png', 1, 1, 1.0, 'image', 'png')",
@@ -1953,7 +1945,7 @@ mod tests {
     /// insensitive LIKE never misses engine-written rows.
     #[test]
     fn writers_populate_path_search() {
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let f = fixture(r"C:\lib\café.jpg");
         insert_one(&conn, &f).unwrap();
         let stored: String = conn
@@ -1996,7 +1988,7 @@ mod tests {
         assert_ne!(nfd_path, "C:\\lib\\caf\u{00E9}.jpg",
             "test vector must actually be NFD, not NFC");
 
-        let conn = in_memory_db();
+        let conn = crate::db::test_support::memory_db();
         let f = fixture(nfd_path);
         insert_one(&conn, &f).unwrap();
 
@@ -2044,7 +2036,7 @@ mod tests {
 
     #[test]
     fn face_flush_records_verified_model_and_source_revision() {
-        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
         let mut file = fixture("/internal/face-cache.png");
         file.faces_evaluated = true;
@@ -2108,7 +2100,7 @@ mod tests {
                 .v1
                 .unwrap();
 
-        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
 
         // Seed the prior row at a path that no longer exists on disk (genuine
         // move) carrying the legacy digest as its content_hash.
@@ -2173,7 +2165,7 @@ mod tests {
         // Exactly what v0.0.1 stamped for a file within the full-hash window.
         let v001_digest = *blake3::hash(&content).as_bytes();
 
-        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let old_path = dir.join("was_here.bin"); // never written → gone from disk
         let seed_id: i64;
         {
@@ -2242,7 +2234,7 @@ mod tests {
             "fixture must make the interior samples fire (v2 != v1)"
         );
 
-        let conn = Arc::new(Mutex::new(in_memory_db()));
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
         let old_path = dir.join("was_here.bin"); // never written → gone from disk
         let seed_id: i64;
         {

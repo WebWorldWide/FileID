@@ -569,8 +569,7 @@ mod tests {
     use crate::pipeline::deep_analyze::VLM_TAG_STOPWORDS;
 
     fn persistence_db() -> (rusqlite::Connection, i64) {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).expect("migrations apply");
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO files \
              (path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, \

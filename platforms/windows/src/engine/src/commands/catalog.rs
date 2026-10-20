@@ -338,9 +338,8 @@ mod tests {
     use super::*;
     #[test]
     fn chapter_evidence_is_searchable_and_stale_after_source_change() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
-        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) VALUES(1,'/internal/Family Birthday.mov',1,100,10,0,'video','mov')",[]).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 1, "/internal/Family Birthday.mov", "video");
         let request:CatalogRequest=serde_json::from_value(serde_json::json!({"requestID":"save","action":"saveChapter","chapter":{"id":"gift","fileID":1,"startSeconds":12.5,"endSeconds":20.0,"title":"Gift Opening","summary":"Grandma opens presents","sourceRevision":"untrusted","modelVersion":"untrusted","confidence":0.0,"userEdited":false,"stale":true}})).unwrap();
         let saved = execute(&mut conn, &request).unwrap();
         assert_eq!(saved.chapters[0].model_version, "user");
