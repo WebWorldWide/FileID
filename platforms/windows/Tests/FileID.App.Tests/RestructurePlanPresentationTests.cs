@@ -90,19 +90,25 @@ public class RestructurePlanPresentationTests
     }
 
     [Theory]
+    [InlineData(3400, 0UL, 3400)]
+    [InlineData(3400, 120UL, 3280)]
+    [InlineData(10, 25UL, 0)]
+    public void StaysPutFiles_IsLibraryFilesMinusMoves(int library, ulong moves, int expected)
+        => Assert.Equal(expected, FileID.Views.Restructure.RestructureView.StaysPutFiles(library, moves));
+
+    [Theory]
     [InlineData(10, 0, 0, true)]
-    [InlineData(10, 1, 0, true)]
-    [InlineData(10, 8, 0, false)]
-    [InlineData(10, 0, 8, false)]
+    [InlineData(10, 1, 0, false)]
+    [InlineData(10, 0, 1, false)]
     [InlineData(0, 0, 0, false)]
-    public void MissingContentSignals_RequiresEightyPercentEligibleCoverage(
+    public void MissingContentModels_OnlyWhenNoEmbeddingsAtAll(
         int total,
         int clip,
         int text,
         bool expected)
         => Assert.Equal(
             expected,
-            RestructurePlanPresentation.HasMissingContentSignals(total, clip, text));
+            RestructurePlanPresentation.ShouldShowMissingContentModels(total, clip, text));
 
     [Theory]
     [InlineData(@"F:\", true)]

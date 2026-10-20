@@ -149,6 +149,49 @@
                     </Button>
                 </Grid>
 
+                <!-- No content embeddings at all (macOS missingContentModelsBanner):
+                     the plan can only sort by date, so say why and offer the fix. -->
+                <Grid x:Name="MissingContentModelsBanner"
+                      Visibility="Collapsed"
+                      ColumnSpacing="14"
+                      CornerRadius="{StaticResource CornerRadiusL}"
+                      Background="{StaticResource PanelBrush}"
+                      BorderBrush="{StaticResource HairlineStrongBrush}"
+                      BorderThickness="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="3" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.ColumnSpan="3" Background="{StaticResource WarningBrush}" Opacity="0.05" />
+                    <Border Grid.Column="0" Background="{StaticResource WarningBrush}" />
+                    <StackPanel Grid.Column="1" Spacing="3" Padding="0,12,0,12">
+                        <TextBlock x:Name="MissingContentModelsTitle"
+                                   FontFamily="{StaticResource BodyFontFamily}"
+                                   FontSize="13.5"
+                                   FontWeight="SemiBold"
+                                   Foreground="{StaticResource Text1Brush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock x:Name="MissingContentModelsBody"
+                                   FontFamily="{StaticResource BodyFontFamily}"
+                                   FontSize="12.5"
+                                   Foreground="{StaticResource Text2Brush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                    <Button Grid.Column="2"
+                            Margin="0,0,14,0"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource ShellSecondaryButtonStyle}"
+                            Foreground="{StaticResource WarningBrush}"
+                            BorderBrush="{StaticResource WarningBrush}"
+                            Click="OnMissingContentModelsActionClicked">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon x:Name="MissingContentModelsActionGlyph" Glyph="&#xE72C;" FontSize="11" />
+                            <TextBlock x:Name="MissingContentModelsActionText" Text="Rescan" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+
                 <!-- Deep Analyze nudge — shown when few files have captions yet.
                      Mirrors macOS deepAnalyzeHintBanner: reading file contents
                      sharpens bucketing. -->
