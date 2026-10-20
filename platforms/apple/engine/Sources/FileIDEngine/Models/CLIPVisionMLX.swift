@@ -89,11 +89,15 @@ final class CLIPVisionMLX: @unchecked Sendable {
     }
 }
 
-/// Minimal protobuf walk over an ONNX model: float32 initializers by name,
+/// Minimal protobuf walk over an ONNX model: float initializers by name,
 /// with the exporter's anonymous MatMul weights renamed through the graph
 /// (each one feeds a named `.bias` Add, or produces `image_embeds`).
 enum ONNXInitializerReader {
     static func visionWeights(at url: URL) throws -> [String: MLXArray] {
+        try withMappedModel(at: url) { try parse($0) }
+    }
+
+    static func withMappedModel<R>(at url: URL, _ body: (UnsafeRawBufferPointer) throws -> R) throws -> R {
         let fd = open(url.path, O_RDONLY)
         guard fd >= 0 else { throw CLIPVisionMLX.LoadError.unreadable }
         defer { close(fd) }
@@ -102,14 +106,49 @@ enum ONNXInitializerReader {
         let size = Int(info.st_size)
         guard let base = mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0), base != MAP_FAILED else { throw CLIPVisionMLX.LoadError.unreadable }
         defer { munmap(base, size) }
-        let bytes = UnsafeRawBufferPointer(start: base, count: size)
-        return try parse(bytes)
+        return try body(UnsafeRawBufferPointer(start: base, count: size))
     }
 
     struct Tensor { var dims: [Int] = []; var type = 0; var name = ""; var raw: Range<Int>? }
-    struct Node { var inputs: [String] = []; var outputs: [String] = []; var op = "" }
+    struct Node { var inputs: [String] = []; var outputs: [String] = []; var op = ""; var name = "" }
+
+    /// float32 and float16 initializers keep their stored type.
+    static func array(_ t: Tensor, in b: UnsafeRawBufferPointer) -> MLXArray? {
+        guard let raw = t.raw else { return nil }
+        let count = t.dims.reduce(1, *)
+        let bytes = UnsafeRawBufferPointer(rebasing: b[raw])
+        switch t.type {
+        case 1 where count * 4 == raw.count: return MLXArray(bytes, t.dims, type: Float.self)
+        case 10 where count * 2 == raw.count: return MLXArray(bytes, t.dims, type: Float16.self)
+        default: return nil
+        }
+    }
 
     static func parse(_ b: UnsafeRawBufferPointer) throws -> [String: MLXArray] {
+        let (tensors, nodes) = try graph(b)
+        var rename: [String: String] = [:]
+        var producer: [String: Node] = [:]
+        for n in nodes { for o in n.outputs { producer[o] = n } }
+        for n in nodes {
+            if n.op == "MatMul", n.outputs.contains("image_embeds"), let w = n.inputs.first(where: { $0.hasPrefix("onnx::") }) {
+                rename[w] = "visual_projection.weight"
+            }
+            guard n.op == "Add", let bias = n.inputs.first(where: { $0.hasPrefix("vision_model.") && $0.hasSuffix(".bias") }),
+                  let other = n.inputs.first(where: { $0 != bias }), let mm = producer[other], mm.op == "MatMul",
+                  let w = mm.inputs.first(where: { $0.hasPrefix("onnx::") }) else { continue }
+            rename[w] = String(bias.dropLast(".bias".count)) + ".weight"
+        }
+        var out: [String: MLXArray] = [:]
+        for t in tensors where t.type == 1 && !t.dims.isEmpty {
+            let name = rename[t.name] ?? t.name
+            guard name.hasPrefix("vision_model.") || name == "visual_projection.weight", let value = array(t, in: b) else { continue }
+            out[name] = value
+        }
+        guard out.count >= 200 else { throw CLIPVisionMLX.LoadError.malformed }
+        return out
+    }
+
+    static func graph(_ b: UnsafeRawBufferPointer) throws -> (tensors: [Tensor], nodes: [Node]) {
         var tensors: [Tensor] = []
         var nodes: [Node] = []
         try fields(b, 0..<b.count) { field, wire, value, span in
@@ -136,6 +175,7 @@ enum ONNXInitializerReader {
                         switch f {
                         case 1: n.inputs.append(string(b, s))
                         case 2: n.outputs.append(string(b, s))
+                        case 3: n.name = string(b, s)
                         case 4: n.op = string(b, s)
                         default: break
                         }
@@ -144,31 +184,7 @@ enum ONNXInitializerReader {
                 }
             }
         }
-        var rename: [String: String] = [:]
-        var producer: [String: Node] = [:]
-        for n in nodes { for o in n.outputs { producer[o] = n } }
-        for n in nodes {
-            if n.op == "MatMul", n.outputs.contains("image_embeds"), let w = n.inputs.first(where: { $0.hasPrefix("onnx::") }) {
-                rename[w] = "visual_projection.weight"
-            }
-            guard n.op == "Add", let bias = n.inputs.first(where: { $0.hasPrefix("vision_model.") && $0.hasSuffix(".bias") }),
-                  let other = n.inputs.first(where: { $0 != bias }), let mm = producer[other], mm.op == "MatMul",
-                  let w = mm.inputs.first(where: { $0.hasPrefix("onnx::") }) else { continue }
-            rename[w] = String(bias.dropLast(".bias".count)) + ".weight"
-        }
-        var out: [String: MLXArray] = [:]
-        for t in tensors where t.type == 1 {
-            guard let raw = t.raw, !t.dims.isEmpty, t.dims.reduce(1, *) * 4 == raw.count else { continue }
-            let name = rename[t.name] ?? t.name
-            guard name.hasPrefix("vision_model.") || name == "visual_projection.weight" else { continue }
-            let floats = [Float](unsafeUninitializedCapacity: raw.count / 4) { buffer, initialized in
-                memcpy(buffer.baseAddress!, b.baseAddress! + raw.lowerBound, raw.count)
-                initialized = raw.count / 4
-            }
-            out[name] = MLXArray(floats, t.dims)
-        }
-        guard out.count >= 200 else { throw CLIPVisionMLX.LoadError.malformed }
-        return out
+        return (tensors, nodes)
     }
 
     private static func string(_ b: UnsafeRawBufferPointer, _ r: Range<Int>) -> String {
@@ -209,25 +225,41 @@ enum ONNXInitializerReader {
 /// Collects concurrent single-image requests from scan workers and runs them
 /// as one GPU batch: 21 ms for one image, 3.3 ms per image in a batch of 16.
 final class CLIPGPUBatcher: @unchecked Sendable {
+    private let batcher: GPURequestBatcher
+
+    init(encoder: CLIPVisionMLX, maxBatch: Int = 16, gather: DispatchTimeInterval = .milliseconds(3)) {
+        batcher = GPURequestBatcher(label: "fileid.clip.gpu", maxBatch: maxBatch, gather: gather) {
+            encoder.embed(pixels: $0, count: $1)
+        }
+    }
+
+    func embed(_ tensor: [Float]) -> [Float]? { batcher.submit(tensor) }
+}
+
+/// Runs each model's batches on its own queue and MLX stream, so a long
+/// RAM++ batch does not hold CLIP requests behind it.
+final class GPURequestBatcher: @unchecked Sendable {
+    typealias Run = @Sendable (_ pixels: [Float], _ count: Int) -> [[Float]]
     private final class Slot: @unchecked Sendable {
         let done = DispatchSemaphore(value: 0)
         var result: [Float]?
     }
-    private let encoder: CLIPVisionMLX
+    private let run: Run
     private let maxBatch: Int
     private let gather: DispatchTimeInterval
     private let lock = NSLock()
     private var pending: [(tensor: [Float], slot: Slot)] = []
     private var draining = false
-    private let queue = DispatchQueue(label: "fileid.clip.gpu", qos: .userInitiated)
+    private let queue: DispatchQueue
 
-    init(encoder: CLIPVisionMLX, maxBatch: Int = 16, gather: DispatchTimeInterval = .milliseconds(3)) {
-        self.encoder = encoder
+    init(label: String, maxBatch: Int, gather: DispatchTimeInterval, run: @escaping Run) {
+        self.run = run
         self.maxBatch = maxBatch
         self.gather = gather
+        queue = DispatchQueue(label: label, qos: .userInitiated)
     }
 
-    func embed(_ tensor: [Float]) -> [Float]? {
+    func submit(_ tensor: [Float]) -> [Float]? {
         let slot = Slot()
         lock.lock()
         pending.append((tensor, slot))
@@ -247,7 +279,7 @@ final class CLIPGPUBatcher: @unchecked Sendable {
                 pending.removeFirst(batch.count)
                 if batch.isEmpty { draining = false; lock.unlock(); return }
                 lock.unlock()
-                let outputs = autoreleasepool { encoder.embed(pixels: batch.flatMap(\.tensor), count: batch.count) }
+                let outputs = autoreleasepool { run(batch.flatMap(\.tensor), batch.count) }
                 for (index, request) in batch.enumerated() {
                     request.slot.result = index < outputs.count ? outputs[index] : nil
                     request.slot.done.signal()
