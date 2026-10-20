@@ -349,19 +349,6 @@ public final class ReadStore: @unchecked Sendable {
         }.value
     }
 
-    /// CLIP text → image semantic search. Embeds the query via the
-    /// CLIP text encoder, ranks files by cosine over their stored
-    /// image embeddings. Returns nil when the text encoder isn't
-    /// installed (caller falls back to keyword search).
-    public func semanticSearch(query: String, limit: Int = 60) -> [FileRow]? {
-        guard let textVec = CLIPTextEncoder.shared.embedText(query) else { return nil }
-        return rankByCosine(against: textVec, limit: limit)
-    }
-
-    /// Off-main twin of `semanticSearch`. The full clip_embeddings cosine
-    /// scan is O(N·512) and froze the UI for seconds on a 50k library when
-    /// run inline on the MainActor. The text embed + ranking happen on a
-    /// background task; the caller awaits and publishes results on main.
     public func semanticVectorAsync(query: String) async -> [Float]? {
         await Task.detached(priority: .userInitiated) { CLIPTextEncoder.shared.embedText(query) }.value
     }
@@ -380,108 +367,6 @@ public final class ReadStore: @unchecked Sendable {
                 }
             }) ?? []
         }.value
-    }
-
-    public func semanticSearchAsync(query: String, limit: Int = 60) async -> [FileRow]? {
-        await Task.detached(priority: .userInitiated) { [self] in
-            semanticSearch(query: query, limit: limit)
-        }.value
-    }
-
-    /// "More photos like this one" — top-K by cosine over CLIP
-    /// image embeddings. Doesn't need the text encoder.
-    public func similarFiles(toFileID seedID: Int64, limit: Int = 24) -> [FileRow] {
-        guard let q = queue else { return [] }
-        let seedVec: [Float] = (try? q.read { db -> [Float] in
-            guard let blob = try Data.fetchOne(db, sql:
-                "SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id = ? AND e.model = ? AND f.failed=0",
-                arguments: [seedID, CLIPEmbeddingSpace.modelID]) else { return [] }
-            return CLIPEmbeddingSpace.vector(from: blob) ?? []
-        }) ?? []
-        guard !seedVec.isEmpty else { return [] }
-        return rankByCosine(against: seedVec, limit: limit, excludeID: seedID)
-    }
-
-    /// Off-main twin of `similarFiles` — the same full-table cosine scan
-    /// as semantic search, kept off the MainActor for the same reason.
-    public func similarFilesAsync(toFileID seedID: Int64, limit: Int = 24) async -> [FileRow] {
-        await Task.detached(priority: .userInitiated) { [self] in
-            similarFiles(toFileID: seedID, limit: limit)
-        }.value
-    }
-
-    /// Top-K files ranked by cosine similarity to the given query
-    /// vector (in CLIP image-embedding space). Used by both visual
-    /// similarity (seed = a file's embedding) and semantic search
-    /// (seed = a CLIP text embedding).
-    public func rankByCosine(against query: [Float], limit: Int = 60,
-                              excludeID: Int64? = nil) -> [FileRow] {
-        guard let q = queue, query.count == CLIPEmbeddingSpace.dimension,
-              query.allSatisfy(\.isFinite), limit > 0 else { return [] }
-        let squaredNorm = query.reduce(0.0) { $0 + Double($1) * Double($1) }
-        guard abs(squaredNorm - 1) <= 0.02 else { return [] }
-        return (try? q.read { db -> [FileRow] in
-            // failed = 0 at SQL time (parity with Windows
-            // SemanticSearchAsync): a failed row scored here would land
-            // in the top-N, then be dropped at materialization below —
-            // displacing a real result, not just wasting dot products.
-            let sql: String
-            let args: StatementArguments
-            if let exclude = excludeID {
-                sql = """
-                    SELECT e.file_id, e.embedding FROM clip_embeddings e
-                    JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0 AND e.model = ? AND e.file_id != ?
-                    """
-                args = [CLIPEmbeddingSpace.modelID, exclude]
-            } else {
-                sql = """
-                    SELECT e.file_id, e.embedding FROM clip_embeddings e
-                    JOIN files f ON f.id = e.file_id
-                    WHERE f.failed = 0 AND e.model = ?
-                    """
-                args = [CLIPEmbeddingSpace.modelID]
-            }
-            // Stream rows through a cursor and keep only a bounded top-K
-            // min-heap. fetchAll would hold every 512-float embedding blob
-            // resident at once (~1 GB at 500k files); the cursor frees each
-            // blob right after it's scored. Ranking is (score desc, row-order
-            // asc) — identical to the previous stable sort-then-prefix(limit),
-            // so the result set and tie order are unchanged while retained
-            // state drops from O(N) to O(limit).
-            var heap = TopKByCosine(capacity: limit)
-            let cursor = try Row.fetchCursor(db, sql: sql, arguments: args)
-            var order = 0
-            while let r = try cursor.next() {
-                guard let fid: Int64 = r["file_id"],
-                      let blob: Data = r["embedding"] else { continue }
-                guard let v = CLIPEmbeddingSpace.vector(from: blob) else { continue }
-                var s: Float = 0
-                for i in 0..<v.count { s += query[i] * v[i] }
-                heap.offer(id: fid, score: s, order: order)
-                order += 1
-            }
-            let topIDs = heap.sortedDescending().map { $0.id }
-            guard !topIDs.isEmpty else { return [] }
-            let placeholders = topIDs.map { _ in "?" }.joined(separator: ",")
-            let fileArgs: [DatabaseValueConvertible] = topIDs.map { Int($0) }
-            let fileRows = try Row.fetchAll(db, sql: """
-                SELECT * FROM files WHERE id IN (\(placeholders)) AND failed = 0
-                """, arguments: StatementArguments(fileArgs))
-            let byID = Dictionary(uniqueKeysWithValues: fileRows.map {
-                (Int64($0["id"] ?? 0), Self.toFileRow($0))
-            })
-            return topIDs.compactMap { byID[$0] }
-        }) ?? []
-    }
-
-    private func blobToFloats(_ data: Data) -> [Float] {
-        let count = data.count / MemoryLayout<Float>.stride
-        guard count > 0 else { return [] }
-        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
-            let base = raw.baseAddress!.assumingMemoryBound(to: Float.self)
-            return Array(UnsafeBufferPointer(start: base, count: count))
-        }
     }
 
     /// Bulk fetch FileRows for a list of ids, preserving the input
@@ -1480,24 +1365,6 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? (0, 0)
     }
 
-    /// One busy-tolerant write connection for a whole restructure batch.
-    /// Callers update each row right after its move so a crash or DB
-    /// failure strands at most one file (which the caller rolls back) —
-    /// the old batch-end variant had no busy timeout and swallowed the
-    /// error after every file had already moved on disk.
-    public func openPathUpdateQueue() throws -> DatabaseQueue {
-        try writeQueue()
-    }
-
-    public func updatePathText(fileID: Int64, newPath: String, on queue: DatabaseQueue) throws {
-        try queue.write { db in
-            try db.execute(
-                sql: "UPDATE files SET path_text = ?, path_search = ? WHERE id = ?",
-                arguments: [newPath, newPath.precomposedStringWithCanonicalMapping, fileID]
-            )
-        }
-    }
-
     /// All non-failed image files that have a non-empty
     /// `vlm_proposed_name`. Used by the bulk-rename UI.
     /// Item 5: (url, tags) for every file carrying ≥1 keyword tag, so the
@@ -1886,73 +1753,5 @@ public final class ReadStore: @unchecked Sendable {
             try? FileManager.default.moveItem(at: target, to: oldURL)
             return nil
         }
-    }
-}
-
-/// Bounded top-K selector for cosine ranking. Retains at most `capacity`
-/// scored ids in a min-heap keyed by rank (score desc, row-order asc): the
-/// root is the lowest-ranked kept item, so an incoming item only displaces
-/// it when it ranks strictly higher. This caps retained state at O(K)
-/// regardless of table size while reproducing exactly the output of a stable
-/// sort-by-score-descending truncated to K — row order breaks score ties, the
-/// same tie-break a stable sort gives. `order` is unique, so the rank is a
-/// strict total order and selection is deterministic.
-private struct TopKByCosine {
-    struct Item { let id: Int64; let score: Float; let order: Int }
-    private var items: [Item] = []
-    private let capacity: Int
-
-    init(capacity: Int) {
-        self.capacity = max(0, capacity)
-        items.reserveCapacity(self.capacity)
-    }
-
-    private func ranksAbove(_ a: Item, _ b: Item) -> Bool {
-        a.score != b.score ? a.score > b.score : a.order < b.order
-    }
-
-    mutating func offer(id: Int64, score: Float, order: Int) {
-        guard capacity > 0 else { return }
-        let item = Item(id: id, score: score, order: order)
-        if items.count < capacity {
-            items.append(item)
-            siftUp(from: items.count - 1)
-        } else if ranksAbove(item, items[0]) {
-            // New item outranks the worst kept — replace the root.
-            items[0] = item
-            siftDown(from: 0)
-        }
-    }
-
-    // Min-heap on rank: a parent never ranks above its children, so the
-    // worst-ranked kept item sits at the root for O(1) comparison in `offer`.
-    private mutating func siftUp(from start: Int) {
-        var i = start
-        while i > 0 {
-            let parent = (i - 1) / 2
-            guard ranksAbove(items[parent], items[i]) else { break }
-            items.swapAt(i, parent)
-            i = parent
-        }
-    }
-
-    private mutating func siftDown(from start: Int) {
-        var i = start
-        let n = items.count
-        while true {
-            let l = 2 * i + 1, r = 2 * i + 2
-            var worst = i
-            if l < n, ranksAbove(items[worst], items[l]) { worst = l }
-            if r < n, ranksAbove(items[worst], items[r]) { worst = r }
-            if worst == i { break }
-            items.swapAt(i, worst)
-            i = worst
-        }
-    }
-
-    /// The kept items, highest rank first — matching `prefix(limit)` of the
-    /// prior stable descending sort.
-    func sortedDescending() -> [Item] {
-        items.sorted { ranksAbove($0, $1) }
     }
 }

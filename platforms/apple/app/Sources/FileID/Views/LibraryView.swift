@@ -64,9 +64,6 @@ struct LibraryView: View {
     @State private var listedQuery: (String, String?)? = nil
     private static let pageSize = 300
     private static let refreshCap = 3_000
-    /// The tile about two screens before the end; the grid creates it lazily,
-    /// so its appearance means the user is approaching the last loaded row.
-    private var loadTriggerID: Int64? { rows.isEmpty ? nil : rows[max(0, rows.count - 24)].id }
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
@@ -88,10 +85,6 @@ struct LibraryView: View {
     // bulk-tag then targets every checked file, not just those still on screen.
     @State private var checkedFiles: [Int64: FileRow] = [:]
     @State private var bulkTagSheetOpen: Bool = false
-
-    private let columns = [
-        GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)
-    ]
 
     private var scanActive: Bool {
         guard let p = engine.lastProgress else { return false }
@@ -1182,7 +1175,7 @@ private struct FinderTagsEditor: View {
             // The detached read doesn't inherit `.task` cancellation; if the
             // user arrowed to another file mid-read, a slow stale read on a
             // network volume could land after the newer one and overwrite it.
-            // Mirror FileTile: drop it once `.task(id:)` is superseded.
+            // Drop it once `.task(id:)` is superseded.
             guard !Task.isCancelled else { return }
             tags = result
             error = nil

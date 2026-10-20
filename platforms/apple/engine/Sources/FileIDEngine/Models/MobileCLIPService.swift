@@ -189,14 +189,6 @@ public final class MobileCLIPService: @unchecked Sendable {
     private var gpuEncoder: CLIPVisionMLX?
     private var gpuEncoderFailed = false
 
-    /// The same embedding computed on the GPU through MLX; nil if the encoder
-    /// could not be built from the installed ONNX file.
-    func embedImageGPU(_ cgImage: CGImage) -> [Float]? {
-        guard let encoder = loadGPUEncoder(), let tensor = makeNCHWTensor(cgImage) else { return nil }
-        guard let raw = encoder.embed(pixels: tensor, count: 1).first, raw.count == Self.embeddingDim else { return nil }
-        return normalize(raw)
-    }
-
     func loadGPUEncoder(at url: URL = MobileCLIPService.defaultImageModelURL) -> CLIPVisionMLX? {
         lock.lock()
         if let gpuEncoder { lock.unlock(); return gpuEncoder }

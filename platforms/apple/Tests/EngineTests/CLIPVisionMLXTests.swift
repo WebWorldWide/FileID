@@ -31,7 +31,7 @@ struct CLIPVisionMLXTests {
             let reference = try #require(service.embedImageCPU(image))
             cpuSeconds += CFAbsoluteTimeGetCurrent() - t
             t = CFAbsoluteTimeGetCurrent()
-            let gpu = try #require(service.embedImageGPU(image))
+            let gpu = try #require(service.embedImage(image))
             gpuSeconds += CFAbsoluteTimeGetCurrent() - t
             let cosine = zip(reference, gpu).reduce(Float(0)) { $0 + $1.0 * $1.1 }
             #expect(cosine > 0.999, "seed \(seed) cosine \(cosine)")
@@ -43,9 +43,9 @@ struct CLIPVisionMLXTests {
         let service = MobileCLIPService.shared
         let encoder = try #require(service.loadGPUEncoder())
         let image = Self.card(3)
-        _ = service.embedImageGPU(image)
+        _ = service.embedImage(image)
         var t = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<20 { _ = service.embedImageGPU(image) }
+        for _ in 0..<20 { _ = service.embedImage(image) }
         let single = (CFAbsoluteTimeGetCurrent() - t) / 20
         let pixels = [Float](repeating: 0.1, count: 3 * 224 * 224 * 16)
         _ = encoder.embed(pixels: pixels, count: 16)

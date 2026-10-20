@@ -75,7 +75,6 @@ struct RestructureView: View {
     /// Shared hover state used by the Sankey, recommendation rows,
     /// tree, and staysPut disclosure to drive cross-highlight.
     @State private var hoverBus = RestructureHoverBus()
-    @State private var hasPulsed = false
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @AppStorage("restructure.dismissedDeepAnalyzeHint") private var dismissedDeepAnalyzeHint = false

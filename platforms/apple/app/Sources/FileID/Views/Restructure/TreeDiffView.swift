@@ -29,8 +29,6 @@ struct TreeDiffView: View {
     }
 
     @State private var filter: FilterMode = .all
-    @State private var expandedSources: Set<String> = []
-    @State private var expandedDests: Set<String> = []
 
     // MARK: - Data
 

@@ -15,7 +15,6 @@ struct PeopleView: View {
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
-    @State private var lastVersionSeen: Int = -1
 
     /// Cards become checkboxes; "Merge selected" picks a target.
     @State private var mergeMode: Bool = false
@@ -423,68 +422,6 @@ struct PeopleView: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.10)))
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
-    }
-
-    private var headerSubtitle: String {
-        let f = totalFacePrints
-        let p = persons.count
-        let unnamed = persons.filter { !$0.hasAnyName }.count
-        if p == 0 && f == 0 {
-            return "Run a scan first — face detection runs as part of the scan."
-        }
-        if p == 0 {
-            return "\(f) faces detected. Click the button to group them into people."
-        }
-        if unnamed > 0 {
-            return "\(p) people identified · \(unnamed) still unnamed. Naming them lets Deep Analyze use real names in captions."
-        }
-        return "\(p) people identified · all named ✓"
-    }
-
-    @ViewBuilder
-    private var stepsBar: some View {
-        let totalNamed = persons.filter { $0.hasAnyName }.count
-        let scanned = totalFacePrints > 0
-        let clustered = !persons.isEmpty
-        let named = totalNamed > 0
-        HStack(spacing: 6) {
-            stepBadge(idx: 1, label: "Scan finds faces",
-                       done: scanned)
-            stepArrow(active: scanned)
-            stepBadge(idx: 2, label: "Cluster groups them",
-                       done: clustered)
-            stepArrow(active: clustered)
-            stepBadge(idx: 3, label: "You name a few",
-                       done: named)
-            stepArrow(active: named)
-            stepBadge(idx: 4, label: "Deep Analyze uses names",
-                       done: named && persons.contains(where: { $0.fileCount > 0 }))
-            Spacer()
-        }
-        .font(.system(size: 10, weight: .semibold))
-    }
-
-    @ViewBuilder
-    private func stepBadge(idx: Int, label: String, done: Bool) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: done ? "checkmark.circle.fill" : "\(idx).circle")
-                .foregroundStyle(done ? Theme.delight : .secondary)
-            Text(label)
-                .foregroundStyle(done ? Color.primary : Color.secondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(done ? Theme.delight.opacity(0.10) : Color.white.opacity(0.04))
-        )
-    }
-
-    @ViewBuilder
-    private func stepArrow(active: Bool) -> some View {
-        Image(systemName: "chevron.right")
-            .font(.system(size: 8))
-            .foregroundStyle(active ? Theme.gold.opacity(0.7) : Color.secondary.opacity(0.5))
     }
 
     // MARK: - Content

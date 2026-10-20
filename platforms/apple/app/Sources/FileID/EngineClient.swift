@@ -533,8 +533,6 @@ public final class EngineClient {
         }
     }
 
-    nonisolated public static func pumpDebug(_ msg: String) async { debug(msg) }
-
     private func handleEvent(_ event: IPCEvent) {
         switch event.payload {
         case .chatResponse(let response):

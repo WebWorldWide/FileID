@@ -57,12 +57,6 @@ public actor DeepAnalyze {
     /// same download (and vice-versa). Created with each loadTask, cleared with it.
     private var currentLoadGate: ModelLoadGate?
 
-    private let generateParams = MLXLMCommon.GenerateParameters(
-        maxTokens: 320,
-        temperature: 0.3,
-        topP: 0.9
-    )
-
     private let analysisGenerateParams = MLXLMCommon.GenerateParameters(
         maxTokens: 320,
         temperature: 0,
