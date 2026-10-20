@@ -1419,16 +1419,26 @@ public enum Restructure {
             // require it still names `oldPath`, so a plan that went stale (the
             // file was renamed/moved/replaced since planning) can't move the
             // wrong bytes.
-            let live: (path: String, fileRef: Int64?)? =
-                try? await database.pool.read { db -> (path: String, fileRef: Int64?)? in
+            let live: (path: String, fileRef: Int64?, hashed: Bool)? =
+                try? await database.pool.read { db -> (path: String, fileRef: Int64?, hashed: Bool)? in
                     guard let row = try GRDB.Row.fetchOne(
-                        db, sql: "SELECT path_text, file_ref FROM files WHERE id = ?",
+                        db, sql: "SELECT path_text, file_ref, content_hash IS NOT NULL AS hashed FROM files WHERE id = ?",
                         arguments: [p.fileID]) else { return nil }
-                    return (row["path_text"], row["file_ref"])
+                    return (row["path_text"], row["file_ref"], row["hashed"])
                 }
             guard let live else {
                 failed += 1
                 JSONLog.shared.warn(ev: "restructure_stale_plan",
+                                    path: redactPathForLog(p.oldPath))
+                continue
+            }
+            // A row with neither a file_ref nor a content hash cannot prove the
+            // bytes on disk are the ones that were planned, so a forward apply
+            // refuses it (mirrors the shared engine). Undo replays only moves
+            // that passed this check.
+            if recordUndo && live.fileRef == nil && !live.hashed {
+                failed += 1
+                JSONLog.shared.warn(ev: "restructure_unverifiable_source",
                                     path: redactPathForLog(p.oldPath))
                 continue
             }

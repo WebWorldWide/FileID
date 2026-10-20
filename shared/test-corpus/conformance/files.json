@@ -21,9 +21,6 @@
     "name": "files-rename-updates-extension",
     "description": "Renaming to a new extension updates the lowercased extension column used by kind filters.",
     "extends": "files-rename-updates-path-identity",
-    "knownDivergences": [
-      {"engine": "rust", "reason": "renameFiles leaves files.extension at the old value (\"txt\" after renaming to .MD)"}
-    ],
     "steps": [
       {"label": "rename", "command": {"renameFiles": {"renames": [{"fileID": 1, "newName": "notes.MD"}]}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
       {"label": "extension", "db": "SELECT path_text,extension FROM files WHERE id=1", "expect": [["{path:docs/notes.MD}", "md"]]}
@@ -33,9 +30,6 @@
     "name": "files-rename-refuses-row-without-identity",
     "description": "A catalog row without a file_ref cannot prove the file on disk is the one indexed, so renameFiles refuses it.",
     "extends": "files-rename-updates-path-identity",
-    "knownDivergences": [
-      {"engine": "swift", "reason": "renameFiles renames rows with a NULL file_ref instead of asking for a rescan"}
-    ],
     "sql": [
       "UPDATE files SET file_ref=NULL"
     ],

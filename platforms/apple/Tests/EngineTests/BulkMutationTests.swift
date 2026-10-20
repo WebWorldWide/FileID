@@ -13,11 +13,97 @@ struct BulkMutationTests {
     }
 
     private func insert(_ db: EngineDatabase, id: Int64, path: String) async throws {
+        let fileRef = Discovery.inode(of: URL(fileURLWithPath: path)).map { Int64(bitPattern: $0) }
         try await db.pool.write { sql in
             try sql.execute(
-                sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES (?,?,?,1,0,'doc','txt')",
-                arguments: [id, path, StablePathHash.hash(path)])
+                sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, file_ref) VALUES (?,?,?,1,0,'doc','txt',?)",
+                arguments: [id, path, StablePathHash.hash(path), fileRef])
         }
+    }
+
+    @Test("Bulk rename refuses a row with no file identity")
+    func renameRefusesRowWithoutIdentity() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDBulkNoIdentity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("source.txt")
+        try Data("kept".utf8).write(to: source)
+        let db = try makeDB(root)
+        try await insert(db, id: 1, path: source.path)
+        try await db.pool.write { sql in try sql.execute(sql: "UPDATE files SET file_ref = NULL") }
+
+        let result = await FileIDEngineMain.renameFiles(
+            database: db, renames: [RenameEntry(fileID: 1, newName: "renamed.txt")])
+        #expect(result.succeeded == 0)
+        #expect(result.failed == 1)
+        #expect(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    @Test("Person rename and mark-unknown report people that no longer exist")
+    func personMutationsReportMissingPeople() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDMissingPerson-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let db = try makeDB(root)
+        try await db.pool.write { sql in
+            try sql.execute(sql: "INSERT INTO persons (id, first_name, created_at) VALUES (1, 'Sam', 0)")
+        }
+
+        let renamed = await FileIDEngineMain.renamePerson(
+            database: db, personID: 42, title: nil, firstName: "Ghost", middleName: nil, lastName: nil, suffix: nil)
+        #expect(renamed.succeeded == 0)
+        #expect(renamed.failed == 1)
+
+        let marked = await FileIDEngineMain.markPersonsAsUnknown(database: db, personIDs: [1, 42])
+        #expect(marked.succeeded == 1)
+        #expect(marked.failed == 1)
+        #expect(marked.messages.map(\.ok) == [true, false])
+        #expect(marked.messages.map(\.fileID) == [1, 42])
+    }
+
+    @Test("Explicit merge records a user-merged edge, drops a contradicting verdict, and allows faceless people")
+    func mergeRecordsUserConstraint() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDMergeConstraint-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let db = try makeDB(root)
+        try await db.pool.write { sql in
+            try sql.execute(sql: """
+                INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension)
+                VALUES (1, '/a.jpg', 1, 1, 0, 'image', 'jpg'), (2, '/b.jpg', 2, 1, 0, 'image', 'jpg')
+                """)
+            try sql.execute(sql: """
+                INSERT INTO persons (id, representative_face_id, file_count, created_at)
+                VALUES (10, 101, 1, 0), (20, 202, 1, 0), (30, NULL, 0, 0)
+                """)
+            try sql.execute(sql: """
+                INSERT INTO face_prints (id, file_id, person_id, print_data, bbox)
+                VALUES (101, 1, 10, X'00', 'a'), (202, 2, 20, X'00', 'b')
+                """)
+            try sql.execute(sql: """
+                INSERT INTO face_verifications
+                    (person_a, person_b, same_person, confidence, vlm_model, verified_at, face_a, face_b, file_a, bbox_a, file_b, bbox_b)
+                VALUES (10, 20, 0, 1.0, 'user-verified', 1, 101, 202, 1, 'a', 2, 'b')
+                """)
+        }
+
+        _ = try await db.mergePersons(target: 10, sources: [20])
+        let edges: [String] = try await db.pool.read { sql in
+            try Row.fetchAll(sql, sql: "SELECT person_a, person_b, same_person, vlm_model, face_a, face_b FROM face_verifications")
+                .map { row in
+                    let model: String = row["vlm_model"]
+                    let values: [Int64] = [row["person_a"], row["person_b"], row["same_person"], row["face_a"], row["face_b"]]
+                    return "\(model) \(values)"
+                }
+        }
+        #expect(edges == ["user-merged [10, 20, 1, 101, 202]"])
+
+        _ = try await db.mergePersons(target: 10, sources: [30])
+        let total = try await db.pool.read { sql in try Int.fetchOne(sql, sql: "SELECT COUNT(*) FROM face_verifications") }
+        #expect(total == 1)
     }
 
     @Test("Bulk rename updates path identity in one chunk and isolates invalid entries")

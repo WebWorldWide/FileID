@@ -31,9 +31,6 @@
   {
     "name": "chat-search-nothing-to-search",
     "description": "A message with no subject or media type runs no search and says what to add.",
-    "knownDivergences": [
-      {"engine": "rust", "reason": "prompt omits “event, time,” (\"Add a subject or a media type …\") although Rust chat resolves people, events and times too"}
-    ],
     "steps": [
       {"label": "empty plan", "chat": {"action": "send", "text": "please", "useModel": false}, "expect": {"status": "completed", "hits": [], "message": "Add a subject, event, time, or media type such as videos or photos. No search was run."}}
     ]
@@ -41,9 +38,6 @@
   {
     "name": "chat-search-names-the-person",
     "description": "A chat question naming a known person filters by that person's faces and says so in the reply.",
-    "knownDivergences": [
-      {"engine": "rust", "reason": "chat reply omits the “(people: …)” / “(event: …)” / “(near …)” qualifiers the macOS reply carries"}
-    ],
     "sql": [
       "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/IMG_0001.jpg',1,10,0,'image','jpg'),(2,'{root}/IMG_0002.jpg',2,10,0,'image','jpg')",
       "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(7,'Grandma','Grandma',0,1)",
