@@ -1,12 +1,14 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SidebarTabList — six tab buttons. Active tab gets gold @ 18% background
-    + gold @ 55% stroke (matches macOS Sidebar.swift:143-150). Tabs are
-    disabled when no folder is picked, except Settings which is always on.
+    SidebarTabList — Prototype v3 area sidebar. Browse / Analyze / Act
+    segmented switcher at the top (gold pill, spring-animated), then the
+    pages of the shown area as 32 px rows with icon, 13.5 px label and a
+    quiet trailing badge only when it says something. The selected row is a
+    radius-m gold tint. 1:1 port of macOS Sidebar.swift.
 
-    Keyboard: each button accepts Alt+1..6 via the WinUI accelerator stack
-    (registered in MainWindow). Click flips AppViewModel.ActiveTab; the
-    button styling reacts via the binding chain.
+    Pages that need a library stay disabled until a folder is picked.
+    Ctrl+1..9 / Alt+1..9 (MainWindow) jump to pages; shortcuts live in the
+    tooltips.
 -->
 <UserControl
     x:Class="FileID.Views.Sidebar.SidebarTabList"
@@ -16,8 +18,28 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel x:Name="ButtonsHost" Spacing="2">
-        <!-- Buttons constructed in code-behind so we can wire Click + style
-             updates per-tab without repeating XAML. -->
+    <StackPanel Spacing="10">
+        <Grid Margin="10,0,10,0"
+              Padding="3"
+              Background="{StaticResource ShellControlFillBrush}"
+              BorderBrush="{StaticResource HairlineStrongBrush}"
+              BorderThickness="1"
+              CornerRadius="{StaticResource CornerRadiusM}">
+            <Grid x:Name="AreaTrack" ColumnSpacing="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="AreaPill"
+                        Grid.Column="0"
+                        Height="26"
+                        CornerRadius="{StaticResource CornerRadiusS}"
+                        Background="{StaticResource GoldBrush}"
+                        IsHitTestVisible="False" />
+            </Grid>
+        </Grid>
+
+        <StackPanel x:Name="ButtonsHost" Spacing="2" Padding="8,0,8,0" />
     </StackPanel>
 </UserControl>
