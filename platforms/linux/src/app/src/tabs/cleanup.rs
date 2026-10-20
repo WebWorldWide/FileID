@@ -193,7 +193,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .sensitive(false)
         .build();
     let delete_btn = gtk::Button::builder()
-        .label("Delete 0 selected (0 B)")
+        .label("Delete 0 selected (Zero KB)")
         .css_classes(["destructive-action"])
         .sensitive(false)
         .build();
@@ -1022,9 +1022,11 @@ impl Cleanup {
                     plural(n_groups)
                 )
             }
+        } else if n_groups == 0 {
+            "No verified duplicate groups".to_string()
         } else {
             format!(
-                "{n_groups} duplicate group{} · {} reclaimable if you keep 1 per group",
+                "{n_groups} verified duplicate group{} · {} reclaimable if you keep 1 per group",
                 plural(n_groups),
                 format_bytes(reclaimable),
             )

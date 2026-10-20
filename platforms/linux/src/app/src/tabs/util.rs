@@ -24,20 +24,28 @@ pub(super) fn icon_for_kind(kind: &str) -> &'static str {
 }
 
 pub(super) fn format_bytes(b: i64) -> String {
-    const MB: f64 = 1024.0 * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    if b < 1024 {
-        return format!("{b} B");
-    }
-    let bytes = b as f64;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes / GB)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes / MB)
-    } else {
-        format!("{:.0} KB", bytes / 1024.0)
-    }
+    file_size(u64::try_from(b).unwrap_or(0))
 }
+
+/// Finder's decimal units (macOS `ByteCountFormatter`, `.file`): 1000-based,
+/// KB whole, MB one decimal, GB and up two.
+pub(crate) fn file_size(bytes: u64) -> String {
+    const UNITS: [(&str, f64, usize); 4] = [("TB", 1e12, 2), ("GB", 1e9, 2), ("MB", 1e6, 1), ("KB", 1e3, 0)];
+    if bytes == 0 {
+        return "Zero KB".to_owned();
+    }
+    if bytes < 1000 {
+        return format!("{bytes} byte{}", if bytes == 1 { "" } else { "s" });
+    }
+    let value = bytes as f64;
+    let (unit, scale, decimals) = UNITS
+        .iter()
+        .copied()
+        .find(|(_, scale, _)| value >= *scale)
+        .unwrap_or(UNITS[3]);
+    format!("{:.*} {unit}", decimals, value / scale)
+}
+
 
 pub(super) fn fmt_date(secs: Option<f64>) -> Option<String> {
     let s = secs?;
@@ -54,4 +62,19 @@ pub(super) fn glass_card() -> gtk::Box {
         .spacing(10)
         .css_classes(["glass-card"])
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_use_finder_decimal_units() {
+        assert_eq!(file_size(0), "Zero KB");
+        assert_eq!(file_size(512), "512 bytes");
+        assert_eq!(file_size(1_000), "1 KB");
+        assert_eq!(file_size(91_400_000), "91.4 MB");
+        assert_eq!(file_size(4_290_000_000), "4.29 GB");
+        assert_eq!(format_bytes(-5), "Zero KB");
+    }
 }

@@ -7,7 +7,7 @@ mod model_catalog;
 pub mod people;
 pub mod restructure;
 pub mod settings;
-mod util;
+pub(crate) mod util;
 
 mod catalog;
 mod tools;

@@ -147,7 +147,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/cli/src/runtime.rs": "62af36fc5aaf77502cb633581599779adf80084e4cbc128f14e002c587e045a5",
   "platforms/cli/src/scan_models.rs": "a359191e9124c156bfbb28a445088c1fbd743eb0319a24aeba60cc7c9e7b5318",
   "platforms/linux/src/app/src/engine_client.rs": "df8322c9bfbe68fcbf4954503f5097789c95ace4912b1e22565df3ae9a0ff101",
-  "platforms/linux/src/app/src/tabs/settings.rs": "d968c5c70793d76a77ff071fe8482d7ba9e6ba80c334f36004f2f7e912523a4c",
+  "platforms/linux/src/app/src/tabs/settings.rs": "430ff61884807e5ff0e432253761f62677edd37e51e0279764a0d799b6030c57",
   "platforms/tui/src/models.rs": "bc27e7237659b63e42d2f4f8ca9d5d2a83015d849be771395654e250b0754c23",
   "platforms/tui/src/scan.rs": "9a1131f508dab0ceaebf8934188d99a18da38da5d1f147d57fec8b97fe1431f6",
   "platforms/windows/src/FileID.App/App.xaml.cs": "fec87e4fc50ba035defeb6ff7517859cd3f162e3a1dd7728696637abb487b4c5",
