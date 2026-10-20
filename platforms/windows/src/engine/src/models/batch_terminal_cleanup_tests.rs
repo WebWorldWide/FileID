@@ -239,11 +239,10 @@ fn batch_cleanup_actual_handler_terminals_and_dispatch_guard_await_finalization(
     assert!(!helper.contains("complete.failed ="));
     assert!(!helper.contains("complete.cancelled ="));
     let main = include_str!("../server.rs");
-    let begin = main.find("CommandPayload::DeepAnalyzeAll(payload) =>").unwrap();
-    let end = begin
-        + main[begin..]
-            .find("handle_deep_analyze_all(")
-            .unwrap();
+    let arm = &main[main.find("CommandPayload::DeepAnalyzeAll(payload) =>").unwrap()..];
+    assert!(arm.find("d.deep_analyze_arm(").unwrap() < arm.find("handle_deep_analyze_all").unwrap());
+    let begin = main.find("async fn deep_analyze_arm").unwrap();
+    let end = begin + main[begin..].find("handler(sink, db, payload, cancel)").unwrap();
     assert!(main[begin..end].contains("let _guard = guard;"));
     assert!(!main[begin..end].contains("drop(guard)"));
 }

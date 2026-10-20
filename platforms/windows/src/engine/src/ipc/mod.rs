@@ -222,6 +222,39 @@ pub enum CommandPayload {
     PurgeExcluded(PurgeExcludedPayload),
 }
 
+impl CommandPayload {
+    /// `BulkActionResult.action` for the commands that answer with one.
+    pub fn action_name(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::ApplyTags(_) => "applyTags",
+            Self::RenameFiles(_) => "renameFiles",
+            Self::TrashFiles(_) => "trashFiles",
+            Self::MergeClusters(_) => "mergeClusters",
+            Self::RenamePerson(_) => "renamePerson",
+            Self::ReassignFace(_) => "reassignFace",
+            Self::MarkPersonsAsUnknown(_) => "markPersonsAsUnknown",
+            Self::MarkPersonsDifferent(_) => "markPersonsDifferent",
+            Self::RestoreFromTrash(_) => "restoreFromTrash",
+            Self::RevertMerge(_) => "revertMerge",
+            Self::PurgeExcluded(_) => "purgeExcluded",
+            _ => return None,
+        })
+    }
+
+    /// Ids a bulk action reports per item; empty means one summary item.
+    pub fn target_ids(&self) -> Vec<i64> {
+        match self {
+            Self::ApplyTags(payload) => payload.file_ids.clone(),
+            Self::TrashFiles(payload) => payload.file_ids.clone(),
+            Self::RenameFiles(payload) => payload.renames.iter().map(|rename| rename.file_id).collect(),
+            Self::MarkPersonsAsUnknown(payload) => payload.person_ids.clone(),
+            Self::RenamePerson(payload) => vec![payload.person_id],
+            Self::ReassignFace(payload) => vec![payload.face_id],
+            _ => Vec::new(),
+        }
+    }
+}
+
 const MAX_BULK_ITEMS: usize = 100_000;
 const MAX_RESTRUCTURE_MOVES: usize = 250_000;
 const MAX_EXCLUDED_PATHS: usize = 10_000;

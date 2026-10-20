@@ -406,68 +406,54 @@ async fn async_main() -> Result<()> {
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
 
-    let dispatch_sink = sink.clone();
-    let dispatch_shutdown = shutdown.clone();
     let command_shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_command_shutdown_requested = command_shutdown_requested.clone();
     let catalog_index = db_conn.as_ref().map(|writer| catalog_index::CatalogIndex::new(writer.clone(), db_path.clone(), db_path.with_extension("visual-index")));
     if let Some(writer) = db_conn.as_ref() {
         if let Err(error) = commands::timeline::recover(&writer.lock()) {
             tracing::warn!(?error, "timeline job recovery failed");
         }
     }
-    let dispatch_catalog_index = catalog_index.clone();
-    let dispatch_db = db_conn.clone();
 
     // Active scan coordinator. None when no scan is running; populated by
     // StartScan and consulted by PauseScan / ResumeScan / CancelScan.
     let scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>> =
         Arc::new(parking_lot::Mutex::new(None));
-    let dispatch_scan_state = scan_state.clone();
     // Reserve scan admission before the task waits on the mutation gate. The
     // coordinator itself is still installed by handle_start_scan immediately
     // after gate acquisition, while this flag rejects duplicate queued scans.
     let scan_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_scan_active = scan_active.clone();
     // CancelScan/wipe set this even when a reserved scan has not reached the
     // coordinator slot yet, so cancellation cannot be lost in that queue gap.
     let scan_cancel_requested: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_scan_cancel_requested = scan_cancel_requested.clone();
 
     // Deep Analyze cancel flag. Single-in-flight; deepAnalyzeCancel sets
     // it; the inner per-file loop polls it between files + during the
     // VLM caption call.
     let deep_analyze_cancel: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_deep_cancel = deep_analyze_cancel.clone();
     // Single-in-flight gate: a second Deep Analyze command must bounce cleanly
     // rather than re-arm the shared cancel flag (mode A) or cross-cancel the
     // running pass (mode B). Only a successful acquire resets `cancel` (#10).
     let deep_analyze_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_deep_active = deep_analyze_active.clone();
     // Single-flight gate for face clustering: a second runFaceClustering must
     // bounce cleanly rather than race the persist transaction (the writer lock
     // is now released during cluster()+consolidate(), so two runs could overlap).
     let face_cluster_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_face_cluster_active = face_cluster_active.clone();
     let restructure_cancellations = RestructureCancelRegistry::default();
-    let dispatch_restructure_cancellations = restructure_cancellations.clone();
     // Single-flight for apply/undo: two overlapping runs would race on-disk
     // moves plus the undo journal. Same compare-exchange + RAII-guard shape as
     // Deep Analyze. (audit 2026-07-14)
     let restructure_active: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dispatch_restructure_active = restructure_active.clone();
 
     // Every filesystem/DB mutation is serialized. Wipe requests cancellation
     // before taking the same permit, so it observes a fully quiescent library
     // or fails without deleting anything.
     let mutation_gate = Arc::new(tokio::sync::Mutex::new(()));
-    let dispatch_mutation_gate = mutation_gate.clone();
 
     // Sidebar job tracker (macOS JobQueue parity): scan / cluster /
     // deep-analyze jobs push on accept and finish via RAII guards;
@@ -481,8 +467,6 @@ async fn async_main() -> Result<()> {
             let _ = qs_sink.try_send(IpcEvent::now(EventPayload::QueueState(Wrap::new(state))));
         });
     }
-    let dispatch_jobs = jobs.clone();
-    let dispatch_db_path = db_path.clone();
 
     // Shared HTTP client (HTTP/2 + connection pool) for the 12-way parallel
     // downloader. Built once at engine startup; cloned cheaply via Arc into
@@ -497,17 +481,36 @@ async fn async_main() -> Result<()> {
             crate::downloader::fail_closed_client()
         }
     };
-    let dispatch_http_client = http_client.clone();
 
     // Prewarm cancellation is per-model-kind, owned by a static registry inside
     // commands::prewarm (see prewarm_cancel_flag / cancel_prewarm) — no global
     // flag to thread through here.
+    let dispatcher = Dispatcher {
+        sink: sink.clone(),
+        shutdown: shutdown.clone(),
+        command_shutdown_requested,
+        db: db_conn.clone(),
+        catalog_index: catalog_index.clone(),
+        db_path,
+        scan_state: scan_state.clone(),
+        scan_active,
+        scan_cancel_requested: scan_cancel_requested.clone(),
+        deep_analyze_cancel: deep_analyze_cancel.clone(),
+        deep_analyze_active,
+        face_cluster_active,
+        restructure_cancellations: restructure_cancellations.clone(),
+        restructure_active,
+        mutation_gate: mutation_gate.clone(),
+        jobs: jobs.clone(),
+        http_client,
+    };
     let mut stdio_loop = tokio::spawn(async move {
+        let d = dispatcher;
         let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         loop {
             tokio::select! {
                 biased;
-                _ = dispatch_shutdown.notified() => {
+                _ = d.shutdown.notified() => {
                     tracing::info!("shutdown notified; stdio loop exiting");
                     break;
                 }
@@ -537,31 +540,12 @@ async fn async_main() -> Result<()> {
                             // methods are panic-free today — this guards a future
                             // regression in an inline arm.)
                             let handled = futures_util::FutureExt::catch_unwind(
-                                std::panic::AssertUnwindSafe(handle_line(
-                                    &dispatch_sink,
-                                    &dispatch_shutdown,
-                                    &dispatch_command_shutdown_requested,
-                                    dispatch_db.as_ref(),
-                                    dispatch_catalog_index.as_ref(),
-                                    &dispatch_db_path,
-                                    &dispatch_scan_state,
-                                    &dispatch_scan_active,
-                                    &dispatch_scan_cancel_requested,
-                                    &dispatch_deep_cancel,
-                                    &dispatch_deep_active,
-                                    &dispatch_face_cluster_active,
-                                    &dispatch_restructure_cancellations,
-                                    &dispatch_restructure_active,
-                                    &dispatch_mutation_gate,
-                                    &dispatch_jobs,
-                                    &dispatch_http_client,
-                                    &text,
-                                )),
+                                std::panic::AssertUnwindSafe(handle_line(&d, &text)),
                             )
                             .await;
                             if handled.is_err() {
                                 tracing::error!("panic in IPC command handler; engine continuing");
-                                dispatch_sink
+                                d.sink
                                     .send(EngineError::event(
                                         "command_handler_panic",
                                         "an internal error interrupted a command; \
@@ -569,7 +553,7 @@ async fn async_main() -> Result<()> {
                                     ))
                                     .await;
                             }
-                            if dispatch_command_shutdown_requested
+                            if d.command_shutdown_requested
                                 .load(std::sync::atomic::Ordering::Acquire)
                             {
                                 tracing::info!("shutdown command handled; stdio loop exiting");
@@ -579,7 +563,7 @@ async fn async_main() -> Result<()> {
                         Ok(BoundedRead::Oversized(seen)) => {
                             // SEC: rejected mid-read, never allocated past the cap.
                             tracing::warn!(bytes_seen = seen, "oversized ipc frame; rejecting");
-                            dispatch_sink.send(EngineError::event(
+                            d.sink.send(EngineError::event(
                                 "oversized_ipc_frame",
                                 oversized_frame_message(seen),
                             )).await;
@@ -588,12 +572,12 @@ async fn async_main() -> Result<()> {
                         }
                         Ok(BoundedRead::Eof) => {
                             tracing::info!("stdin EOF; entering shutdown");
-                            dispatch_shutdown.notify_waiters();
+                            d.shutdown.notify_waiters();
                             break;
                         }
                         Err(err) => {
                             tracing::error!(%err, "stdin read error");
-                            dispatch_shutdown.notify_waiters();
+                            d.shutdown.notify_waiters();
                             break;
                         }
                     }
@@ -1096,14 +1080,6 @@ fn bulk_rejection_event(action: &str, file_ids: &[i64], message: &str) -> IpcEve
     )))
 }
 
-fn trash_rejection_event(file_ids: &[i64], message: &str) -> IpcEvent {
-    bulk_rejection_event("trashFiles", file_ids, message)
-}
-
-fn command_error_event(kind: &str, message: &str) -> IpcEvent {
-    EngineError::event(kind, message)
-}
-
 fn scan_rejection_event() -> IpcEvent {
     IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(ScanPhase::Failed)))
 }
@@ -1121,7 +1097,7 @@ fn deep_analyze_rejection_event(model_kind: &str) -> IpcEvent {
 }
 
 fn face_clustering_rejection_event(message: &str) -> IpcEvent {
-    command_error_event("face_clustering_failed", message)
+    EngineError::event("face_clustering_failed", message)
 }
 
 fn idle_scan_rejection_event(
@@ -1138,27 +1114,151 @@ fn idle_deep_analyze_rejection_event(
         .then(|| deep_analyze_rejection_event(model_kind))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_line(
-    sink: &Sink,
-    shutdown: &Arc<Notify>,
-    command_shutdown_requested: &std::sync::atomic::AtomicBool,
-    db: Option<&std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>,
-    catalog_index: Option<&Arc<catalog_index::CatalogIndex>>,
-    db_path: &std::path::Path,
-    scan_state: &Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
-    scan_active: &Arc<std::sync::atomic::AtomicBool>,
-    scan_cancel_requested: &Arc<std::sync::atomic::AtomicBool>,
-    deep_analyze_cancel: &Arc<std::sync::atomic::AtomicBool>,
-    deep_analyze_active: &Arc<std::sync::atomic::AtomicBool>,
-    face_cluster_active: &Arc<std::sync::atomic::AtomicBool>,
-    restructure_cancellations: &RestructureCancelRegistry,
-    restructure_active: &Arc<std::sync::atomic::AtomicBool>,
-    mutation_gate: &Arc<tokio::sync::Mutex<()>>,
-    jobs: &job_queue::JobQueue,
-    http_client: &Arc<reqwest::Client>,
-    line: &str,
-) {
+type Writer = Arc<parking_lot::Mutex<rusqlite::Connection>>;
+type Flag = Arc<std::sync::atomic::AtomicBool>;
+
+struct Dispatcher {
+    sink: Sink,
+    shutdown: Arc<Notify>,
+    command_shutdown_requested: Flag,
+    db: Option<Writer>,
+    catalog_index: Option<Arc<catalog_index::CatalogIndex>>,
+    db_path: std::path::PathBuf,
+    scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>>,
+    scan_active: Flag,
+    scan_cancel_requested: Flag,
+    deep_analyze_cancel: Flag,
+    deep_analyze_active: Flag,
+    face_cluster_active: Flag,
+    restructure_cancellations: RestructureCancelRegistry,
+    restructure_active: Flag,
+    mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    jobs: job_queue::JobQueue,
+    http_client: Arc<reqwest::Client>,
+}
+
+impl Dispatcher {
+    /// Bulk mutation answered by a `BulkActionResult`; `phrase` opens both rejection messages.
+    async fn dispatch_mutation<P, F, Fut>(&self, action: &str, ids: &[i64], phrase: &str, payload: P, handler: F)
+    where
+        P: Send + 'static,
+        F: FnOnce(Sink, Writer, P) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let Some(db) = &self.db else {
+            emit_db_unavailable(&self.sink, action).await;
+            let message = format!("{phrase} because the library database is unavailable.");
+            self.sink.send(bulk_rejection_event(action, ids, &message)).await;
+            return;
+        };
+        let rejection = bulk_rejection_event(action, ids, &format!("{phrase} while the library scan is paused."));
+        let (sink, db) = (self.sink.clone(), db.clone());
+        spawn_mutation_with_rejection(&self.mutation_gate, &self.sink, &self.scan_state, rejection, async move {
+            handler(sink, db, payload).await;
+        })
+        .await;
+    }
+
+    async fn restructure_mutation<P, F, Fut>(&self, command: &str, kind: &str, phrase: &str, payload: P, handler: F)
+    where
+        P: Send + 'static,
+        F: FnOnce(Sink, Writer, P, Flag) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let Some(db) = &self.db else {
+            emit_db_unavailable(&self.sink, command).await;
+            let message = format!("{phrase} because the library database is unavailable.");
+            self.sink.send(EngineError::event(kind, message)).await;
+            return;
+        };
+        // Single-flight: a second apply (or an undo) while one is running
+        // would share the cancel flag and race on-disk moves + the undo
+        // journal. Reject it loudly instead. (audit 2026-07-14)
+        if self
+            .restructure_active
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            emit_restructure_busy(&self.sink).await;
+            let message = format!("{phrase} because another restructure operation is already running.");
+            self.sink.send(EngineError::event(kind, message)).await;
+            return;
+        }
+        let guard = DeepActiveGuard(self.restructure_active.clone());
+        let cancel_guard = self.restructure_cancellations.register();
+        let (sink, db, cancel) = (self.sink.clone(), db.clone(), cancel_guard.token());
+        let rejection = EngineError::event(kind, format!("{phrase} while the library scan is paused."));
+        spawn_mutation_with_rejection(&self.mutation_gate, &self.sink, &self.scan_state, rejection, async move {
+            let _guard = guard;
+            let _cancel_guard = cancel_guard;
+            handler(sink, db, payload, cancel).await;
+        })
+        .await;
+    }
+
+    async fn deep_analyze_arm<P, F, Fut>(&self, command: &str, model_kind: String, label: &str, payload: P, handler: F)
+    where
+        P: Send + 'static,
+        F: FnOnce(Sink, Writer, P, Flag) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let Some(db) = &self.db else {
+            emit_db_unavailable(&self.sink, command).await;
+            self.sink.send(deep_analyze_rejection_event(&model_kind)).await;
+            return;
+        };
+        if coordinator::process_gpu_device_removed() {
+            emit_deep_analyze_gpu_blocked(&self.sink, model_kind).await;
+            return;
+        }
+        if self
+            .deep_analyze_active
+            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
+            .is_err()
+        {
+            emit_deep_analyze_busy(&self.sink).await;
+            return;
+        }
+        self.deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        let guard = DeepActiveGuard(self.deep_analyze_active.clone());
+        let track = JobTrackGuard::start(&self.jobs, JobCategory::DeepAnalyze, label);
+        let (sink, db, cancel) = (self.sink.clone(), db.clone(), self.deep_analyze_cancel.clone());
+        let rejection = deep_analyze_rejection_event(&model_kind);
+        spawn_mutation_with_rejection(&self.mutation_gate, &self.sink, &self.scan_state, rejection, async move {
+            let _guard = guard;
+            let _track = track;
+            handler(sink, db, payload, cancel).await;
+        })
+        .await;
+    }
+}
+
+async fn handle_line(d: &Dispatcher, line: &str) {
+    let Dispatcher {
+        sink,
+        shutdown,
+        command_shutdown_requested,
+        db_path,
+        scan_state,
+        scan_active,
+        scan_cancel_requested,
+        deep_analyze_cancel,
+        deep_analyze_active,
+        face_cluster_active,
+        restructure_cancellations,
+        restructure_active,
+        mutation_gate,
+        jobs,
+        http_client,
+        ..
+    } = d;
+    let db = d.db.as_ref();
+    let catalog_index = d.catalog_index.as_ref();
     // Strip a leading UTF-8 BOM defensively. The C# side ships BOM-less UTF-8,
     // but legacy installs or third-party wrappers may push `EF BB BF` on the
     // first byte of stdin. Trim before the deserializer sees it.
@@ -1187,71 +1287,34 @@ async fn handle_line(
     if let Err(message) = ipc::normalize_and_validate_command(&mut cmd.payload) {
         tracing::warn!(%message, "IPC command rejected by semantic resource limits");
         let terminal = match &cmd.payload {
-            CommandPayload::TrashFiles(payload) => Some(trash_rejection_event(
-                &payload.file_ids,
-                &format!("Trash command was rejected: {message}"),
-            )),
-            CommandPayload::ApplyTags(payload) => {
-                Some(bulk_rejection_event("applyTags", &payload.file_ids, &message))
-            }
-            CommandPayload::RenameFiles(payload) => Some(bulk_rejection_event(
-                "renameFiles",
-                &payload
-                    .renames
-                    .iter()
-                    .map(|rename| rename.file_id)
-                    .collect::<Vec<_>>(),
-                &message,
-            )),
-            CommandPayload::MarkPersonsAsUnknown(payload) => Some(bulk_rejection_event(
-                "markPersonsAsUnknown",
-                &payload.person_ids,
-                &message,
-            )),
-            CommandPayload::ReassignFace(payload) => Some(bulk_rejection_event(
-                "reassignFace",
-                &[payload.face_id],
-                &message,
-            )),
-            CommandPayload::RevertMerge(_) => {
-                Some(bulk_rejection_event("revertMerge", &[], &message))
-            }
-            CommandPayload::PurgeExcluded(_) => {
-                Some(bulk_rejection_event("purgeExcluded", &[], &message))
-            }
-            CommandPayload::MergeClusters(_) => {
-                Some(bulk_rejection_event("mergeClusters", &[], &message))
-            }
             CommandPayload::StartScan(_) => idle_scan_rejection_event(scan_active),
-            CommandPayload::DeepAnalyzeFile(payload) => {
-                idle_deep_analyze_rejection_event(deep_analyze_active, &payload.model_kind)
+            CommandPayload::DeepAnalyzeFile(ipc::DeepAnalyzeFilePayload { model_kind, .. })
+            | CommandPayload::DeepAnalyzeFolder(ipc::DeepAnalyzeFolderPayload { model_kind, .. })
+            | CommandPayload::DeepAnalyzeAll(ipc::DeepAnalyzeAllPayload { model_kind, .. }) => {
+                idle_deep_analyze_rejection_event(deep_analyze_active, model_kind)
             }
-            CommandPayload::DeepAnalyzeFolder(payload) => {
-                idle_deep_analyze_rejection_event(deep_analyze_active, &payload.model_kind)
+            CommandPayload::PlanRestructure(_) => {
+                Some(EngineError::event("plan_restructure_invalid", &message))
             }
-            CommandPayload::DeepAnalyzeAll(payload) => {
-                idle_deep_analyze_rejection_event(deep_analyze_active, &payload.model_kind)
-            }
-            CommandPayload::PlanRestructure(_) => Some(command_error_event(
-                "plan_restructure_invalid",
-                &message,
-            )),
-            CommandPayload::ApplyRestructure(_) => {
-                Some(command_error_event("apply_restructure", &message))
-            }
-            CommandPayload::UndoRestructure(_) => {
-                Some(command_error_event("undo_restructure", &message))
-            }
-            _ => None,
+            CommandPayload::ApplyRestructure(_) => Some(EngineError::event("apply_restructure", &message)),
+            CommandPayload::UndoRestructure(_) => Some(EngineError::event("undo_restructure", &message)),
+            payload => payload.action_name().map(|action| {
+                let detail = match payload {
+                    CommandPayload::TrashFiles(_) => format!("Trash command was rejected: {message}"),
+                    _ => message.clone(),
+                };
+                bulk_rejection_event(action, &payload.target_ids(), &detail)
+            }),
         };
-        sink.send(EngineError::event("command_limit_exceeded", message))
-        .await;
+        sink.send(EngineError::event("command_limit_exceeded", message)).await;
         if let Some(event) = terminal {
             sink.send(event).await;
         }
         return;
     }
 
+    let action = cmd.payload.action_name().unwrap_or_default();
+    let ids = cmd.payload.target_ids();
     match cmd.payload {
         CommandPayload::ChatRequest(payload) => {
             tokio::spawn(commands::chat::handle(sink.clone(), db.cloned(), payload.request));
@@ -1321,7 +1384,7 @@ async fn handle_line(
         CommandPayload::PlanRestructure(payload) => {
             let Some(db) = db else {
                 emit_db_unavailable(sink, "planRestructure").await;
-                sink.send(command_error_event(
+                sink.send(EngineError::event(
                     "plan_restructure_db_unavailable",
                     "Could not compute a restructure plan because the library database is unavailable.",
                 ))
@@ -1336,7 +1399,7 @@ async fn handle_line(
                 mutation_gate,
                 sink,
                 scan_state,
-                command_error_event(
+                EngineError::event(
                     "plan_restructure_library_busy",
                     "Could not compute a restructure plan because the library is busy.",
                 ),
@@ -1354,105 +1417,12 @@ async fn handle_line(
             .await;
         }
         CommandPayload::ApplyRestructure(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "applyRestructure").await;
-                sink.send(command_error_event(
-                    "apply_restructure",
-                    "Could not apply the restructure because the library database is unavailable.",
-                ))
+            d.restructure_mutation("applyRestructure", "apply_restructure", "Could not apply the restructure", payload, commands::restructure::handle_apply_restructure)
                 .await;
-                return;
-            };
-            // Single-flight: a second apply (or an undo) while one is running
-            // would share the cancel flag and race on-disk moves + the undo
-            // journal. Reject it loudly instead. (audit 2026-07-14)
-            if restructure_active
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_err()
-            {
-                emit_restructure_busy(sink).await;
-                sink.send(command_error_event(
-                    "apply_restructure",
-                    "Could not apply the restructure because another restructure operation is already running.",
-                ))
-                .await;
-                return;
-            }
-            let guard = DeepActiveGuard(restructure_active.clone());
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            let cancel_guard = restructure_cancellations.register();
-            let cancel_c = cancel_guard.token();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                command_error_event(
-                    "apply_restructure",
-                    "Could not apply the restructure while the library scan is paused.",
-                ),
-                async move {
-                    let _guard = guard;
-                    let _cancel_guard = cancel_guard;
-                    commands::restructure::handle_apply_restructure(sink_c, db_c, payload, cancel_c)
-                        .await;
-                },
-            )
-            .await;
         }
         CommandPayload::UndoRestructure(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "undoRestructure").await;
-                sink.send(command_error_event(
-                    "undo_restructure",
-                    "Could not undo the restructure because the library database is unavailable.",
-                ))
+            d.restructure_mutation("undoRestructure", "undo_restructure", "Could not undo the restructure", payload, commands::restructure::handle_undo_restructure)
                 .await;
-                return;
-            };
-            if restructure_active
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                )
-                .is_err()
-            {
-                emit_restructure_busy(sink).await;
-                sink.send(command_error_event(
-                    "undo_restructure",
-                    "Could not undo the restructure because another restructure operation is already running.",
-                ))
-                .await;
-                return;
-            }
-            let guard = DeepActiveGuard(restructure_active.clone());
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            let cancel_guard = restructure_cancellations.register();
-            let cancel_c = cancel_guard.token();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                command_error_event(
-                    "undo_restructure",
-                    "Could not undo the restructure while the library scan is paused.",
-                ),
-                async move {
-                    let _guard = guard;
-                    let _cancel_guard = cancel_guard;
-                    commands::restructure::handle_undo_restructure(sink_c, db_c, payload, cancel_c)
-                        .await;
-                },
-            )
-            .await;
         }
         CommandPayload::GrantFolderAccess(_) => {}
         CommandPayload::StartScan(payload) => {
@@ -1508,118 +1478,16 @@ async fn handle_line(
             tracing::info!("restructure cancel requested");
         }
         CommandPayload::ApplyTags(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "applyTags").await;
-                sink.send(bulk_rejection_event(
-                    "applyTags",
-                    &payload.file_ids,
-                    "Tags could not be applied because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "applyTags",
-                &payload.file_ids,
-                "Tags could not be applied while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_apply_tags(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "Tags could not be applied", payload, commands::bulk::handle_apply_tags).await;
         }
         CommandPayload::RenameFiles(payload) => {
-            let file_ids: Vec<i64> = payload.renames.iter().map(|rename| rename.file_id).collect();
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "renameFiles").await;
-                sink.send(bulk_rejection_event(
-                    "renameFiles",
-                    &file_ids,
-                    "Files could not be renamed because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "renameFiles",
-                &file_ids,
-                "Files could not be renamed while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_rename_files(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "Files could not be renamed", payload, commands::bulk::handle_rename_files).await;
         }
         CommandPayload::TrashFiles(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "trashFiles").await;
-                sink.send(trash_rejection_event(
-                    &payload.file_ids,
-                    "Trash could not run because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = trash_rejection_event(
-                &payload.file_ids,
-                "Trash could not run while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_trash_files(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "Trash could not run", payload, commands::bulk::handle_trash_files).await;
         }
         CommandPayload::MergeClusters(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "mergeClusters").await;
-                sink.send(bulk_rejection_event(
-                    "mergeClusters",
-                    &[],
-                    "Could not merge people because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                bulk_rejection_event(
-                    "mergeClusters",
-                    &[],
-                    "Could not merge people while the library scan is paused.",
-                ),
-                async move {
-                    commands::bulk::handle_merge_clusters(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "Could not merge people", payload, commands::bulk::handle_merge_clusters).await;
         }
         CommandPayload::EmbedTextQuery(payload) => {
             let sink_c = sink.clone();
@@ -1628,93 +1496,13 @@ async fn handle_line(
             });
         }
         CommandPayload::RenamePerson(payload) => {
-            let person_ids = [payload.person_id];
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "renamePerson").await;
-                sink.send(bulk_rejection_event(
-                    "renamePerson",
-                    &person_ids,
-                    "The person could not be renamed because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "renamePerson",
-                &person_ids,
-                "The person could not be renamed while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_rename_person(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "The person could not be renamed", payload, commands::bulk::handle_rename_person).await;
         }
         CommandPayload::ReassignFace(payload) => {
-            let face_ids = [payload.face_id];
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "reassignFace").await;
-                sink.send(bulk_rejection_event(
-                    "reassignFace",
-                    &face_ids,
-                    "The face could not be reassigned because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "reassignFace",
-                &face_ids,
-                "The face could not be reassigned while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_reassign_face(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "The face could not be reassigned", payload, commands::bulk::handle_reassign_face).await;
         }
         CommandPayload::MarkPersonsAsUnknown(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "markPersonsAsUnknown").await;
-                sink.send(bulk_rejection_event(
-                    "markPersonsAsUnknown",
-                    &payload.person_ids,
-                    "People could not be marked unknown because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "markPersonsAsUnknown",
-                &payload.person_ids,
-                "People could not be marked unknown while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_mark_persons_as_unknown(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "People could not be marked unknown", payload, commands::bulk::handle_mark_persons_as_unknown).await;
         }
         CommandPayload::FindMergeSuggestions(_) => {
             // Availability guard preserved (no DB → no read connection), but the
@@ -1722,7 +1510,7 @@ async fn handle_line(
             // contends on the writer mutex.
             let Some(_db) = db else {
                 emit_db_unavailable(sink, "findMergeSuggestions").await;
-                sink.send(command_error_event(
+                sink.send(EngineError::event(
                     "find_merge_suggestions_failed",
                     "Merge suggestions are unavailable because the library database could not be opened.",
                 ))
@@ -1730,39 +1518,13 @@ async fn handle_line(
                 return;
             };
             let sink_c = sink.clone();
-            let path_c = db_path.to_path_buf();
+            let path_c = db_path.clone();
             tokio::spawn(async move {
                 commands::bulk::handle_find_merge_suggestions(sink_c, path_c).await;
             });
         }
         CommandPayload::MarkPersonsDifferent(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "markPersonsDifferent").await;
-                sink.send(bulk_rejection_event(
-                    "markPersonsDifferent",
-                    &[],
-                    "The verdict could not be saved because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "markPersonsDifferent",
-                &[],
-                "The verdict could not be saved while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::bulk::handle_mark_persons_different(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "The verdict could not be saved", payload, commands::bulk::handle_mark_persons_different).await;
         }
         CommandPayload::EmbedImageQuery(payload) => {
             let Some(db) = db else {
@@ -1776,189 +1538,29 @@ async fn handle_line(
             });
         }
         CommandPayload::DeepAnalyzeFile(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "deepAnalyzeFile").await;
-                sink.send(deep_analyze_rejection_event(&payload.model_kind))
-                    .await;
-                return;
-            };
-            if coordinator::process_gpu_device_removed() {
-                emit_deep_analyze_gpu_blocked(sink, payload.model_kind).await;
-                return;
-            }
-            if deep_analyze_active
-                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
-                .is_err()
-            {
-                emit_deep_analyze_busy(sink).await;
-                return;
-            }
-            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-            let guard = DeepActiveGuard(deep_analyze_active.clone());
-            let track = JobTrackGuard::start(jobs, JobCategory::DeepAnalyze, "Deep Analyze 1 file");
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            let cancel = deep_analyze_cancel.clone();
-            let rejection = deep_analyze_rejection_event(&payload.model_kind);
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    let _guard = guard;
-                    let _track = track;
-                    commands::deep_analyze::handle_deep_analyze_file(
-                        sink_c, db_c, payload, cancel,
-                    )
-                    .await;
-                },
-            )
-            .await;
+            let model_kind = payload.model_kind.clone();
+            d.deep_analyze_arm("deepAnalyzeFile", model_kind, "Deep Analyze 1 file", payload, commands::deep_analyze::handle_deep_analyze_file)
+                .await;
         }
         CommandPayload::DeepAnalyzeFolder(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "deepAnalyzeFolder").await;
-                sink.send(deep_analyze_rejection_event(&payload.model_kind))
-                    .await;
-                return;
-            };
-            if coordinator::process_gpu_device_removed() {
-                emit_deep_analyze_gpu_blocked(sink, payload.model_kind).await;
-                return;
-            }
-            if deep_analyze_active
-                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
-                .is_err()
-            {
-                emit_deep_analyze_busy(sink).await;
-                return;
-            }
-            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-            let guard = DeepActiveGuard(deep_analyze_active.clone());
-            let track = JobTrackGuard::start(jobs, JobCategory::DeepAnalyze, "Deep Analyze folder");
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            let cancel = deep_analyze_cancel.clone();
-            let rejection = deep_analyze_rejection_event(&payload.model_kind);
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    let _guard = guard;
-                    let _track = track;
-                    commands::deep_analyze::handle_deep_analyze_folder(
-                        sink_c, db_c, payload, cancel,
-                    )
-                    .await;
-                },
-            )
-            .await;
+            let model_kind = payload.model_kind.clone();
+            d.deep_analyze_arm("deepAnalyzeFolder", model_kind, "Deep Analyze folder", payload, commands::deep_analyze::handle_deep_analyze_folder)
+                .await;
         }
         CommandPayload::DeepAnalyzeAll(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "deepAnalyzeAll").await;
-                sink.send(deep_analyze_rejection_event(&payload.model_kind))
-                    .await;
-                return;
-            };
-            if coordinator::process_gpu_device_removed() {
-                emit_deep_analyze_gpu_blocked(sink, payload.model_kind).await;
-                return;
-            }
-            if deep_analyze_active
-                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Relaxed)
-                .is_err()
-            {
-                emit_deep_analyze_busy(sink).await;
-                return;
-            }
-            deep_analyze_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-            let guard = DeepActiveGuard(deep_analyze_active.clone());
-            let track = JobTrackGuard::start(jobs, JobCategory::DeepAnalyze, "Deep Analyze entire library");
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            let cancel = deep_analyze_cancel.clone();
-            let rejection = deep_analyze_rejection_event(&payload.model_kind);
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    let _guard = guard;
-                    let _track = track;
-                    commands::deep_analyze::handle_deep_analyze_all(
-                        sink_c, db_c, payload, cancel,
-                    )
-                    .await;
-                },
-            )
-            .await;
+            let model_kind = payload.model_kind.clone();
+            d.deep_analyze_arm("deepAnalyzeAll", model_kind, "Deep Analyze entire library", payload, commands::deep_analyze::handle_deep_analyze_all)
+                .await;
         }
         CommandPayload::DeepAnalyzeCancel(_) => {
             deep_analyze_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
             tracing::info!("deep analyze cancel requested");
         }
         CommandPayload::RestoreFromTrash(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "restoreFromTrash").await;
-                sink.send(bulk_rejection_event(
-                    "restoreFromTrash",
-                    &[],
-                    "Restore could not run because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "restoreFromTrash",
-                &[],
-                "Restore could not run while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::trash::handle_restore_from_trash(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "Restore could not run", payload, commands::trash::handle_restore_from_trash).await;
         }
         CommandPayload::RevertMerge(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "revertMerge").await;
-                sink.send(bulk_rejection_event(
-                    "revertMerge",
-                    &[],
-                    "The merge could not be reverted because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "revertMerge",
-                &[],
-                "The merge could not be reverted while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::trash::handle_revert_merge(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "The merge could not be reverted", payload, commands::trash::handle_revert_merge).await;
         }
         CommandPayload::RunFaceClustering(_) => {
             let Some(db) = db else {
@@ -2041,33 +1643,7 @@ async fn handle_line(
             });
         }
         CommandPayload::PurgeExcluded(payload) => {
-            let Some(db) = db else {
-                emit_db_unavailable(sink, "purgeExcluded").await;
-                sink.send(bulk_rejection_event(
-                    "purgeExcluded",
-                    &[],
-                    "Excluded files could not be purged because the library database is unavailable.",
-                ))
-                .await;
-                return;
-            };
-            let rejection = bulk_rejection_event(
-                "purgeExcluded",
-                &[],
-                "Excluded files could not be purged while the library scan is paused.",
-            );
-            let sink_c = sink.clone();
-            let db_c = db.clone();
-            spawn_mutation_with_rejection(
-                mutation_gate,
-                sink,
-                scan_state,
-                rejection,
-                async move {
-                    commands::scan::handle_purge_excluded(sink_c, db_c, payload).await;
-                },
-            )
-            .await;
+            d.dispatch_mutation(action, &ids, "Excluded files could not be purged", payload, commands::scan::handle_purge_excluded).await;
         }
     }
 }
@@ -2164,7 +1740,7 @@ mod tests {
 
     #[test]
     fn trash_rejection_event_is_correlated_per_file_and_terminal() {
-        let event = trash_rejection_event(&[4, 9], "busy");
+        let event = bulk_rejection_event("trashFiles", &[4, 9], "busy");
         let EventPayload::BulkActionResult(result) = event.payload else {
             panic!("expected BulkActionResult");
         };
@@ -2200,7 +1776,7 @@ mod tests {
             "apply_restructure",
             "undo_restructure",
         ] {
-            let event = command_error_event(kind, "busy");
+            let event = EngineError::event(kind, "busy");
             assert!(matches!(
                 event.payload,
                 EventPayload::Error(Wrap {
