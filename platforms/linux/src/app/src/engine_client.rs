@@ -1226,12 +1226,19 @@ fn preview_worker(slot: &PreviewSlot) {
     }
 }
 
+/// Upright thumbnails through the engine: RAW embedded previews with their
+/// container orientation, EXIF orientation, scaled JPEG decode and HEIC.
+/// RAW files are memory-mapped and only their preview is decoded, so the
+/// byte cap applies to everything else.
 fn image_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
-    let length = std::fs::metadata(path).ok()?.len();
-    if length > THUMB_MAX_BYTES {
+    let raw = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(fileid_engine::pipeline::raw_preview::is_raw_extension);
+    if !raw && std::fs::metadata(path).ok()?.len() > THUMB_MAX_BYTES {
         return None;
     }
-    fileid_engine::shell::thumbnail::render_at(path, dim).ok()
+    fileid_engine::shell::thumbnail::render_oriented(path, dim).ok()
 }
 
 fn video_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
@@ -1664,6 +1671,16 @@ mod tests {
     #[test]
     fn oversized_sparse_image_is_not_decoded() {
         let path = std::env::temp_dir().join(format!("fileid-linux-thumb-cap-{}.png", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(THUMB_MAX_BYTES + 1).unwrap();
+        drop(file);
+        assert!(image_thumbnail(&path, 64).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn raw_files_skip_the_byte_cap_and_still_fail_cleanly_without_a_preview() {
+        let path = std::env::temp_dir().join(format!("fileid-linux-thumb-raw-{}.ARW", std::process::id()));
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(THUMB_MAX_BYTES + 1).unwrap();
         drop(file);
