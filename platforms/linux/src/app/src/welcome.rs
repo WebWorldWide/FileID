@@ -59,7 +59,7 @@ pub fn should_show() -> bool {
 }
 
 fn fmt_gb(bytes: u64) -> String {
-    crate::tabs::util::file_size(bytes)
+    fileid_engine::util::display::file_size(bytes)
 }
 
 pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>>) {

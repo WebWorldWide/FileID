@@ -771,7 +771,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
                 None => ui.progress_eta.set_text(""),
             }
             match p.current_path.as_deref() {
-                Some(path) => ui.progress_file.set_text(basename(path)),
+                Some(path) => ui.progress_file.set_text(fileid_engine::util::display::basename(path)),
                 None => ui.progress_file.set_text(""),
             }
             match p.current_caption.as_deref().filter(|s| !s.is_empty()) {
@@ -1570,13 +1570,6 @@ fn reveal(card: &gtk::Box) {
             c.set_opacity(v);
         }
     });
-}
-
-fn basename(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(path)
 }
 
 fn format_duration(seconds: f64) -> String {

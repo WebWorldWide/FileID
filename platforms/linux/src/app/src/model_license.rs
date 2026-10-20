@@ -1,67 +1,27 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use adw::prelude::*;
+use fileid_engine::models::license::{self, LicensePolicy};
 use gtk::glib;
 
-#[derive(Clone, Copy)]
-struct LicensePolicy {
-    key: &'static str,
-    reviewed_at: &'static str,
-    display_name: &'static str,
-    terms_url: &'static str,
-}
-
-fn policy_for(model_kind: &str) -> Option<LicensePolicy> {
-    match model_kind {
-        "gemma_3_4b" | "gemma_3_12b" | "paligemma_3b" => Some(LicensePolicy {
-            key: "Gemma",
-            reviewed_at: "2026-07-16",
-            display_name: "Google Gemma Terms of Use",
-            terms_url: "https://ai.google.dev/gemma/terms",
-        }),
-        _ => None,
+/// Accepted on this device — in the shared `model-licenses.json`, or in the
+/// per-policy marker file older GTK builds wrote, which is migrated once.
+fn accepted_in(root: &Path, policy: &LicensePolicy) -> bool {
+    if license::is_accepted(root, policy) {
+        return true;
     }
-}
-
-fn marker_path(root: &Path, policy: LicensePolicy) -> PathBuf {
-    root.join("license-acceptance")
-        .join(format!("{}-{}.accepted", policy.key, policy.reviewed_at))
-}
-
-fn accepted_in(root: &Path, policy: LicensePolicy) -> bool {
-    std::fs::read_to_string(marker_path(root, policy)).is_ok_and(|value| value == "accepted\n")
-}
-
-fn record_acceptance_in(root: &Path, policy: LicensePolicy) -> std::io::Result<()> {
-    let directory = root.join("license-acceptance");
-    std::fs::create_dir_all(&directory)?;
-    let marker = marker_path(root, policy);
-    let temporary = directory.join(format!(
-        ".{}-{}-{}.tmp",
-        policy.key,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    let legacy = root
+        .join("license-acceptance")
+        .join(format!("{}-{}.accepted", policy.key, policy.reviewed_at));
+    if !std::fs::read_to_string(&legacy).is_ok_and(|value| value == "accepted\n") {
+        return false;
     }
-    let mut file = options.open(&temporary)?;
-    file.write_all(b"accepted\n")?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = std::fs::rename(&temporary, &marker) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
+    if let Err(error) = license::record(root, policy) {
+        tracing::warn!(policy = policy.key, ?error, "legacy license acceptance kept unmigrated");
+        return true;
     }
-    Ok(())
+    let _ = std::fs::remove_file(&legacy);
+    true
 }
 
 // gtk::Dialog is deprecated in GTK 4.10+; this is the app's only use of it.
@@ -69,7 +29,7 @@ fn record_acceptance_in(root: &Path, policy: LicensePolicy) -> std::io::Result<(
 // than rewrite to adw::AlertDialog blind — a proper migration is tracked in NEXT.
 #[allow(deprecated)]
 pub(crate) fn ensure_or_prompt(button: &gtk::Button, model_kind: &'static str) -> bool {
-    let Some(policy) = policy_for(model_kind) else {
+    let Some(policy) = license::policy_for(model_kind) else {
         return true;
     };
     let Ok(root) = fileid_engine::paths::root() else {
@@ -79,7 +39,7 @@ pub(crate) fn ensure_or_prompt(button: &gtk::Button, model_kind: &'static str) -
         );
         return false;
     };
-    if accepted_in(&root, policy) {
+    if accepted_in(&root, &policy) {
         return true;
     }
     let Some(window) = button.root().and_downcast::<gtk::Window>() else {
@@ -140,7 +100,7 @@ pub(crate) fn ensure_or_prompt(button: &gtk::Button, model_kind: &'static str) -
                 dialog.close();
                 return;
             }
-            match record_acceptance_in(&root, policy) {
+            match license::record(&root, &policy) {
                 Ok(()) => {
                     dialog.close();
                     if let Some(button) = button_weak.upgrade() {
@@ -163,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn restricted_policy_is_versioned_and_persisted() {
+    fn legacy_acceptance_markers_migrate_to_the_shared_store() {
         let root = std::env::temp_dir().join(format!(
             "fileid-linux-license-{}-{}",
             std::process::id(),
@@ -172,16 +132,15 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let policy = policy_for("gemma_3_4b").unwrap();
-        assert!(!accepted_in(&root, policy));
-        record_acceptance_in(&root, policy).unwrap();
-        assert!(accepted_in(&root, policy));
-        assert!(marker_path(&root, policy)
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .contains("2026-07-16"));
-        assert!(policy_for("qwen2_5_vl_7b").is_none());
+        let policy = license::policy_for("gemma_3_4b").unwrap();
+        assert!(!accepted_in(&root, &policy));
+        let legacy = root.join("license-acceptance").join("Gemma-2026-07-16.accepted");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "accepted\n").unwrap();
+        assert!(accepted_in(&root, &policy));
+        assert!(!legacy.exists(), "migrated once");
+        assert!(license::is_accepted(&root, &policy));
+        assert!(accepted_in(&root, &policy));
         std::fs::remove_dir_all(root).ok();
     }
 }

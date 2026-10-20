@@ -8,7 +8,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
-use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
+use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{texture_from_decoded, EngineClient, FileRow, ThumbReply};
 
 const PANE_PREVIEW_PX: i32 = 1024;
@@ -271,7 +272,7 @@ impl SelectedPane {
             self.facts.append(&kv_row("Captured", &date));
         }
         self.facts
-            .append(&kv_row("Size", &format_bytes(row.size_bytes)));
+            .append(&kv_row("Size", &file_size_i64(row.size_bytes)));
         if let Some(name) = row.proposed_name.as_ref().filter(|name| !name.is_empty()) {
             self.facts
                 .append(&kv_row("Smart name", &format!("{name}.{}", row.extension)));

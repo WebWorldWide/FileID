@@ -5,10 +5,13 @@
 //   * "Exact"   — same-size candidates are re-read and grouped by full-file
 //                 SHA-256. The indexed sampled hash is only a ranking hint.
 //   * "Similar" — visually near-identical images grouped by the Hamming distance
-//                 of their 64-bit dHash (`files.phash`), union-found into clusters
+//                 of their 64-bit dHash (`files.phash`) into transitive clusters
 //                 (default threshold 8 of 64 bits; `FILEID_NEARDUP_HAMMING`
-//                 overrides, clamped 0..20). Pure byte-exact clusters are dropped
+//                 overrides, clamped 0..16). Pure byte-exact clusters are dropped
 //                 (they already appear under Exact).
+//
+// Both groupings come from the shared engine (`read::dupes`), the same code the
+// CLI and TUI use.
 //
 // Each group is a glass card. The keeper (rank 0 — aesthetic ⇣, size ⇣, created
 // ⇡, shortest path ⇡, path ordinal) wears a gold KEEPER badge. Tiles toggle a
@@ -32,23 +35,19 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
-use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
+use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{texture_from_decoded, EngineClient, EngineEvent};
 use fileid_engine::ipc::{
     CommandPayload, ExactTrashIdentity, RestoreFromTrashPayload, TrashFilesPayload,
 };
+use fileid_engine::read::dupes::{self, ExactCaps, DEFAULT_SIMILAR_THRESHOLD, MAX_SIMILAR_THRESHOLD};
 
-/// Default "visually similar" Hamming threshold (8 of 64 bits). `FILEID_NEARDUP_HAMMING`
-/// overrides, clamped to 0..20. (mirrors macOS `defaultNearDupHamming`.)
-const DEFAULT_NEARDUP_HAMMING: u32 = 8;
-/// Above this image-with-dHash count the O(N²) pairwise scan is skipped rather
-/// than hang the UI. (mirrors macOS `nearDupImageCap`.)
-const NEAR_DUP_IMAGE_CAP: usize = 20_000;
 /// Largest clusters first; cap the rendered groups like the reference.
 const MAX_GROUPS: usize = 200;
 const MAX_VISIBLE_MEMBERS: usize = 5_000;
 const MAX_VISIBLE_MEMBERS_PER_GROUP: usize = 500;
-const EXACT_READ_BUDGET_BYTES: i64 = 64 * 1024 * 1024 * 1024;
+const EXACT_READ_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const TILE_THUMB_PX: i32 = 256;
 
 // ─── Data model (app-side mirror of DuplicateGroup / DuplicateMember) ─────────
@@ -696,8 +695,8 @@ impl Cleanup {
         }
         let size_text = format!(
             "{} total · {} if you keep 1",
-            format_bytes(group.total_bytes),
-            format_bytes(group.reclaimable()),
+            file_size_i64(group.total_bytes),
+            file_size_i64(group.reclaimable()),
         );
         head.append(
             &gtk::Label::builder()
@@ -898,7 +897,7 @@ impl Cleanup {
             .orientation(gtk::Orientation::Horizontal)
             .spacing(4)
             .build();
-        let size_caption = format_bytes(member.size);
+        let size_caption = file_size_i64(member.size);
         meta.append(
             &gtk::Label::builder()
                 .label(size_caption.as_str())
@@ -1028,7 +1027,7 @@ impl Cleanup {
             format!(
                 "{n_groups} verified duplicate group{} · {} to reclaim",
                 plural(n_groups),
-                format_bytes(reclaimable),
+                file_size_i64(reclaimable),
             )
         };
         if n_skipped > 0 {
@@ -1044,7 +1043,7 @@ impl Cleanup {
         } else {
             self.delete_btn.set_label(&format!(
                 "Delete {total_sel} selected · {}",
-                format_bytes(total_sel_bytes)
+                file_size_i64(total_sel_bytes)
             ));
         }
         self.delete_btn
@@ -1088,7 +1087,7 @@ impl Cleanup {
             "Moves the selected cop{} to Trash. Frees about {}. You can restore them \
              from Trash if you change your mind.",
             if n == 1 { "y" } else { "ies" },
-            format_bytes(bytes),
+            file_size_i64(bytes),
         );
         let dialog = adw::AlertDialog::new(Some(heading.as_str()), Some(body.as_str()));
         dialog.add_responses(&[("cancel", "Cancel"), ("trash", "Move to Trash")]);
@@ -1349,7 +1348,7 @@ impl Cleanup {
                 "Trashed {} file{} · freed {} · restore from Trash to undo",
                 result.succeeded,
                 plural(result.succeeded as usize),
-                format_bytes(freed),
+                file_size_i64(freed),
             ));
         } else {
             let details = result
@@ -1581,7 +1580,7 @@ fn update_group_selection_widgets(
             (c, b)
         }
     });
-    sel_lbl.set_text(&format!("{cnt} selected · {}", format_bytes(bytes)));
+    sel_lbl.set_text(&format!("{cnt} selected · {}", file_size_i64(bytes)));
     sel_lbl.set_visible(cnt > 0);
     del_btn.set_label(&format!("Delete {cnt} from this group"));
     del_btn.set_sensitive(cnt > 0);
@@ -1694,7 +1693,6 @@ struct RawRow {
     created: Option<f64>,
     aesthetic: Option<f64>,
     kind: String,
-    phash: i64,
 }
 
 #[cfg(test)]
@@ -1702,63 +1700,27 @@ fn load_exact(conn: &rusqlite::Connection) -> LoadResult {
     load_exact_until(conn, || false).expect("exact cleanup query")
 }
 
-fn load_exact_until(conn: &rusqlite::Connection, should_cancel: impl Fn() -> bool) -> LoadOutcome {
-    let candidate_count = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE failed=0", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(|error| format!("Could not count indexed files: {error}"))?
-        .max(0) as usize;
-    let eligible_count = conn
-        .query_row(
-            "WITH sizes AS ( \
-                 SELECT size_bytes FROM files WHERE failed=0 \
-                 GROUP BY size_bytes HAVING COUNT(*)>1 \
-             ) \
-             SELECT COUNT(*) FROM files f JOIN sizes s ON s.size_bytes=f.size_bytes \
-             WHERE f.failed=0",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map_err(|error| format!("Could not count same-size cleanup candidates: {error}"))?
-        .max(0) as usize;
-    if eligible_count == 0 {
-        return Ok(LoadResult {
-            groups: Vec::new(),
-            candidate_count,
-            warning: None,
-        });
-    }
+fn count_active(conn: &rusqlite::Connection, filter: &str) -> rusqlite::Result<usize> {
+    conn.query_row(&format!("SELECT COUNT(*) FROM files WHERE failed=0{filter}"), [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|count| count.max(0) as usize)
+}
 
-    let sql = "WITH top_sizes AS ( \
-                   SELECT size_bytes,COUNT(*) AS n, \
-                          (COUNT(*)-1)*MAX(size_bytes,0) AS payoff \
-                   FROM files WHERE failed=0 \
-                   GROUP BY size_bytes HAVING n>1 \
-                   ORDER BY payoff DESC,size_bytes DESC LIMIT ?1 \
-               ), ranked AS ( \
-                   SELECT f.id,f.path_text,f.size_bytes,f.modified_at, \
-                          f.created_at,f.aesthetic,f.kind,ts.payoff, \
-                          ROW_NUMBER() OVER (PARTITION BY f.size_bytes \
-                            ORDER BY COALESCE(f.aesthetic,0) DESC, \
-                                     COALESCE(f.created_at,1e18),LENGTH(f.path_text),f.path_text) AS member_rank \
-                   FROM files f JOIN top_sizes ts ON ts.size_bytes=f.size_bytes \
-                   WHERE f.failed=0 \
-               ) \
-               SELECT id,path_text,size_bytes,modified_at,created_at,aesthetic,kind \
-               FROM ranked WHERE member_rank<=?2 \
-               ORDER BY payoff DESC,size_bytes DESC,member_rank LIMIT ?3";
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|error| format!("Could not prepare the exact-cleanup query: {error}"))?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![
-                MAX_GROUPS,
-                MAX_VISIBLE_MEMBERS_PER_GROUP,
-                MAX_VISIBLE_MEMBERS
-            ],
-            |row| {
+/// Display metadata for the grouped ids, in `ids` order.
+fn load_rows(conn: &rusqlite::Connection, ids: &[i64]) -> Result<Vec<RawRow>, String> {
+    let mut by_id = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT id,path_text,size_bytes,modified_at,created_at,aesthetic,kind FROM files \
+             WHERE failed=0 AND id IN ({})",
+            vec!["?"; chunk.len()].join(",")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|error| format!("Could not prepare the cleanup row query: {error}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(chunk), |row| {
                 Ok(RawRow {
                     id: row.get(0)?,
                     path: row.get(1)?,
@@ -1767,70 +1729,66 @@ fn load_exact_until(conn: &rusqlite::Connection, should_cancel: impl Fn() -> boo
                     created: row.get(4)?,
                     aesthetic: row.get(5)?,
                     kind: row.get(6)?,
-                    phash: 0,
                 })
-            },
-        )
-        .map_err(|error| format!("Could not run the exact-cleanup query: {error}"))?;
-    let raw: Vec<RawRow> = rows
-        .collect::<Result<_, _>>()
-        .map_err(|error| format!("Could not read an exact-cleanup row: {error}"))?;
-    let mut selected_bytes = 0i64;
-    let mut candidates = Vec::new();
-    for row in &raw {
-        let bytes = row.size.max(0);
-        if bytes > EXACT_READ_BUDGET_BYTES - selected_bytes {
-            continue;
+            })
+            .map_err(|error| format!("Could not run the cleanup row query: {error}"))?;
+        for row in rows {
+            let row = row.map_err(|error| format!("Could not read a cleanup row: {error}"))?;
+            by_id.insert(row.id, row);
         }
-        selected_bytes += bytes;
-        candidates.push(fileid_engine::util::content_hash::ExactDuplicateCandidate {
-            id: row.id,
-            path: std::path::PathBuf::from(&row.path),
-            indexed_size: row.size,
-        });
     }
-    let selected_count = candidates.len();
-    let grouping =
-        fileid_engine::util::content_hash::group_exact_duplicates_until(candidates, should_cancel);
-    let skipped = grouping.skipped;
-    let index_by_id: HashMap<i64, usize> = raw
-        .iter()
-        .enumerate()
-        .map(|(index, row)| (row.id, index))
-        .collect();
-    let mut groups = Vec::new();
-    for exact in grouping.groups {
-        let mut indices: Vec<usize> = exact
-            .files
-            .iter()
-            .filter_map(|file| index_by_id.get(&file.id).copied())
-            .collect();
-        if indices.len() < 2 {
-            continue;
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
+/// One rendered group: members ranked keeper-first, at most
+/// `MAX_VISIBLE_MEMBERS_PER_GROUP` shown, totals over every member.
+fn ranked_group(rows: Vec<RawRow>, key: String, is_similar: bool, exact_hash: Option<[u8; 32]>) -> DupGroup {
+    let mut indices: Vec<usize> = (0..rows.len()).collect();
+    rank_indices(&rows, &mut indices);
+    let visible = indices.len().min(MAX_VISIBLE_MEMBERS_PER_GROUP);
+    let mut group = build_group(&rows, &indices[..visible], key, is_similar, false, exact_hash);
+    group.total_members = rows.len();
+    group.total_bytes = rows.iter().map(|row| row.size).sum();
+    group
+}
+
+fn load_exact_until(conn: &rusqlite::Connection, should_cancel: impl Fn() -> bool) -> LoadOutcome {
+    let candidate_count = count_active(conn, "")
+        .map_err(|error| format!("Could not count indexed files: {error}"))?;
+    let caps = ExactCaps {
+        max_candidates: MAX_VISIBLE_MEMBERS as u64,
+        max_bytes: EXACT_READ_BUDGET_BYTES,
+    };
+    let listing = dupes::exact_groups(conn, caps, &should_cancel)
+        .map_err(|error| format!("Could not verify exact duplicates: {error:#}"))?;
+    if should_cancel() {
+        return Ok(LoadResult::empty());
+    }
+    let mut groups = Vec::with_capacity(listing.groups.len());
+    for exact in &listing.groups {
+        let ids: Vec<i64> = exact.files.iter().map(|file| file.id).collect();
+        let rows = load_rows(conn, &ids)?;
+        if rows.len() >= 2 {
+            groups.push(ranked_group(
+                rows,
+                format!("dup-{}:{}", hex(&exact.hash), exact.size),
+                false,
+                Some(exact.hash),
+            ));
         }
-        rank_indices(&raw, &mut indices);
-        groups.push(build_group(
-            &raw,
-            &indices,
-            format!("dup-{}:{}", hex(&exact.hash), exact.size),
-            false,
-            false,
-            Some(exact.hash),
-        ));
     }
     groups.sort_by_key(|group| std::cmp::Reverse(group.total_members));
     let omitted_groups = groups.len().saturating_sub(MAX_GROUPS);
-    if omitted_groups > 0 {
-        groups.truncate(MAX_GROUPS);
-    }
-    let omitted = eligible_count.saturating_sub(selected_count);
-    let verified = selected_count.saturating_sub(skipped);
-    let warning = (omitted > 0 || skipped > 0 || omitted_groups > 0).then(|| {
+    groups.truncate(MAX_GROUPS);
+    let eligible = listing.admitted + listing.skipped_candidates;
+    let verified = (listing.admitted as usize).saturating_sub(listing.unreadable);
+    let warning = (listing.is_partial() || listing.unreadable > 0 || omitted_groups > 0).then(|| {
         format!(
-            "Exact results are partial: byte-verified {verified} of {eligible_count} same-size candidates; \
-             {omitted} were outside the 200-size-class, 500-per-size, {MAX_VISIBLE_MEMBERS}-file, or 64 GiB refresh limits; \
-             {skipped} were missing, unreadable, changed, or cancelled; {omitted_groups} verified groups were outside the {MAX_GROUPS}-group display limit. \
-             No unverified file is shown as an exact duplicate."
+            "Exact results are partial: byte-verified {verified} of {eligible} same-size candidates; \
+             {} were outside the {MAX_VISIBLE_MEMBERS}-file or 64 GiB refresh limits; \
+             {} were missing, unreadable, changed, or cancelled; {omitted_groups} verified groups were outside the {MAX_GROUPS}-group display limit. \
+             No unverified file is shown as an exact duplicate.",
+            listing.skipped_candidates, listing.unreadable
         )
     });
     Ok(LoadResult {
@@ -1849,120 +1807,55 @@ fn load_similar_until(
     conn: &rusqlite::Connection,
     should_cancel: impl Fn() -> bool,
 ) -> LoadOutcome {
-    let candidate_count = conn
-        .query_row(
-            "SELECT COUNT(*) FROM files WHERE kind='image' AND failed=0 AND phash IS NOT NULL AND phash!=0",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(|error| format!("Could not count similar-image candidates: {error}"))?
-        .max(0) as usize;
-    if should_cancel() {
-        return Ok(LoadResult::empty());
-    }
-    if candidate_count > NEAR_DUP_IMAGE_CAP {
+    let candidate_count = count_active(conn, " AND phash IS NOT NULL AND phash!=0")
+        .map_err(|error| format!("Could not count similar-image candidates: {error}"))?;
+    if should_cancel() || candidate_count < 2 {
         return Ok(LoadResult {
-            groups: Vec::new(),
             candidate_count,
-            warning: Some(format!(
-                "Visually similar comparison is unavailable for {candidate_count} images: \
-                 the exact Hamming matcher is capped at {NEAR_DUP_IMAGE_CAP}. \
-                 Exact duplicate cleanup remains available."
-            )),
+            ..LoadResult::empty()
         });
     }
-    // Only images carry a dHash; phash == 0 is the engine's "none / failed"
-    // sentinel — exclude it so blank hashes don't collapse into one giant group.
-    let sql = "SELECT id, path_text, size_bytes, modified_at, created_at, aesthetic, phash, kind \
-               FROM files \
-               WHERE kind = 'image' AND failed = 0 AND phash IS NOT NULL AND phash != 0";
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|error| format!("Could not prepare the similar-cleanup query: {error}"))?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(RawRow {
-                id: row.get(0)?,
-                path: row.get(1)?,
-                size: row.get(2)?,
-                modified: row.get(3)?,
-                created: row.get(4)?,
-                aesthetic: row.get(5)?,
-                phash: row.get(6)?,
-                kind: row.get(7)?,
+    let components = match dupes::similar_groups(conn, near_dup_threshold(), &should_cancel) {
+        Ok(components) => components.unwrap_or_default(),
+        Err(_) if should_cancel() => return Ok(LoadResult::empty()),
+        Err(error) => {
+            return Ok(LoadResult {
+                groups: Vec::new(),
+                candidate_count,
+                warning: Some(format!(
+                    "Visually similar comparison is unavailable for {candidate_count} images: {error}. \
+                     Exact duplicate cleanup remains available."
+                )),
             })
-        })
-        .map_err(|error| format!("Could not run the similar-cleanup query: {error}"))?;
+        }
+    };
 
-    let raw: Vec<RawRow> = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("Could not read a similar-cleanup row: {error}"))?
-        .into_iter()
-        .filter(|row| row.phash != 0)
-        .collect();
-    if raw.len() <= 1 || raw.len() > NEAR_DUP_IMAGE_CAP {
-        // Empty or beyond the O(N²) cap — skip perceptual grouping (Exact stays).
-        return Ok(LoadResult {
-            groups: Vec::new(),
-            candidate_count,
-            warning: None,
-        });
-    }
-
-    let max_hamming = near_dup_threshold();
-    let mut index_by_id: HashMap<i64, usize> = HashMap::with_capacity(raw.len());
-    let mut items: Vec<(i64, i64)> = Vec::with_capacity(raw.len());
-    for (i, r) in raw.iter().enumerate() {
-        index_by_id.insert(r.id, i);
-        items.push((r.id, r.phash));
-    }
-
-    let matched = group_by_hamming_until(&items, max_hamming, &should_cancel);
     let mut groups: Vec<DupGroup> = Vec::new();
     let mut remaining = MAX_VISIBLE_MEMBERS;
     let mut omitted_for_members = 0usize;
-    for ids in matched {
+    for ids in components {
+        if should_cancel() {
+            return Ok(LoadResult::empty());
+        }
         if remaining < 2 {
             omitted_for_members += 1;
             continue;
         }
-        let mut indices: Vec<usize> = ids
-            .iter()
-            .filter_map(|id| index_by_id.get(id).copied())
-            .collect();
-        if indices.len() < 2 {
+        let rows = load_rows(conn, &ids)?;
+        if rows.len() < 2 || pure_exact_group(&rows) {
             continue;
         }
-        if pure_exact_group(&raw, &indices) {
-            continue;
-        }
-        rank_indices(&raw, &mut indices);
         // Stable identity: smallest member id, independent of keeper re-ranks.
-        let gid = indices.iter().map(|&i| raw[i].id).min().unwrap_or(0);
-        let total_members = indices.len();
-        let total_bytes = indices.iter().map(|&i| raw[i].size).sum();
-        let visible = total_members
-            .min(MAX_VISIBLE_MEMBERS_PER_GROUP)
-            .min(remaining);
-        let mut group = build_group(
-            &raw,
-            &indices[..visible],
-            format!("sim-{gid}"),
-            true,
-            false,
-            None,
-        );
-        group.total_members = total_members;
-        group.total_bytes = total_bytes;
+        let gid = ids[0];
+        let mut group = ranked_group(rows, format!("sim-{gid}"), true, None);
+        group.members.truncate(remaining);
         remaining -= group.members.len();
         groups.push(group);
     }
 
     groups.sort_by_key(|group| std::cmp::Reverse(group.total_members));
     let omitted_for_groups = groups.len().saturating_sub(MAX_GROUPS);
-    if omitted_for_groups > 0 {
-        groups.truncate(MAX_GROUPS);
-    }
+    groups.truncate(MAX_GROUPS);
     let omitted = omitted_for_members + omitted_for_groups;
     Ok(LoadResult {
         groups,
@@ -1976,15 +1869,15 @@ fn load_similar_until(
     })
 }
 
-fn pure_exact_group(raw: &[RawRow], indices: &[usize]) -> bool {
-    let Some(first) = indices.first().map(|index| &raw[*index]) else {
+fn pure_exact_group(rows: &[RawRow]) -> bool {
+    let Some(first) = rows.first() else {
         return false;
     };
     let Ok(size) = u64::try_from(first.size) else {
         return false;
     };
-    if size.saturating_mul(indices.len() as u64) > EXACT_READ_BUDGET_BYTES as u64
-        || indices.iter().any(|index| raw[*index].size != first.size)
+    if size.saturating_mul(rows.len() as u64) > EXACT_READ_BUDGET_BYTES
+        || rows.iter().any(|row| row.size != first.size)
     {
         return false;
     }
@@ -1994,12 +1887,9 @@ fn pure_exact_group(raw: &[RawRow], indices: &[usize]) -> bool {
     ) else {
         return false;
     };
-    indices.iter().skip(1).all(|index| {
-        fileid_engine::util::content_hash::exact_file_sha256(
-            std::path::Path::new(&raw[*index].path),
-            size,
-        )
-        .is_ok_and(|other| other == digest)
+    rows.iter().skip(1).all(|row| {
+        fileid_engine::util::content_hash::exact_file_sha256(std::path::Path::new(&row.path), size)
+            .is_ok_and(|other| other == digest)
     })
 }
 
@@ -2061,84 +1951,13 @@ fn rank_indices(raw: &[RawRow], indices: &mut [usize]) {
     });
 }
 
-/// Union-find clustering of dHashes within `max_hamming` (transitively). Returns
-/// groups of size ≥ 2 in first-seen order. (Direct port of `PerceptualGrouping`.)
-fn group_by_hamming_until(
-    items: &[(i64, i64)],
-    max_hamming: u32,
-    should_cancel: impl Fn() -> bool,
-) -> Vec<Vec<i64>> {
-    let n = items.len();
-    if n <= 1 {
-        return Vec::new();
-    }
-    let mut parent: Vec<usize> = (0..n).collect();
-
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        let mut r = x;
-        while parent[r] != r {
-            parent[r] = parent[parent[r]];
-            r = parent[r];
-        }
-        r
-    }
-
-    for i in 0..n {
-        if should_cancel() {
-            return Vec::new();
-        }
-        for j in (i + 1)..n {
-            if hamming(items[i].1, items[j].1) <= max_hamming {
-                let ra = find(&mut parent, i);
-                let rb = find(&mut parent, j);
-                if ra != rb {
-                    // Point the higher index at the lower so every root is its
-                    // smallest member — keeps group order deterministic.
-                    if ra < rb {
-                        parent[rb] = ra;
-                    } else {
-                        parent[ra] = rb;
-                    }
-                }
-            }
-        }
-    }
-
-    let mut order: Vec<usize> = Vec::new();
-    let mut members_by_root: HashMap<usize, Vec<i64>> = HashMap::new();
-    for (i, item) in items.iter().enumerate() {
-        let r = find(&mut parent, i);
-        members_by_root.entry(r).or_insert_with(|| {
-            order.push(r);
-            Vec::new()
-        });
-        members_by_root.get_mut(&r).unwrap().push(item.0);
-    }
-
-    let mut groups = Vec::new();
-    for root in order {
-        if let Some(ids) = members_by_root.remove(&root) {
-            if ids.len() >= 2 {
-                groups.push(ids);
-            }
-        }
-    }
-    groups
-}
-
-/// popcount(a XOR b) over the raw 64 bits — the dHashes' bit patterns, not their
-/// signed values (the sign bit is just bit 63 of the hash).
-fn hamming(a: i64, b: i64) -> u32 {
-    ((a as u64) ^ (b as u64)).count_ones()
-}
-
 fn near_dup_threshold() -> u32 {
     if let Ok(raw) = std::env::var("FILEID_NEARDUP_HAMMING") {
         if let Ok(v) = raw.trim().parse::<i64>() {
-            return v.clamp(0, 20) as u32;
+            return v.clamp(0, i64::from(MAX_SIMILAR_THRESHOLD)) as u32;
         }
     }
-    DEFAULT_NEARDUP_HAMMING
+    DEFAULT_SIMILAR_THRESHOLD
 }
 
 // ─── Small helpers (mirrors of library.rs) ───────────────────────────────────
@@ -2216,16 +2035,16 @@ mod tests {
             .execute_batch(
                 "CREATE TABLE files(\
                     id INTEGER, path_text, size_bytes INTEGER, modified_at REAL,\
-                    created_at REAL, aesthetic REAL, kind TEXT, failed INTEGER\
+                    created_at REAL, aesthetic REAL, kind TEXT, failed INTEGER, content_hash BLOB\
                  );\
-                 INSERT INTO files VALUES(1,NULL,4,NULL,NULL,NULL,'other',0);\
-                 INSERT INTO files VALUES(2,'/tmp/two',4,NULL,NULL,NULL,'other',0);",
+                 INSERT INTO files VALUES(1,NULL,4,NULL,NULL,NULL,'other',0,NULL);\
+                 INSERT INTO files VALUES(2,'/tmp/two',4,NULL,NULL,NULL,'other',0,NULL);",
             )
             .unwrap();
         assert!(load_exact_until(&malformed_row, || false)
             .err()
             .unwrap()
-            .contains("Could not read an exact-cleanup row"));
+            .contains("Could not verify exact duplicates"));
     }
 
     #[test]
@@ -2253,19 +2072,29 @@ mod tests {
         let loaded = load_exact(&conn);
         assert_eq!(loaded.candidate_count, 600);
         assert_eq!(loaded.groups.len(), 1);
-        assert_eq!(
-            loaded.groups[0].total_members,
-            MAX_VISIBLE_MEMBERS_PER_GROUP
-        );
+        assert_eq!(loaded.groups[0].total_members, 600);
         assert_eq!(
             loaded.groups[0].members.len(),
             MAX_VISIBLE_MEMBERS_PER_GROUP
         );
-        assert_eq!(loaded.groups[0].total_bytes, 2_000);
+        assert_eq!(loaded.groups[0].total_bytes, 2_400);
+        assert!(loaded.warning.is_none());
+
+        let tx = conn.transaction().unwrap();
+        for id in 601..=(MAX_VISIBLE_MEMBERS as i64 + 1) {
+            tx.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,content_hash) \
+                 VALUES (?1,printf('/absent/%d.bin',?1),?1,9,1,'other','bin',0,NULL)",
+                [id],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let loaded = load_exact(&conn);
+        assert_eq!(loaded.groups.len(), 1, "the twin class still verifies first");
         let warning = loaded.warning.as_deref().unwrap_or_default();
         assert!(warning.contains("partial"));
-        assert!(warning.contains("100 were outside"));
-        assert!(warning.contains("500-per-size"));
+        assert!(warning.contains("were outside the 5000-file"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2456,31 +2285,34 @@ mod tests {
     }
 
     #[test]
-    fn similar_hamming_grouping_honors_cancellation() {
-        let calls = std::cell::Cell::new(0usize);
-        let items: Vec<(i64, i64)> = (0..1_000).map(|id| (id, id)).collect();
-        let groups = group_by_hamming_until(&items, 8, || {
-            calls.set(calls.get() + 1);
-            true
-        });
-        assert!(groups.is_empty());
-        assert_eq!(calls.get(), 1);
+    fn similar_grouping_honors_cancellation() {
+        let conn = database();
+        for id in 1..=2i64 {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,phash) \
+                 VALUES (?1,printf('/library/%d.jpg',?1),?1,4,1,'image','jpg',0,7)",
+                [id],
+            )
+            .unwrap();
+        }
+        assert!(load_similar_until(&conn, || true).unwrap().groups.is_empty());
+        assert_eq!(load_similar(&conn).groups.len(), 1);
     }
 
     #[test]
-    fn similar_cleanup_rejects_oversized_input_before_materializing_rows() {
+    fn similar_cleanup_reports_a_degenerate_hash_set_instead_of_hanging() {
         let conn = database();
         conn.execute(
             "WITH RECURSIVE ids(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM ids WHERE x<?1) \
              INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,phash) \
              SELECT x,printf('/library/%d.jpg',x),x,4,1,'image','jpg',0,x FROM ids",
-            [NEAR_DUP_IMAGE_CAP as i64 + 1],
+            [20_001],
         )
         .unwrap();
 
         let loaded = load_similar(&conn);
         assert!(loaded.groups.is_empty());
-        assert_eq!(loaded.candidate_count, NEAR_DUP_IMAGE_CAP + 1);
+        assert_eq!(loaded.candidate_count, 20_001);
         assert!(loaded
             .warning
             .as_deref()
