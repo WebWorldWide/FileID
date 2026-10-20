@@ -240,11 +240,23 @@ fn is_newline(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
+/// Same wording as macOS `ChatService.kindLabel`.
+fn kind_label(kind: &str) -> &str {
+    match kind {
+        "image" => "photos",
+        "video" => "videos",
+        "doc" => "documents",
+        "pdf" => "PDFs",
+        "other" => "other files",
+        other => other,
+    }
+}
+
 fn model_note(no_hits: bool) -> &'static str {
     if no_hits {
-        " No model summary was attempted. No download was started."
+        " Nothing was downloaded."
     } else {
-        " The selected model is not loaded. Choose Download & load in the model browser; showing catalog evidence only. No download was started."
+        " Load a model in Deep Analyze for a written answer; these are the matching files. Nothing was downloaded."
     }
 }
 
@@ -318,14 +330,15 @@ fn prepare_send(conn: &Connection, request: &ChatRequest) -> Result<(String, Str
         plan.time_seconds,
     )?;
     let scope = if plan.query.is_empty() {
-        "all catalog files".to_owned()
+        "in the library".to_owned()
     } else {
-        format!("“{}”", plan.query)
+        format!("for “{}”", plan.query)
     };
     let filter = if plan.kinds.is_empty() {
         String::new()
     } else {
-        format!(" ({})", plan.kinds.join(", "))
+        let labels: Vec<&str> = plan.kinds.iter().map(|kind| kind_label(kind)).collect();
+        format!(" ({})", labels.join(", "))
     };
     let explanation = if plan.query.is_empty()
         && plan.kinds.is_empty()
@@ -335,14 +348,15 @@ fn prepare_send(conn: &Connection, request: &ChatRequest) -> Result<(String, Str
     {
         "Add a subject or a media type such as videos or photos. No search was run.".into()
     } else if hits.is_empty() {
-        format!("No keyword matches for {scope}{filter}. Try names or a few descriptive terms. Unanalyzed files may still contain the requested event.")
+        format!("No matches {scope}{filter}. Try names or a few descriptive words; files that haven't been analyzed may still contain it.")
     } else {
         let sample_note = if hits.iter().any(|hit| hit.kind == "sampledFrame") {
             " Sampled-frame descriptions remain unverified."
         } else {
             ""
         };
-        format!("Found {} file or evidence matches for {scope}{filter}.{sample_note}", hits.len())
+        let noun = if hits.len() == 1 { "match" } else { "matches" };
+        format!("Found {} {noun} {scope}{filter}.{sample_note}", hits.len())
     };
     Ok((text, explanation, hits))
 }
@@ -412,7 +426,8 @@ mod tests {
         let result = execute(&mut conn, &request).unwrap();
         assert_eq!(result.hits[0].file_id, 1);
         assert_eq!(result.messages.len(), 2);
-        assert!(result.message.contains("showing catalog evidence only. No download was started."));
+        assert!(result.message.contains("these are the matching files. Nothing was downloaded."));
+        assert!(result.message.starts_with("Found 1 match for "), "{}", result.message);
         request.action = "history".into();
         assert_eq!(execute(&mut conn, &request).unwrap().messages.len(), 2);
         request.conversation_id = "another".into();

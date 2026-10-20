@@ -44,16 +44,16 @@ actor ChatService {
                 }
                 let hits = try await database.pool.read { db in try CatalogStore.search(db, query: plan.query, kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds) }
                 guard active[request.conversationID] == request.requestID else { return }
-                let scope = plan.query.isEmpty ? "all catalog files" : "“\(plan.query)”"
-                let filter = plan.kinds.isEmpty ? "" : " (\(plan.kinds.joined(separator: ", ")))"
+                let scope = plan.query.isEmpty ? "in the library" : "for “\(plan.query)”"
+                let filter = plan.kinds.isEmpty ? "" : " (\(plan.kinds.map(Self.kindLabel).joined(separator: ", ")))"
                 let people = plan.personNames.isEmpty ? "" : " (people: \(plan.personNames.joined(separator: ", ")))"
                 let events = plan.eventNames.isEmpty ? "" : " (event: \(plan.eventNames.joined(separator: ", ")))"
                 let time = plan.timeSeconds.map { " (near \(Self.timeLabel($0)))" } ?? ""
                 let explanation = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.timeSeconds == nil
                     ? "Add a subject, event, time, or media type such as videos or photos. No search was run."
                     : hits.isEmpty
-                        ? "No catalog evidence matches \(scope)\(filter)\(people)\(events)\(time). Try names or a few descriptive terms. Unanalyzed files may still contain the requested event."
-                        : "Found \(hits.count) file or evidence matches \(scope)\(filter)\(people)\(events)\(time)." + (hits.contains { $0.kind == "sampledFrame" } ? " Sampled-frame descriptions remain unverified." : "")
+                        ? "No matches \(scope)\(filter)\(people)\(events)\(time). Try names or a few descriptive words; files that haven't been analyzed may still contain it."
+                        : "Found \(hits.count) \(hits.count == 1 ? "match" : "matches") \(scope)\(filter)\(people)\(events)\(time)." + (hits.contains { $0.kind == "sampledFrame" } ? " Sampled-frame descriptions remain unverified." : "")
                 await emit(request, status: "retrieving", message: explanation, hits: hits, database: database, sink: sink)
                 guard active[request.conversationID] == request.requestID else { return }
                 if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState,
@@ -65,10 +65,8 @@ actor ChatService {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
                 } else {
-                    let modelNote = hits.isEmpty
-                        ? " No model summary was attempted."
-                        : " The selected model is not loaded. Choose Download & load in the model browser; showing catalog evidence only."
-                    let message = explanation + (request.useModel == true ? modelNote + " No download was started." : "")
+                    let modelNote = hits.isEmpty ? "" : " Load a model in Deep Analyze for a written answer; these are the matching files."
+                    let message = explanation + (request.useModel == true ? modelNote + " Nothing was downloaded." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }
                     active.removeValue(forKey: request.conversationID)
@@ -115,6 +113,17 @@ actor ChatService {
     private static func timeLabel(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    static func kindLabel(_ kind: String) -> String {
+        switch kind {
+        case "image": "photos"
+        case "video": "videos"
+        case "doc": "documents"
+        case "pdf": "PDFs"
+        case "other": "other files"
+        default: kind
+        }
     }
 
     /// Numbered one-line evidence instead of JSON: about a third fewer prompt

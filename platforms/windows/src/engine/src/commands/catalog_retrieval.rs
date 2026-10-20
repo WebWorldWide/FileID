@@ -163,7 +163,7 @@ fn tag_hits(
         .join(" + ");
     let sql = format!(
         "WITH scored AS (SELECT f.id,f.path_text,f.kind,{score} AS score FROM files f WHERE {filters} AND ?1 IS NOT NULL) \
-         SELECT s.id,s.path_text,s.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT TRIM(tag) AS tag FROM tags WHERE file_id=s.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL \
+         SELECT s.id,s.path_text,s.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT REPLACE(TRIM(tag),'_',' ') AS tag FROM tags WHERE file_id=s.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL \
          FROM scored s WHERE s.score>0 AND s.score=(SELECT MAX(score) FROM scored) ORDER BY s.id DESC LIMIT 100"
     );
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];

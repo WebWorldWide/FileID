@@ -155,7 +155,7 @@ struct ChatWorkbench: View {
         let user = entry.role == "user"
         let isLastAnswer = !user && entry.id == messages.last(where: { $0.role != "user" })?.id
         return VStack(alignment: .leading, spacing: 6) {
-            SectionLabel(user ? "You" : modelName, color: user ? Theme.gold : Theme.ai)
+            SectionLabel(user ? "You" : "FileID", color: user ? Theme.gold : Theme.ai)
             Text(entry.text).font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1).textSelection(.enabled)
                 .lineSpacing(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -215,7 +215,7 @@ struct ChatWorkbench: View {
                 .accessibilityLabel("Chat model: \(modelName)")
                 Spacer(minLength: 0)
             }
-            if !busy && !message.isEmpty {
+            if !busy && !message.isEmpty && message != messages.last(where: { $0.role != "user" })?.text {
                 Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(3).textSelection(.enabled)
             } else if !useModel {
                 MetaText("Keyword search only. Turn on local AI for written answers.")
