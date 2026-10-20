@@ -1,4 +1,3 @@
-#![allow(dead_code)] // CLI consumer
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

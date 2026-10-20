@@ -151,7 +151,6 @@ pub(crate) fn trash_path_as(
 /// threaded once + stays in the pool for the batch's lifetime, amortizing
 /// the ~1-2 ms CoInitialize cost across N files. Matches macOS's 8-way
 /// async trash pattern. Order of `paths` is preserved in the result.
-#[allow(dead_code)]
 pub fn trash(paths: &[std::path::PathBuf]) -> Vec<bool> {
     if paths.is_empty() {
         return Vec::new();

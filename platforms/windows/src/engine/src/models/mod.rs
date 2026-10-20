@@ -21,7 +21,6 @@
 pub mod bge_text;
 pub mod catalog;
 pub mod launch_tuning;
-#[allow(dead_code)]
 pub mod license;
 pub mod benchmark;
 pub mod clip_text;

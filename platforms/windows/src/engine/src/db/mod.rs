@@ -8,7 +8,6 @@
 
 pub mod migrations;
 #[path = "../read/mod.rs"]
-#[allow(dead_code)]
 pub mod read;
 pub mod zero_byte;
 

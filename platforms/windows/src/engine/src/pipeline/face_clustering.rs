@@ -78,7 +78,6 @@ pub struct ClusterAssignment {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClusterAnchor {
     pub cluster_id: i32,
     pub anchor_face_id: i64,

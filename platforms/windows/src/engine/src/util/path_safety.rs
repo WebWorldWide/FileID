@@ -323,7 +323,6 @@ pub fn safe_filename_component_max(raw: &str, max_len: usize) -> String {
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
 pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
@@ -352,7 +351,6 @@ pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<(
 }
 
 #[cfg(unix)]
-#[allow(dead_code)]
 fn c_path(path: &Path, label: &str) -> std::io::Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
 
@@ -365,7 +363,6 @@ fn c_path(path: &Path, label: &str) -> std::io::Result<std::ffi::CString> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source = c_path(source, "source")?;
     let destination = c_path(destination, "destination")?;
@@ -386,7 +383,6 @@ pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<(
 }
 
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
 pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     let source = c_path(source, "source")?;
     let destination = c_path(destination, "destination")?;
@@ -399,7 +395,6 @@ pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<(
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-#[allow(dead_code)]
 pub fn rename_no_replace(_source: &Path, _destination: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

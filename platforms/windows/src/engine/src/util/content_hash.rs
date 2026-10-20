@@ -30,9 +30,6 @@ pub(crate) fn content_hash(path: &Path, size: u64) -> std::io::Result<[u8; 32]> 
     Ok(content_hashes(path, size, false)?.0)
 }
 
-// Public library surface used by the CLI, TUI, and Linux app rather than the
-// engine binary.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ExactDuplicateCandidate {
     pub id: i64,
@@ -40,7 +37,6 @@ pub struct ExactDuplicateCandidate {
     pub indexed_size: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ExactDuplicateGroup {
     pub hash: [u8; 32],
@@ -48,7 +44,6 @@ pub struct ExactDuplicateGroup {
     pub files: Vec<ExactDuplicateCandidate>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ExactDuplicateGrouping {
     pub groups: Vec<ExactDuplicateGroup>,
@@ -61,7 +56,6 @@ pub(crate) struct ExactFileHash {
     _file: std::fs::File,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) enum ExactFileLock {
     None,
@@ -69,7 +63,6 @@ pub(crate) enum ExactFileLock {
     DenyMutation,
 }
 
-#[allow(dead_code)]
 pub fn exact_file_sha256(path: &Path, expected_size: u64) -> std::io::Result<[u8; 32]> {
     exact_file_sha256_until_with_identity(path, expected_size, || false, ExactFileLock::None)
         .map(|proof| proof.hash)
@@ -83,7 +76,6 @@ pub(crate) fn exact_file_sha256_guard(
     exact_file_sha256_until_with_identity(path, expected_size, || false, lock)
 }
 
-#[allow(dead_code)]
 fn exact_file_sha256_until(
     path: &Path,
     expected_size: u64,
@@ -180,7 +172,6 @@ fn exact_file_sha256_until_with_identity(
     })
 }
 
-#[allow(dead_code)]
 pub fn group_exact_duplicates(
     candidates: Vec<ExactDuplicateCandidate>,
 ) -> ExactDuplicateGrouping {
@@ -205,7 +196,6 @@ fn exact_hash_pool() -> &'static rayon::ThreadPool {
 /// Full-file SHA-256 grouping. Only files sharing an indexed size can be
 /// duplicates, so singleton sizes are never read. `should_cancel` is polled on
 /// the calling thread; once it fires, unread files count as skipped.
-#[allow(dead_code)]
 pub fn group_exact_duplicates_until(
     candidates: Vec<ExactDuplicateCandidate>,
     should_cancel: impl Fn() -> bool,

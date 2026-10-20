@@ -4,7 +4,6 @@
 //! can pull them in without dragging in the wider command graph.
 
 pub mod content_hash;
-#[allow(dead_code)]
 pub mod display;
 pub(crate) mod hmac;
 pub(crate) mod hnsw_index;

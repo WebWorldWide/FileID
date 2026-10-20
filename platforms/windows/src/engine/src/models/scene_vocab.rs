@@ -90,7 +90,6 @@ pub static SCENE_LABELS: &[&str] = &[
 /// template and the embeddings are averaged + renormalized. A few templates
 /// recover a few percent of accuracy over a single one at no per-file cost
 /// (the averaging happens once at matrix-build time). `{}` is the label.
-#[allow(dead_code)] // offline matrix build only (examples/gen_scene_matrix.rs)
 pub static PROMPT_TEMPLATES: &[&str] = &[
     "a photo of a {}.",
     "a photo of the {}.",
@@ -126,7 +125,6 @@ pub const SCENE_COSINE_THRESHOLD: f32 = 0.15;
 pub const SCENE_TOP_K: usize = 4;
 
 /// Prompts text-encoded per ONNX batch when building the label matrix.
-#[allow(dead_code)] // offline matrix build only (examples/gen_scene_matrix.rs)
 const BUILD_BATCH: usize = 64;
 
 /// The label-embedding matrix used for zero-shot scoring. Holds one
@@ -147,7 +145,6 @@ impl SceneLabeler {
     /// Read-only view of the prompt-ensembled label matrix (one L2-normalized
     /// row per `SCENE_LABELS` entry). Used by the offline matrix-regeneration
     /// harness (`examples/gen_scene_matrix.rs`); not referenced at runtime.
-    #[allow(dead_code)] // offline matrix build only
     pub fn matrix(&self) -> &[Vec<f32>] {
         &self.matrix
     }
@@ -155,7 +152,6 @@ impl SceneLabeler {
     /// Build the label matrix from an already-loaded CLIP text encoder.
     /// Embeds every label×template prompt (batched), averages each label's
     /// template embeddings, and L2-renormalizes.
-    #[allow(dead_code)] // offline matrix build only
     pub fn build(model: &mut ClipText) -> Result<Self> {
         let started = std::time::Instant::now();
         let templates = PROMPT_TEMPLATES.len();
@@ -287,7 +283,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
-#[allow(dead_code)] // offline matrix build only (examples/gen_scene_matrix.rs)
 fn l2_normalize(v: &mut [f32]) {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
     for x in v.iter_mut() {

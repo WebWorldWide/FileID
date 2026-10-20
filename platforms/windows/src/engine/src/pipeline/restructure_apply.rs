@@ -1768,10 +1768,6 @@ impl RestructureApply {
     /// Apply every proposed move. Stops on first hard error; returns the
     /// applied + failed counts. A privilege error in symlink mode short-
     /// circuits with a friendly message instead of partial writes.
-    // The engine package compiles this module once for the library and again
-    // for the binary. External library callers and unit tests use the slice
-    // convenience method; the binary uses `apply_iter` directly.
-    #[allow(dead_code)]
     pub fn apply(&self, moves: &[RestructureMove]) -> Result<RestructureApplyResult> {
         self.apply_iter_with(
             moves.iter().cloned().map(Ok),

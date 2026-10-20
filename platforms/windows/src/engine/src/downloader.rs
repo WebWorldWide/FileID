@@ -248,7 +248,6 @@ pub fn chain_has_disk_full(err: &anyhow::Error) -> bool {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DownloadProgress {
     pub url: String,
     pub bytes_done: u64,
@@ -1237,9 +1236,8 @@ async fn download_range_with_retry(
 // ─────────────────────────────────────────────────────────────────────
 
 /// Per-file progress for [`install_model_blocking`]'s callback. Consumed by the
-/// `fileid` CLI (external lib consumer), not the engine binary — `allow(dead_code)`.
+/// `fileid` CLI (external lib consumer), not the engine binary.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct InstallFileProgress {
     /// 0-based index of the file currently downloading within the bundle.
     pub file_index: usize,
@@ -1271,8 +1269,7 @@ pub fn required_install_free_bytes(download_bytes: u64) -> u64 {
 /// mutability if the caller needs mutable state.
 ///
 /// Driven by the `fileid` CLI (external lib consumer); the engine binary uses
-/// the IPC `handle_prewarm_model` path instead — hence `allow(dead_code)`.
-#[allow(dead_code)]
+/// the IPC `handle_prewarm_model` path instead.
 pub fn install_model_blocking(
     model: &crate::models::registry::Model,
     cancel: Arc<AtomicBool>,
@@ -1385,9 +1382,7 @@ pub fn install_model_blocking(
 /// CA-pinned client as model downloads, so the egress host must be on the
 /// downloader's Hugging Face-only redirect allow-list — there is
 /// no second, unaudited network code path. Driven by the cross-platform `fileid`
-/// CLI (external lib consumer); the engine binary never calls it — hence
-/// `allow(dead_code)`.
-#[allow(dead_code)]
+/// CLI (external lib consumer); the engine binary never calls it.
 pub fn download_file_blocking(
     url: &str,
     dest: &Path,

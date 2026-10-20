@@ -798,7 +798,6 @@ impl ModelStack {
         Self { arcface, scrfd, mobileclip_pool, mobileclip_batch, scene_labeler, bge_text, ram_plus, ram_plus_batch, pool_size }
     }
 
-    #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
             arcface: None,
@@ -2951,7 +2950,6 @@ pub fn resize_rgb_quality(
     .into_raw()
 }
 
-#[allow(dead_code)]
 pub fn compute_dhash_for_path(path: &std::path::Path) -> anyhow::Result<i64> {
     let (width, height) = image::ImageReader::open(path)?
         .with_guessed_format()?
