@@ -165,7 +165,7 @@ public enum Tagging {
                 if ext == "obj",
                    let cg = DeepAnalyze.quickLookThumbnail(url: url, maxPixelSize: 512),
                    let blob = MobileCLIPService.shared.embedImage(cg)
-                        .map({ MobileCLIPService.embeddingToBlob($0) }) {
+                        .map({ FloatBlob.encode($0) }) {
                     tagged.clipEmbeddingBlob = blob
                 }
                 // The content-derivation stage (render attempt) ran — stops the model
@@ -214,7 +214,7 @@ public enum Tagging {
                     let hashBox = ScanSideResult<Data?>()
                     DispatchQueue.global(qos: .userInitiated).async(group: sideWork) {
                         let clipStart = CFAbsoluteTimeGetCurrent()
-                        let blob = MobileCLIPService.shared.embedImage(cgImage).map { MobileCLIPService.embeddingToBlob($0) }
+                        let blob = MobileCLIPService.shared.embedImage(cgImage).map { FloatBlob.encode($0) }
                         clipBox.set((blob, (CFAbsoluteTimeGetCurrent() - clipStart) * 1000))
                     }
                     DispatchQueue.global(qos: .utility).async(group: sideWork) {
@@ -394,7 +394,7 @@ public enum Tagging {
                 // Mirrors the Windows engine, which CLIP-embeds the video keyframe at scan.
                 if let cg = boundedVideoKeyframe(url: url, maxPixelSize: 512, timeout: 6),
                    let blob = MobileCLIPService.shared.embedImage(cg)
-                        .map({ MobileCLIPService.embeddingToBlob($0) }) {
+                        .map({ FloatBlob.encode($0) }) {
                     tagged.clipEmbeddingBlob = blob
                 }
                 tagged.perFileTotalMs = (CFAbsoluteTimeGetCurrent() - started) * 1000
@@ -482,7 +482,7 @@ public enum Tagging {
               let emb = BGETextService.shared.embed(text) else {
             return (text, nil)
         }
-        return (text, MobileCLIPService.embeddingToBlob(emb))
+        return (text, FloatBlob.encode(emb))
     }
 
     // MARK: - PDF pipeline

@@ -54,7 +54,7 @@ struct CatalogNamingContextTests {
     func lateEvidenceChangesRejectPersistence(fault: String) async throws {
         let (db,root,source) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let vector = [Float(1)] + [Float](repeating: 0,count:127)
-        let blob = ArcFaceService.embeddingToBlob(vector)
+        let blob = FloatBlob.encode(vector)
         try await db.pool.write { d in
             try chapter(d, title: "Home run")
             try d.execute(sql: "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Maya',1)")
@@ -75,7 +75,7 @@ struct CatalogNamingContextTests {
     @Test(arguments: ["excluded", "unknown", "model", "revision", "failed", "generic"])
     func invalidIdentityHintsAreOmitted(fault: String) async throws {
         let (db,root,_) = try await fixture(); defer { try? FileManager.default.removeItem(at: root) }
-        let blob = ArcFaceService.embeddingToBlob([Float(1)] + [Float](repeating:0,count:127))
+        let blob = FloatBlob.encode([Float(1)] + [Float](repeating:0,count:127))
         try await db.pool.write { d in
             try d.execute(sql: "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Maya',1)")
             try d.execute(sql: "INSERT INTO face_prints(file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision) VALUES(1,1,X'00','[0.1,0.1,0.3,0.3]',?,'fixture',?,'1:4607182418800017408')",arguments:[blob,FaceAnalysisCache.processingVersion])

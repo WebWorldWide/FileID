@@ -38,9 +38,12 @@ struct MetaText: View {
 // MARK: - Panels
 
 struct Panel<Content: View>: View {
+    var padding: CGFloat? = nil
     @ViewBuilder var content: Content
     var body: some View {
         VStack(alignment: .leading, spacing: 0) { content }
+            .padding(padding ?? 0)
+            .frame(maxWidth: padding == nil ? nil : .infinity, alignment: .leading)
             .background(Theme.panel, in: rounded(Theme.Radius.l))
             .clipShape(rounded(Theme.Radius.l))
             .overlay(rounded(Theme.Radius.l).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
@@ -84,47 +87,6 @@ struct Hairline: View {
 struct VHairline: View {
     var color: Color = Theme.hairline
     var body: some View { Rectangle().fill(color).frame(width: 1) }
-}
-
-// MARK: - Metrics and key/value rows
-
-struct MetricCell: View {
-    let label: String
-    let value: String
-    var unit: String = ""
-    var valueColor: Color = Theme.text1
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionLabel(label)
-            Text(value).font(Theme.Font.mono(20, .semibold)).foregroundStyle(valueColor).lineLimit(1).minimumScaleFactor(0.7)
-            if !unit.isEmpty { MetaText(unit) }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .trailing) { VHairline() }
-    }
-}
-
-struct MetricRow: View {
-    let cells: [MetricCell]
-    var body: some View {
-        HStack(spacing: 0) { ForEach(Array(cells.enumerated()), id: \.offset) { $0.element } }
-    }
-}
-
-struct KeyValueRow: View {
-    let key: String
-    let value: String
-    var keyWidth: CGFloat = 84
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(key).font(Theme.Font.body(12, .medium)).foregroundStyle(Theme.label).frame(width: keyWidth, alignment: .leading)
-            Text(value).font(Theme.Font.body(13)).foregroundStyle(Theme.textOnPanel).textSelection(.enabled)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14).padding(.vertical, 7)
-        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
-    }
 }
 
 // MARK: - Focus
@@ -396,9 +358,8 @@ extension PrimitiveButtonStyle where Self == DSGhostButtonStyle { static var dsG
 extension PrimitiveButtonStyle where Self == DSAccentOutlineButtonStyle { static var dsAccentOutline: DSAccentOutlineButtonStyle { .init() } }
 extension PrimitiveButtonStyle where Self == DSDangerButtonStyle { static var dsDanger: DSDangerButtonStyle { .init() } }
 extension PrimitiveButtonStyle where Self == DSRowButtonStyle { static var dsRow: DSRowButtonStyle { .init() } }
-extension PrimitiveButtonStyle where Self == DSBareButtonStyle { static var dsBare: DSBareButtonStyle { .init() } }
 
-// MARK: - Toggle / radio / check
+// MARK: - Toggle / check
 
 struct DSToggleStyle: ToggleStyle {
     @Environment(\.labelsVisibility) private var labelsVisibility
@@ -419,18 +380,6 @@ struct DSToggleStyle: ToggleStyle {
         }
         .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.s))
         .accessibilityRepresentation { Toggle(isOn: configuration.$isOn) { configuration.label } }
-    }
-}
-
-struct DSRadio: View {
-    let on: Bool
-    var body: some View {
-        ZStack {
-            Circle().stroke(on ? Theme.gold : Color.white.opacity(0.3), lineWidth: 1.2).frame(width: 13, height: 13)
-            if on { Circle().fill(Theme.gold).frame(width: 7, height: 7) }
-        }
-        .frame(width: 15, height: 15)
-        .accessibilityHidden(true)
     }
 }
 
@@ -601,19 +550,6 @@ struct TagChip: View {
         Text(text).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(Color.white.opacity(0.07), in: rounded(Theme.Radius.xs))
-    }
-}
-
-struct KindBadge: View {
-    let text: String
-    var color: Color = Theme.textOnPanel
-    var background: Color = Color.black.opacity(0.55)
-    var border: Color? = nil
-    var body: some View {
-        Text(text.capitalized).font(Theme.Font.body(10.5, .semibold)).foregroundStyle(color)
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(background, in: rounded(Theme.Radius.xs))
-            .overlay { if let border { rounded(Theme.Radius.xs).stroke(border, lineWidth: 1) } }
     }
 }
 

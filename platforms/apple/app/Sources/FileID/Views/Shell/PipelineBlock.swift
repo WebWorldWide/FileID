@@ -118,7 +118,7 @@ struct PipelineBlock: View {
     @ViewBuilder
     private func stats(_ p: ScanProgress) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            statRow("Found", p.discovered.formatted(), trailing: p.etaSeconds.flatMap { $0 > 0 && scanRunning ? ProcessingControl.formatETA($0) + " left" : nil })
+            statRow("Found", p.discovered.formatted(), trailing: p.etaSeconds.flatMap { $0 > 0 && scanRunning ? DurationText.short($0) + " left" : nil })
             statRow("Tagged", p.processed.formatted(), trailing: p.filesPerSecond > 0 ? String(format: "%.1f/s", p.filesPerSecond) : nil)
             statRow("Memory", "\(p.residentMB) MB", trailing: "\(p.availableMB) MB free", warn: p.residentMB > 1200)
             if p.failed > 0 { statRow("Failed", p.failed.formatted(), trailing: nil, danger: true) }

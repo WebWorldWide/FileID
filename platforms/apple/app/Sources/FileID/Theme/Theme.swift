@@ -21,7 +21,6 @@ enum Theme {
     static let warning = Color(hex: 0xE0A340)
     static let paused  = Color(red: 185/255, green: 190/255, blue: 196/255).opacity(0.5)
 
-    static let bg0 = Color(hex: 0x070708)
     static let bg1 = Color(hex: 0x0B0B0C)
     static let text1 = Color(hex: 0xF0F1F2)
     static let text2 = adaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
@@ -51,23 +50,10 @@ enum Theme {
     static let nsText3 = nsAdaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let nsHairline = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
     static let nsHairlineHover = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.28), increased: NSColor.white.withAlphaComponent(0.6))
-    static let controlBorder  = Color.white.opacity(0.18)
     static let controlBorderHover = adaptive(normal: NSColor.white.withAlphaComponent(0.24), increased: NSColor.white.withAlphaComponent(0.6))
     static let focusRing      = gold.opacity(0.9)
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
-
-    static let surfaceBase     = Color.black.opacity(0.3)
-    static let surfaceCard     = panel
-    static let surfaceBorder   = hairline
-
-    enum Space {
-        static let xs: CGFloat = 4
-        static let s:  CGFloat = 8
-        static let m:  CGFloat = 16
-        static let l:  CGFloat = 24
-        static let xl: CGFloat = 40
-    }
 
     /// Subtle corners (cosmic-studio): 6 controls, 8 cards and rows, 10 panels.
     enum Radius {
@@ -101,8 +87,6 @@ enum Theme {
         static func body(_ size: CGFloat = 14, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { BrandFonts.registered ? .custom("Archivo", size: size).weight(weight) : .system(size: size, weight: weight) }
         static var sectionLabel: SwiftUI.Font { body(11, .semibold) }
         static var meta: SwiftUI.Font { body(12) }
-        static var metaStrong: SwiftUI.Font { body(12, .semibold) }
-        static var control: SwiftUI.Font { body(13, .medium) }
         static var pageTitle: SwiftUI.Font { display(34) }
     }
 
@@ -151,23 +135,6 @@ extension Color {
     init(hex: UInt32, opacity: Double = 1) {
         self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
                   blue: Double(hex & 0xFF) / 255, opacity: opacity)
-    }
-}
-
-// MARK: - GlassCard → rounded hairline panel
-
-struct GlassCard<Content: View>: View {
-    @ViewBuilder var content: Content
-    var padding: CGFloat = Theme.Space.m
-
-    var body: some View {
-        content
-            .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairlineStrong.opacity(0.8), lineWidth: 1))
-            .background(Color.clear, ignoresSafeAreaEdges: [])
-
     }
 }
 
@@ -228,30 +195,5 @@ struct SettingToggleRow: View {
                 .accessibilityHint(Text(subtitle ?? ""))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-// MARK: - GoldButton
-
-struct GoldButton: View {
-    let title:  String
-    let icon:   String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: icon)
-        }
-        .buttonStyle(DSPrimaryButtonStyle())
-    }
-}
-
-// MARK: - ThemedSegmentedControl → square segmented bar
-
-struct ThemedSegmentedControl: View {
-    @Binding var selection: String
-    let options: [(tag: String, label: String)]
-    var body: some View {
-        SegmentedBar(selection: $selection, options: options.map { ($0.tag, $0.label) })
     }
 }

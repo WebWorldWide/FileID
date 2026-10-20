@@ -21,8 +21,6 @@ struct TitleBar: View {
     @FocusState private var searchFocused: Bool
     @State private var userOpened = false
 
-    private var isNarrow: Bool { false }
-
     var body: some View {
         HStack(spacing: 12) {
             leading.frame(maxWidth: .infinity, alignment: .leading)

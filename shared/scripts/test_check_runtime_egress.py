@@ -292,10 +292,8 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/cli/src/runtime.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
-            "platforms/apple/app/Sources/FileID/Services/ArcFaceModelInstaller.swift",
-            "platforms/apple/app/Sources/FileID/Services/BGEModelInstaller.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-            "platforms/apple/app/Sources/FileID/Services/RamPlusModelInstaller.swift",
+            "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
         })
 
     def test_string_decoys_cannot_replace_live_downloader_contracts(self) -> None:

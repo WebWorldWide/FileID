@@ -2,6 +2,7 @@ import Foundation
 import CoreText
 import GRDB
 import Testing
+import FileIDShared
 @testable import FileIDEngine
 
 private typealias EngineDatabase = FileIDEngine.Database
@@ -228,7 +229,7 @@ struct DeepAnalyzeFileTypeMatrixTests {
     func classifications() {
         let matrix: [(String, DiscoveredFile.Kind)] = [
             ("jpg", .image), ("heic", .image),
-            ("mp4", .video), ("mts", .video), ("m2ts", .video),
+            ("mp4", .video), ("mts", .video), ("m2ts", .video), ("3gp", .video),
             ("pdf", .pdf),
             ("doc", .doc), ("docx", .doc), ("odt", .doc),
             ("ppt", .doc), ("pptx", .doc), ("key", .doc),

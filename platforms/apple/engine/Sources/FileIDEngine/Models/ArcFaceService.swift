@@ -12,7 +12,6 @@ public final class ArcFaceService: @unchecked Sendable {
 
     private let lock = NSLock()
     private let loadLock = NSLock()
-    private var env: ORTEnv?
     private var session: ORTSession?
     private var inputName: String?
     private var loadedKind: FaceEmbedderKind?
@@ -90,17 +89,6 @@ public final class ArcFaceService: @unchecked Sendable {
             guard let size = values.fileSize, size > 0, size <= 128 * 1024 * 1024,
                   let fingerprint = ExactFileDigest.computeWithIdentity(url: url, expectedSize: Int64(size)) else { return false }
             let modelVersion = "sface128-sha256:" + fingerprint.digest.map { String(format: "%02x", $0) }.joined()
-            // ORTEnv is process-wide; reuse across model swaps.
-            lock.lock()
-            let cachedEnv = self.env
-            lock.unlock()
-            let env: ORTEnv
-            if let existing = cachedEnv {
-                env = existing
-            } else {
-                env = try ORTEnv(loggingLevel: ORTLoggingLevel.warning)
-            }
-            let opts = try ORTSessionOptions()
             // CoreML EP — ANE/GPU acceleration on Apple Silicon. SFace is small
             // enough that MLProgram + MLComputeUnits=All roughly HALVES inference
             // on-hardware (~23 ms → ~11 ms) vs the legacy NeuralNetwork format,
@@ -108,29 +96,20 @@ public final class ArcFaceService: @unchecked Sendable {
             // RAM++ Swin, which it rejects, so RAM++/CLIP stay on NeuralNetwork.
             // Leaving useCPUAndGPU/useCPUOnly unset keeps MLComputeUnits at the All
             // default (ANE + GPU + CPU); useCPUAndGPU would EXCLUDE the ANE.
-            // Appended in its OWN do/catch: a CoreML bind failure (or an
-            // explicit FILEID_FACE_EP=cpu) drops to ORT's implicit CPU EP so
-            // session creation — and embedding — still succeed. (hardening)
-            var ep = "coreml"
-            if epPref == "cpu" {
-                ep = "cpu"
+            // A CoreML bind failure (or an explicit FILEID_FACE_EP=cpu) drops to
+            // ORT's implicit CPU EP so session creation and embedding still succeed.
+            let built = try ORTSessions.make(modelPath: url.path, coreML: epPref == "cpu" ? .disabled : .optional) {
+                $0.createMLProgram = true
+                $0.enableOnSubgraphs = true
+            }
+            let session = built.session
+            let ep = built.coreML ? "coreml" : "cpu"
+            if !built.coreML {
                 JSONLog.shared.warn(ev: "arcface_coreml_ep_unavailable",
                                     path: redactPathForLog(url.path),
-                                    error: "FILEID_FACE_EP=cpu; binding ORT CPU EP only.")
-            } else {
-                do {
-                    let coremlOpts = ORTCoreMLExecutionProviderOptions()
-                    coremlOpts.createMLProgram = true
-                    coremlOpts.enableOnSubgraphs = true
-                    try opts.appendCoreMLExecutionProvider(with: coremlOpts)
-                } catch {
-                    ep = "cpu"
-                    JSONLog.shared.warn(ev: "arcface_coreml_ep_unavailable",
-                                        path: redactPathForLog(url.path),
-                                        error: "CoreML EP could not bind; falling back to CPU: \(error)")
-                }
+                                    error: built.bindError.map { "CoreML EP could not bind; falling back to CPU: \($0)" }
+                                        ?? "FILEID_FACE_EP=cpu; binding ORT CPU EP only.")
             }
-            let session = try ORTSession(env: env, modelPath: url.path, sessionOptions: opts)
             // Discover input name — Buffalo ONNX uses "input.1" after
             // PyTorch tracing renames the original; mobileface may differ.
             guard ExactFileDigest.cacheKey(url: url, expectedSize: Int64(size)) == fingerprint.identity else { return false }
@@ -142,7 +121,6 @@ public final class ArcFaceService: @unchecked Sendable {
                 return false
             }
             lock.lock()
-            self.env = env
             self.session = session
             self.inputName = firstInput
             self.loadedKind = kind
@@ -267,24 +245,6 @@ public final class ArcFaceService: @unchecked Sendable {
         JSONLog.shared.info(ev: "arcface_prewarmed",
                             extra: ["ms": AnyCodable(ms),
                                     "kind": AnyCodable(kind.rawValue)])
-    }
-
-    /// Encode a 128-d (SFace) float32 embedding as a raw little-endian
-    /// blob for the DB. Symmetric with `MobileCLIPService.embeddingToBlob`.
-    public static func embeddingToBlob(_ vec: [Float]) -> Data {
-        vec.withUnsafeBufferPointer { Data(buffer: $0) }
-    }
-
-    public static func blobToEmbedding(_ data: Data) -> [Float] {
-        let count = data.count / MemoryLayout<Float>.stride
-        // An empty/corrupt blob makes `baseAddress` nil; force-unwrapping it
-        // would crash the engine. Bail to an empty vector (callers treat a
-        // zero-length embedding as "no embedding").
-        guard count > 0 else { return [] }
-        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
-            guard let base = raw.baseAddress?.assumingMemoryBound(to: Float.self) else { return [] }
-            return Array(UnsafeBufferPointer(start: base, count: count))
-        }
     }
 
     // MARK: - Preprocessing

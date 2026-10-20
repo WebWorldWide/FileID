@@ -350,7 +350,7 @@ struct ChatWorkbench: View {
 
 private func sourceMeta(_ hit: CatalogHit) -> String {
     var parts: [String] = []
-    if let seconds = hit.startSeconds { parts.append(Timecode.string(seconds)) }
+    if let seconds = hit.startSeconds { parts.append(DurationText.clock(seconds)) }
     if let page = hit.page { parts.append("Page \(page)") }
     if hit.kind == "sampledFrame" { parts.append("Unverified frame") }
     return parts.joined(separator: " · ")

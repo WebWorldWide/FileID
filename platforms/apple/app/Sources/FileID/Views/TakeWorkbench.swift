@@ -30,8 +30,6 @@ struct TakeWorkbench: View {
     @State private var goalRequestedIDs: Set<Int64> = []
     @State private var previousJobIDs: Set<String> = []
 
-    private static let videoExtensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "webm", "3gp", "mpeg", "mpg", "mts", "m2ts"]
-
     private var goalJob: CatalogJob? {
         engine.catalogJobs.first { $0.id == goalJobID && selectedEvent?.id == goalEventID }
     }
@@ -39,7 +37,7 @@ struct TakeWorkbench: View {
     private func canAnalyzeGoal(_ event: CatalogEvent) -> Bool {
         pendingID.isEmpty && goal.trimmingCharacters(in: .whitespacesAndNewlines) == event.goal
             && selectedIDs == Set(event.fileIDs) && takes.count == event.fileIDs.count
-            && takes.allSatisfy { Self.videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) }
+            && takes.allSatisfy { FileTypes.isVideo(path: $0.path) }
             && !["queued", "running", "paused"].contains(goalJob?.state ?? "")
     }
 
@@ -394,7 +392,7 @@ struct TakeWorkbench: View {
         }
         if action == "search" {
             var seen = Set(candidates.map(\.fileID))
-            foundClips = response.hits.filter { Self.videoExtensions.contains(URL(fileURLWithPath: $0.path).pathExtension.lowercased()) && seen.insert($0.fileID).inserted }
+            foundClips = response.hits.filter { FileTypes.isVideo(path: $0.path) && seen.insert($0.fileID).inserted }
             if foundClips.isEmpty { ToastCenter.shared.show("No videos matched “\(clipQuery)”") }
             return
         }
@@ -472,7 +470,6 @@ private struct TakeCard: View {
     let onOutcome: (Double?) -> Void
     let onPrefer: () -> Void
     let onUndo: () -> Void
-    @State private var thumbnail: NSImage?
 
     private var url: URL { URL(fileURLWithPath: take.path) }
     private var isDraft: Bool { take.modelVersion?.hasPrefix("take-outcome-sequence-v1/") == true }
@@ -515,9 +512,7 @@ private struct TakeCard: View {
                 if let playing {
                     NativeVideoPlayer(player: playing).accessibilityLabel("Video player")
                 } else {
-                    if let thumbnail {
-                        Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fill)
-                    }
+                    AsyncThumbnail(url: url, size: 480) { EmptyView() }
                     Button(action: onPlay) {
                         Image(systemName: "play.fill").font(.system(size: 14, weight: .bold)).foregroundStyle(Theme.onGold)
                             .frame(width: 36, height: 36).background(Theme.gold.opacity(0.92), in: Circle())
@@ -577,9 +572,6 @@ private struct TakeCard: View {
             .stroke(recommended ? Theme.gold : Theme.hairlineStrong.opacity(0.8), lineWidth: recommended ? 2 : 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Take \(index), \(url.lastPathComponent)\(recommended ? ", recommended" : "")")
-        .task(id: take.path) {
-            thumbnail = await ThumbnailService.shared.thumbnail(for: url, size: 480)
-        }
     }
 
     private func outcomeButton(_ label: String, value: Double?) -> some View {

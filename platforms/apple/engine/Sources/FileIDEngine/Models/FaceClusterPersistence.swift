@@ -19,7 +19,7 @@ enum FaceClusterPersistence {
         var reused = Set<Int64>()
         for cluster in clusters {
             guard !cluster.faceIDs.isEmpty, cluster.faceIDs.contains(cluster.representative),
-                  cluster.centroid.count == 512, ArcFaceService.blobToEmbedding(cluster.centroid).allSatisfy(\.isFinite), cluster.radius.isFinite,
+                  cluster.centroid.count == 512, FloatBlob.decode(cluster.centroid).allSatisfy(\.isFinite), cluster.radius.isFinite,
                   cluster.faceIDs.allSatisfy({ $0 > 0 && pool.contains($0) && seen.insert($0).inserted }) else { throw Failure.invalidPlan }
             if let person = cluster.personID {
                 guard person > 0, !preserved.contains(person), reused.insert(person).inserted,

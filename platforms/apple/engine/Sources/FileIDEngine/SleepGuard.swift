@@ -62,10 +62,4 @@ public final class SleepGuard: @unchecked Sendable {
         JSONLog.shared.info(ev: "sleep_assertion_end")
     }
 
-    /// Convenience: scope an async block under the assertion.
-    public func withGuard<T>(reason: String, _ body: () async throws -> T) async rethrows -> T {
-        begin(reason: reason)
-        defer { end() }
-        return try await body()
-    }
 }
