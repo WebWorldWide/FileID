@@ -121,7 +121,7 @@ public enum CatalogStore {
             )
             SELECT s.id, s.path_text, s.kind,
                    (SELECT GROUP_CONCAT(tag, ', ') FROM (
-                      SELECT DISTINCT TRIM(tag) AS tag FROM tags WHERE file_id = s.id AND source IN ('auto','user','vlm')
+                      SELECT DISTINCT REPLACE(TRIM(tag), '_', ' ') AS tag FROM tags WHERE file_id = s.id AND source IN ('auto','user','vlm')
                       ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, COALESCE(score,0) DESC LIMIT 8)) AS tag_list
             FROM scored s
             WHERE s.score > 0 AND s.score = (SELECT MAX(score) FROM scored)

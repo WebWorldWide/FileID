@@ -313,9 +313,10 @@ fn extract_zip_xml_glob_inner<R: Read + Seek>(
     let mut names: Vec<String> = zip
         .file_names()
         .take(MAX_ARCHIVE_ENTRIES)
+        .filter_map(|n| n.ok())
         .filter(|n| n.starts_with(prefix) && n.ends_with(suffix))
         .take(MAX_GLOB_MEMBERS)
-        .map(String::from)
+        .map(|n| n.into_owned())
         .collect();
     names.sort();
     let mut out = String::new();
@@ -358,8 +359,9 @@ fn extract_epub_inner<R: Read + Seek>(reader: R, path: &Path) -> Result<String> 
     let mut names: Vec<String> = zip
         .file_names()
         .take(MAX_ARCHIVE_ENTRIES)
+        .filter_map(|n| n.ok())
         .filter(|n| {
-            std::path::Path::new(n)
+            std::path::Path::new(n.as_ref())
                 .extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| {

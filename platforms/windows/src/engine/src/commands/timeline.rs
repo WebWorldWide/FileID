@@ -623,6 +623,7 @@ async fn process<M: FrameModel>(
                 cancel,
                 sink,
                 database,
+                decode_frame,
             )
             .await?;
         }
@@ -715,11 +716,139 @@ async fn analyze_moments<M: FrameModel>(
     cancel: &Arc<AtomicBool>,
     sink: &Sink,
     database: &Arc<Mutex<Connection>>,
+    decoder: impl FrameDecoder,
 ) -> Result<()> {
     let windows = analysis::windows(duration, signals);
     if windows.is_empty() {
         return Err(unreadable());
     }
+    let mut prefetched: Option<Prefetch> = None;
+    let result = moment_windows(
+        id,
+        file_id,
+        source,
+        duration,
+        &windows,
+        size,
+        frame_version,
+        (file_index, total_files, share),
+        model,
+        frames,
+        cancel,
+        sink,
+        database,
+        decoder,
+        &mut prefetched,
+    )
+    .await;
+    if let Some(pending) = prefetched {
+        pending.discard();
+    }
+    result
+}
+
+/// A window's frame extraction started while the model works on the previous
+/// window. Frame extraction is CPU work; inference is GPU work.
+struct Prefetch {
+    window: usize,
+    stop: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<Result<Vec<PathBuf>>>,
+}
+
+impl Prefetch {
+    fn spawn<D: FrameDecoder>(
+        decoder: D,
+        source: &Path,
+        (window, plan): (usize, Vec<(f64, PathBuf)>),
+        size: (u32, u32),
+        cancel: &Arc<AtomicBool>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (source, cancel, flag) = (source.to_owned(), cancel.clone(), stop.clone());
+        let task =
+            tokio::task::spawn_blocking(move || decode_window(&decoder, &source, &plan, size, &cancel, Some(&flag)));
+        Self { window, stop, task }
+    }
+
+    fn discard(self) {
+        self.stop.store(true, Ordering::Release);
+        tokio::spawn(async move {
+            if let Ok(Ok(paths)) = self.task.await {
+                remove_all(&paths);
+            }
+        });
+    }
+}
+
+pub(crate) trait FrameDecoder: Fn(&Path, f64, (u32, u32), &Path, &AtomicBool) -> Result<()> + Clone + Send + Sync + 'static {}
+impl<T: Fn(&Path, f64, (u32, u32), &Path, &AtomicBool) -> Result<()> + Clone + Send + Sync + 'static> FrameDecoder for T {}
+
+fn decode_frame(source: &Path, seconds: f64, size: (u32, u32), output: &Path, cancel: &AtomicBool) -> Result<()> {
+    let rgb = video_export::frame_rgb(source, seconds, size.0, size.1, cancel)?;
+    write_jpeg(output, rgb, size.0, size.1)
+}
+
+/// Decodes every planned frame in order; on failure, cancellation or `stop`
+/// (checked between frames) removes what it wrote.
+fn decode_window<D: FrameDecoder>(
+    decoder: &D,
+    source: &Path,
+    plan: &[(f64, PathBuf)],
+    size: (u32, u32),
+    cancel: &AtomicBool,
+    stop: Option<&AtomicBool>,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::with_capacity(plan.len());
+    for (seconds, output) in plan {
+        let decoded = if stop.is_some_and(|s| s.load(Ordering::Acquire)) {
+            Err(anyhow!("frame prefetch discarded"))
+        } else {
+            decoder(source, *seconds, size, output, cancel)
+        };
+        if let Err(error) = decoded {
+            let _ = std::fs::remove_file(output);
+            remove_all(&paths);
+            return Err(error);
+        }
+        paths.push(output.clone());
+    }
+    Ok(paths)
+}
+
+/// Timestamps of a window's distinct frames and where each frame is written.
+fn window_plan(window: &analysis::Window, duration: f64, frames: &Path) -> Result<(Vec<f64>, Vec<(f64, PathBuf)>)> {
+    // Requests past the last decodable frame resolve to that frame; the
+    // distinct-index pass collapses such repeats before inference.
+    let times: Vec<f64> = window.times.iter().map(|t| t.min((duration - 0.05).max(0.0))).collect();
+    let distinct = analysis::distinct_frame_indices(&times, window)?;
+    let kept: Vec<f64> = distinct.iter().map(|&i| times[i]).collect();
+    let plan = distinct
+        .iter()
+        .map(|&frame| {
+            (times[frame], frames.join(format!("moment-{}-{frame}.jpg", analysis::millis(window.start))))
+        })
+        .collect();
+    Ok((kept, plan))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn moment_windows<M: FrameModel, D: FrameDecoder>(
+    id: &str,
+    file_id: i64,
+    source: &Source,
+    duration: f64,
+    windows: &[analysis::Window],
+    size: (u32, u32),
+    frame_version: &str,
+    (file_index, total_files, share): (usize, usize, f64),
+    model: &M,
+    frames: &Path,
+    cancel: &Arc<AtomicBool>,
+    sink: &Sink,
+    database: &Arc<Mutex<Connection>>,
+    decoder: D,
+    prefetched: &mut Option<Prefetch>,
+) -> Result<()> {
     let version = format!("timeline-moment-sequence-v1/{frame_version}");
     for (index, window) in windows.iter().enumerate() {
         require_running(&database.lock(), id)?;
@@ -748,22 +877,35 @@ async fn analyze_moments<M: FrameModel>(
                     &version,
                 )?;
             }
-            // Requests past the last decodable frame resolve to that frame; the
-            // distinct-index pass collapses such repeats before inference.
-            let times: Vec<f64> = window.times.iter().map(|t| t.min((duration - 0.05).max(0.0))).collect();
-            let distinct = analysis::distinct_frame_indices(&times, window)?;
-            let mut paths = Vec::with_capacity(distinct.len());
-            for &frame in &distinct {
-                let output = frames.join(format!("moment-{}-{frame}.jpg", analysis::millis(window.start)));
-                match decode_jpeg(&source.path, times[frame], size, output, cancel).await {
-                    Ok(path) => paths.push(path),
-                    Err(error) => {
-                        remove_all(&paths);
-                        return Err(error);
+            let (kept, plan) = window_plan(window, duration, frames)?;
+            let pending = prefetched.take();
+            let paths = match pending {
+                Some(pending) if pending.window == index => {
+                    pending.task.await.map_err(|error| anyhow!(error)).and_then(|decoded| decoded)
+                }
+                other => {
+                    if let Some(stale) = other {
+                        stale.discard();
                     }
+                    let (path, flag, decode) = (source.path.clone(), cancel.clone(), decoder.clone());
+                    blocking(move || decode_window(&decode, &path, &plan, size, &flag, None)).await
                 }
             }
-            let kept: Vec<f64> = distinct.iter().map(|&i| times[i]).collect();
+            .map_err(|error| interrupted_or(cancel, error))?;
+            if let Some(next) = windows.get(index + 1) {
+                match window_plan(next, duration, frames) {
+                    Ok((_, next_plan)) => {
+                        *prefetched = Some(Prefetch::spawn(
+                            decoder.clone(),
+                            &source.path,
+                            (index + 1, next_plan),
+                            size,
+                            cancel,
+                        ));
+                    }
+                    Err(error) => tracing::debug!(?error, "next moment window has no usable frames"),
+                }
+            }
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
             let raw = model
                 .sequence(&refs, &analysis::moment_prompt(&kept), MOMENT_TOKENS, cancel.clone())

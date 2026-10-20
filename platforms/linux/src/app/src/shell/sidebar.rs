@@ -160,10 +160,16 @@ impl Sidebar {
         if let Some(previous) = self.pill_anim.take() {
             previous.pause();
         }
-        let anim = crate::spring::animate(&self.pill, from, to, move |value| {
-            pos.set(value);
-            pill.queue_draw();
-        });
+        let anim = crate::spring::animate_with(
+            crate::spring::Spring::Tight,
+            &self.pill,
+            from,
+            to,
+            move |value| {
+                pos.set(value);
+                pill.queue_draw();
+            },
+        );
         self.pill_anim.replace(Some(anim));
     }
 

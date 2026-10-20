@@ -922,6 +922,55 @@ const QUERY_FILTER: &str = "f.failed = 0 \
                 OR f.id IN (SELECT rowid FROM doc_fts WHERE doc_fts MATCH :fts)))) \
     AND (:kind IS NULL OR f.kind = :kind)";
 
+const FILE_COLUMNS: &str = "f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, \
+     f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, f.vlm_description, f.vlm_proposed_name";
+
+fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
+    let path: String = row.get(1)?;
+    let name = Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    Ok(FileRow {
+        id: row.get(0)?,
+        path,
+        name,
+        kind: row.get(2)?,
+        extension: row.get(3)?,
+        size_bytes: row.get(4)?,
+        created_at: row.get(5)?,
+        modified_at: row.get(6)?,
+        has_faces: row.get(7)?,
+        has_text: row.get(8)?,
+        file_ref: row.get(9)?,
+        content_hash: row.get(10)?,
+        description: row.get(11)?,
+        proposed_name: row.get(12)?,
+    })
+}
+
+fn file_row_at_path(path: &Path, id: i64) -> Result<Option<FileRow>> {
+    use rusqlite::OptionalExtension;
+    let conn = fileid_engine::db::open_read(path)?;
+    Ok(conn
+        .query_row(&format!("SELECT {FILE_COLUMNS} FROM files f WHERE f.id = ?1 AND f.failed = 0"), [id], file_row)
+        .optional()?)
+}
+
+/// One file's current row, read off the main loop (the preview refreshes
+/// what it shows after a scan).
+pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
+    let (tx, rx) = async_channel::bounded(1);
+    thread::spawn(move || {
+        let row = fileid_engine::paths::db_path()
+            .ok()
+            .filter(|path| path.exists())
+            .and_then(|path| file_row_at_path(&path, id).ok().flatten());
+        let _ = tx.send_blocking(row);
+    });
+    rx
+}
+
 fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i64)> {
     let conn = fileid_engine::db::open_read(path)?;
     let search = spec.search.trim();
@@ -932,10 +981,8 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
     let kind = spec.kind.as_deref().filter(|kind| !kind.is_empty());
     let limit = if spec.limit > 0 { spec.limit.min(QUERY_MAX_ROWS) } else { 500 };
     let mut stmt = conn.prepare(&format!(
-        "SELECT f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, \
-         f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, \
-         f.vlm_description, f.vlm_proposed_name \
-         FROM files f WHERE {QUERY_FILTER} ORDER BY f.scanned_at DESC, f.id DESC LIMIT :limit OFFSET :offset"
+        "SELECT {FILE_COLUMNS} FROM files f WHERE {QUERY_FILTER} \
+         ORDER BY f.scanned_at DESC, f.id DESC LIMIT :limit OFFSET :offset"
     ))?;
     let rows = stmt
         .query_map(
@@ -948,29 +995,7 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
                 ":limit": limit,
                 ":offset": spec.offset.max(0),
             },
-            |row| {
-                let path: String = row.get(1)?;
-                let name = Path::new(&path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
-                Ok(FileRow {
-                    id: row.get(0)?,
-                    path,
-                    name,
-                    kind: row.get(2)?,
-                    extension: row.get(3)?,
-                    size_bytes: row.get(4)?,
-                    created_at: row.get(5)?,
-                    modified_at: row.get(6)?,
-                    has_faces: row.get(7)?,
-                    has_text: row.get(8)?,
-                    file_ref: row.get(9)?,
-                    content_hash: row.get(10)?,
-                    description: row.get(11)?,
-                    proposed_name: row.get(12)?,
-                })
-            },
+            file_row,
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     // The common small-library reload never fills the limit, so it skips the
@@ -1226,12 +1251,19 @@ fn preview_worker(slot: &PreviewSlot) {
     }
 }
 
+/// Upright thumbnails through the engine: RAW embedded previews with their
+/// container orientation, EXIF orientation, scaled JPEG decode and HEIC.
+/// RAW files are memory-mapped and only their preview is decoded, so the
+/// byte cap applies to everything else.
 fn image_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
-    let length = std::fs::metadata(path).ok()?.len();
-    if length > THUMB_MAX_BYTES {
+    let raw = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(fileid_engine::pipeline::raw_preview::is_raw_extension);
+    if !raw && std::fs::metadata(path).ok()?.len() > THUMB_MAX_BYTES {
         return None;
     }
-    fileid_engine::shell::thumbnail::render_at(path, dim).ok()
+    fileid_engine::shell::thumbnail::render_oriented(path, dim).ok()
 }
 
 fn video_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
@@ -1672,6 +1704,16 @@ mod tests {
     }
 
     #[test]
+    fn raw_files_skip_the_byte_cap_and_still_fail_cleanly_without_a_preview() {
+        let path = std::env::temp_dir().join(format!("fileid-linux-thumb-raw-{}.ARW", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(THUMB_MAX_BYTES + 1).unwrap();
+        drop(file);
+        assert!(image_thumbnail(&path, 64).is_none());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn library_query_filters_indexed_files_without_treating_wildcards_as_searches() {
         let fixture = std::env::temp_dir().join(format!(
             "fileid-library-{}-{}",
@@ -1720,6 +1762,9 @@ mod tests {
         assert_eq!(query("needle", None, 10).0[0].kind, "pdf");
         assert_eq!(query("", Some("image"), 10).1, 1);
         assert!(query_files_at_path(&fixture.join("missing.sqlite"), &QuerySpec { limit: 10, ..QuerySpec::default() }).is_err());
+        assert_eq!(file_row_at_path(&db_path, 2).unwrap().unwrap().name, "image.png");
+        assert!(file_row_at_path(&db_path, 4).unwrap().is_none());
+        assert!(file_row_at_path(&db_path, 99).unwrap().is_none());
         std::fs::remove_dir_all(fixture).unwrap();
     }
 }

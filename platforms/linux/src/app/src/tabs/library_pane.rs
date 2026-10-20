@@ -40,8 +40,10 @@ fn details_from(conn: &rusqlite::Connection, file_id: i64) -> FileDetails {
     let strings = |sql: &str, limit: i64| -> Vec<String> {
         conn.prepare(sql)
             .and_then(|mut stmt| {
-                stmt.query_map(rusqlite::params![file_id, limit], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()
+                stmt.query_map(rusqlite::params![file_id, limit], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
             })
             .unwrap_or_default()
     };
@@ -102,7 +104,12 @@ pub(super) fn chips(values: &[String]) -> gtk::FlowBox {
         .column_spacing(4)
         .build();
     for value in values {
-        flow.append(&gtk::Label::builder().label(value).css_classes(["chip"]).build());
+        flow.append(
+            &gtk::Label::builder()
+                .label(value)
+                .css_classes(["chip"])
+                .build(),
+        );
     }
     flow
 }
@@ -240,13 +247,19 @@ impl SelectedPane {
         });
         let weak = Rc::downgrade(&pane);
         reveal.connect_clicked(move |button| {
-            if let Some(row) = weak.upgrade().and_then(|pane| pane.current.borrow().clone()) {
+            if let Some(row) = weak
+                .upgrade()
+                .and_then(|pane| pane.current.borrow().clone())
+            {
                 super::library::show_in_files(button, &row.path);
             }
         });
         let weak = Rc::downgrade(&pane);
         open.connect_clicked(move |button| {
-            if let Some(row) = weak.upgrade().and_then(|pane| pane.current.borrow().clone()) {
+            if let Some(row) = weak
+                .upgrade()
+                .and_then(|pane| pane.current.borrow().clone())
+            {
                 super::library::open_default(button, &row.path);
             }
         });
@@ -254,7 +267,12 @@ impl SelectedPane {
     }
 
     pub fn show(&self, row: FileRow) {
-        if self.current.borrow().as_ref().is_some_and(|current| current.id == row.id) {
+        if self
+            .current
+            .borrow()
+            .as_ref()
+            .is_some_and(|current| current.id == row.id)
+        {
             self.revealer.set_reveal_child(true);
             return;
         }
@@ -269,11 +287,17 @@ impl SelectedPane {
         if let Some(date) = fmt_date(row.created_at.or(row.modified_at)) {
             self.facts.append(&kv_row("Captured", &date));
         }
-        self.facts.append(&kv_row("Size", &format_bytes(row.size_bytes)));
+        self.facts
+            .append(&kv_row("Size", &format_bytes(row.size_bytes)));
         if let Some(name) = row.proposed_name.as_ref().filter(|name| !name.is_empty()) {
-            self.facts.append(&kv_row("Smart name", &format!("{name}.{}", row.extension)));
+            self.facts
+                .append(&kv_row("Smart name", &format!("{name}.{}", row.extension)));
         }
-        if let Some(caption) = row.description.as_ref().filter(|caption| !caption.is_empty()) {
+        if let Some(caption) = row
+            .description
+            .as_ref()
+            .filter(|caption| !caption.is_empty())
+        {
             self.facts.append(&kv_row("Caption", caption));
         }
         append_details(&self.facts, row.id);
@@ -299,14 +323,17 @@ impl SelectedPane {
         if row.kind != "image" && row.kind != "video" {
             return;
         }
-        let rx = self
-            .engine
-            .borrow()
-            .request_preview(row.path.clone(), PANE_PREVIEW_PX, row.kind == "video");
+        let rx = self.engine.borrow().request_preview(
+            row.path.clone(),
+            PANE_PREVIEW_PX,
+            row.kind == "video",
+        );
         let picture = self.picture.downgrade();
         let pane_generation = self.generation.clone();
         glib::MainContext::default().spawn_local(async move {
-            let Ok(ThumbReply::Image(decoded)) = rx.recv().await else { return };
+            let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
+                return;
+            };
             if pane_generation.get() != generation {
                 return;
             }
@@ -335,7 +362,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             details_from(&conn, 1),
-            FileDetails { people: vec!["Ada".into()], tags: vec!["dog".into(), "beach".into()] }
+            FileDetails {
+                people: vec!["Ada".into()],
+                tags: vec!["dog".into(), "beach".into()]
+            }
         );
         assert_eq!(details_from(&conn, 9), FileDetails::default());
         assert_eq!(parent_folder("/photos/2024/a.jpg"), "/photos/2024");

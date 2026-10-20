@@ -81,24 +81,39 @@ struct ExactNeighborsTests {
         return out
     }
 
+    private struct Neighbor { let index: Int; let similarity: Float }
+
+    private func dot(_ a: [Float], _ b: [Float]) -> Float {
+        var sum: Float = 0
+        for j in 0..<a.count { sum += a[j] * b[j] }
+        return sum
+    }
+
+    private func bruteForce(_ data: [[Float]], _ i: Int, _ k: Int) -> [Neighbor] {
+        var all: [Neighbor] = []
+        for j in 0..<data.count where j != i { all.append(Neighbor(index: j, similarity: dot(data[i], data[j]))) }
+        all.sort { (a: Neighbor, b: Neighbor) -> Bool in a.similarity != b.similarity ? a.similarity > b.similarity : a.index < b.index }
+        return Array(all.prefix(k))
+    }
+
     @Test func matchesReferenceForSeveralK() throws {
         let n = 300, d = 48
         let data = vectors(n, d)
         for k in [1, 5, n - 1] {
             let fast = try #require(RestructureSemantic.exactNeighbors(data, k: k))
             for i in 0..<n {
-                let reference = (0..<n).filter { $0 != i }
-                    .map { j in (j, zip(data[i], data[j]).reduce(Float(0)) { $0 + $1.0 * $1.1 }) }
-                    .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0 < $1.0 }
-                    .prefix(k)
-                #expect(fast[i].count == reference.count)
-                for (a, b) in zip(fast[i], reference) {
-                    #expect(abs(a.similarity - b.1) < 1e-5)
+                let reference = bruteForce(data, i, k)
+                let got = fast[i]
+                #expect(got.count == reference.count)
+                for (a, b) in zip(got, reference) {
+                    #expect(abs(a.similarity - b.similarity) < 1e-5)
                 }
                 if k == n - 1 {
-                    #expect(Set(fast[i].map(\.neighbor)) == Set(reference.map(\.0)))
-                } else if let top = reference.first, reference.count < 2 || top.1 - reference[reference.index(after: reference.startIndex)].1 > 1e-4 {
-                    #expect(fast[i].first?.neighbor == top.0)
+                    let gotIDs = Set(got.map { (hit: (neighbor: Int, similarity: Float)) -> Int in hit.neighbor })
+                    let refIDs = Set(reference.map { (hit: Neighbor) -> Int in hit.index })
+                    #expect(gotIDs == refIDs)
+                } else if reference.count >= 2, reference[0].similarity - reference[1].similarity > 1e-4 {
+                    #expect(got.first?.neighbor == reference[0].index)
                 }
             }
         }

@@ -72,7 +72,7 @@ import FileIDShared
         }
         #expect(replies.last?.hits.map(\.fileID) == [1])
         #expect(replies.last?.message.contains("birthday") == true)
-        #expect(replies.last?.message.contains("(video)") == true)
+        #expect(replies.last?.message.contains("(videos)") == true)
     }
 
     @Test func personFilterRequiresAConfirmedObservation() async throws {
