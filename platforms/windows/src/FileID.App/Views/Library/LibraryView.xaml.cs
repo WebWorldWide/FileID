@@ -107,6 +107,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         ViewModel.Items.CollectionChanged += OnItemsCollectionChanged;
         UndoStack.Instance.PropertyChanged += OnUndoStackChanged;
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
+        AppViewModel.Instance.LibraryQueryRequested += OnLibraryQueryRequested;
 
         // Arrow-key navigation for the tile grid. ItemsRepeater has NO built-in
         // keyboard nav (unlike GridView), so we drive it ourselves. Wire on the
@@ -134,7 +135,20 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             SyncUndoPill();
             SyncBanners();
+            ApplyLibraryQueryHandoff();
         };
+    }
+
+    private void OnLibraryQueryRequested(object? sender, EventArgs e)
+        => DebugLog.SafeRun(nameof(OnLibraryQueryRequested), () => DispatcherQueue.TryEnqueue(ApplyLibraryQueryHandoff));
+
+    private void ApplyLibraryQueryHandoff()
+    {
+        if (_unloaded) return;
+        if (AppViewModel.Instance.TakeLibraryQuery() is { } query)
+        {
+            SearchBox.Text = query;
+        }
     }
 
     private void OnUndoStackChanged(object? sender, PropertyChangedEventArgs e)
@@ -340,6 +354,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { ViewModel.Items.CollectionChanged -= OnItemsCollectionChanged; } catch { /* swallow */ }
         try { UndoStack.Instance.PropertyChanged -= OnUndoStackChanged; } catch { /* swallow */ }
         try { EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
+        try { AppViewModel.Instance.LibraryQueryRequested -= OnLibraryQueryRequested; } catch { /* swallow */ }
         // Step 1: cancel + dispose every in-flight thumb load so closing
         // the tab doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)
