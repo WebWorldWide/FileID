@@ -87,15 +87,69 @@ pub struct Page {
 }
 
 pub const PAGES: [Page; 9] = [
-    Page { id: "library", title: "Library", icon: "view-grid-symbolic", area: Some(Area::Browse), shortcut: Some(1) },
-    Page { id: "people", title: "People", icon: "system-users-symbolic", area: Some(Area::Browse), shortcut: Some(2) },
-    Page { id: "moments", title: "Search & Moments", icon: "system-search-symbolic", area: Some(Area::Browse), shortcut: Some(3) },
-    Page { id: "deep-analyze", title: "Deep Analyze", icon: "starred-symbolic", area: Some(Area::Analyze), shortcut: Some(4) },
-    Page { id: "chat", title: "Chat", icon: "chat-symbolic", area: Some(Area::Analyze), shortcut: Some(5) },
-    Page { id: "cleanup", title: "Cleanup", icon: "user-trash-symbolic", area: Some(Area::Act), shortcut: Some(7) },
-    Page { id: "restructure", title: "Restructure", icon: "view-list-symbolic", area: Some(Area::Act), shortcut: Some(8) },
-    Page { id: "tools", title: "File Tools", icon: "applications-utilities-symbolic", area: Some(Area::Act), shortcut: Some(9) },
-    Page { id: "settings", title: "Settings", icon: "emblem-system-symbolic", area: None, shortcut: None },
+    Page {
+        id: "library",
+        title: "Library",
+        icon: "view-grid-symbolic",
+        area: Some(Area::Browse),
+        shortcut: Some(1),
+    },
+    Page {
+        id: "people",
+        title: "People",
+        icon: "system-users-symbolic",
+        area: Some(Area::Browse),
+        shortcut: Some(2),
+    },
+    Page {
+        id: "moments",
+        title: "Search & Moments",
+        icon: "system-search-symbolic",
+        area: Some(Area::Browse),
+        shortcut: Some(3),
+    },
+    Page {
+        id: "deep-analyze",
+        title: "Deep Analyze",
+        icon: "starred-symbolic",
+        area: Some(Area::Analyze),
+        shortcut: Some(4),
+    },
+    Page {
+        id: "chat",
+        title: "Chat",
+        icon: "chat-symbolic",
+        area: Some(Area::Analyze),
+        shortcut: Some(5),
+    },
+    Page {
+        id: "cleanup",
+        title: "Cleanup",
+        icon: "user-trash-symbolic",
+        area: Some(Area::Act),
+        shortcut: Some(7),
+    },
+    Page {
+        id: "restructure",
+        title: "Restructure",
+        icon: "view-list-symbolic",
+        area: Some(Area::Act),
+        shortcut: Some(8),
+    },
+    Page {
+        id: "tools",
+        title: "File Tools",
+        icon: "applications-utilities-symbolic",
+        area: Some(Area::Act),
+        shortcut: Some(9),
+    },
+    Page {
+        id: "settings",
+        title: "Settings",
+        icon: "emblem-system-symbolic",
+        area: None,
+        shortcut: None,
+    },
 ];
 
 pub fn page(id: &str) -> Option<&'static Page> {
@@ -108,7 +162,11 @@ pub fn page_for_shortcut(n: u32) -> Option<&'static Page> {
 
 impl Page {
     pub fn crumb(&self) -> String {
-        format!("{} / {}", self.area.map_or("FileID", Area::name), self.title)
+        format!(
+            "{} / {}",
+            self.area.map_or("FileID", Area::name),
+            self.title
+        )
     }
 
     pub fn tooltip(&self) -> String {
@@ -205,23 +263,35 @@ pub struct GrainBar {
 
 impl GrainBar {
     pub fn new(mini: bool) -> Self {
-        let bar = gtk::ProgressBar::builder().css_classes(["grain-bar"]).valign(gtk::Align::Center).build();
+        let bar = gtk::ProgressBar::builder()
+            .css_classes(["grain-bar"])
+            .valign(gtk::Align::Center)
+            .build();
         if mini {
             bar.add_css_class("mini");
         }
-        Self { bar, target: std::rc::Rc::new(std::cell::Cell::new(0.0)) }
+        Self {
+            bar,
+            target: std::rc::Rc::new(std::cell::Cell::new(0.0)),
+        }
     }
 
     pub fn set(&self, fraction: f64, tone: status::Tone) {
         set_tone(&self.bar, tone);
-        let to = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+        let to = if fraction.is_finite() {
+            fraction.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         if (to - self.target.get()).abs() < 0.001 {
             return;
         }
         self.target.set(to);
         let from = self.bar.fraction();
         let bar = self.bar.clone();
-        let _ = crate::spring::animate(&self.bar, from, to, move |value| bar.set_fraction(value.clamp(0.0, 1.0)));
+        let _ = crate::spring::animate(&self.bar, from, to, move |value| {
+            bar.set_fraction(value.clamp(0.0, 1.0))
+        });
     }
 }
 
@@ -251,9 +321,18 @@ mod tests {
 
     #[test]
     fn switching_area_returns_to_its_last_page() {
-        assert_eq!(Area::Act.remembered("library", Some("restructure")).id, "restructure");
-        assert_eq!(Area::Act.remembered("tools", Some("restructure")).id, "tools");
-        assert_eq!(Area::Analyze.remembered("library", Some("library")).id, "deep-analyze");
+        assert_eq!(
+            Area::Act.remembered("library", Some("restructure")).id,
+            "restructure"
+        );
+        assert_eq!(
+            Area::Act.remembered("tools", Some("restructure")).id,
+            "tools"
+        );
+        assert_eq!(
+            Area::Analyze.remembered("library", Some("library")).id,
+            "deep-analyze"
+        );
         assert_eq!(Area::Browse.remembered("cleanup", None).id, "library");
     }
 

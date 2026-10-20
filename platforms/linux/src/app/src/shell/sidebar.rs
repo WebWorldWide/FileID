@@ -193,10 +193,21 @@ impl Sidebar {
     }
 }
 
-fn area_switcher(act: &Rc<dyn Fn(Action)>) -> (gtk::Overlay, Vec<gtk::Button>, gtk::DrawingArea, Rc<Cell<f64>>) {
+fn area_switcher(
+    act: &Rc<dyn Fn(Action)>,
+) -> (
+    gtk::Overlay,
+    Vec<gtk::Button>,
+    gtk::DrawingArea,
+    Rc<Cell<f64>>,
+) {
     const GAP: f64 = 2.0;
     let pill_pos = Rc::new(Cell::new(0.0_f64));
-    let pill = gtk::DrawingArea::builder().content_height(26).hexpand(true).can_target(false).build();
+    let pill = gtk::DrawingArea::builder()
+        .content_height(26)
+        .hexpand(true)
+        .can_target(false)
+        .build();
     let pos = pill_pos.clone();
     pill.set_draw_func(move |_, cr, width, height| {
         let segment = (f64::from(width) - GAP * 2.0) / 3.0;
@@ -206,7 +217,10 @@ fn area_switcher(act: &Rc<dyn Fn(Action)>) -> (gtk::Overlay, Vec<gtk::Button>, g
         cr.set_source_rgb(r, g, b);
         let _ = cr.fill();
     });
-    let buttons_box = gtk::Box::builder().homogeneous(true).spacing(GAP as i32).build();
+    let buttons_box = gtk::Box::builder()
+        .homogeneous(true)
+        .spacing(GAP as i32)
+        .build();
     let mut buttons = Vec::new();
     for area in Area::ALL {
         let button = gtk::Button::builder()
@@ -218,7 +232,10 @@ fn area_switcher(act: &Rc<dyn Fn(Action)>) -> (gtk::Overlay, Vec<gtk::Button>, g
         buttons_box.append(&button);
         buttons.push(button);
     }
-    let overlay = gtk::Overlay::builder().child(&pill).css_classes(["area-switcher"]).build();
+    let overlay = gtk::Overlay::builder()
+        .child(&pill)
+        .css_classes(["area-switcher"])
+        .build();
     overlay.add_overlay(&buttons_box);
     overlay.set_measure_overlay(&buttons_box, true);
     overlay.set_margin_start(10);
@@ -238,7 +255,13 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
     cr.close_path();
 }
 
-fn nav_row(id: &'static str, title: &str, icon: &str, tooltip: &str, act: &Rc<dyn Fn(Action)>) -> NavRow {
+fn nav_row(
+    id: &'static str,
+    title: &str,
+    icon: &str,
+    tooltip: &str,
+    act: &Rc<dyn Fn(Action)>,
+) -> NavRow {
     let content = hbox(10);
     let image = gtk::Image::from_icon_name(icon);
     image.set_pixel_size(14);
@@ -263,7 +286,10 @@ fn nav_row(id: &'static str, title: &str, icon: &str, tooltip: &str, act: &Rc<dy
 }
 
 fn icon_button(icon: &str, text: &str, classes: &[&str]) -> (gtk::Button, adw::ButtonContent) {
-    let content = adw::ButtonContent::builder().icon_name(icon).label(text).build();
+    let content = adw::ButtonContent::builder()
+        .icon_name(icon)
+        .label(text)
+        .build();
     let button = gtk::Button::builder().child(&content).build();
     for class in classes {
         button.add_css_class(class);
@@ -287,7 +313,11 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
 
     let pick = vbox(8);
     pick.append(&label("Pick a folder to start", &["scan-title"]));
-    let (pick_button, _) = icon_button("folder-new-symbolic", "Pick a folder…", &["gold-button", "compact"]);
+    let (pick_button, _) = icon_button(
+        "folder-new-symbolic",
+        "Pick a folder…",
+        &["gold-button", "compact"],
+    );
     pick_button.set_halign(gtk::Align::Start);
     pick_button.set_tooltip_text(Some("Pick a folder (Ctrl+O)"));
     let act_pick = act.clone();
@@ -311,7 +341,10 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     let segments: Vec<gtk::Box> = STAGES
         .iter()
         .map(|_| {
-            let segment = gtk::Box::builder().css_classes(["step-seg"]).valign(gtk::Align::Center).build();
+            let segment = gtk::Box::builder()
+                .css_classes(["step-seg"])
+                .valign(gtk::Align::Center)
+                .build();
             segments_box.append(&segment);
             segment
         })
@@ -350,23 +383,44 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         move |toggle| {
             let open = !details.reveals_child();
             details.set_reveal_child(open);
-            toggle.set_icon_name(if open { "pan-up-symbolic" } else { "pan-down-symbolic" });
-            toggle.set_tooltip_text(Some(if open { "Hide scan details" } else { "Show scan details" }));
+            toggle.set_icon_name(if open {
+                "pan-up-symbolic"
+            } else {
+                "pan-down-symbolic"
+            });
+            toggle.set_tooltip_text(Some(if open {
+                "Hide scan details"
+            } else {
+                "Show scan details"
+            }));
             if open {
                 let target = stats.clone();
-                let _ = crate::spring::animate(&stats, 0.0, 1.0, move |v| target.set_opacity(v.clamp(0.0, 1.0)));
+                let _ = crate::spring::animate(&stats, 0.0, 1.0, move |v| {
+                    target.set_opacity(v.clamp(0.0, 1.0))
+                });
             }
         }
     ));
 
     let controls = hbox(6);
-    let (scan, scan_content) = icon_button("media-playback-start-symbolic", "Scan", &["gold-button", "compact"]);
+    let (scan, scan_content) = icon_button(
+        "media-playback-start-symbolic",
+        "Scan",
+        &["gold-button", "compact"],
+    );
     scan.set_tooltip_text(Some("Scan (Ctrl+R)"));
     let (rescan, _) = icon_button("view-refresh-symbolic", "Rescan", &["secondary"]);
     rescan.set_tooltip_text(Some("Rescan (Ctrl+R)"));
     let (pause, _) = icon_button("media-playback-pause-symbolic", "Pause", &["secondary"]);
-    let (resume, _) = icon_button("media-playback-start-symbolic", "Resume", &["gold-button", "compact"]);
-    let cancel = gtk::Button::builder().label("Cancel").css_classes(["ghost"]).build();
+    let (resume, _) = icon_button(
+        "media-playback-start-symbolic",
+        "Resume",
+        &["gold-button", "compact"],
+    );
+    let cancel = gtk::Button::builder()
+        .label("Cancel")
+        .css_classes(["ghost"])
+        .build();
     for (button, action) in [
         (&scan, Action::StartScan),
         (&rescan, Action::StartScan),
@@ -426,7 +480,8 @@ impl ScanCard {
                 set_tone(segment, p.stage_tone);
             }
         }
-        self.step.set_text(&format!("Step {} of 5 · {}", p.stage + 1, STAGES[p.stage]));
+        self.step
+            .set_text(&format!("Step {} of 5 · {}", p.stage + 1, STAGES[p.stage]));
         self.sub.set_text(&p.sub);
 
         let rows = status.stats();

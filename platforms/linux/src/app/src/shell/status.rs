@@ -124,15 +124,24 @@ pub fn percent(fraction: f64) -> String {
 
 impl Status {
     pub fn scan_running(&self) -> bool {
-        matches!(self.phase, Some(ScanPhase::Discovering | ScanPhase::Tagging | ScanPhase::PostScan))
+        matches!(
+            self.phase,
+            Some(ScanPhase::Discovering | ScanPhase::Tagging | ScanPhase::PostScan)
+        )
     }
 
     fn scan_fraction(&self) -> f64 {
-        self.progress.as_ref().map_or(0.0, |p| fraction(p.processed, p.total))
+        self.progress
+            .as_ref()
+            .map_or(0.0, |p| fraction(p.processed, p.total))
     }
 
     fn scan_of_total(p: &ScanProgress) -> String {
-        format!("{} of {} files", grouped(p.processed), grouped(p.total.max(p.discovered)))
+        format!(
+            "{} of {} files",
+            grouped(p.processed),
+            grouped(p.total.max(p.discovered))
+        )
     }
 
     pub fn stage(&self) -> usize {
@@ -156,8 +165,20 @@ impl Status {
     pub fn pipeline(&self) -> Pipeline {
         let stage = self.stage();
         let (title, fraction, bar, accent, sub) = self.pipeline_state();
-        let stage_tone = if stage == 3 && self.deep_running { Tone::Ai } else { accent };
-        Pipeline { title, fraction, bar, accent, sub, stage, stage_tone }
+        let stage_tone = if stage == 3 && self.deep_running {
+            Tone::Ai
+        } else {
+            accent
+        };
+        Pipeline {
+            title,
+            fraction,
+            bar,
+            accent,
+            sub,
+            stage,
+            stage_tone,
+        }
     }
 
     fn pipeline_state(&self) -> (String, f64, Tone, Tone, String) {
@@ -165,7 +186,13 @@ impl Status {
         if let (Some(p), true) = (self.progress.as_ref(), self.scan_running()) {
             let frac = self.scan_fraction();
             if self.paused {
-                return ("Scan paused".into(), frac, Tone::Paused, Tone::Muted, Self::scan_of_total(p));
+                return (
+                    "Scan paused".into(),
+                    frac,
+                    Tone::Paused,
+                    Tone::Muted,
+                    Self::scan_of_total(p),
+                );
             }
             let discovering = self.phase == Some(ScanPhase::Discovering);
             let title = match self.phase {
@@ -180,25 +207,63 @@ impl Status {
             } else {
                 Self::scan_of_total(p)
             };
-            return (title.into(), if discovering { 0.02 } else { frac }, Tone::Gold, Tone::Gold, sub);
+            return (
+                title.into(),
+                if discovering { 0.02 } else { frac },
+                Tone::Gold,
+                Tone::Gold,
+                sub,
+            );
         }
         if self.scan_running() {
-            return ("Starting".into(), 0.0, Tone::Gold, Tone::Gold, format!("Reading {folder}"));
+            return (
+                "Starting".into(),
+                0.0,
+                Tone::Gold,
+                Tone::Gold,
+                format!("Reading {folder}"),
+            );
         }
         if let (true, Some(d)) = (self.deep_running, self.deep.as_ref()) {
             let sub = format!("{} of {} captioned", grouped(d.processed), grouped(d.total));
-            return ("Writing captions".into(), fraction(d.processed, d.total), Tone::Ai, Tone::Ai, sub);
+            return (
+                "Writing captions".into(),
+                fraction(d.processed, d.total),
+                Tone::Ai,
+                Tone::Ai,
+                sub,
+            );
         }
         if let Some(done) = self.deep_done.filter(|n| *n > 0) {
-            return ("Everything analyzed".into(), 1.0, Tone::Done, Tone::Done, format!("{} files captioned", grouped(done)));
+            return (
+                "Everything analyzed".into(),
+                1.0,
+                Tone::Done,
+                Tone::Done,
+                format!("{} files captioned", grouped(done)),
+            );
         }
         match (self.phase, self.progress.as_ref()) {
             (Some(ScanPhase::Cancelled), p) => {
-                let sub = p.map_or_else(String::new, |p| format!("{} of {} tagged", grouped(p.processed), grouped(p.total)));
-                return ("Scan cancelled".into(), self.scan_fraction(), Tone::Paused, Tone::Muted, sub);
+                let sub = p.map_or_else(String::new, |p| {
+                    format!("{} of {} tagged", grouped(p.processed), grouped(p.total))
+                });
+                return (
+                    "Scan cancelled".into(),
+                    self.scan_fraction(),
+                    Tone::Paused,
+                    Tone::Muted,
+                    sub,
+                );
             }
             (Some(ScanPhase::Failed), _) => {
-                return ("Scan failed".into(), 0.0, Tone::Paused, Tone::Danger, "Check the engine log".into());
+                return (
+                    "Scan failed".into(),
+                    0.0,
+                    Tone::Paused,
+                    Tone::Danger,
+                    "Check the engine log".into(),
+                );
             }
             _ => {}
         }
@@ -206,13 +271,25 @@ impl Status {
             let sub = format!("{} files · captions not started", grouped(self.total_files));
             return ("Scan complete".into(), 1.0, Tone::Gold, Tone::Gold, sub);
         }
-        let title = if self.start_requested { "Starting" } else { "Not scanned yet" };
-        (title.into(), 0.0, Tone::Gold, Tone::Text2, format!("{folder} is ready to scan"))
+        let title = if self.start_requested {
+            "Starting"
+        } else {
+            "Not scanned yet"
+        };
+        (
+            title.into(),
+            0.0,
+            Tone::Gold,
+            Tone::Text2,
+            format!("{folder} is ready to scan"),
+        )
     }
 
     pub fn controls(&self) -> ScanControls {
         if self.scan_running() {
-            ScanControls::Running { paused: self.paused }
+            ScanControls::Running {
+                paused: self.paused,
+            }
         } else if self.folder.is_none() {
             ScanControls::PickFolder
         } else if self.total_files > 0 || self.progress.is_some() {
@@ -228,24 +305,47 @@ impl Status {
 
     pub fn activity(&self) -> Activity {
         if self.scan_running() {
-            return Activity { label: "Scanning", tone: Tone::Gold, fraction: self.scan_fraction(), idle: false };
+            return Activity {
+                label: "Scanning",
+                tone: Tone::Gold,
+                fraction: self.scan_fraction(),
+                idle: false,
+            };
         }
         if let (true, Some(d)) = (self.deep_running, self.deep.as_ref()) {
-            return Activity { label: "Captions", tone: Tone::Ai, fraction: fraction(d.processed, d.total), idle: false };
+            return Activity {
+                label: "Captions",
+                tone: Tone::Ai,
+                fraction: fraction(d.processed, d.total),
+                idle: false,
+            };
         }
-        Activity { label: "Idle", tone: Tone::Info, fraction: 1.0, idle: true }
+        Activity {
+            label: "Idle",
+            tone: Tone::Info,
+            fraction: 1.0,
+            idle: true,
+        }
     }
 
     pub fn jobs(&self) -> Vec<Job> {
         let mut jobs = Vec::new();
-        if let Some(p) = self.progress.as_ref().filter(|_| self.phase.is_some_and(|ph| ph != ScanPhase::Idle)) {
+        if let Some(p) = self
+            .progress
+            .as_ref()
+            .filter(|_| self.phase.is_some_and(|ph| ph != ScanPhase::Idle))
+        {
             let running = self.scan_running();
             let completed = self.phase == Some(ScanPhase::Completed);
             let frac = if completed { 1.0 } else { self.scan_fraction() };
             let state = if completed {
                 "DONE".to_owned()
             } else if running {
-                format!("{}{}", if self.paused { "PAUSED " } else { "" }, percent(frac))
+                format!(
+                    "{}{}",
+                    if self.paused { "PAUSED " } else { "" },
+                    percent(frac)
+                )
             } else {
                 format!("{:?}", self.phase.unwrap_or(ScanPhase::Idle)).to_uppercase()
             };
@@ -258,11 +358,19 @@ impl Status {
             };
             jobs.push(Job {
                 name: "Library scan",
-                sub: if running { Self::scan_of_total(p) } else { format!("{} files", grouped(p.processed)) },
+                sub: if running {
+                    Self::scan_of_total(p)
+                } else {
+                    format!("{} files", grouped(p.processed))
+                },
                 state,
                 tone,
                 fraction: frac,
-                action: running.then_some(if self.paused { JobAction::ResumeScan } else { JobAction::PauseScan }),
+                action: running.then_some(if self.paused {
+                    JobAction::ResumeScan
+                } else {
+                    JobAction::PauseScan
+                }),
                 open: "library",
             });
         }
@@ -270,7 +378,12 @@ impl Status {
             let frac = fraction(d.processed, d.total);
             jobs.push(Job {
                 name: "Deep Analyze",
-                sub: format!("{} of {} · {}", grouped(d.processed), grouped(d.total), d.model_kind),
+                sub: format!(
+                    "{} of {} · {}",
+                    grouped(d.processed),
+                    grouped(d.total),
+                    d.model_kind
+                ),
                 state: percent(frac),
                 tone: Tone::Ai,
                 fraction: frac,
@@ -296,18 +409,32 @@ impl Status {
         match page {
             "library" => {
                 if self.scan_running() {
-                    let total = self.progress.as_ref().map_or(0, |p| p.total.max(p.discovered));
-                    let text = if total > 0 { percent(self.scan_fraction()) } else { "…".into() };
+                    let total = self
+                        .progress
+                        .as_ref()
+                        .map_or(0, |p| p.total.max(p.discovered));
+                    let text = if total > 0 {
+                        percent(self.scan_fraction())
+                    } else {
+                        "…".into()
+                    };
                     return Some((text, Tone::Gold));
                 }
                 (self.total_files > 0).then(|| (super::compact(self.total_files), Tone::Muted))
             }
-            "people" => self.people.filter(|n| *n > 0).map(|n| (super::compact(u64::from(n)), Tone::Muted)),
+            "people" => self
+                .people
+                .filter(|n| *n > 0)
+                .map(|n| (super::compact(u64::from(n)), Tone::Muted)),
             "deep-analyze" => match (self.deep_running, self.deep.as_ref()) {
-                (true, Some(d)) if d.total > 0 => Some((percent(fraction(d.processed, d.total)), Tone::Ai)),
+                (true, Some(d)) if d.total > 0 => {
+                    Some((percent(fraction(d.processed, d.total)), Tone::Ai))
+                }
                 _ => None,
             },
-            "restructure" => self.restructure_plan.then(|| ("Plan".to_owned(), Tone::Gold)),
+            "restructure" => self
+                .restructure_plan
+                .then(|| ("Plan".to_owned(), Tone::Gold)),
             _ => None,
         }
     }
@@ -326,7 +453,11 @@ impl Status {
     }
 
     pub fn stats(&self) -> Vec<(&'static str, String, Option<String>, Tone)> {
-        let Some(p) = self.progress.as_ref().filter(|_| self.phase.is_some_and(|ph| ph != ScanPhase::Idle)) else {
+        let Some(p) = self
+            .progress
+            .as_ref()
+            .filter(|_| self.phase.is_some_and(|ph| ph != ScanPhase::Idle))
+        else {
             return Vec::new();
         };
         let eta = p
@@ -334,11 +465,20 @@ impl Status {
             .filter(|s| *s > 0.0 && self.scan_running())
             .map(|s| format!("{} left", format_eta(s)));
         let rate = (p.files_per_second > 0.0).then(|| format!("{:.1}/s", p.files_per_second));
-        let memory_tone = if p.resident_mb > 1200 { Tone::Warning } else { Tone::Text2 };
+        let memory_tone = if p.resident_mb > 1200 {
+            Tone::Warning
+        } else {
+            Tone::Text2
+        };
         let mut rows = vec![
             ("Found", grouped(p.discovered), eta, Tone::Text2),
             ("Tagged", grouped(p.processed), rate, Tone::Text2),
-            ("Memory", format!("{} MB", p.resident_mb), Some(format!("{} MB free", p.available_mb)), memory_tone),
+            (
+                "Memory",
+                format!("{} MB", p.resident_mb),
+                Some(format!("{} MB free", p.available_mb)),
+                memory_tone,
+            ),
         ];
         if p.failed > 0 {
             rows.push(("Failed", grouped(p.failed), None, Tone::Danger));
@@ -389,7 +529,11 @@ mod tests {
 
     #[test]
     fn fresh_folder_is_ready_to_scan_at_step_one() {
-        let status = Status { folder: Some("Photos".into()), engine_ready: true, ..Status::default() };
+        let status = Status {
+            folder: Some("Photos".into()),
+            engine_ready: true,
+            ..Status::default()
+        };
         let p = status.pipeline();
         assert_eq!(p.title, "Not scanned yet");
         assert_eq!(p.sub, "Photos is ready to scan");
@@ -409,15 +553,29 @@ mod tests {
         assert_eq!((p.stage, p.bar), (1, Tone::Gold));
         assert_eq!(status.controls(), ScanControls::Running { paused: false });
         assert_eq!(status.badge("library"), Some(("25%".into(), Tone::Gold)));
-        assert_eq!(status.activity(), Activity { label: "Scanning", tone: Tone::Gold, fraction: 0.25, idle: false });
+        assert_eq!(
+            status.activity(),
+            Activity {
+                label: "Scanning",
+                tone: Tone::Gold,
+                fraction: 0.25,
+                idle: false
+            }
+        );
         assert!(!status.can_start());
     }
 
     #[test]
     fn paused_scan_greys_the_bar_and_offers_resume() {
-        let status = Status { paused: true, ..scanning(10, 40) };
+        let status = Status {
+            paused: true,
+            ..scanning(10, 40)
+        };
         let p = status.pipeline();
-        assert_eq!((p.title.as_str(), p.bar, p.accent), ("Scan paused", Tone::Paused, Tone::Muted));
+        assert_eq!(
+            (p.title.as_str(), p.bar, p.accent),
+            ("Scan paused", Tone::Paused, Tone::Muted)
+        );
         let job = &status.jobs()[0];
         assert_eq!(job.state, "PAUSED 25%");
         assert_eq!(job.action, Some(JobAction::ResumeScan));
@@ -449,7 +607,10 @@ mod tests {
             current_caption: None,
         });
         let p = status.pipeline();
-        assert_eq!((p.title.as_str(), p.bar, p.stage_tone), ("Writing captions", Tone::Ai, Tone::Ai));
+        assert_eq!(
+            (p.title.as_str(), p.bar, p.stage_tone),
+            ("Writing captions", Tone::Ai, Tone::Ai)
+        );
         assert_eq!(status.badge("deep-analyze"), Some(("25%".into(), Tone::Ai)));
         assert_eq!(status.page_meta("deep-analyze"), "30 / 120");
         assert_eq!(status.activity().label, "Captions");
@@ -458,7 +619,10 @@ mod tests {
         status.deep_running = false;
         status.deep_done = Some(120);
         let p = status.pipeline();
-        assert_eq!((p.title.as_str(), p.stage, p.bar), ("Everything analyzed", 4, Tone::Done));
+        assert_eq!(
+            (p.title.as_str(), p.stage, p.bar),
+            ("Everything analyzed", 4, Tone::Done)
+        );
         assert!(status.activity().idle);
     }
 
@@ -472,7 +636,10 @@ mod tests {
         };
         assert_eq!(cancelled.pipeline().title, "Scan cancelled");
         assert_eq!(cancelled.jobs()[0].state, "CANCELLED");
-        let failed = Status { phase: Some(ScanPhase::Failed), ..cancelled };
+        let failed = Status {
+            phase: Some(ScanPhase::Failed),
+            ..cancelled
+        };
         let p = failed.pipeline();
         assert_eq!((p.title.as_str(), p.accent), ("Scan failed", Tone::Danger));
     }
@@ -483,9 +650,16 @@ mod tests {
         for page in ["library", "people", "deep-analyze", "restructure", "chat"] {
             assert_eq!(status.badge(page), None, "{page}");
         }
-        let status = Status { people: Some(14), restructure_plan: true, ..Status::default() };
+        let status = Status {
+            people: Some(14),
+            restructure_plan: true,
+            ..Status::default()
+        };
         assert_eq!(status.badge("people"), Some(("14".into(), Tone::Muted)));
-        assert_eq!(status.badge("restructure"), Some(("Plan".into(), Tone::Gold)));
+        assert_eq!(
+            status.badge("restructure"),
+            Some(("Plan".into(), Tone::Gold))
+        );
     }
 
     #[test]
@@ -493,7 +667,10 @@ mod tests {
         let mut status = scanning(100, 400);
         status.progress.as_mut().unwrap().failed = 3;
         let rows = status.stats();
-        assert_eq!(rows[0], ("Found", "400".into(), Some("2m left".into()), Tone::Text2));
+        assert_eq!(
+            rows[0],
+            ("Found", "400".into(), Some("2m left".into()), Tone::Text2)
+        );
         assert_eq!(rows[1].2.as_deref(), Some("142.4/s"));
         assert_eq!(rows[3], ("Failed", "3".into(), None, Tone::Danger));
         assert!(Status::default().stats().is_empty());

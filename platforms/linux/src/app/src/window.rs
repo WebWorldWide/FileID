@@ -82,7 +82,10 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .ok()
         .and_then(|size| {
             let mut parts = size.split('x');
-            Some((parts.next()?.trim().parse().ok()?, parts.next()?.trim().parse().ok()?))
+            Some((
+                parts.next()?.trim().parse().ok()?,
+                parts.next()?.trim().parse().ok()?,
+            ))
         })
         .unwrap_or((1320, 860));
     let window = adw::ApplicationWindow::builder()
@@ -112,10 +115,19 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         ("library", crate::tabs::library::build(engine.clone())),
         ("people", crate::tabs::people::build(engine.clone())),
         ("moments", crate::tabs::workbenches::catalog(engine.clone())),
-        ("deep-analyze", crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone())),
+        (
+            "deep-analyze",
+            crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone()),
+        ),
         ("chat", crate::tabs::workbenches::chat(engine.clone())),
-        ("cleanup", crate::tabs::cleanup::build_cleanup_tab(engine.clone())),
-        ("restructure", crate::tabs::restructure::build_restructure_tab(engine.clone())),
+        (
+            "cleanup",
+            crate::tabs::cleanup::build_cleanup_tab(engine.clone()),
+        ),
+        (
+            "restructure",
+            crate::tabs::restructure::build_restructure_tab(engine.clone()),
+        ),
         ("tools", crate::tabs::workbenches::tools(engine.clone())),
         ("settings", crate::tabs::settings::build(engine.clone())),
     ];
@@ -197,7 +209,10 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     shell.count_files();
 
     ACTIVE_WINDOW.with_borrow_mut(|active| {
-        *active = Some(ActiveWindow { window: window.clone(), shell: Rc::downgrade(&shell) });
+        *active = Some(ActiveWindow {
+            window: window.clone(),
+            shell: Rc::downgrade(&shell),
+        });
     });
     let shell_for_close = shell.clone();
     window.connect_close_request(move |_| {
@@ -217,6 +232,10 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
 
     EngineClient::start(&engine);
     window.present();
+    // GTK focuses the first focusable widget on map; the search field should
+    // only light up when asked for (click or Ctrl+K), as on macOS.
+    let unfocus = window.clone();
+    glib::idle_add_local_once(move || GtkWindowExt::set_focus(&unfocus, gtk::Widget::NONE));
 
     // First-launch onboarding re-shows while any core model is missing.
     if crate::welcome::should_show() && std::env::var("FILEID_SELF_SHOT").is_err() {
@@ -226,7 +245,10 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     // Dev-only self-capture for compositors without a screenshot API. Gated by
     // `FILEID_SELF_SHOT=<path>`; `FILEID_SELF_SHOT_TAB=<name>` selects a tab.
     if let Ok(path) = std::env::var("FILEID_SELF_SHOT") {
-        if let Some(page) = std::env::var("FILEID_SELF_SHOT_TAB").ok().and_then(|tab| shell::page(&tab)) {
+        if let Some(page) = std::env::var("FILEID_SELF_SHOT_TAB")
+            .ok()
+            .and_then(|tab| shell::page(&tab))
+        {
             shell.navigate(page.id);
         }
         let window = window.clone();
@@ -299,13 +321,17 @@ impl Shell {
         if changed {
             if let Some(child) = self.stack.visible_child() {
                 let target = child.clone();
-                let _ = crate::spring::animate(&child, 0.0, 1.0, move |v| target.set_opacity(v.clamp(0.0, 1.0)));
+                let _ = crate::spring::animate(&child, 0.0, 1.0, move |v| {
+                    target.set_opacity(v.clamp(0.0, 1.0))
+                });
             }
         }
     }
 
     fn hand_off(&self, page: &str, placeholder: &str, text: &str) {
-        let Some((_, root)) = self.contents.iter().find(|(id, _)| *id == page) else { return };
+        let Some((_, root)) = self.contents.iter().find(|(id, _)| *id == page) else {
+            return;
+        };
         if let Some(editable) = find_editable(root, placeholder) {
             editable.set_text(text);
             editable.grab_focus();
@@ -367,12 +393,18 @@ impl Shell {
             .modal(true)
             .build();
         let weak = Rc::downgrade(self);
-        dialog.select_folder(Some(&self.window), gtk::gio::Cancellable::NONE, move |result| {
-            let (Some(shell), Some(path)) = (weak.upgrade(), result.ok().and_then(|file| file.path())) else {
-                return;
-            };
-            shell.set_folder(&path);
-        });
+        dialog.select_folder(
+            Some(&self.window),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                let (Some(shell), Some(path)) =
+                    (weak.upgrade(), result.ok().and_then(|file| file.path()))
+                else {
+                    return;
+                };
+                shell.set_folder(&path);
+            },
+        );
     }
 
     fn start_scan(&self) {
@@ -383,7 +415,10 @@ impl Shell {
         if !self.status.borrow().can_start() {
             return;
         }
-        let started = self.engine.borrow_mut().start_scan(&folder.to_string_lossy());
+        let started = self
+            .engine
+            .borrow_mut()
+            .start_scan(&folder.to_string_lossy());
         match started {
             Ok(()) => {
                 self.status.borrow_mut().start_requested = true;
@@ -408,7 +443,10 @@ impl Shell {
                 return;
             }
             let Some(shell) = weak.upgrade() else { return };
-            let wiped = shell.engine.borrow_mut().send(CommandPayload::WipeLibrary(Empty {}));
+            let wiped = shell
+                .engine
+                .borrow_mut()
+                .send(CommandPayload::WipeLibrary(Empty {}));
             if let Err(err) = wiped {
                 shell.set_note(Some(format!("Engine: {err}")));
                 return;
@@ -438,7 +476,10 @@ impl Shell {
                 .ok()
                 .filter(|path| path.exists())
                 .and_then(|path| fileid_engine::db::open_read(&path).ok())
-                .and_then(|conn| conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0)).ok())
+                .and_then(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+                        .ok()
+                })
                 .unwrap_or(0);
             let _ = tx.send_blocking(count.max(0) as u64);
         });
@@ -454,7 +495,11 @@ impl Shell {
 
     fn refresh(&self) {
         let status = self.status.borrow().clone();
-        let path = self.folder_path.borrow().as_ref().map(|path| path.to_string_lossy().into_owned());
+        let path = self
+            .folder_path
+            .borrow()
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
         self.title_bar.update(&status, path.as_deref());
         self.sidebar.update(&status);
         for (id, header) in &self.headers {
@@ -487,7 +532,13 @@ impl Shell {
                 }
                 EngineState::ScanPhase(phase) => {
                     status.phase = Some(phase);
-                    if matches!(phase, ScanPhase::Idle | ScanPhase::Completed | ScanPhase::Cancelled | ScanPhase::Failed) {
+                    if matches!(
+                        phase,
+                        ScanPhase::Idle
+                            | ScanPhase::Completed
+                            | ScanPhase::Cancelled
+                            | ScanPhase::Failed
+                    ) {
                         status.paused = false;
                         status.start_requested = false;
                         recount = true;
@@ -524,7 +575,9 @@ impl Shell {
                     status.deep_running = false;
                     status.deep_done = (!done.cancelled).then_some(done.processed);
                 }
-                EngineState::FaceClusteringComplete(result) => status.people = Some(result.person_count),
+                EngineState::FaceClusteringComplete(result) => {
+                    status.people = Some(result.person_count)
+                }
                 EngineState::RestructurePlan(_) => status.restructure_plan = true,
                 EngineState::RestructureApplyResult(_) => status.restructure_plan = false,
                 EngineState::Error { kind, message, .. } if kind == "models_not_installed" => {
@@ -540,7 +593,11 @@ impl Shell {
                         "Scan blocked: {missing} Install the missing models in Settings, then retry."
                     )));
                 }
-                EngineState::Error { kind, message, model_kind } => {
+                EngineState::Error {
+                    kind,
+                    message,
+                    model_kind,
+                } => {
                     if kind.starts_with("deep_analyze") {
                         status.deep_running = false;
                     }
@@ -614,7 +671,10 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
     let controller = gtk::ShortcutController::new();
     controller.set_scope(gtk::ShortcutScope::Global);
     let mut bindings: Vec<(String, Action)> = (1..=9)
-        .filter_map(|n| shell::page_for_shortcut(n).map(|page| (format!("<Control>{n}"), Action::Navigate(page.id))))
+        .filter_map(|n| {
+            shell::page_for_shortcut(n)
+                .map(|page| (format!("<Control>{n}"), Action::Navigate(page.id)))
+        })
         .collect();
     bindings.extend([
         ("<Control>comma".to_owned(), Action::Navigate("settings")),
@@ -629,7 +689,10 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
             act(action.clone());
             glib::Propagation::Stop
         });
-        controller.add_shortcut(gtk::Shortcut::new(gtk::ShortcutTrigger::parse_string(&trigger), Some(callback)));
+        controller.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string(&trigger),
+            Some(callback),
+        ));
     }
     window.add_controller(controller);
 }
@@ -655,7 +718,12 @@ fn drop_hint() -> gtk::Box {
     icon.set_pixel_size(40);
     icon.add_css_class("tone-gold");
     inner.append(&icon);
-    inner.append(&gtk::Label::builder().label("Drop folder to scan").css_classes(["title-2", "tone-gold"]).build());
+    inner.append(
+        &gtk::Label::builder()
+            .label("Drop folder to scan")
+            .css_classes(["title-2", "tone-gold"])
+            .build(),
+    );
     hint.append(&inner);
     hint
 }
@@ -673,7 +741,11 @@ fn install_drop_target(overlay: &gtk::Overlay, hint: &gtk::Box, shell: &Rc<Shell
     let weak = Rc::downgrade(shell);
     target.connect_drop(move |_, value, _, _| {
         hint_drop.set_visible(false);
-        let Some(path) = value.get::<gtk::gio::File>().ok().and_then(|file| file.path()) else {
+        let Some(path) = value
+            .get::<gtk::gio::File>()
+            .ok()
+            .and_then(|file| file.path())
+        else {
             return false;
         };
         if !path.is_dir() {
@@ -701,7 +773,12 @@ fn self_capture(window: &adw::ApplicationWindow, path: &str) {
     };
     let paintable = gtk::WidgetPaintable::new(Some(widget));
     let snapshot = gtk::Snapshot::new();
-    gtk::prelude::PaintableExt::snapshot(&paintable, &snapshot, f64::from(width), f64::from(height));
+    gtk::prelude::PaintableExt::snapshot(
+        &paintable,
+        &snapshot,
+        f64::from(width),
+        f64::from(height),
+    );
     let Some(node) = snapshot.to_node() else {
         eprintln!("[self_capture] empty render node");
         return;

@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::status::{percent, Job, JobAction, Status, Tone};
-use super::{grouped, hbox, label, matching_pages, section_label, set_tone, spacer, vbox, Action, GrainBar};
+use super::{
+    grouped, hbox, label, matching_pages, section_label, set_tone, spacer, vbox, Action, GrainBar,
+};
 
 #[derive(Debug, PartialEq)]
 pub struct SearchItem {
@@ -88,7 +90,9 @@ pub struct TitleBar {
 
 impl TitleBar {
     pub fn new(act: Rc<dyn Fn(Action)>) -> Rc<Self> {
-        let header = adw::HeaderBar::builder().css_classes(["fileid-titlebar"]).build();
+        let header = adw::HeaderBar::builder()
+            .css_classes(["fileid-titlebar"])
+            .build();
 
         let toggle = gtk::Button::builder()
             .icon_name("sidebar-show-symbolic")
@@ -102,7 +106,10 @@ impl TitleBar {
 
         let folder_content = hbox(10);
         folder_content.append(&label("FileID", &["wordmark"]));
-        let rule = gtk::Box::builder().css_classes(["vrule"]).valign(gtk::Align::Center).build();
+        let rule = gtk::Box::builder()
+            .css_classes(["vrule"])
+            .valign(gtk::Align::Center)
+            .build();
         folder_content.append(&rule);
         let folder_name = label("No folder", &["tb-folder", "empty"]);
         folder_name.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -147,9 +154,15 @@ impl TitleBar {
         folder_body.append(&no_folder);
         let actions = hbox(8);
         actions.add_css_class("pop-actions");
-        let add = gtk::Button::builder().label("Add folder…").css_classes(["secondary"]).build();
+        let add = gtk::Button::builder()
+            .label("Add folder…")
+            .css_classes(["secondary"])
+            .build();
         add.set_tooltip_text(Some("Add folder (Ctrl+O)"));
-        let rescan = gtk::Button::builder().label("Rescan").css_classes(["secondary"]).build();
+        let rescan = gtk::Button::builder()
+            .label("Rescan")
+            .css_classes(["secondary"])
+            .build();
         actions.append(&add);
         actions.append(&rescan);
         folder_body.append(&actions);
@@ -191,7 +204,10 @@ impl TitleBar {
         let glass = gtk::Image::from_icon_name("system-search-symbolic");
         glass.add_css_class("tone-muted");
         search_box.append(&glass);
-        let search_text = gtk::Text::builder().placeholder_text("Search or ask").hexpand(true).build();
+        let search_text = gtk::Text::builder()
+            .placeholder_text("Search or ask")
+            .hexpand(true)
+            .build();
         search_text.update_property(&[gtk::accessible::Property::Label("Search or ask")]);
         search_box.append(&search_text);
         let kbd = label("Ctrl+K", &["kbd"]);
@@ -223,7 +239,10 @@ impl TitleBar {
         header.pack_end(&settings);
 
         let activity_content = hbox(8);
-        let activity_dot = gtk::Box::builder().css_classes(["tone-dot", "tone-info"]).valign(gtk::Align::Center).build();
+        let activity_dot = gtk::Box::builder()
+            .css_classes(["tone-dot", "tone-info"])
+            .valign(gtk::Align::Center)
+            .build();
         activity_content.append(&activity_dot);
         let activity_label = label("Idle", &["tb-activity-label"]);
         activity_content.append(&activity_label);
@@ -309,6 +328,7 @@ impl TitleBar {
             }
         });
         let click = gtk::GestureClick::new();
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         click.connect_pressed(move |_, _, _, _| {
             if let Some(bar) = weak.upgrade() {
@@ -325,6 +345,7 @@ impl TitleBar {
         });
         self.search_text.add_controller(focus);
         let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         keys.connect_key_pressed(move |_, key, _, _| {
             if key != gtk::gdk::Key::Escape {
@@ -413,7 +434,8 @@ impl TitleBar {
                 self.folder_name.set_text(name);
                 self.folder_name.remove_css_class("empty");
                 self.folder_row_name.set_text(name);
-                self.folder_row_path.set_text(folder_path.unwrap_or_default());
+                self.folder_row_path
+                    .set_text(folder_path.unwrap_or_default());
                 self.folder_row_path.set_tooltip_text(folder_path);
                 self.folder_row_count.set_text(&if status.total_files > 0 {
                     format!("{} files", grouped(status.total_files))
@@ -443,13 +465,19 @@ impl TitleBar {
         set_tone(&self.activity_pct, activity.tone);
 
         let jobs = status.jobs();
-        let running = jobs.iter().filter(|job| matches!(job.tone, Tone::Gold | Tone::Ai)).count();
+        let running = jobs
+            .iter()
+            .filter(|job| matches!(job.tone, Tone::Gold | Tone::Ai))
+            .count();
         self.activity_count.set_text(&if running > 0 {
             format!("{running} running")
         } else {
             "Nothing running".to_owned()
         });
-        let shape: Vec<(&'static str, bool)> = jobs.iter().map(|job| (job.name, job.action.is_some())).collect();
+        let shape: Vec<(&'static str, bool)> = jobs
+            .iter()
+            .map(|job| (job.name, job.action.is_some()))
+            .collect();
         if *self.job_shape.borrow() != shape {
             self.rebuild_jobs(&jobs);
             self.job_shape.replace(shape);
@@ -502,7 +530,9 @@ impl TitleBar {
             row.append(&bar.bar);
             let buttons = hbox(6);
             let action = job.action.map(|_| {
-                let button = gtk::Button::builder().css_classes(["secondary", "small"]).build();
+                let button = gtk::Button::builder()
+                    .css_classes(["secondary", "small"])
+                    .build();
                 let slot = Rc::new(RefCell::new(None::<JobAction>));
                 let act = self.act.clone();
                 let target = slot.clone();
@@ -533,15 +563,24 @@ impl TitleBar {
             buttons.append(&open);
             row.append(&buttons);
             self.activity_list.append(&row);
-            self.activity_list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-            rows.push(JobRow { sub, state, bar, action });
+            self.activity_list
+                .append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            rows.push(JobRow {
+                sub,
+                state,
+                bar,
+                action,
+            });
         }
         self.job_rows.replace(rows);
     }
 }
 
 fn popover(width: i32) -> gtk::Popover {
-    let popover = gtk::Popover::builder().css_classes(["fileid-popover"]).position(gtk::PositionType::Bottom).build();
+    let popover = gtk::Popover::builder()
+        .css_classes(["fileid-popover"])
+        .position(gtk::PositionType::Bottom)
+        .build();
     popover.set_size_request(width, -1);
     popover
 }
