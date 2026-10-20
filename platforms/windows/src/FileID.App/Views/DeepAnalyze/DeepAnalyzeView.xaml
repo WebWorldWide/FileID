@@ -28,7 +28,7 @@
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="980" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">
-                <TextBlock Text="Deep Analyze" Style="{StaticResource TitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level1" />
+                <TextBlock Text="Deep Analyze" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed" AutomationProperties.HeadingLevel="Level1" />
                 <TextBlock TextWrapping="Wrap"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"

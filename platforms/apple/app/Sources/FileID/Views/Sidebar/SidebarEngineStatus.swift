@@ -7,7 +7,7 @@ struct EngineStatusRow: View {
         case .starting:
             Label("Starting…", systemImage: "hourglass")
                 .font(Theme.Font.body(13.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
         case .ready(let info):
             Label("Ready", systemImage: "checkmark.circle.fill")
                 .font(Theme.Font.body(13.5, .semibold))

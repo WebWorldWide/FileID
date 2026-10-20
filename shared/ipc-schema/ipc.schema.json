@@ -666,7 +666,7 @@
         "promptTokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
         "generatedTokensPerSecond": { "type": ["number", "null"], "minimum": 0 },
         "secondsPerImage": { "type": ["number", "null"], "minimum": 0 },
-        "peakResidentGB": { "type": ["number", "null"], "minimum": 0 },
+        "peakResidentGB": { "type": ["number", "null"], "minimum": 0, "description": "Peak resident memory in decimal gigabytes (bytes / 1e9)." },
         "jsonValidRate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "probeAccuracy": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "tunedArguments": { "type": ["array", "null"], "maxItems": 32, "items": { "type": "string", "maxLength": 64 } }

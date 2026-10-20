@@ -37,6 +37,8 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     protected override void OnOpened()
     {
         Engine.PropertyChanged += OnEngineChanged;
+        AppViewModel.Instance.ChatDraftRequested += OnChatDraftRequested;
+        UseChatDraft();
         Run(async ct =>
         {
             var id = await ChatConversationStore.LoadOrCreateAsync(Path.Combine(AppPaths.Root, "chat-conversation-id.txt"), ct);
@@ -51,9 +53,16 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     protected override void OnClosed()
     {
         Engine.PropertyChanged -= OnEngineChanged;
+        AppViewModel.Instance.ChatDraftRequested -= OnChatDraftRequested;
         _presentation.Invalidate();
         _request.Reset();
         _sendObservation?.Cancel();
+    }
+    private void OnChatDraftRequested(object? sender, EventArgs e)
+        => DebugLog.SafeRun("ChatWorkbench.OnChatDraftRequested", () => DispatcherQueue.TryEnqueue(UseChatDraft));
+    private void UseChatDraft()
+    {
+        if (AppViewModel.Instance.TakeChatDraft() is { } draft) _input.Text = draft;
     }
     protected override void UpdateControls() => _stop.IsEnabled = ChatFrontendPolicy.SupportsCancellation && _request.CanStop && _request.Generation == Engine.SpawnGeneration;
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)

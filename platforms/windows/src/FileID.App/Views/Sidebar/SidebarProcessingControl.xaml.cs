@@ -1,5 +1,6 @@
-﻿// SidebarProcessingControl code-behind. Subscribes to EngineClient state
-// and re-paints the panel as scan phase advances.
+﻿// SidebarProcessingControl code-behind: the v3 scan card. Subscribes to
+// EngineClient state and re-paints title, bar, sub line, counters and
+// controls as the pipeline advances (macOS PipelineBlock).
 //
 // Stat color thresholds (matches macOS):
 //   memory  > 1200 MB -> orange
@@ -30,13 +31,31 @@ public sealed partial class SidebarProcessingControl : UserControl
     // Resources traversal on every Sync() (~10 Hz during a scan, even with the
     // IdlePanel collapsed).
     private readonly Brush _idleStatusDefaultBrush;
+    private readonly Brush _gold;
+    private readonly Brush _ai;
+    private readonly Brush _delight;
+    private readonly Brush _text1;
+    private readonly Brush _text2;
+    private readonly Brush _goldBar;
+    private readonly Brush _aiBar;
+    private readonly Brush _doneBar;
+    private readonly Brush _pausedBar;
 
     public SidebarProcessingControl()
     {
         InitializeComponent();
         _memoryWarnBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0x99, 0x00));
-        _statDefaultBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-        _idleStatusDefaultBrush = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush");
+        _statDefaultBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xF0, 0xF1, 0xF2));
+        _idleStatusDefaultBrush = FileID.Services.ThemeHelper.GetBrushSafe("Text3Brush");
+        _gold = FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush");
+        _ai = FileID.Services.ThemeHelper.GetBrushSafe("AiBrush");
+        _delight = FileID.Services.ThemeHelper.GetBrushSafe("DelightBrush");
+        _text1 = FileID.Services.ThemeHelper.GetBrushSafe("Text1Brush");
+        _text2 = FileID.Services.ThemeHelper.GetBrushSafe("Text2Brush");
+        _goldBar = FileID.Services.ThemeHelper.GetBrushSafe("GoldProgressBrush");
+        _aiBar = FileID.Services.ThemeHelper.GetBrushSafe("AiProgressBrush");
+        _doneBar = FileID.Services.ThemeHelper.GetBrushSafe("DoneProgressBrush");
+        _pausedBar = FileID.Services.ThemeHelper.GetBrushSafe("PausedBrush");
         Loaded += (_, _) => { Sync(); SyncWarningBanner(); };
         EngineClient.Instance.PropertyChanged += OnEngineChanged;
         AppViewModel.Instance.PropertyChanged += OnAppChanged;
@@ -60,7 +79,11 @@ public sealed partial class SidebarProcessingControl : UserControl
                               or nameof(EngineClient.IsPaused)
                               or nameof(EngineClient.LastScanDuration)
                               or nameof(EngineClient.LastError)
-                              or nameof(EngineClient.GpuDeviceRemoved))
+                              or nameof(EngineClient.GpuDeviceRemoved)
+                              or nameof(EngineClient.DeepAnalyzeProgress)
+                              or nameof(EngineClient.DeepAnalyzeStarting)
+                              or nameof(EngineClient.DeepAnalyzeComplete)
+                              or nameof(EngineClient.QueueState))
             {
                 DebugLog.Debug($"[ENGINE-SUB:SidebarProcessingControl] {e.PropertyName}");
                 DispatcherQueue.TryEnqueue(Sync);
@@ -80,7 +103,7 @@ public sealed partial class SidebarProcessingControl : UserControl
 
     private void OnAppChangedCore(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(AppViewModel.HasFolder))
+        if (e.PropertyName is nameof(AppViewModel.HasFolder) or nameof(AppViewModel.FolderDisplay))
         {
             DispatcherQueue.TryEnqueue(Sync);
         }
@@ -128,7 +151,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             if (!vm.HasFolder)
             {
                 await ShowAlertAsync("Pick a folder first",
-                    "FileID needs a folder to scan. Use the picker at the top of the sidebar.");
+                    "FileID needs a folder to scan. Use the folder switcher in the title bar.");
                 return;
             }
 
@@ -351,66 +374,41 @@ public sealed partial class SidebarProcessingControl : UserControl
     /// scan is in flight. Keeps a momentary Total==0 mid-scan from bouncing
     /// ScanProgressBar back to the indeterminate sweep (scan-bar flicker).</summary>
     private bool _scanTotalKnown;
+    private double _lastScanFraction;
+    private bool _detailsOpen;
+
+    private enum CardControls { Pick, Start, Scanning, Rescan }
+
+    private void OnDetailsToggleClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnDetailsToggleClicked), () =>
+        {
+            _detailsOpen = !_detailsOpen;
+            Sync();
+        });
 
     private void Sync()
     {
-        var prog = EngineClient.Instance.LastProgress;
-        var phase = EngineClient.Instance.Phase ?? prog?.Phase;
+        var engine = EngineClient.Instance;
+        var vm = AppViewModel.Instance;
+        var prog = engine.LastProgress;
+        var phase = engine.Phase ?? prog?.Phase;
 
         bool isInFlight = phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan;
         bool isCompleted = phase is ScanPhase.Completed;
         bool isFailed = phase is ScanPhase.Failed;
+        bool isCancelled = phase is ScanPhase.Cancelled;
+        bool captionsRunning = engine.DeepAnalyzeProgress is not null || engine.DeepAnalyzeStarting is not null;
+        bool facesRunning = engine.QueueState?.Running?.Category == JobCategory.FaceCluster;
+        var captionsDone = engine.DeepAnalyzeComplete;
 
         // Reset the latch between scans so the next scan starts indeterminate
         // until its file count lands.
         if (!isInFlight) _scanTotalKnown = false;
 
-        // Failed: surface the engine error in the idle pill in red. Without
-        // this branch a scan failure (e.g. missing model files) reported via
-        // PhaseChanged(Failed) + Error(model_load_failed) falls through to
-        // the default idle text and looks like the click did nothing.
-        if (isFailed)
-        {
-            IdlePanel.Visibility = Visibility.Visible;
-            ScanningPanel.Visibility = Visibility.Collapsed;
-            CompletedPanel.Visibility = Visibility.Collapsed;
-            var err = EngineClient.Instance.LastError;
-            IdleStatusText.Text = err?.Message ?? "Scan failed.";
-            IdleStatusText.Foreground = FailedTextBrush;
-            RestartEngineButton.Visibility = EngineClient.Instance.GpuDeviceRemoved
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-            // Start Scan is enabled on HasFolder alone; the
-            // click handler waits for Ready with visible feedback.
-            // Exception: a Crashed engine — there's nothing to wait for.
-            // also gate on `!_startInFlight` so a touch-double-tap
-            // can't issue a second startScan while the first is in flight.
-            StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
-                                      && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
-                                      && !EngineClient.Instance.GpuDeviceRemoved
-                                      && !_startInFlight;
-            return;
-        }
-
-        IdlePanel.Visibility = (!isInFlight && !isCompleted) ? Visibility.Visible : Visibility.Collapsed;
-        ScanningPanel.Visibility = isInFlight ? Visibility.Visible : Visibility.Collapsed;
-        CompletedPanel.Visibility = isCompleted ? Visibility.Visible : Visibility.Collapsed;
-
-        // Reset foreground so a successful follow-up scan doesn't keep the
-        // red text from the previous failed attempt. Cached at ctor — avoids a
-        // Resources traversal on every Sync() (~10 Hz during a scan).
-        IdleStatusText.Foreground = _idleStatusDefaultBrush;
-
-        // enable on HasFolder alone. The previous version also
-        // required `EngineClient.State == Ready`, which made the button
-        // silently grey for users whose engine took longer than usual to
-        // spawn — they reported "I click Start scan, nothing happens."
-        // OnStartScanClicked now awaits Ready up to 15 s with inline
-        // feedback. Crashed is the one state the click can't recover from,
-        // so we still disable for that.
-        // also gate on `!_startInFlight` (macOS parity — Swift uses
-        // `disabled: startRequested` on the same button). Without this,
-        // spam-clicking issues N concurrent IPC calls.
+        // Start Scan is enabled on HasFolder alone; the click handler waits
+        // for Ready with visible feedback. A Crashed engine or a removed GPU
+        // can't recover from a click, and `!_startInFlight` stops a
+        // touch-double-tap from issuing a second startScan (macOS parity).
         StartScanButton.IsEnabled = AppViewModel.Instance.HasFolder
                                   && EngineClient.Instance.State != EngineClient.LifecycleState.Crashed
                                   && !EngineClient.Instance.GpuDeviceRemoved
@@ -418,132 +416,258 @@ public sealed partial class SidebarProcessingControl : UserControl
         RestartEngineButton.Visibility = EngineClient.Instance.GpuDeviceRemoved
             ? Visibility.Visible
             : Visibility.Collapsed;
-        if (EngineClient.Instance.GpuDeviceRemoved)
+
+        string title;
+        string sub;
+        double? fraction = 0;
+        Brush bar = _goldBar;
+        Brush accent = _text2;
+        bool danger = false;
+        bool showLog = false;
+        var controls = CardControls.Start;
+
+        if (!vm.HasFolder)
         {
-            IdleStatusText.Text = EngineClient.GpuRestartRequiredMessage
-                + " Use Restart Engine here in the sidebar.";
-            IdleStatusText.Foreground = FailedTextBrush;
+            title = "Pick a folder to start";
+            sub = "Or drop a folder on the window.";
+            controls = CardControls.Pick;
         }
-        // when the click has been registered but the engine hasn't
-        // yet emitted PhaseChanged(Discovering), show "Starting…" so the
-        // user gets visible feedback. Mirrors macOS's hourglass icon +
-        // "Starting…" label.
-        if (_startInFlight && phase == ScanPhase.Idle)
+        else if (EngineClient.Instance.GpuDeviceRemoved)
         {
-            IdleStatusText.Text = "Starting…";
+            title = "Engine needs a restart";
+            sub = EngineClient.GpuRestartRequiredMessage + " Use Restart Engine here in the sidebar.";
+            bar = _pausedBar;
+            danger = true;
         }
-
-        // FEAT-1: Pause/Resume label always reflects engine truth.
-        PauseResumeText.Text = EngineClient.Instance.IsPaused ? "Resume" : "Pause";
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-            PauseResumeButton, EngineClient.Instance.IsPaused ? "Resume scan" : "Pause scan");
-
-        if (isInFlight && prog is not null)
+        else if (isInFlight)
         {
-            PhaseText.Text = phase switch
+            var processed = prog?.Processed ?? 0;
+            var total = prog is null ? 0UL : Math.Max(prog.Total, prog.Discovered);
+            if (prog is { Total: > 0UL })
             {
-                ScanPhase.Discovering => "Discovering files...",
-                ScanPhase.Tagging => "Tagging files...",
-                ScanPhase.PostScan => "Wrapping up...",
-                _ => "Working...",
-            };
-            // glyphs were empty strings from a prior cp1252 round-trip
-            // that ate the PUA chars. Use Unicode escapes (encoding-bulletproof):
-            //   E721 = Search (Discovering)
-            //   E8B7 = TagGroup / labels (Tagging)
-            //   E895 = OEM (Wrapping up)
-            //   E8FB = AcceptMedium (default Working)
-            PhaseIcon.Glyph = phase switch
-            {
-                ScanPhase.Discovering => "",
-                ScanPhase.Tagging => "",
-                ScanPhase.PostScan => "",
-                _ => "",
-            };
-
-            if (prog.Total > 0)
-            {
-                ScanProgressBar.Maximum = prog.Total;
-                ScanProgressBar.Value = prog.Processed;
-                ScanProgressBar.IsIndeterminate = false;
+                _lastScanFraction = Math.Clamp((double)prog.Processed / prog.Total, 0, 1);
                 _scanTotalKnown = true;
+                fraction = _lastScanFraction;
             }
-            else if (!_scanTotalKnown)
+            else
             {
-                // Total not yet known (still discovering) — sweep.
-                ScanProgressBar.IsIndeterminate = true;
+                // Total not yet known (still discovering) — sweep; a transient
+                // Total==0 after the count was known keeps the determinate bar.
+                fraction = _scanTotalKnown ? _lastScanFraction : null;
             }
-            // else: a transient Total==0 after the count was already known this
-            // scan — keep the determinate bar rather than bouncing to the sweep.
 
-            StatDiscovered.Text = prog.Discovered.ToString("N0");
-            StatTagged.Text = prog.Processed.ToString("N0");
-            StatMemory.Text = prog.ResidentMb + " MB";
-            StatMemory.Foreground = prog.ResidentMb > 1200 ? _memoryWarnBrush : _statDefaultBrush;
-            StatFailures.Text = prog.Failed.ToString("N0");
-            StatFailures.Foreground = prog.Failed > 0 ? FailedTextBrush : _statDefaultBrush;
-
-            // Screen-reader names combine label + value so each stat tile
-            // announces e.g. "Discovered: 1,240" rather than a bare label.
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-                DiscoveredStatBorder, $"Discovered: {StatDiscovered.Text}");
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-                TaggedStatBorder, $"Tagged: {StatTagged.Text}");
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-                MemoryStatBorder, $"Memory: {StatMemory.Text}");
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-                FailuresStatBorder, $"Failures: {StatFailures.Text}");
-
-            // Per-step ETA: attribute the estimate to the ACTIVE pipeline
-            // stage rather than showing a bare number. During discovery the
-            // total is unknowable (counting the files IS the work), so we never
-            // fabricate an ETA there — that was the class of wrong number the
-            // engine used to emit. The People/Captions stages are separate jobs
-            // that surface their own ETA when they run.
-            EtaText.Text = phase switch
+            var counted = $"{processed:N0} of {total:N0} files";
+            if (engine.IsPaused)
             {
-                ScanPhase.Discovering => "Counting files…",
-                _ when prog.EtaSeconds is { } eta && eta > 0 =>
-                    $"{StageLabel(phase)} — {FormatDuration(eta)} left",
-                _ => $"{StageLabel(phase)} — estimating…",
-            };
+                title = "Scan paused";
+                sub = counted;
+                bar = _pausedBar;
+                accent = _idleStatusDefaultBrush;
+            }
+            else
+            {
+                title = phase switch
+                {
+                    ScanPhase.Discovering => "Counting files",
+                    ScanPhase.PostScan => "Finishing up",
+                    _ => "Scanning",
+                };
+                sub = phase == ScanPhase.Discovering
+                    ? $"{(prog?.Discovered ?? 0):N0} found"
+                    : prog is { FilesPerSecond: > 0 } rate ? $"{counted} · {rate.FilesPerSecond:F0}/s" : counted;
+                accent = _gold;
+            }
+            controls = CardControls.Scanning;
         }
-        else if (isCompleted && prog is not null)
+        else if (captionsRunning)
         {
-            // FEAT-2: real duration from EngineClient.LastScanDuration
-            // (tracked from StartScanAsync to ScanCompleteEvent). The
-            // previous version showed "in 0s" because of a placeholder
-            // typo `prog.Total > 0 ? 0 : 0`.
-            var elapsed = EngineClient.Instance.LastScanDuration.TotalSeconds;
-            // Use the engine's authoritative ScanComplete count, not LastProgress
-            // (which can be throttle-stale by up to one batch on a fast scan).
-            var done = Math.Max(EngineClient.Instance.LastScanProcessedFiles, prog.Processed);
-            CompletedSummary.Text = elapsed > 0
-                ? $"Scan complete -- {done:N0} files in {FormatDuration(elapsed)}."
-                : $"Scan complete -- {done:N0} files.";
+            var d = engine.DeepAnalyzeProgress;
+            title = "Writing captions";
+            fraction = d is { Total: > 0UL } ? Math.Clamp((double)d.Processed / d.Total, 0, 1) : null;
+            sub = d is not null
+                ? $"{d.Processed:N0} of {d.Total:N0} captioned"
+                : engine.DeepAnalyzeStarting?.Message ?? "Loading the model";
+            bar = _aiBar;
+            accent = _ai;
+            controls = CardControls.Rescan;
         }
-        else if (!AppViewModel.Instance.HasFolder)
+        else if (facesRunning)
         {
-            IdleStatusText.Text = "Pick a folder above to begin.";
+            title = "Grouping faces";
+            sub = "Comparing face prints";
+            fraction = null;
+            bar = _aiBar;
+            accent = _ai;
+            controls = CardControls.Rescan;
+        }
+        else if (isFailed)
+        {
+            title = "Scan failed";
+            sub = engine.LastError?.Message ?? "Scan failed.";
+            bar = _pausedBar;
+            danger = true;
+            showLog = true;
+        }
+        else if (captionsDone is { Processed: > 0UL, Cancelled: false })
+        {
+            title = "Everything analyzed";
+            sub = $"{captionsDone.Processed:N0} files captioned";
+            fraction = 1;
+            bar = _doneBar;
+            accent = _delight;
+            controls = CardControls.Rescan;
+        }
+        else if (isCancelled && prog is not null)
+        {
+            title = "Scan cancelled";
+            sub = $"{prog.Processed:N0} of {prog.Total:N0} tagged";
+            fraction = prog.Total > 0 ? Math.Clamp((double)prog.Processed / prog.Total, 0, 1) : 0;
+            bar = _pausedBar;
+            accent = _idleStatusDefaultBrush;
+        }
+        else if (isCompleted)
+        {
+            // FEAT-2: real duration from EngineClient.LastScanDuration and the
+            // engine's authoritative ScanComplete count (LastProgress can be
+            // throttle-stale by up to one batch on a fast scan).
+            var elapsed = engine.LastScanDuration.TotalSeconds;
+            var done = Math.Max(engine.LastScanProcessedFiles, prog?.Processed ?? 0);
+            title = "Scan complete";
+            sub = elapsed > 0 ? $"{done:N0} files in {FormatDuration(elapsed)}" : $"{done:N0} files";
+            fraction = 1;
+            accent = _gold;
+            controls = CardControls.Rescan;
         }
         else
         {
-            // surface engine state so the user knows why
-            // Start Scan is/isn't immediately responsive.
-            var state = EngineClient.Instance.State;
-            IdleStatusText.Text = state switch
+            var state = engine.State;
+            title = _startInFlight ? "Starting…" : "Not scanned yet";
+            sub = state switch
             {
-                EngineClient.LifecycleState.Ready => "Ready when you are.",
+                EngineClient.LifecycleState.Ready => $"{vm.FolderDisplay} is ready to scan.",
                 EngineClient.LifecycleState.Starting => "Engine starting…",
-                EngineClient.LifecycleState.Crashed => EngineClient.Instance.CrashReason is string r && r.Length > 0
+                EngineClient.LifecycleState.Crashed => engine.CrashReason is string r && r.Length > 0
                     ? $"Engine crashed: {r}"
                     : "Engine crashed — try restarting the app.",
                 _ => $"Engine state: {state}",
             };
             if (state == EngineClient.LifecycleState.Crashed)
             {
-                IdleStatusText.Foreground = FailedTextBrush;
+                danger = true;
+                showLog = true;
             }
+        }
+
+        CardTitleText.Text = title;
+        CardTitleText.Foreground = danger ? FailedTextBrush : _text1;
+        IdleStatusText.Text = sub;
+        IdleStatusText.Foreground = danger ? FailedTextBrush : _idleStatusDefaultBrush;
+
+        var showProgress = vm.HasFolder ? Visibility.Visible : Visibility.Collapsed;
+        ScanProgressBar.Visibility = showProgress;
+        StepsStrip.Visibility = showProgress;
+        CardPercentText.Visibility = showProgress;
+        ScanProgressBar.Foreground = bar;
+        if (fraction is { } f)
+        {
+            ScanProgressBar.IsIndeterminate = false;
+            ScanProgressBar.Maximum = 1000;
+            ScanProgressBar.Value = f * 1000;
+            CardPercentText.Text = $"{(int)Math.Round(f * 100)}%";
+        }
+        else
+        {
+            ScanProgressBar.IsIndeterminate = true;
+            CardPercentText.Text = "…";
+        }
+        CardPercentText.Foreground = danger ? FailedTextBrush : accent;
+
+        IdlePanel.Visibility = controls is CardControls.Pick or CardControls.Start ? Visibility.Visible : Visibility.Collapsed;
+        StartScanButton.Visibility = controls == CardControls.Start ? Visibility.Visible : Visibility.Collapsed;
+        PickFolderButton.Visibility = controls == CardControls.Pick ? Visibility.Visible : Visibility.Collapsed;
+        ScanningPanel.Visibility = controls == CardControls.Scanning ? Visibility.Visible : Visibility.Collapsed;
+        CompletedPanel.Visibility = controls == CardControls.Rescan ? Visibility.Visible : Visibility.Collapsed;
+        RescanButton.IsEnabled = !captionsRunning && !facesRunning && !_startInFlight && !EngineClient.Instance.GpuDeviceRemoved;
+        OpenLogButton.Visibility = showLog ? Visibility.Visible : Visibility.Collapsed;
+        StartScanText.Text = string.IsNullOrEmpty(vm.FolderDisplay) ? "Start Scan" : $"Scan {vm.FolderDisplay}";
+
+        // FEAT-1: Pause/Resume label always reflects engine truth.
+        PauseResumeText.Text = engine.IsPaused ? "Resume" : "Pause";
+        PauseResumeGlyph.Glyph = engine.IsPaused ? "\uE768" : "\uE769";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            PauseResumeButton, engine.IsPaused ? "Resume scan" : "Pause scan");
+
+        SyncDetails(prog, phase, isInFlight);
+    }
+
+    private void SyncDetails(ScanProgress? prog, ScanPhase? phase, bool isInFlight)
+    {
+        bool hasDetails = prog is not null && phase is not null and not ScanPhase.Idle;
+        DetailsToggleButton.Visibility = hasDetails ? Visibility.Visible : Visibility.Collapsed;
+        DetailsPanel.Visibility = hasDetails && _detailsOpen ? Visibility.Visible : Visibility.Collapsed;
+        DetailsToggleGlyph.Glyph = _detailsOpen ? "\uE70E" : "\uE70D";
+        var toggleLabel = _detailsOpen ? "Hide scan details" : "Show scan details";
+        ToolTipService.SetToolTip(DetailsToggleButton, toggleLabel);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(DetailsToggleButton, toggleLabel);
+        if (prog is null || !hasDetails || !_detailsOpen) return;
+
+        StatDiscovered.Text = prog.Discovered.ToString("N0");
+        StatTagged.Text = prog.Processed.ToString("N0");
+        StatRate.Text = prog.FilesPerSecond > 0 ? $"{prog.FilesPerSecond:F1}/s" : string.Empty;
+        StatMemory.Text = prog.ResidentMb + " MB";
+        StatMemory.Foreground = prog.ResidentMb > 1200 ? _memoryWarnBrush : _statDefaultBrush;
+        StatAvailable.Text = prog.AvailableMb > 0 ? $"{prog.AvailableMb:N0} MB free" : string.Empty;
+        StatFailures.Text = prog.Failed.ToString("N0");
+        StatFailures.Foreground = prog.Failed > 0 ? FailedTextBrush : _statDefaultBrush;
+        FailuresStatBorder.Visibility = prog.Failed > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        // During discovery the total is unknowable (counting the files IS the
+        // work), so never fabricate an ETA there.
+        EtaText.Text = isInFlight && phase != ScanPhase.Discovering && prog.EtaSeconds is { } eta && eta > 0
+            ? $"{FormatDuration(eta)} left"
+            : string.Empty;
+
+        // Screen-reader names combine label + value so each stat row
+        // announces e.g. "Discovered: 1,240" rather than a bare label.
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            DiscoveredStatBorder, $"Discovered: {StatDiscovered.Text}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            TaggedStatBorder, $"Tagged: {StatTagged.Text}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            MemoryStatBorder, $"Memory: {StatMemory.Text}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            FailuresStatBorder, $"Failures: {StatFailures.Text}");
+    }
+
+    private int _pickInFlight;
+
+    private async void OnPickFolderClicked(object sender, RoutedEventArgs e)
+    {
+        if (System.Threading.Interlocked.CompareExchange(ref _pickInFlight, 1, 0) != 0) return;
+        try
+        {
+            var hwnd = App.HostWindow is { } window
+                ? WinRT.Interop.WindowNative.GetWindowHandle(window)
+                : IntPtr.Zero;
+            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            if (result.FailureReason is not null)
+            {
+                await ShowAlertAsync("Couldn't open folder", result.FailureReason);
+                return;
+            }
+            if (result.Path is not null)
+            {
+                AppViewModel.Instance.FolderPath = result.Path;
+                DebugLog.Info($"FolderPicker: chose {PathRedactor.Redact(result.Path)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("OnPickFolderClicked threw: " + ex.Message);
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref _pickInFlight, 0);
         }
     }
 
@@ -565,14 +689,6 @@ public sealed partial class SidebarProcessingControl : UserControl
             Sync();
         }
     }
-
-    private static string StageLabel(ScanPhase? phase) => phase switch
-    {
-        ScanPhase.Discovering => "Counting",
-        ScanPhase.Tagging => "Tagging",
-        ScanPhase.PostScan => "Finishing up",
-        _ => "Working",
-    };
 
     private static string FormatDuration(double seconds)
     {

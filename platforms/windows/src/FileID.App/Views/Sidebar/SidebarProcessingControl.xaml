@@ -1,12 +1,15 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    SidebarProcessingControl — Start Scan / Pause / Resume / Cancel + ETA
-    + 4-stat grid (discovered / tagged / memory MB / failures).
+    SidebarProcessingControl: the Prototype v3 scan card at the foot of the
+    sidebar (macOS Views/Shell/PipelineBlock.swift). Title + percent, a 6 px
+    capsule bar, the five-step indicator (SidebarPipelineProgress), one sub
+    line, collapsible counters (found, tagged, memory, failures) and the scan
+    controls (Scan / Pause / Resume / Cancel / Rescan).
 
-    Three states:
-      • Pre-scan: idle pill + "Start Scan" gold button (Ctrl+R).
-      • In-flight: phase badge + progress bar + stat grid + Pause/Cancel.
-      • Completed: summary line + Rescan button.
+    Three control states:
+      • Pre-scan: "Scan <folder>" gold button (Ctrl+R), or Pick a folder.
+      • In-flight: Pause / Resume + Cancel.
+      • Completed: Rescan.
 
     All FontIcon glyphs use numeric XML escapes so the bytes survive
     encoding pipelines.
@@ -15,20 +18,21 @@
     x:Class="FileID.Views.Sidebar.SidebarProcessingControl"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:FileID.Views.Sidebar"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <StackPanel Spacing="10">
+    <StackPanel Spacing="8">
         <!-- Non-fatal engine events: skipped stages, partial discovery,
              stale-WAL warning, CUDA fall-back. Distinct from LastError
              so a later per-file error can't clobber the banner. -->
         <Grid x:Name="WarningBanner"
               Visibility="Collapsed"
-              Padding="12,9"
-              CornerRadius="8"
-              Background="{StaticResource GoldSelectedBackgroundBrush}"
-              BorderBrush="{StaticResource GoldBrush}"
+              Padding="10,8"
+              CornerRadius="{StaticResource CornerRadiusM}"
+              Background="{StaticResource GoldWashBrush}"
+              BorderBrush="{StaticResource GoldSelectedStrokeBrush}"
               BorderThickness="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
@@ -37,242 +41,237 @@
             </Grid.ColumnDefinitions>
             <FontIcon Grid.Column="0"
                       Glyph="&#xE7BA;"
-                      FontSize="14"
+                      FontSize="13"
                       Margin="0,2,8,0"
                       Foreground="{StaticResource GoldBrush}"
                       VerticalAlignment="Top" />
             <TextBlock Grid.Column="1"
                        x:Name="WarningBannerText"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                       FontFamily="{StaticResource BodyFontFamily}"
+                       FontSize="12"
+                       Foreground="{StaticResource Text1Brush}"
                        TextWrapping="Wrap"
                        VerticalAlignment="Center" />
             <Button Grid.Column="2"
-                    Background="Transparent"
-                    BorderThickness="0"
-                    Padding="6,2"
+                    Style="{StaticResource ShellGhostButtonStyle}"
                     Click="OnDismissWarningClicked"
                     ToolTipService.ToolTip="Dismiss"
                     AutomationProperties.Name="Dismiss warning">
-                <FontIcon Glyph="&#xE711;" FontSize="11" />
+                <FontIcon Glyph="&#xE711;" FontSize="10" />
             </Button>
         </Grid>
 
-        <!-- AutoPilot tracker removed. macOS has no separate
-             AutoPilot UI; the standard SidebarPipelineProgress (Scan →
-             Tag → People → Captions → Done) already covers the full
-             pipeline, and Start Scan now auto-advances into face
-             clustering exactly like macOS does (see EngineClient.Apply's
-             ScanCompleteEvent handler). -->
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="CardTitleText"
+                       Text="Not scanned yet"
+                       FontFamily="{StaticResource BodyFontFamily}"
+                       FontSize="13"
+                       FontWeight="SemiBold"
+                       Foreground="{StaticResource Text1Brush}"
+                       TextTrimming="CharacterEllipsis"
+                       AutomationProperties.HeadingLevel="Level2" />
+            <TextBlock x:Name="CardPercentText"
+                       Grid.Column="1"
+                       Text="0%"
+                       FontFamily="{StaticResource BodyFontFamily}"
+                       FontSize="12.5"
+                       FontWeight="SemiBold"
+                       Foreground="{StaticResource Text2Brush}" />
+        </Grid>
 
-        <!-- Section header — uppercase muted caption, Fluent Settings pattern. -->
-        <TextBlock Text="PROCESSING"
-                   Style="{StaticResource CaptionTextBlockStyle}"
-                   FontWeight="SemiBold"
-                   CharacterSpacing="40"
-                   Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                   AutomationProperties.HeadingLevel="Level2" />
+        <ProgressBar x:Name="ScanProgressBar"
+                     Height="6"
+                     MinHeight="6"
+                     CornerRadius="3"
+                     IsIndeterminate="False"
+                     Maximum="100"
+                     Value="0"
+                     Foreground="{StaticResource GoldProgressBrush}"
+                     Background="{StaticResource ProgressTrackBrush}" />
 
-        <!-- Pre-scan: idle pill + Start Scan -->
-        <StackPanel x:Name="IdlePanel" Spacing="8">
-            <Grid Padding="12,9"
-                  CornerRadius="8"
-                  BorderThickness="1"
-                  BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                  Background="{ThemeResource ControlFillColorDefaultBrush}">
-                <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                    <FontIcon Glyph="&#xE916;" FontSize="14" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                    <TextBlock x:Name="IdleStatusText"
-                               Text="Idle. Pick a folder to begin."
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               TextWrapping="Wrap"
-                               VerticalAlignment="Center" />
-                </StackPanel>
-            </Grid>
-            <Button x:Name="StartScanButton"
-                    HorizontalAlignment="Stretch"
-                    Click="OnStartScanClicked"
-                    Style="{StaticResource GoldButtonStyle}"
-                    Height="40"
-                    AccessKey="R"
-                    ToolTipService.ToolTip="Start scan (Ctrl+R)"
-                    AutomationProperties.Name="Start Scan"
-                    AutomationProperties.HelpText="Start scanning the selected folder (Ctrl+R)">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="13" Glyph="&#xE768;" />
-                    <TextBlock Text="Start Scan" FontWeight="SemiBold" />
-                </StackPanel>
+        <Grid>
+            <local:SidebarPipelineProgress x:Name="StepsStrip" />
+            <Button x:Name="DetailsToggleButton"
+                    Style="{StaticResource ShellGhostButtonStyle}"
+                    Width="20"
+                    Height="20"
+                    MinHeight="20"
+                    Padding="0"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Bottom"
+                    Visibility="Collapsed"
+                    Click="OnDetailsToggleClicked"
+                    ToolTipService.ToolTip="Show scan details"
+                    AutomationProperties.Name="Show scan details">
+                <FontIcon x:Name="DetailsToggleGlyph"
+                          Glyph="&#xE70D;"
+                          FontSize="10"
+                          Foreground="{StaticResource Text3Brush}" />
             </Button>
+        </Grid>
+
+        <TextBlock x:Name="IdleStatusText"
+                   Text="Pick a folder to start."
+                   FontFamily="{StaticResource BodyFontFamily}"
+                   FontSize="12"
+                   Foreground="{StaticResource Text3Brush}"
+                   TextWrapping="Wrap"
+                   MaxLines="3"
+                   TextTrimming="CharacterEllipsis" />
+
+        <!-- Counters: found, tagged, memory, failures (collapsible). -->
+        <StackPanel x:Name="DetailsPanel"
+                    Visibility="Collapsed"
+                    Spacing="4"
+                    Padding="0,6"
+                    BorderBrush="{StaticResource HairlineSoftBrush}"
+                    BorderThickness="0,1,0,1">
+            <Grid x:Name="DiscoveredStatBorder" ColumnSpacing="6" AutomationProperties.Name="Discovered">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="62" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Found" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock x:Name="StatDiscovered" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource Text1Brush}" />
+                <TextBlock x:Name="EtaText" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{StaticResource Text3Brush}" />
+            </Grid>
+            <Grid x:Name="TaggedStatBorder" ColumnSpacing="6" AutomationProperties.Name="Tagged">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="62" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Tagged" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock x:Name="StatTagged" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource Text1Brush}" />
+                <TextBlock x:Name="StatRate" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{StaticResource Text3Brush}" />
+            </Grid>
+            <Grid x:Name="MemoryStatBorder" ColumnSpacing="6" AutomationProperties.Name="Memory">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="62" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Memory" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock x:Name="StatMemory" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" />
+                <TextBlock x:Name="StatAvailable" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{StaticResource Text3Brush}" />
+            </Grid>
+            <Grid x:Name="FailuresStatBorder" ColumnSpacing="6" AutomationProperties.Name="Failures">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="62" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Failed" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock x:Name="StatFailures" Grid.Column="1" Text="0" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" />
+            </Grid>
+        </StackPanel>
+
+        <!-- Pre-scan: Scan <folder> / Pick a folder / Restart Engine -->
+        <StackPanel x:Name="IdlePanel" Spacing="6">
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <Button x:Name="StartScanButton"
+                        Style="{StaticResource ShellPrimaryButtonStyle}"
+                        Height="28"
+                        MinHeight="28"
+                        Click="OnStartScanClicked"
+                        AccessKey="R"
+                        ToolTipService.ToolTip="Start scan (Ctrl+R)"
+                        AutomationProperties.Name="Start Scan"
+                        AutomationProperties.HelpText="Start scanning the selected folder (Ctrl+R)">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <FontIcon FontSize="11" Glyph="&#xE768;" />
+                        <TextBlock x:Name="StartScanText"
+                                   Text="Start Scan"
+                                   MaxWidth="150"
+                                   TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Button>
+                <Button x:Name="PickFolderButton"
+                        Style="{StaticResource ShellPrimaryButtonStyle}"
+                        Height="30"
+                        MinHeight="30"
+                        Visibility="Collapsed"
+                        Click="OnPickFolderClicked"
+                        ToolTipService.ToolTip="Pick a folder (Ctrl+O)"
+                        AutomationProperties.Name="Pick a folder">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <FontIcon FontSize="12" Glyph="&#xE8F4;" />
+                        <TextBlock Text="Pick a folder…" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
             <Button x:Name="RestartEngineButton"
-                    HorizontalAlignment="Stretch"
+                    Style="{StaticResource ShellPrimaryButtonStyle}"
+                    Height="28"
+                    MinHeight="28"
+                    HorizontalAlignment="Left"
                     Click="OnRestartEngineClicked"
-                    Style="{StaticResource GoldButtonStyle}"
-                    Height="40"
                     Visibility="Collapsed"
                     AutomationProperties.Name="Restart Engine"
                     AutomationProperties.HelpText="Restart the local FileID engine after a graphics device reset">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="13" Glyph="&#xE117;" />
-                    <TextBlock Text="Restart Engine" FontWeight="SemiBold" />
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon FontSize="11" Glyph="&#xE117;" />
+                    <TextBlock Text="Restart Engine" />
                 </StackPanel>
             </Button>
-            <!-- AutoPilot button removed. macOS has only "Start Scan"
-                 and the engine auto-enqueues face clustering after scan
-                 completes. Windows now matches: ScanComplete in
-                 EngineClient.Apply auto-fires RunFaceClusteringAsync.
-                 Deep Analyze stays manual (user must name ≥1 person first),
-                 also matching macOS. -->
-
-            <!-- tiny "Open engine log" affordance. Useful diagnostic
-                 link when a scan didn't behave as expected. Opens
-                 %LOCALAPPDATA%\FileID\logs\engine.jsonl in the user's default
-                 .jsonl handler (Notepad on a fresh box). Single-click; no
-                 prominence — sits as a discreet caption-styled hyperlink. -->
+            <!-- Diagnostic link when a scan didn't behave as expected. Opens
+                 %LOCALAPPDATA%\FileID\logs\engine.jsonl in the default handler. -->
             <HyperlinkButton x:Name="OpenLogButton"
                              Click="OnOpenLogClicked"
                              Padding="0"
                              HorizontalAlignment="Left"
+                             Visibility="Collapsed"
                              AutomationProperties.Name="Open engine log"
                              AutomationProperties.HelpText="Open the engine diagnostic log in your default viewer">
                 <TextBlock Text="Open engine log"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                           FontFamily="{StaticResource BodyFontFamily}"
+                           FontSize="12"
+                           Foreground="{StaticResource Text3Brush}" />
             </HyperlinkButton>
         </StackPanel>
 
-        <!-- In-flight: phase + progress + stats + Pause/Cancel -->
-        <StackPanel x:Name="ScanningPanel" Spacing="10" Visibility="Collapsed">
-            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                <FontIcon x:Name="PhaseIcon" Glyph="&#xE895;" FontSize="13" Foreground="{ThemeResource GoldBrush}" />
-                <TextBlock x:Name="PhaseText"
-                           Text="Discovering…"
-                           Style="{StaticResource BodyStrongTextBlockStyle}" />
-            </StackPanel>
-
-            <ProgressBar x:Name="ScanProgressBar"
-                         IsIndeterminate="False"
-                         Maximum="100"
-                         Value="0"
-                         Foreground="{ThemeResource GoldBrush}" />
-
-            <Grid ColumnSpacing="6" RowSpacing="6">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-
-                <Border Grid.Row="0" Grid.Column="0" Padding="10,8"
-                        x:Name="DiscoveredStatBorder"
-                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8"
-                        AutomationProperties.Name="Discovered">
-                    <StackPanel Spacing="2">
-                        <TextBlock Text="Discovered"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <TextBlock x:Name="StatDiscovered" Text="—"
-                                   FontSize="15" FontWeight="SemiBold"
-                                   Foreground="{ThemeResource GoldBrush}" />
-                    </StackPanel>
-                </Border>
-                <Border Grid.Row="0" Grid.Column="1" Padding="10,8"
-                        x:Name="TaggedStatBorder"
-                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8"
-                        AutomationProperties.Name="Tagged">
-                    <StackPanel Spacing="2">
-                        <TextBlock Text="Tagged"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <TextBlock x:Name="StatTagged" Text="—"
-                                   FontSize="15" FontWeight="SemiBold"
-                                   Foreground="{ThemeResource GoldBrush}" />
-                    </StackPanel>
-                </Border>
-                <Border Grid.Row="1" Grid.Column="0" Padding="10,8"
-                        x:Name="MemoryStatBorder"
-                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8"
-                        AutomationProperties.Name="Memory">
-                    <StackPanel Spacing="2">
-                        <TextBlock Text="Memory"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <TextBlock x:Name="StatMemory" Text="—"
-                                   FontSize="15" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-                <Border Grid.Row="1" Grid.Column="1" Padding="10,8"
-                        x:Name="FailuresStatBorder"
-                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        CornerRadius="8"
-                        AutomationProperties.Name="Failures">
-                    <StackPanel Spacing="2">
-                        <TextBlock Text="Failures"
-                                   Style="{StaticResource CaptionTextBlockStyle}"
-                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <TextBlock x:Name="StatFailures" Text="0"
-                                   FontSize="15" FontWeight="SemiBold" />
-                    </StackPanel>
-                </Border>
-            </Grid>
-
-            <TextBlock x:Name="EtaText"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       Text="ETA: —" />
-
-            <Grid ColumnSpacing="8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Button x:Name="PauseResumeButton" Grid.Column="0"
-                        Click="OnPauseResumeClicked"
-                        HorizontalAlignment="Stretch"
-                        Padding="12,8"
-                        BorderThickness="1"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        CornerRadius="8">
-                    <TextBlock x:Name="PauseResumeText"
-                               Text="Pause"
-                               Style="{StaticResource CaptionTextBlockStyle}" />
-                </Button>
-                <Button Grid.Column="1"
-                        Click="OnCancelClicked"
-                        HorizontalAlignment="Stretch"
-                        Padding="12,8"
-                        BorderThickness="1"
-                        BorderBrush="{ThemeResource DestructiveBorderBrush}"
-                        Background="{ThemeResource DestructiveBackgroundBrush}"
-                        CornerRadius="8"
-                        AutomationProperties.Name="Cancel scan">
-                    <TextBlock Text="Cancel"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource DestructiveTextBrush}" />
-                </Button>
-            </Grid>
+        <!-- In-flight: Pause / Resume + Cancel -->
+        <StackPanel x:Name="ScanningPanel"
+                    Orientation="Horizontal"
+                    Spacing="6"
+                    Visibility="Collapsed">
+            <Button x:Name="PauseResumeButton"
+                    Style="{StaticResource ShellSecondaryButtonStyle}"
+                    Height="28"
+                    MinHeight="28"
+                    Click="OnPauseResumeClicked">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon x:Name="PauseResumeGlyph" FontSize="11" Glyph="&#xE769;" />
+                    <TextBlock x:Name="PauseResumeText" Text="Pause" />
+                </StackPanel>
+            </Button>
+            <Button Style="{StaticResource ShellGhostButtonStyle}"
+                    Height="28"
+                    MinHeight="28"
+                    Content="Cancel"
+                    Click="OnCancelClicked"
+                    AutomationProperties.Name="Cancel scan" />
         </StackPanel>
 
         <!-- Completed: Rescan -->
-        <StackPanel x:Name="CompletedPanel" Spacing="8" Visibility="Collapsed">
-            <TextBlock x:Name="CompletedSummary"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                       TextWrapping="Wrap" />
-            <Button HorizontalAlignment="Stretch"
+        <StackPanel x:Name="CompletedPanel"
+                    Orientation="Horizontal"
+                    Spacing="6"
+                    Visibility="Collapsed">
+            <Button x:Name="RescanButton"
+                    Style="{StaticResource ShellSecondaryButtonStyle}"
+                    Height="28"
+                    MinHeight="28"
                     Click="OnStartScanClicked"
-                    Height="40"
-                    Style="{StaticResource GoldButtonStyle}">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon FontSize="13" Glyph="&#xE72C;" />
-                    <TextBlock Text="Rescan" FontWeight="SemiBold" />
+                    ToolTipService.ToolTip="Rescan (Ctrl+R)"
+                    AutomationProperties.Name="Rescan">
+                <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                    <FontIcon FontSize="11" Glyph="&#xE72C;" />
+                    <TextBlock Text="Rescan" />
                 </StackPanel>
             </Button>
         </StackPanel>

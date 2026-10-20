@@ -1,12 +1,12 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    Sidebar — composition root. 260 DIP fixed width. Hosts:
-      • SidebarFolderHeader     (folder picker + change/clear/wipe actions)
-      • SidebarTabList          (the six tab buttons)
-      • SidebarProcessingControl (Start Scan / Pause / Resume / Cancel + ETA + stats)
-      • SidebarPipelineProgress  (5-stage Scan→Tag→People→Captions→Done dots)
-      • SidebarQueueList        (pending jobs)
-      • SidebarEngineStatus     (engine PID/version/RAM tooltip + state pill)
+    Sidebar — Prototype v3 composition root (232 DIP). Hosts:
+      • SidebarTabList           (Browse / Analyze / Act switcher + page rows)
+      • SidebarEngineStatus      (only while the engine is starting / crashed)
+      • SidebarQueueList         (pending jobs, hidden when empty)
+      • SidebarProcessingControl (the radius-l scan card: title, bar, steps,
+                                  counters and scan controls)
+    The folder switcher lives in the title bar (Views/Shell/TitleBar).
 -->
 <UserControl
     x:Class="FileID.Views.Sidebar.Sidebar"
@@ -17,35 +17,34 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <!-- rows 0-4 live inside a ScrollViewer so on short windows
-         the queue list overflows scrollably instead of pushing the engine
-         pill (the most important "is the engine running" indicator) below
-         the visible area. The engine pill stays anchored at row 1 of the
-         outer Grid where Height="Auto" means it always renders.
-
-         16-px outer padding + 16-px row spacing matches Fluent's 8-px
-         baseline grid. The bottom padding is doubled (24-px) so the
-         engine pill never touches the window edge. -->
-    <Grid Padding="16,12,16,24">
+    <Grid Background="{StaticResource SidebarSurfaceBrush}">
         <Grid.RowDefinitions>
-            <RowDefinition Height="*" />    <!-- Scrollable content -->
-            <RowDefinition Height="Auto" /> <!-- Engine status (anchored) -->
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <ScrollViewer Grid.Row="0"
+                      Padding="0,12,0,10"
                       VerticalScrollBarVisibility="Auto"
                       HorizontalScrollBarVisibility="Disabled"
                       ZoomMode="Disabled">
-            <StackPanel Spacing="22">
-                <local:SidebarFolderHeader />
-                <local:SidebarTabList />
-                <local:SidebarProcessingControl />
-                <local:SidebarPipelineProgress />
-                <local:SidebarQueueList />
-            </StackPanel>
+            <local:SidebarTabList />
         </ScrollViewer>
 
-        <!-- Engine status anchored at the bottom — always visible. -->
-        <local:SidebarEngineStatus Grid.Row="1" Margin="0,16,0,0" />
+        <local:SidebarEngineStatus Grid.Row="1" Margin="12,0,12,10" />
+
+        <local:SidebarQueueList Grid.Row="2" Margin="14,0,14,10" />
+
+        <Border Grid.Row="3"
+                Margin="10"
+                Padding="12"
+                CornerRadius="{StaticResource CornerRadiusL}"
+                Background="{StaticResource ScanCardBrush}"
+                BorderBrush="{StaticResource HairlineBrush}"
+                BorderThickness="1">
+            <local:SidebarProcessingControl />
+        </Border>
     </Grid>
 </UserControl>

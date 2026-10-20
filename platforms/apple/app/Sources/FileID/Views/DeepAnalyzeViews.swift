@@ -26,10 +26,10 @@ struct DeepAnalyzeModelPickerCard: View {
                     Text("AI models · Deep Analyze").font(Theme.Font.body(14, .semibold))
                     Spacer()
                     Text("Recommended for this Mac (\(Int(ramGB)) GB RAM)")
-                        .font(Theme.Font.mono(11)).foregroundStyle(.secondary)
+                        .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                 }
                 Text("Reads images and writes captions plus smart filenames.")
-                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
                 Divider().opacity(0.3)
                 if !AIModelKind.favorites.contains(settings.activeKind) {
                     Text("Selected model").font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.ai)
@@ -100,7 +100,7 @@ private struct ModelOptionRow: View {
                     titleRow
                     Text(kind.subtitle)
                         .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                     statsLine
                     if !fits {
                         Text("This model exceeds the memory budget of this Mac. Choose a smaller model.")
@@ -161,7 +161,7 @@ private struct ModelOptionRow: View {
     private var statsLine: some View {
         Text(kind.secondsPerImage > 0 ? "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · \(String(format: "%.1f", kind.secondsPerImage)) s/image · \(kind.licenseName)" : "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · Speed not measured · \(kind.licenseName)")
             .font(Theme.Font.mono(10.5))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.text3)
     }
 
     @ViewBuilder
@@ -362,20 +362,13 @@ struct DeepAnalyzeView: View {
                         .font(Theme.Font.body(14, .semibold))
                     Text("Tagging runs automatically as you scan — it adds quick keyword tags (like sunset, beach, dog) so search works. Deep Analyze is an optional, heavier step: it reads each photo, writes a full sentence describing it, and suggests a smart filename — using the people you've named.")
                         .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
-                Button {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                        hideExplainer = true
-                    }
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
+                DSIconButton("Hide this explanation", systemImage: "xmark", tint: Theme.text3) {
+                    withAnimation(Theme.springStandard) { hideExplainer = true }
                 }
-                .buttonStyle(.plain)
-                .help("Hide this explanation")
             }
         }
     }
@@ -396,7 +389,7 @@ struct DeepAnalyzeView: View {
                     if applyInFlight { ProgressView().controlSize(.small) }
                 }
                 Text("Write what FileID found onto the files themselves. Tags and people are added as Finder tags so Spotlight and Finder search find your photos; Apply all also renames to the smart names.")
-                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 10) {
                     secondaryApplyButton("Apply tags", systemImage: "tag",
@@ -436,7 +429,7 @@ struct DeepAnalyzeView: View {
                     Text("This renames \(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s") on disk and writes tags and people as Finder tags. Library's \"Undo last rename\" can revert the renames; tag writes are additive and can be removed individually.")
                 }
                 if let applyStatus {
-                    Text(applyStatus).font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    Text(applyStatus).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
             }
         }
@@ -521,11 +514,11 @@ struct DeepAnalyzeView: View {
                     Spacer()
                     Text("\(pendingRenameCount) file\(pendingRenameCount == 1 ? "" : "s")")
                         .font(Theme.Font.mono(11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 Text("Deep Analyze suggested new filenames for these images. Review and apply them in one batch — original names remain in Finder's metadata until you Apply.")
                     .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                 Button {
                     bulkRenameSheetOpen = true
                 } label: {
@@ -552,7 +545,7 @@ struct DeepAnalyzeView: View {
                     Text(engine.deepAnalyzeUnavailableReason ??
                          "mlx.metallib was not compiled. Run ./run.sh — it will fail with install instructions if cmake or the Metal Toolchain is missing.")
                         .font(Theme.Font.body(13.5))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
@@ -580,24 +573,24 @@ struct DeepAnalyzeView: View {
                 }
                 Text("Run a scan first (in the Sidebar). Deep Analyze then suggests descriptions and short filenames for supported files. Without it, files keep their original names.")
                     .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                     .padding(.bottom, 2)
                 Divider().opacity(0.3)
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
                     GridRow {
-                        Text("Active model").foregroundStyle(.secondary)
+                        Text("Active model").foregroundStyle(Theme.text3)
                         Text(settings.activeKind.displayName).font(Theme.Font.body(13, .medium))
                     }
                     GridRow {
-                        Text("Eligible files").foregroundStyle(.secondary)
+                        Text("Eligible files").foregroundStyle(Theme.text3)
                         Text(totals.total.formatted()).font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
                     GridRow {
-                        Text("Not yet analyzed").foregroundStyle(.secondary)
+                        Text("Not yet analyzed").foregroundStyle(Theme.text3)
                         Text(totals.pending.formatted()).font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
                     GridRow {
-                        Text("Estimated batch time").foregroundStyle(.secondary)
+                        Text("Estimated batch time").foregroundStyle(Theme.text3)
                         Text(formatDuration(seconds: pendingMins * 60))
                             .font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
@@ -648,7 +641,7 @@ struct DeepAnalyzeView: View {
                     }
                     Spacer()
                     Text("Runs serially on the GPU. Safe to leave overnight — system stays awake.")
-                        .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 }
                 if !activeFits {
                     HStack(spacing: 6) {
@@ -661,7 +654,7 @@ struct DeepAnalyzeView: View {
                 }
                 Divider().opacity(0.3)
                 Text("Per-file Deep Analyze: open a file in Library and click the **Deep Analyze** button on the preview toolbar.")
-                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
             }
         }
     }
@@ -682,7 +675,7 @@ struct DeepAnalyzeView: View {
                 Text("Name your people first (recommended)").font(Theme.Font.body(13.5, .semibold))
                 Text("Deep Analyze writes captions like \"Mia playing piano\" — that needs at least one named person. Without names, captions fall back to generic descriptions like \"a person playing piano.\"")
                     .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     Button {
@@ -699,7 +692,7 @@ struct DeepAnalyzeView: View {
 
                     Text("or")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
 
                     Button {
                         guard ModelLicenseGate.ensureAccepted(for: settings.activeKind) else { return }
@@ -710,7 +703,7 @@ struct DeepAnalyzeView: View {
                             .font(Theme.Font.body(12, .semibold))
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.6), lineWidth: 1))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                     }
                     .buttonStyle(.plain)
                     .disabled(engine.deepAnalyzeInFlight
@@ -747,7 +740,7 @@ struct DeepAnalyzeView: View {
                         Text("Starting Deep Analyze…").font(Theme.Font.body(14, .semibold))
                         Text(startingSubtitle)
                             .font(Theme.Font.body(12))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                             .contentTransition(.opacity)
                             .animation(.easeInOut(duration: 0.18),
                                        value: engine.deepAnalyzeStarting?.message)
@@ -794,7 +787,7 @@ struct DeepAnalyzeView: View {
                     if let path = p.currentPath {
                         Text(URL(fileURLWithPath: path).lastPathComponent)
                             .font(Theme.Font.mono(11))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                             .lineLimit(1).truncationMode(.middle)
                     }
                     // Live caption stream — engine emits the
@@ -825,7 +818,7 @@ struct DeepAnalyzeView: View {
                     Spacer()
                 }
                 Text("\(c.processed) processed · \(c.failed) failed · \(formatDuration(seconds: c.totalSeconds)) wall time")
-                    .font(Theme.Font.mono(12.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.mono(12.5)).foregroundStyle(Theme.text3)
             }
         }
     }
@@ -840,7 +833,7 @@ struct DeepAnalyzeView: View {
                         Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
                         Text("Smart name: ")
                             .font(Theme.Font.body(12, .semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                         Text(n).font(Theme.Font.mono(11)).foregroundStyle(Theme.gold)
                     }
                 }

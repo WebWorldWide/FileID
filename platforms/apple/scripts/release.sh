@@ -224,7 +224,7 @@ APP_KB=$(du -sk "$SIGNED_APP" | cut -f1)
 HEADROOM_KB=$((APP_KB + 51200))
 hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE_DIR" -fs HFS+ \
     -format UDRW -size "${HEADROOM_KB}k" -ov "$DIST_DIR/FileID-rw.dmg" >/dev/null
-hdiutil convert "$DIST_DIR/FileID-rw.dmg" -format UDZO -imagekey zlib-level=9 \
+hdiutil convert "$DIST_DIR/FileID-rw.dmg" -format ULMO \
     -o "$DMG_OUT" >/dev/null
 rm -f "$DIST_DIR/FileID-rw.dmg"
 hdiutil verify "$DMG_OUT" >/dev/null

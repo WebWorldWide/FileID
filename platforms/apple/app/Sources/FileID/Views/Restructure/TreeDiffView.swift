@@ -116,24 +116,8 @@ struct TreeDiffView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text("Filter:").font(Theme.Font.body(12, .semibold)).foregroundStyle(.secondary)
-                ForEach(FilterMode.allCases) { mode in
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            filter = mode
-                        }
-                    } label: {
-                        Text(mode.label)
-                            .font(Theme.Font.body(12, .semibold))
-                            .padding(.horizontal, 10).padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(filter == mode
-                                                ? Theme.gold
-                                                : Color.secondary.opacity(0.10))
-                            )
-                            .foregroundStyle(filter == mode ? .black : .primary)
-                    }
-                    .buttonStyle(.plain)
+                LabeledSegment("Show") {
+                    SegmentedBar(selection: $filter, options: FilterMode.allCases.map { ($0, $0.label) })
                 }
                 Spacer()
                 legendStrip
@@ -171,7 +155,7 @@ struct TreeDiffView: View {
                 .foregroundStyle(.black)
                 .frame(width: 16, height: 16)
                 .background(Circle().fill(tint))
-            Text(label).font(Theme.Font.body(11)).foregroundStyle(.secondary)
+            Text(label).font(Theme.Font.body(11)).foregroundStyle(Theme.text2)
         }
     }
 
@@ -188,8 +172,8 @@ struct TreeDiffView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(.primary)
-                Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(.tertiary)
+                Text(title).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
+                Text(subtitle).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
             }
             .padding(.horizontal, 10).padding(.top, 8)
             ScrollView {
@@ -206,7 +190,7 @@ struct TreeDiffView: View {
         }
         .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(.ultraThinMaterial))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.20), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
         .frame(minHeight: 280, idealHeight: 420, maxHeight: 600)
     }
 
@@ -226,7 +210,7 @@ struct TreeDiffView: View {
                 label
             } else {
                 Button { onTapSource(row.folder) } label: { label }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
             }
         }
         .help(sourceHelp(for: row))
@@ -255,7 +239,7 @@ struct TreeDiffView: View {
             Spacer(minLength: 6)
             Text("\(row.totalFiles)")
                 .font(Theme.Font.body(12).monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text2)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(
@@ -284,7 +268,7 @@ struct TreeDiffView: View {
                 label
             } else {
                 Button { onTapDestination(row.bucket) } label: { label }
-                    .buttonStyle(.plain)
+                    .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
             }
         }
         .help(row.isExisting
@@ -315,7 +299,7 @@ struct TreeDiffView: View {
             Spacer(minLength: 6)
             Text("\(row.count)")
                 .font(Theme.Font.body(12).monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text2)
         }
         .padding(.horizontal, 8).padding(.vertical, 5)
         .background(

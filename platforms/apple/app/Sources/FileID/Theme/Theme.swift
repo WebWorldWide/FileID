@@ -3,9 +3,10 @@ import AppKit
 import CoreText
 
 // MARK: - Theme (Prototype v3)
-// Square corners, 1 px hairlines, mono section labels, serif page titles.
+// Rounded continuous corners, 1 px hairlines, Archivo text, serif page titles.
 // Gold is the only action/selection accent; lavender means a model is
-// running, cyan is information, pink is "done".
+// running, cyan is information, pink is "done". Text and hairline tokens
+// strengthen automatically under Increase Contrast.
 
 enum Theme {
     static let gold    = Color(red: 1.0, green: 0.8, blue: 0.0)          // #FFCC00
@@ -23,8 +24,8 @@ enum Theme {
     static let bg0 = Color(hex: 0x070708)
     static let bg1 = Color(hex: 0x0B0B0C)
     static let text1 = Color(hex: 0xF0F1F2)
-    static let text2 = Color(hex: 0xCFD3D8)
-    static let text3 = Color(hex: 0xA6ACB3)
+    static let text2 = adaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
+    static let text3 = adaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
     static let label = Color(hex: 0xAEB4BB)
     static let textOnPanel = Color(hex: 0xE2E5E8)
 
@@ -32,10 +33,27 @@ enum Theme {
     static let panelHeader    = Color.white.opacity(0.02)
     static let pane           = Color.white.opacity(0.015)
     static let well           = Color.black.opacity(0.3)
-    static let hairline       = Color.white.opacity(0.08)
-    static let hairlineSoft   = Color.white.opacity(0.06)
-    static let hairlineStrong = Color.white.opacity(0.14)
+    static let hairline       = adaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
+    static let hairlineSoft   = adaptive(normal: NSColor.white.withAlphaComponent(0.06), increased: NSColor.white.withAlphaComponent(0.26))
+    static let hairlineStrong = adaptive(normal: NSColor.white.withAlphaComponent(0.14), increased: NSColor.white.withAlphaComponent(0.5))
+
+    /// Resolves per appearance, so it follows System Settings ▸ Accessibility ▸ Increase Contrast live.
+    static func adaptive(normal: NSColor, increased: NSColor) -> Color {
+        Color(nsColor: nsAdaptive(normal: normal, increased: increased))
+    }
+    static func nsAdaptive(normal: NSColor, increased: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua, .darkAqua, .aqua])
+                .map { $0.rawValue.contains("HighContrast") } == true ? increased : normal
+        }
+    }
+    static let nsText2 = nsAdaptive(normal: NSColor(hex: 0xCFD3D8), increased: NSColor(hex: 0xEBEDEF))
+    static let nsText3 = nsAdaptive(normal: NSColor(hex: 0xA6ACB3), increased: NSColor(hex: 0xD6D9DD))
+    static let nsHairline = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.08), increased: NSColor.white.withAlphaComponent(0.34))
+    static let nsHairlineHover = nsAdaptive(normal: NSColor.white.withAlphaComponent(0.28), increased: NSColor.white.withAlphaComponent(0.6))
     static let controlBorder  = Color.white.opacity(0.18)
+    static let controlBorderHover = adaptive(normal: NSColor.white.withAlphaComponent(0.24), increased: NSColor.white.withAlphaComponent(0.6))
+    static let focusRing      = gold.opacity(0.9)
     static let hover          = Color.white.opacity(0.05)
     static let goldWash       = gold.opacity(0.07)
 
@@ -66,6 +84,8 @@ enum Theme {
         static let control: CGFloat = 28
         static let controlSmall: CGFloat = 24
         static let controlLarge: CGFloat = 30
+        /// Smallest click/tap target on any control (HIG, macOS).
+        static let hitTarget: CGFloat = 28
         static let pageInsetX: CGFloat = 26
         static let pageInsetY: CGFloat = 20
         static let sidePane: CGFloat = 300
@@ -86,9 +106,14 @@ enum Theme {
         static var pageTitle: SwiftUI.Font { display(34) }
     }
 
-    /// One quick, well-damped spring for every state change; nothing bounces.
-    static let spring = Animation.spring(response: 0.24, dampingFraction: 0.9)
+    /// Tight spring (0.35 / 0.78) for control state: segments, toggles,
+    /// chips, selection. Nil under Reduce Motion, so changes land instantly.
+    @MainActor static var spring: Animation? { reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.78) }
+    /// Standard spring (0.40 / 0.80) for layout: panes, panels, rows
+    /// appearing. Under Reduce Motion it becomes a short cross-fade.
+    @MainActor static var springStandard: Animation { reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.4, dampingFraction: 0.8) }
     static let quick = Animation.easeOut(duration: 0.14)
+    @MainActor static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
 }
 
 /// Registers the bundled brand fonts once per process. The resource bundle
@@ -115,6 +140,13 @@ enum BrandFonts {
     }
 }
 
+extension NSColor {
+    convenience init(hex: UInt32) {
+        self.init(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+                  blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+    }
+}
+
 extension Color {
     init(hex: UInt32, opacity: Double = 1) {
         self.init(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
@@ -122,7 +154,7 @@ extension Color {
     }
 }
 
-// MARK: - GlassCard → square hairline panel
+// MARK: - GlassCard → rounded hairline panel
 
 struct GlassCard<Content: View>: View {
     @ViewBuilder var content: Content
@@ -144,15 +176,21 @@ struct GlassCard<Content: View>: View {
 struct BadgePill: View {
     let label:  String
     var color:  Color = Theme.gold
+    /// Over photos and video frames the tint wash alone disappears on bright
+    /// skies, so the pill sits on a dark backing like the Library kind badge.
+    var onImage = false
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.xs, style: .continuous)
         Text(label)
             .font(Theme.Font.body(11, .semibold))
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
-            .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.xs, style: .continuous))
+            .background(color.opacity(0.12), in: shape)
+            .background(onImage ? Color.black.opacity(0.62) : Color.clear, in: shape)
+            .overlay { if onImage { shape.stroke(color.opacity(0.6), lineWidth: 1) } }
     }
 }
 

@@ -1505,12 +1505,24 @@ pub(crate) async fn handle_plan_restructure(
     // confidence into the emitted plan. (R3 → learn-your-style)
     restructure_feedback::boost(&db_for_boost, &mut proposed);
 
+    // Keep what the user already organized (RESTRUCTURE.md 2026-10-15).
+    let mut kept_organized_folders = std::collections::HashSet::new();
+    let respect_on = !crate::pipeline::restructure_respect::kill_switch_off();
+    if respect_on {
+        let (kept, untouched) =
+            crate::pipeline::restructure_respect::apply(proposed, &files, library_root_path);
+        proposed = kept;
+        kept_organized_folders = untouched;
+    }
+
     // Engine-authoritative folder classification, computed on the FULL proposal
     // set so the Keep/Tidy/Reorganize tile counts stay accurate.
     let folder_class = restructure::classify_folders(&proposed, library_root_path);
+    // With the respect stage on, every surviving move is one it intends (a format
+    // correction or a loose-file move), so none of their folders is wholly kept.
     let semantic_action_folders: std::collections::HashSet<PathBuf> = proposed
         .iter()
-        .filter(|move_| moved.contains(&move_.file_id) && !proposed_move_is_noop(move_))
+        .filter(|move_| (respect_on || moved.contains(&move_.file_id)) && !proposed_move_is_noop(move_))
         .filter_map(|move_| move_.source.parent().map(Path::to_path_buf))
         .collect();
     let mut anchor = 0u32;
@@ -1546,6 +1558,12 @@ pub(crate) async fn handle_plan_restructure(
         };
         tier_by_folder.insert(f.source_folder.clone(), tier_label);
     }
+    for folder in kept_organized_folders {
+        if let std::collections::hash_map::Entry::Vacant(slot) = tier_by_folder.entry(folder) {
+            slot.insert("Anchor");
+            anchor += 1;
+        }
+    }
 
     // Anchor folders are well-organized with clear names; the macOS reference
     // emits NO proposals for them ("Files inside Anchor folders stay put"), and
@@ -1555,11 +1573,13 @@ pub(crate) async fn handle_plan_restructure(
     // would stay put — without this, default-selected Anchor rows were applied.
     // Only exact semantic proposals are exempt. Exempting their whole source
     // folder also relocated unrelated rule-cascade siblings from an Anchor.
-    let proposed = restructure::strip_anchor_folder_moves_except(
-        proposed,
-        &folder_class,
-        &moved,
-    );
+    // The respect stage already drops every move out of an organized folder
+    // except format corrections, so the strip only runs when it is switched off.
+    let proposed = if respect_on {
+        proposed
+    } else {
+        restructure::strip_anchor_folder_moves_except(proposed, &folder_class, &moved)
+    };
     let proposed: Vec<_> = proposed
         .into_iter()
         .filter(|move_| !proposed_move_is_noop(move_))
@@ -3231,5 +3251,63 @@ mod tests {
             .to_string()
             .contains("more moves than declared"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn respect_moves_survive_the_plan_and_their_folders_are_not_kept() {
+        let root = std::env::temp_dir().join(format!("fileid-respect-plan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        let sep19 = 1_789_840_800.0;
+        let mar1 = 1_772_388_000.0;
+        let mut rows: Vec<(String, f64)> = (0..5)
+            .map(|i| (format!("DCIM/100MSDCF/DSC0000{i}.JPG"), sep19 + f64::from(i) * 600.0))
+            .collect();
+        rows.extend((0..3).map(|i| (format!("Event/Photos/JPEGs/D{i}.ARW"), mar1 + f64::from(i) * 60.0)));
+        rows.extend((0..2).map(|i| (format!("Event/Photos/JPEGs/D{i}.JPG"), mar1 + f64::from(i) * 60.0)));
+        rows.extend((0..2).map(|i| (format!("Event/Photos/RAWs/R{i}.ARW"), mar1 + f64::from(i) * 60.0)));
+        for (index, (relative, time)) in rows.iter().enumerate() {
+            let path = root.join(relative);
+            let extension = path.extension().unwrap().to_string_lossy().to_lowercase();
+            conn.execute(
+                "INSERT INTO files(id, path_text, path_hash, size_bytes, created_at, modified_at,
+                                   scanned_at, kind, extension)
+                 VALUES (?1, ?2, ?1, 1000, ?3, ?3, ?3, 'image', ?4)",
+                rusqlite::params![index as i64 + 1, path.to_string_lossy(), time, extension],
+            )
+            .unwrap();
+        }
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let payload = ipc::PlanRestructurePayload {
+            library_root: root.to_string_lossy().into_owned(),
+            supports_paged_plans: false,
+        };
+        handle_plan_restructure(sink, db, payload, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))).await;
+        let plan = loop {
+            match events.recv().await.expect("plan event").payload {
+                EventPayload::RestructurePlan(plan) => break plan.inner,
+                EventPayload::Error(err) => panic!("planning failed: {}", err.inner.message),
+                _ => {}
+            }
+        };
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(plan.moves.len(), 8, "{:?}", plan.moves);
+        let dcim: Vec<_> = plan.moves.iter().filter(|m| m.source.contains("100MSDCF")).collect();
+        assert_eq!(dcim.len(), 5);
+        let day = Path::new(&dcim[0].destination).parent().unwrap().to_path_buf();
+        assert_eq!(day.parent().unwrap(), root.join("Photos").join("2026"));
+        assert!(dcim.iter().all(|m| Path::new(&m.destination).parent() == Some(day.as_path())));
+        let corrections: Vec<_> = plan.moves.iter().filter(|m| m.source.contains("JPEGs")).collect();
+        assert_eq!(corrections.len(), 3);
+        for m in &corrections {
+            let name = Path::new(&m.source).file_name().unwrap();
+            assert_eq!(Path::new(&m.destination), root.join("Event/Photos/RAWs").join(name));
+        }
+        assert!(plan.moves.iter().all(|m| m.tier.as_deref() != Some("Anchor")), "{:?}", plan.moves);
+        let tiles = plan.folder_classifications.expect("folder tiles");
+        assert_eq!(tiles.anchor_folders, 1, "only Event/Photos/RAWs stays as kept");
     }
 }

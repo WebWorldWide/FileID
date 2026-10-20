@@ -67,9 +67,45 @@
     <SolidColorBrush x:Key="HairlineStrongBrush" Color="#24FFFFFF" />
     <SolidColorBrush x:Key="ControlBorderBrush" Color="#2EFFFFFF" />
     <SolidColorBrush x:Key="GoldWashBrush" Color="#12FFCC00" />
-    <!-- Square geometry everywhere: these override WinUI's default control radii. -->
-    <CornerRadius x:Key="ControlCornerRadius">0</CornerRadius>
-    <CornerRadius x:Key="OverlayCornerRadius">0</CornerRadius>
+    <Color x:Key="GoldHoverColor">#FFFFD84D</Color>
+    <SolidColorBrush x:Key="GoldHoverBrush" Color="{StaticResource GoldHoverColor}" />
+    <SolidColorBrush x:Key="TitleBarBrush" Color="#9E0B0B0C" />
+    <SolidColorBrush x:Key="SidebarSurfaceBrush" Color="#8C0B0B0C" />
+    <SolidColorBrush x:Key="PageSurfaceBrush" Color="#CC0F0F11" />
+    <SolidColorBrush x:Key="PopoverBrush" Color="#FF161618" />
+    <SolidColorBrush x:Key="PanelHeaderBrush" Color="#05FFFFFF" />
+    <SolidColorBrush x:Key="ShellControlFillBrush" Color="#47000000" />
+    <SolidColorBrush x:Key="ShellControlFillStrongBrush" Color="#52000000" />
+    <SolidColorBrush x:Key="ShellControlBorderBrush" Color="#29FFFFFF" />
+    <SolidColorBrush x:Key="SecondaryButtonFillBrush" Color="#0DFFFFFF" />
+    <SolidColorBrush x:Key="NavSelectedBrush" Color="#1FFFCC00" />
+    <SolidColorBrush x:Key="ShellChipSelectedBrush" Color="#24FFCC00" />
+    <SolidColorBrush x:Key="SearchHighlightBrush" Color="#14FFCC00" />
+    <SolidColorBrush x:Key="ScanCardBrush" Color="#09FFFFFF" />
+    <SolidColorBrush x:Key="ProgressTrackBrush" Color="#12FFFFFF" />
+    <SolidColorBrush x:Key="StepDoneBrush" Color="#B3CFD3D8" />
+    <SolidColorBrush x:Key="StepPendingBrush" Color="#1FFFFFFF" />
+    <SolidColorBrush x:Key="PausedBrush" Color="#80B9BEC4" />
+    <LinearGradientBrush x:Key="GoldProgressBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#FFFF8A1A" Offset="0" />
+        <GradientStop Color="#FFFFB000" Offset="0.35" />
+        <GradientStop Color="#FFFFCC00" Offset="0.7" />
+        <GradientStop Color="#FFFFE9A3" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="AiProgressBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#FF7462A6" Offset="0" />
+        <GradientStop Color="#FFB19BCE" Offset="0.6" />
+        <GradientStop Color="#FFDED2F2" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="DoneProgressBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#FFFFB000" Offset="0" />
+        <GradientStop Color="#FFFFCC00" Offset="0.5" />
+        <GradientStop Color="#FFF2A6C0" Offset="1" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="InfoProgressBrush" Color="#FFA0E2EA" />
+    <!-- Subtle continuous corners (DESIGN_V3 revision 2026-10-15): controls s, overlays l. -->
+    <CornerRadius x:Key="ControlCornerRadius">6</CornerRadius>
+    <CornerRadius x:Key="OverlayCornerRadius">10</CornerRadius>
     <!-- Brand type (SIL OFL files under Assets/Fonts). Mono stays Cascadia Mono. -->
     <FontFamily x:Key="DisplayFontFamily">ms-appx:///Assets/Fonts/InstrumentSerif-Regular.ttf#Instrument Serif</FontFamily>
     <FontFamily x:Key="BodyFontFamily">ms-appx:///Assets/Fonts/Archivo-Variable.ttf#Archivo</FontFamily>
@@ -77,7 +113,7 @@
     <x:Double x:Key="PageTitleFontSize">34</x:Double>
     <x:Double x:Key="SectionLabelFontSize">11</x:Double>
     <x:Double x:Key="MetaFontSize">11.5</x:Double>
-    <x:Double x:Key="TitleBarHeight">42</x:Double>
+    <x:Double x:Key="TitleBarHeight">48</x:Double>
     <x:Double x:Key="SidebarWidth">232</x:Double>
     <x:Double x:Key="NavRowHeight">50</x:Double>
 
@@ -164,13 +200,15 @@
     <Thickness x:Key="PaddingL">24</Thickness>
 
     <!-- ─── Corner radii (Theme.Radius.*) ────────────────────────────── -->
-    <x:Double x:Key="RadiusS">8</x:Double>
-    <x:Double x:Key="RadiusM">12</x:Double>
-    <x:Double x:Key="RadiusL">16</x:Double>
+    <x:Double x:Key="RadiusXs">4</x:Double>
+    <x:Double x:Key="RadiusS">6</x:Double>
+    <x:Double x:Key="RadiusM">8</x:Double>
+    <x:Double x:Key="RadiusL">10</x:Double>
 
-    <CornerRadius x:Key="CornerRadiusS">8</CornerRadius>
-    <CornerRadius x:Key="CornerRadiusM">12</CornerRadius>
-    <CornerRadius x:Key="CornerRadiusL">16</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusXs">4</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusS">6</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusM">8</CornerRadius>
+    <CornerRadius x:Key="CornerRadiusL">10</CornerRadius>
 
     <!-- ─── Type ramp ─────────────────────────────────────────────────── -->
     <!--
@@ -280,5 +318,147 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
+    </Style>
+
+    <!-- ─── Prototype v3 shell styles (DESIGN_V3.md › Components) ────── -->
+    <Style x:Key="ShellSectionLabelStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource BodyFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource SectionLabelFontSize}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="CharacterSpacing" Value="55" />
+        <Setter Property="Foreground" Value="{StaticResource LabelBrush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <Style x:Key="ShellMetaTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource BodyFontFamily}" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Foreground" Value="{StaticResource Text3Brush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+
+    <Style x:Key="PageTitleTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource DisplayFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource PageTitleFontSize}" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{StaticResource Text1Brush}" />
+        <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+        <Setter Property="TextWrapping" Value="NoWrap" />
+        <Setter Property="MaxLines" Value="1" />
+    </Style>
+
+    <Style x:Key="ShellButtonStyle" TargetType="Button">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Foreground" Value="{StaticResource Text1Brush}" />
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="FontFamily" Value="{StaticResource BodyFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Padding" Value="12,0,12,0" />
+        <Setter Property="MinHeight" Value="28" />
+        <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusS}" />
+        <Setter Property="HorizontalContentAlignment" Value="Center" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid x:Name="RootGrid"
+                          Background="{TemplateBinding Background}"
+                          BorderBrush="{TemplateBinding BorderBrush}"
+                          BorderThickness="{TemplateBinding BorderThickness}"
+                          CornerRadius="{TemplateBinding CornerRadius}">
+                        <Border x:Name="HoverOverlay"
+                                Background="White"
+                                Opacity="0"
+                                IsHitTestVisible="False"
+                                CornerRadius="{TemplateBinding CornerRadius}" />
+                        <ContentPresenter x:Name="ContentPresenter"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          FontFamily="{TemplateBinding FontFamily}"
+                                          FontSize="{TemplateBinding FontSize}"
+                                          FontWeight="{TemplateBinding FontWeight}"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          Padding="{TemplateBinding Padding}"
+                                          AutomationProperties.AccessibilityView="Raw" />
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="HoverOverlay.Opacity" Value="0.05" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="HoverOverlay.Opacity" Value="0.10" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="RootGrid.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style x:Key="ShellPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
+        <Setter Property="Background" Value="{StaticResource GoldBrush}" />
+        <Setter Property="Foreground" Value="{StaticResource OnGoldBrush}" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Padding" Value="14,0,14,0" />
+    </Style>
+
+    <Style x:Key="ShellSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
+        <Setter Property="Background" Value="{StaticResource SecondaryButtonFillBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource HairlineStrongBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+    </Style>
+
+    <Style x:Key="ShellGhostButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
+        <Setter Property="Foreground" Value="{StaticResource Text3Brush}" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="Padding" Value="6,0,6,0" />
+        <Setter Property="MinHeight" Value="24" />
+        <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusXs}" />
+    </Style>
+
+    <Style x:Key="ShellIconButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
+        <Setter Property="Width" Value="30" />
+        <Setter Property="Height" Value="30" />
+        <Setter Property="MinHeight" Value="30" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="Background" Value="{StaticResource ShellControlFillStrongBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource ShellControlBorderBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Foreground" Value="{StaticResource Text2Brush}" />
+    </Style>
+
+    <Style x:Key="ShellNavRowStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
+        <Setter Property="Height" Value="32" />
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="Padding" Value="10,0,10,0" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusM}" />
+    </Style>
+
+    <Style x:Key="ShellFlyoutPresenterStyle" TargetType="FlyoutPresenter">
+        <Setter Property="Background" Value="{StaticResource PopoverBrush}" />
+        <Setter Property="BorderBrush" Value="{StaticResource HairlineStrongBrush}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusL}" />
+        <Setter Property="MaxWidth" Value="480" />
     </Style>
 </ResourceDictionary>

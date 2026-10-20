@@ -158,7 +158,7 @@ enum ModelBenchmarkRunner {
             throw error
         }
         sampler.record(Self.physicalFootprintBytes())
-        let peak = Double(max(Memory.peakMemory, sampler.peak)) / 1_073_741_824
+        let peak = Self.decimalGB(max(Memory.peakMemory, sampler.peak))
         if previous != kind { await analyzer.unload() }
         await progress("done", total, total)
 
@@ -177,6 +177,11 @@ enum ModelBenchmarkRunner {
     }
 
     /// What Activity Monitor calls Memory: resident plus compressed, GPU buffers included.
+    /// `peakResidentGB` is decimal gigabytes, like the shared engine.
+    nonisolated static func decimalGB(_ bytes: Int) -> Double {
+        (Double(bytes) / 1_000_000_000 * 100).rounded() / 100
+    }
+
     static func physicalFootprintBytes() -> Int {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)

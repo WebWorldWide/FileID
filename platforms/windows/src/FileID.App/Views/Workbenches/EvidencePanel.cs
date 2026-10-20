@@ -17,7 +17,7 @@ internal sealed class EvidencePanel : StackPanel
     private MediaPlayer? _player;
     private CatalogHit? _hit;
     private int _revision;
-    private static readonly string[] VideoExtensions = { ".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm" };
+    private static readonly string[] VideoExtensions = { ".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm", ".mp3", ".m4a", ".wav", ".aac", ".flac", ".wma" };
 
     public EvidencePanel(Action<string> status)
     {
@@ -62,9 +62,9 @@ internal sealed class EvidencePanel : StackPanel
         if (hit is null) return;
         var revision = _revision;
         if (!File.Exists(hit.Path)) { _status("This catalog file is offline or unavailable."); return; }
-        if (hit.StartSeconds is { } seconds && double.IsFinite(seconds) && seconds >= 0
-            && VideoExtensions.Contains(Path.GetExtension(hit.Path), StringComparer.OrdinalIgnoreCase))
+        if (VideoExtensions.Contains(Path.GetExtension(hit.Path), StringComparer.OrdinalIgnoreCase))
         {
+            double seconds = hit.StartSeconds is { } s && double.IsFinite(s) && s >= 0 ? s : 0;
             var file = await StorageFile.GetFileFromPathAsync(hit.Path);
             if (revision != _revision) return;
             Stop();

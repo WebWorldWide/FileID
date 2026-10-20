@@ -96,23 +96,28 @@ struct MainWindow: View {
             VStack(spacing: 0) {
                 TitleBar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL,
                          sidebarVisible: $sidebarVisible, chatPresented: $chatPresented, pickFolder: pickFolder)
+                    .background(TrafficLightAligner(barHeight: Theme.Metrics.titleBar))
+                    .focusSection()
                 GeometryReader { geometry in
                 HStack(spacing: 0) {
                     if sidebarVisible && (!chatPresented || geometry.size.width >= 1440) {
                         Sidebar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL, pickFolder: pickFolder)
                             .frame(width: Theme.Metrics.sidebar)
-                            .transition(.move(edge: .leading).combined(with: .opacity))
+                            .focusSection()
+                            .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
                         VHairline()
                     }
                     Detail(engine: engine, store: store, toolsSession: toolsSession, activeTab: activeTab,
                            pickedURL: $pickedURL, onSwitchTab: { activeTabBinding.wrappedValue = $0 }, pickFolder: pickFolder)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .focusSection()
                     // Chat stays beside the current page, as before the redesign;
                     // the Chat page is the same conversation at full width.
                     if chatPresented && activeTab != .chat {
                         VHairline()
                         ChatWorkbench(engine: engine, onClose: { chatPresented = false })
                             .frame(width: 380)
+                            .focusSection()
                             .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.86), ignoresSafeAreaEdges: [])
                             .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
                             .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))

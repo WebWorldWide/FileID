@@ -50,7 +50,7 @@ struct BulkRenameSheet: View {
                 Text("Apply smart names")
                     .font(Theme.Font.body(20, .semibold))
                 Text("Deep Analyze produced a smart filename for each photo based on its content. Pick which ones to apply.")
-                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
             }
             Spacer()
             Button("Done") { dismiss() }
@@ -63,10 +63,10 @@ struct BulkRenameSheet: View {
         VStack(spacing: 12) {
             Image(systemName: "wand.and.rays")
                 .font(.system(size: 48, weight: .light))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
             Text("No smart names yet").font(Theme.Font.body(16, .semibold))
             Text("Run Deep Analyze on your photos first — smart filenames will appear here.")
-                .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
         }
@@ -109,7 +109,7 @@ struct BulkRenameSheet: View {
                 Text("This will rename \(selectedIDs.count) files on disk. The Library 'Undo last rename' button can revert it, but it won't restore filenames you've moved or renamed again afterwards.")
             }
             if let s = status {
-                Text(s).font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                Text(s).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
             }
         }
         .padding(12)
@@ -288,7 +288,7 @@ private struct BulkRenameRow: View {
                 } else {
                     Image(systemName: kindFallbackIcon(file.kind))
                         .font(Theme.Font.body(16, .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
             }
             .overlay(
@@ -299,13 +299,13 @@ private struct BulkRenameRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(oldName)
                     .font(Theme.Font.mono(11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                     .strikethrough(isSelected, color: .secondary.opacity(0.5))
                     .lineLimit(1).truncationMode(.middle)
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.right")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
                     Text(newName)
                         .font(Theme.Font.mono(11, .semibold))
                         .foregroundStyle(Theme.gold)

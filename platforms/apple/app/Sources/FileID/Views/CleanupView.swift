@@ -123,6 +123,8 @@ struct CleanupView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             MetaText(headerSubtitle, color: Theme.text2)
+                .lineLimit(2)
+                .layoutPriority(-1)
             ThemedSegmentedControl(
                 selection: $mode,
                 options: [(tag: "exact", label: "Exact"), (tag: "similar", label: "Similar")]
@@ -135,31 +137,34 @@ struct CleanupView: View {
                     // copies are NOT byte-identical, so one-click mass selection would
                     // be unsafe — the user must pick copies deliberately per group.
                     if !isSimilar {
-                        Button("Select all non-keepers") { selectAllNonKeepers() }
+                        Button("Select extra copies") { selectAllNonKeepers() }
                             .buttonStyle(.dsSecondary)
+                            .fixedSize()
                             .help("Select every duplicate except the keeper in each group.")
                     }
                     Button("Clear selection") { selection.removeAll() }
                         .buttonStyle(.dsSecondary)
+                        .fixedSize()
                         .disabled(totalSelected == 0)
                 }
                 Button {
                     confirmDeleteSelected()
                 } label: {
                     Label(
-                        "Delete \(totalSelected) selected (\(totalSelectedSize))",
+                        totalSelected == 0 ? "Delete selected" : "Delete \(totalSelected) selected · \(totalSelectedSize)",
                         systemImage: "trash"
                     )
                     .fontWeight(.semibold)
                     .foregroundStyle(Theme.danger)
+                    .fixedSize()
                     .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .frame(minHeight: Theme.Metrics.hitTarget)
                     .background(Theme.danger.opacity(0.12), ignoresSafeAreaEdges: [])
                     .overlay(
                         RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                             .stroke(Theme.danger.opacity(0.5), lineWidth: 1)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
@@ -193,7 +198,7 @@ struct CleanupView: View {
             let bytes = visibleGroups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
             base = g == 0
                 ? "No verified duplicate groups"
-                : "\(g.formatted()) verified duplicate group\(g == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) reclaimable if you keep 1 per group"
+                : "\(g.formatted()) verified duplicate group\(g == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) to reclaim"
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
@@ -258,7 +263,7 @@ struct CleanupView: View {
                             .foregroundStyle(Theme.warning)
                         Text("**Visually similar — review before deleting (not identical).** These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected: open each, confirm it's a true duplicate, then choose which copies to Trash.")
                             .font(Theme.Font.body(12))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                     }
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.10)))
@@ -273,7 +278,7 @@ struct CleanupView: View {
                              ? "**Verified preview is partial.** Every group shown passed a live full-file SHA-256 check, but candidate/read limits may leave additional duplicates undisplayed. Selected copies are re-read again immediately before Trash."
                              : "Each group was verified with a live full-file SHA-256. The **KEEPER** is the copy we recommend you keep. Selected copies are re-read again immediately before Trash; you can restore them if you change your mind.")
                             .font(Theme.Font.body(12))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                     }
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
@@ -723,17 +728,18 @@ private struct CopyTile: View {
             HStack(spacing: 4) {
                 Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
                 Spacer()
                 if let date = file.displayDate {
                     Text(date.formatted(date: .numeric, time: .omitted))
                         .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
                 }
             }
             .frame(width: 132)
         }
         .task(id: file.id) { thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 264) }
+        .onDisappear { thumb = nil }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
@@ -755,7 +761,7 @@ private struct CopyTile: View {
         if let thumb {
             Image(nsImage: thumb).resizable().scaledToFill()
         } else {
-            Image(systemName: "photo").foregroundStyle(.secondary)
+            Image(systemName: "photo").foregroundStyle(Theme.text3)
         }
     }
 
@@ -763,7 +769,7 @@ private struct CopyTile: View {
     private var badgeOverlay: some View {
         ZStack(alignment: .topLeading) {
             if isKeeper {
-                BadgePill(label: "KEEPER", color: Theme.delight)
+                BadgePill(label: "KEEPER", color: Theme.delight, onImage: true)
                     .padding(6)
                     .help("This is the copy we recommend you keep — usually the largest / highest-resolution one. The other copies in this group are duplicates of it. You can override by clicking another tile to make it the keeper instead.")
             }

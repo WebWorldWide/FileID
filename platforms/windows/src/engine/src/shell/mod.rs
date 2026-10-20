@@ -647,16 +647,92 @@ pub mod thumbnail {
     }
 
     pub fn render_at(path: &Path, dim: i32) -> Result<Thumbnail> {
+        render_oriented(path, dim)
+    }
+
+    /// Upright thumbnail, like macOS ImageIO with the EXIF transform applied:
+    /// camera RAWs use their embedded preview and container orientation, other
+    /// images honour their EXIF orientation, oversized JPEGs DCT-scale toward
+    /// `dim`, and HEIC/HEIF falls back to libheif on Linux. Full decodes are
+    /// capped at the scan's decoded-pixel limit, so file size needs no cap.
+    pub fn render_oriented(path: &Path, dim: i32) -> Result<Thumbnail> {
         let dim = u32::try_from(dim).ok().filter(|dim| *dim > 0)
             .context("thumbnail dimension must be positive")?;
-        let image = image::ImageReader::open(path)
-            .context("opening thumbnail source")?
-            .with_guessed_format()
-            .context("detecting image format")?
-            .decode()
-            .context("decoding thumbnail source")?
-            .thumbnail(dim, dim)
-            .into_rgba8();
+        let image = decode_upright(path, dim)?.thumbnail(dim, dim).into_rgba8();
+        Ok(Thumbnail {
+            width: image.width(),
+            height: image.height(),
+            rgba: image.into_raw(),
+        })
+    }
+
+    fn decode_upright(path: &Path, dim: u32) -> Result<image::DynamicImage> {
+        use crate::pipeline::{raw_preview, tagging};
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        let file = tagging::open_image_file(path).context("opening thumbnail source")?;
+        // SAFETY: read-only map of a file we only read; a concurrent truncation
+        // can fault, the same trade-off the scan decoder makes.
+        let bytes = unsafe { memmap2::Mmap::map(&file) }.context("mapping thumbnail source")?;
+        if raw_preview::is_raw_extension(&ext) {
+            if let Some((rgb, w, h)) = tagging::decode_raw_preview_at_least(path, Some(&bytes), 1, dim) {
+                return rgb_image(rgb, w, h);
+            }
+        }
+        match decode_with_orientation(&bytes, dim) {
+            Ok(image) => Ok(image),
+            Err(err) if ext == "heic" || ext == "heif" => {
+                let (rgb, w, h) = super::heic::decode(path).map_err(|_| err)?;
+                rgb_image(rgb, w, h)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn decode_with_orientation(bytes: &[u8], dim: u32) -> Result<image::DynamicImage> {
+        use crate::pipeline::tagging;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<image::DynamicImage> {
+            let reader = || {
+                image::ImageReader::new(std::io::Cursor::new(bytes))
+                    .with_guessed_format()
+                    .context("detecting image format")
+            };
+            let orientation = tagging::exif_orientation(bytes);
+            let decoder = reader()?;
+            let scaled = (decoder.format() == Some(image::ImageFormat::Jpeg))
+                .then(|| tagging::decode_jpeg_scaled_to(bytes, dim))
+                .flatten();
+            let mut image = match scaled {
+                Some((rgb, w, h)) => rgb_image(rgb, w, h)?,
+                None => {
+                    let (w, h) = reader()?.into_dimensions().context("reading thumbnail dimensions")?;
+                    anyhow::ensure!(
+                        u64::from(w) * u64::from(h) <= tagging::MAX_DECODED_PIXELS,
+                        "image too large to thumbnail"
+                    );
+                    decoder.decode().context("decoding thumbnail source")?
+                }
+            };
+            if let Some(orientation) = orientation {
+                image.apply_orientation(orientation);
+            }
+            Ok(image)
+        }))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("thumbnail decoder panicked")))
+    }
+
+    fn rgb_image(rgb: Vec<u8>, width: u32, height: u32) -> Result<image::DynamicImage> {
+        image::RgbImage::from_raw(width, height, rgb)
+            .map(image::DynamicImage::ImageRgb8)
+            .context("decoded buffer does not match its dimensions")
+    }
+
+    /// Scale a decoded RGB frame (a video keyframe) to fit `dim`.
+    pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>, dim: i32) -> Result<Thumbnail> {
+        let dim = u32::try_from(dim).ok().filter(|dim| *dim > 0)
+            .context("thumbnail dimension must be positive")?;
+        let image = image::RgbImage::from_raw(width, height, rgb)
+            .context("frame buffer does not match its dimensions")?;
+        let image = image::DynamicImage::ImageRgb8(image).thumbnail(dim, dim).into_rgba8();
         Ok(Thumbnail {
             width: image.width(),
             height: image.height(),
@@ -667,6 +743,37 @@ pub mod thumbnail {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn jpeg_with_orientation(width: u32, height: u32, orientation: Option<u8>) -> Vec<u8> {
+            let img = image::RgbImage::from_pixel(width, height, image::Rgb([90, 140, 200]));
+            let mut encoded = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut encoded, image::ImageFormat::Jpeg).unwrap();
+            let encoded = encoded.into_inner();
+            let Some(value) = orientation else { return encoded };
+            let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x22];
+            out.extend_from_slice(b"Exif\0\0");
+            out.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00]);
+            out.extend_from_slice(&[0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, value, 0x00, 0x00, 0x00]);
+            out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            out.extend_from_slice(&encoded[2..]);
+            out
+        }
+
+        /// TIFF-style RAW: IFD0 with orientation 6 and a JPEG preview.
+        fn fake_raw(preview: &[u8]) -> Vec<u8> {
+            let mut b = b"II\x2A\x00\x08\x00\x00\x00".to_vec();
+            let data_at = 8 + 2 + 3 * 12 + 4;
+            b.extend_from_slice(&3u16.to_le_bytes());
+            for (tag, kind, value) in [(0x0112u16, 3u16, 6u32), (0x0201, 4, data_at), (0x0202, 4, preview.len() as u32)] {
+                b.extend_from_slice(&tag.to_le_bytes());
+                b.extend_from_slice(&kind.to_le_bytes());
+                b.extend_from_slice(&1u32.to_le_bytes());
+                b.extend_from_slice(&value.to_le_bytes());
+            }
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(preview);
+            b
+        }
 
         #[test]
         fn linux_thumbnail_scales_generated_image_and_rejects_invalid_size() {
@@ -681,10 +788,41 @@ pub mod thumbnail {
                 .save(&path).unwrap();
             let thumb = render_at(&path, 8).unwrap();
             assert_eq!((thumb.width, thumb.height), (8, 4));
+            let rotated = fixture.join("portrait.jpg");
+            std::fs::write(&rotated, jpeg_with_orientation(40, 20, Some(6))).unwrap();
+            let upright = render_oriented(&rotated, 8).unwrap();
+            assert_eq!((upright.width, upright.height), (4, 8), "EXIF orientation 6 renders upright");
+            let raw = fixture.join("camera.ARW");
+            std::fs::write(&raw, fake_raw(&jpeg_with_orientation(60, 45, None))).unwrap();
+            let preview = render_oriented(&raw, 8).unwrap();
+            assert_eq!((preview.width, preview.height), (6, 8), "RAW preview with its container orientation");
             assert_eq!(thumb.rgba.len(), 8 * 4 * 4);
             assert_eq!(&thumb.rgba[0..4], &[200, 40, 60, 255]);
             assert!(render_at(&path, 0).is_err());
+            assert!(render_oriented(&path, 0).is_err());
             std::fs::remove_dir_all(fixture).unwrap();
+        }
+
+        #[test]
+        fn oversized_jpeg_scales_toward_the_thumbnail_and_stays_upright() {
+            let fixture = std::env::temp_dir().join(format!("fileid-thumbnail-scaled-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&fixture).unwrap();
+            let path = fixture.join("large.jpg");
+            let encoded = jpeg_with_orientation(2048, 1024, Some(8));
+            std::fs::write(&path, &encoded).unwrap();
+            let (rgb, w, h) = crate::pipeline::tagging::decode_jpeg_scaled_to(&encoded, 256).expect("DCT-scaled");
+            assert_eq!((w, h), (256, 128), "1/8 scale still covers the 256 px request");
+            assert_eq!(rgb.len(), 256 * 128 * 3);
+            let thumb = render_oriented(&path, 256).unwrap();
+            assert_eq!((thumb.width, thumb.height), (128, 256), "orientation 8 turns the frame upright");
+            std::fs::remove_dir_all(fixture).unwrap();
+        }
+
+        #[test]
+        fn video_frames_scale_to_fit_and_reject_short_buffers() {
+            let thumb = from_rgb(64, 32, vec![10; 64 * 32 * 3], 16).unwrap();
+            assert_eq!((thumb.width, thumb.height), (16, 8));
+            assert!(from_rgb(64, 32, vec![10; 10], 16).is_err());
         }
     }
 }

@@ -31,7 +31,7 @@ public final class ThumbnailService {
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
         c.countLimit = 4000          // cover a full ~3–4k-file library
-        c.totalCostLimit = 512 * 1024 * 1024  // 512 MB ceiling
+        c.totalCostLimit = 256 * 1024 * 1024
         return c
     }()
 
@@ -44,7 +44,7 @@ public final class ThumbnailService {
         if let hit = cache.object(forKey: key) { return hit }
         if let task = inflight[key as String] {
             if let data = await task.value {
-                return NSImage(data: data)
+                return await Self.decoded(data)
             }
             return nil
         }
@@ -58,7 +58,7 @@ public final class ThumbnailService {
         inflight[key as String] = task
         let data = await task.value
         inflight.removeValue(forKey: key as String)
-        if let data, let image = NSImage(data: data) {
+        if let data, let image = await Self.decoded(data) {
             // Cost in PIXELS, not points — a Retina request yields a
             // scale× representation, and point-based costs undercount
             // 4× so the totalCostLimit never engages.
@@ -66,6 +66,42 @@ public final class ThumbnailService {
             return image
         }
         return nil
+    }
+
+    /// Screen-sized still for the preview sheet, decoded straight from the
+    /// file with ImageIO (a RAW's embedded preview, or a scaled decode). Skips
+    /// Quick Look and the thumbnail gate, which grid thumbnails keep busy.
+    nonisolated static func previewImage(for url: URL, maxPixelSize: Int) async -> NSImage? {
+        await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            ]
+            var image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+            if let small = image, max(small.width, small.height) < 800 {
+                var full = options
+                full[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
+                full[kCGImageSourceCreateThumbnailFromImageAlways] = true
+                image = CGImageSourceCreateThumbnailAtIndex(source, 0, full as CFDictionary) ?? small
+            }
+            guard let image else { return nil }
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }.value
+    }
+
+    /// Decodes the cached JPEG into a bitmap off the main thread. NSImage(data:)
+    /// defers decoding to the first draw, which put a JPEG decode on the main
+    /// thread for every tile scrolled into view.
+    nonisolated static func decoded(_ data: Data) async -> NSImage? {
+        await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+            else { return nil }
+            return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        }.value
     }
 
     nonisolated static func sourceOrientation(for url: URL) async -> Int? {
@@ -81,7 +117,7 @@ public final class ThumbnailService {
         }.value
     }
 
-    static func cropFace(in image: NSImage, bbox: String, sourceOrientation: Int = 1) -> NSImage? {
+    nonisolated static func cropFace(in image: NSImage, bbox: String, sourceOrientation: Int = 1) -> NSImage? {
         guard let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let bounds = FaceBBox.parseNormalized(bbox, imageWidth: pixels.width,
                   imageHeight: pixels.height, sourceOrientation: sourceOrientation)

@@ -25,16 +25,9 @@ struct SettingsTab: View {
                 GlassCard {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Cleanup").font(Theme.Font.body(14, .semibold))
-                        Toggle(isOn: $cleanupAutoTag) {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Tag kept files after Cleanup")
-                                    .font(Theme.Font.body(13.5))
-                                Text("When ON, after you trash duplicates the surviving keepers get a Finder tag (\"\(AppSettings.cleanupAutoTagName)\"). Useful for finding files you've already deduped via a Finder Smart Folder.")
-                                    .font(Theme.Font.body(11))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .toggleStyle(DSToggleStyle())
+                        SettingToggleRow("Tag kept files after Cleanup",
+                                         subtitle: "After you trash duplicates, the copies you keep get the Finder tag “\(AppSettings.cleanupAutoTagName)”, so a Smart Folder can find them.",
+                                         isOn: $cleanupAutoTag)
                     }
                 }
 
@@ -46,7 +39,7 @@ struct SettingsTab: View {
                         }
                         Text("How finely Restructure splits your files into folders — Looser groups broadly into fewer folders, Tighter makes more, smaller ones. Takes effect the next time the engine starts (relaunch FileID, or Settings ▸ Advanced ▸ Restart Engine).")
                             .font(Theme.Font.body(11))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                     }
                 }
 
@@ -116,7 +109,7 @@ struct SettingsTab: View {
                                 Text("Recent scans").font(Theme.Font.body(12.5, .semibold))
                                 if sessions.isEmpty {
                                     Text("No scans recorded yet.")
-                                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                                        .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 } else {
                                     ForEach(sessions) { s in
                                         sessionRow(s)
@@ -130,7 +123,7 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Logs").font(Theme.Font.body(12.5, .semibold))
                                 Text("Detailed scan + app logs for troubleshooting.")
-                                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 HStack(spacing: 8) {
                                     Button("Open scan log") {
                                         NSWorkspace.shared.open(SettingsTab.scanLogURL)
@@ -153,7 +146,7 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Danger Zone").font(Theme.Font.body(12.5, .semibold)).foregroundStyle(Theme.danger)
                                 Text("Permanently erase FileID's library, local models, settings, and caches.")
-                                    .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                                 Button(role: .destructive) {
                                     confirmFactoryReset = true
                                 } label: {
@@ -179,11 +172,11 @@ struct SettingsTab: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "wrench.and.screwdriver")
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Theme.text3)
                             Text("Advanced").font(Theme.Font.body(14, .semibold))
                             Text("(engine status, database, scan history, logs)")
                                 .font(Theme.Font.body(12))
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Theme.text3)
                         }
                     }
                 }
@@ -213,7 +206,7 @@ struct SettingsTab: View {
                     Text(s.status)
                     if let n = s.lastFileIndex { Text("\(n) files") }
                 }
-                .font(Theme.Font.mono(10.5)).foregroundStyle(.secondary)
+                .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
             }
             Spacer()
         }
@@ -231,7 +224,7 @@ struct SettingsTab: View {
     @ViewBuilder
     private func infoRow(_ k: String, _ v: String) -> some View {
         HStack(alignment: .top) {
-            Text(k).foregroundStyle(.secondary).frame(width: 130, alignment: .leading)
+            Text(k).foregroundStyle(Theme.text3).frame(width: 130, alignment: .leading)
             Text(v).font(Theme.Font.mono(12.5)).textSelection(.enabled)
             Spacer()
         }
@@ -264,7 +257,7 @@ struct DeepAnalyzeExclusionsCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Deep Analyze exclusions").font(Theme.Font.body(14, .semibold))
                 Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
-                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider().opacity(0.3)
@@ -282,7 +275,7 @@ struct DeepAnalyzeExclusionsCard: View {
 
                 if settings.excludedFolders.isEmpty {
                     Text("No folders are excluded from Deep Analyze.")
-                        .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 } else {
                     ForEach(settings.excludedFolders, id: \.self) { folder in
                         HStack(spacing: 8) {
@@ -291,14 +284,9 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            Button {
+                            DSIconButton("Stop excluding \(folder) from Deep Analyze", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
                             }
-                            .buttonStyle(.borderless)
-                            .foregroundStyle(.secondary)
-                            .help("Stop excluding \(folder) from Deep Analyze")
                         }
                     }
                 }
@@ -348,7 +336,7 @@ struct CLIPSemanticSearchCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — semantic search (CLIP)").font(Theme.Font.body(14, .semibold))
                 Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.")
-                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Divider().opacity(0.3)
@@ -406,9 +394,9 @@ struct CLIPSemanticSearchCard: View {
                 Image(systemName: "arrow.down.circle")
                     .foregroundStyle(Theme.gold)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(reason).font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                    Text(reason).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                     Text("Approximately \(downloadSizeLabel) from huggingface.co (Xenova CLIP ViT-B/32 + OpenAI BPE vocabulary).")
-                        .font(Theme.Font.body(11)).foregroundStyle(.tertiary)
+                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 }
                 Spacer()
             }
@@ -428,7 +416,7 @@ struct CLIPSemanticSearchCard: View {
                     NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
                 }
                 .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
                 Spacer()
             }
 
@@ -442,13 +430,13 @@ struct CLIPSemanticSearchCard: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(msg).font(Theme.Font.mono(10.5))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                         let rateETA = DownloadFormat.rateAndETA(
                             DownloadTick(written: 0, total: 0,
                                           bytesPerSecond: bps, etaSeconds: eta))
                         if !rateETA.isEmpty {
                             Text(rateETA).font(Theme.Font.mono(10.5))
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Theme.text3)
                         }
                     }
                     Spacer()
@@ -461,7 +449,7 @@ struct CLIPSemanticSearchCard: View {
         case .extracting:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Extracting…").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                Text("Extracting…").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 Spacer()
             }
 
@@ -472,7 +460,7 @@ struct CLIPSemanticSearchCard: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Installed").font(Theme.Font.body(13.5, .semibold))
                     Text("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) on disk · semantic search active.")
-                        .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 Button("Open Models folder") {
@@ -521,7 +509,7 @@ struct CLIPSemanticSearchCard: View {
                 Text(name).font(Theme.Font.body(13.5))
                 Text(url.path)
                     .font(Theme.Font.mono(10.5))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -562,15 +550,15 @@ struct RamPlusTaggerCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — image tagging").font(Theme.Font.body(14, .semibold))
                 Text("RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.")
-                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                 Divider().opacity(0.3)
                 HStack(alignment: .top, spacing: 8) {
                     statusIcon.padding(.top, 2)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("RAM++ (Recognize Anything Plus)").font(Theme.Font.body(13.5, .semibold))
-                        Text("Swin-Large @384 · 4585-tag English vocabulary").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                        Text("Swin-Large @384 · 4585-tag English vocabulary").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                         Text(modelPath)
-                            .font(Theme.Font.mono(10.5)).foregroundStyle(.tertiary)
+                            .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
                             .lineLimit(1).truncationMode(.middle)
                     }
                     Spacer()
@@ -613,14 +601,14 @@ struct RamPlusTaggerCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 ProgressView(value: fraction).frame(maxWidth: 280)
                 HStack {
-                    Text(message).font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     Spacer()
                     Button("Cancel") { installer.cancel() }.font(Theme.Font.body(12))
                 }
             }
         case .installed(let sizeBytes):
             HStack(spacing: 8) {
-                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 Spacer()
                 Button("Remove", role: .destructive) { confirmUninstall = true }.font(Theme.Font.body(12))
             }
@@ -648,15 +636,15 @@ struct BGEDocCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — document understanding").font(Theme.Font.body(14, .semibold))
                 Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
-                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                 Divider().opacity(0.3)
                 HStack(alignment: .top, spacing: 8) {
                     statusIcon.padding(.top, 2)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("BGE-small-en-v1.5").font(Theme.Font.body(13.5, .semibold))
-                        Text("384-d BERT text embedder · runs on the Neural Engine").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                        Text("384-d BERT text embedder · runs on the Neural Engine").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                         Text(modelPath)
-                            .font(Theme.Font.mono(10.5)).foregroundStyle(.tertiary)
+                            .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
                             .lineLimit(1).truncationMode(.middle)
                     }
                     Spacer()
@@ -699,14 +687,14 @@ struct BGEDocCard: View {
             VStack(alignment: .leading, spacing: 4) {
                 ProgressView(value: fraction).frame(maxWidth: 280)
                 HStack {
-                    Text(message).font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     Spacer()
                     Button("Cancel") { installer.cancel() }.font(Theme.Font.body(12))
                 }
             }
         case .installed(let sizeBytes):
             HStack(spacing: 8) {
-                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 Spacer()
                 Button("Remove", role: .destructive) { confirmUninstall = true }.font(Theme.Font.body(12))
             }
@@ -730,7 +718,7 @@ struct FaceEmbedderCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("AI Models — face recognition").font(Theme.Font.body(14, .semibold))
                 Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")
-                    .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                 Divider().opacity(0.3)
                 ForEach(FaceEmbedderKind.allCases, id: \.rawValue) { kind in
                     embedderRow(kind)
@@ -771,10 +759,10 @@ struct FaceEmbedderCard: View {
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(kind.displayName).font(Theme.Font.body(13.5, .semibold))
-                    Text(kind.subtitle).font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    Text(kind.subtitle).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     Text(path)
                         .font(Theme.Font.mono(10.5))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -830,13 +818,13 @@ struct FaceEmbedderCard: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(msg).font(Theme.Font.mono(10.5))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                         let rateETA = DownloadFormat.rateAndETA(
                             DownloadTick(written: 0, total: 0,
                                           bytesPerSecond: bps, etaSeconds: eta))
                         if !rateETA.isEmpty {
                             Text(rateETA).font(Theme.Font.mono(10.5))
-                                .foregroundStyle(.tertiary)
+                                .foregroundStyle(Theme.text3)
                         }
                     }
                     Spacer()
@@ -849,7 +837,7 @@ struct FaceEmbedderCard: View {
         case .installed(let bytes):
             HStack(spacing: 8) {
                 Text("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) installed")
-                    .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 Spacer()
                 Button("Uninstall") { confirmUninstall = kind }
                     .buttonStyle(.borderless)

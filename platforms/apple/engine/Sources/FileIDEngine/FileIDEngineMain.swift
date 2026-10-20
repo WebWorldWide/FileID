@@ -9,6 +9,7 @@
 // Lifetime: bound to the parent. Pipe close → LineReader EOF → clean
 // exit. A getppid() poll catches force-quits where the pipe lingers.
 import Foundation
+import CoreGraphics
 import Darwin
 import FileIDShared
 import AsyncAlgorithms
@@ -1499,6 +1500,13 @@ struct FileIDEngineMain {
         // simultaneously. Each is a no-op if the model isn't installed.
         await Task.detached(priority: .userInitiated) {
             MobileCLIPService.shared.preWarm()
+            // Loads Vision's classifier and face models once, instead of in
+            // every worker on its first file.
+            if let blank = CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
+                                     space: CGColorSpaceCreateDeviceRGB(),
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage() {
+                _ = VisionWorker().runPrimaryPass(blank)
+            }
             // RAM++ primary tagger (macOS lockstep) — no-op if not installed, in
             // which case Tagging falls back to the Vision scene classifier.
             RamPlusService.shared.preWarm()

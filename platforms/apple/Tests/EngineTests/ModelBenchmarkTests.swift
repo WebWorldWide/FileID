@@ -104,3 +104,18 @@ private final class PhaseLog: @unchecked Sendable {
     func append(_ phase: String) { lock.lock(); stored.append(phase); lock.unlock() }
     var values: [String] { lock.lock(); defer { lock.unlock() }; return stored }
 }
+
+@Suite("Idle model release")
+struct IdleModelReleaseTests {
+    @Test func idleTimeoutDefaultsToFiveMinutesAndHonoursOverride() {
+        #expect(DeepAnalyze.idleUnloadSeconds(environment: [:]) == 300)
+        #expect(DeepAnalyze.idleUnloadSeconds(environment: ["FILEID_MODEL_IDLE_SECONDS": "0"]) == 0)
+        #expect(DeepAnalyze.idleUnloadSeconds(environment: ["FILEID_MODEL_IDLE_SECONDS": "45"]) == 45)
+        #expect(DeepAnalyze.idleUnloadSeconds(environment: ["FILEID_MODEL_IDLE_SECONDS": "-1"]) == 300)
+    }
+
+    @Test func peakMemoryIsDecimalGigabytes() {
+        #expect(ModelBenchmarkRunner.decimalGB(3_600_000_000) == 3.6)
+        #expect(ModelBenchmarkRunner.decimalGB(1_073_741_824) == 1.07)
+    }
+}

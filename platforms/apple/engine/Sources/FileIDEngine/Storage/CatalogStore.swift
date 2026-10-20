@@ -87,6 +87,62 @@ public enum CatalogStore {
         }
     }
 
+    /// Files whose scan tags match the query words, best first. Each word is
+    /// matched against the start of a tag word ("grass" hits "grass" and
+    /// "grassland"; "sky" hits "blue_sky"). Files matching the most words win,
+    /// so a filler word in the question can't hide a real match.
+    static func tagHits(
+        _ db: GRDB.Database, words query: String, filter: String?, peopleFilter: String?, eventFilter: String?
+    ) throws -> [CatalogHit] {
+        let words = Array(Set(query.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+            .filter { $0.count >= 3 })).sorted().prefix(6)
+        guard !words.isEmpty else { return [] }
+        let forms = words.map(Self.wordForms)
+        let score: String = forms.map { (variants: [String]) -> String in
+            let any: String = variants.map { _ in "(' ' || REPLACE(LOWER(t.tag), '_', ' ')) LIKE ?" }.joined(separator: " OR ")
+            return "(EXISTS (SELECT 1 FROM tags t WHERE t.file_id = f.id AND t.source IN ('auto','user','vlm') AND (\(any))))"
+        }.joined(separator: " + ")
+        let likeArgs: [DatabaseValueConvertible] = forms.flatMap { $0.map { "% \($0)%" } }
+        let rows = try Row.fetchAll(db, sql: """
+            WITH scored AS (
+              SELECT f.id, f.path_text, f.kind, \(score) AS score
+              FROM files f
+              WHERE f.failed = 0 AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
+                AND (? IS NULL OR f.id IN (
+                  SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
+                  UNION SELECT file_id FROM catalog_observations
+                    WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0
+                ))
+                AND (? IS NULL OR f.id IN (
+                  SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
+                ))
+            )
+            SELECT s.id, s.path_text, s.kind,
+                   (SELECT GROUP_CONCAT(tag, ', ') FROM (
+                      SELECT DISTINCT REPLACE(TRIM(tag), '_', ' ') AS tag FROM tags WHERE file_id = s.id AND source IN ('auto','user','vlm')
+                      ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END, COALESCE(score,0) DESC LIMIT 8)) AS tag_list
+            FROM scored s
+            WHERE s.score > 0 AND s.score = (SELECT MAX(score) FROM scored)
+            ORDER BY s.id DESC LIMIT 100
+            """, arguments: StatementArguments(likeArgs + [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter]))
+        return rows.map { row in
+            let tags: String = row["tag_list"] ?? ""
+            return CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: "Tags: " + tags)
+        }
+    }
+
+    /// The word plus its singular, so "dogs" and "beaches" find the singular
+    /// labels scans write (Rust `tag_hits`).
+    static func wordForms(_ word: String) -> [String] {
+        guard word.count >= 4 else { return [word] }
+        if word.hasSuffix("ies") { return [word, String(word.dropLast(3)) + "y"] }
+        if word.hasSuffix("es") { return [word, String(word.dropLast(2)), String(word.dropLast())] }
+        if word.hasSuffix("s") && !word.hasSuffix("ss") { return [word, String(word.dropLast())] }
+        return [word]
+    }
+
     static func search(
         _ db: GRDB.Database,
         query: String,
@@ -153,6 +209,9 @@ public enum CatalogStore {
             for row in files {
                 results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
             }
+            let seen = Set(results.map(\.fileID))
+            results.append(contentsOf: try tagHits(db, words: meaningful, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter)
+                .filter { !seen.contains($0.fileID) })
             results.append(contentsOf: try textEvidenceHits(db, table: "doc_fts", kind: "documentText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
             results.append(contentsOf: try textEvidenceHits(db, table: "ocr_fts", kind: "ocrText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
         }

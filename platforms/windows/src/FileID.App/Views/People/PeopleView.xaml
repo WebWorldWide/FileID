@@ -27,7 +27,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock Text="People" Style="{StaticResource TitleTextBlockStyle}"
+                <TextBlock Text="People" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
                            AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Faces clustered into named cards. Drag to merge."
                            Style="{StaticResource BodyTextBlockStyle}"

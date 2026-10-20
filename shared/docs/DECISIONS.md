@@ -3948,3 +3948,28 @@ The old note said setting MLX's cache limit killed the engine; on the pinned MLX
 ## 2026-10-15 — CLIP image tower runs in MLX, from the installed ONNX weights
 
 The CoreML execution provider cannot compile the pinned CLIP ONNX export (it is built from dynamic-shape primitives), so CLIP ran on the CPU and dominated scan time. Rather than add a CoreML conversion step, a new model download, or a new dependency, the engine reads the float32 weights directly out of the ONNX file and runs the ViT-B/32 image tower with MLX, which FileID already ships for Deep Analyze. Weight names come from the graph, not from export order; the encoder refuses to load unless all 200+ expected tensors are present, and a parity test pins it above 0.999 cosine to ONNX Runtime so the stored embedding space and the ONNX text encoder stay compatible. Float16 is used for half the memory and faster batches at the same parity. Each GPU batch runs on its own MLX stream so it cannot interleave with a Deep Analyze generation on the default stream. ONNX Runtime stays as the fallback.
+
+## 2026-10-15 — Restructure never reorganizes what the user already organized
+
+The owner rejected Restructure's output. On an event-organized library it proposed thousands of confident moves between events and formats because similarity alone drove placement. The planner now treats any named, non-generic folder as the user's decision: files there stay, except a RAW/JPEG/video file sitting in the wrong format folder, which moves to its sibling within the same event. Loose files are still organized, and those captured during an existing event join it. This is a post-pass filter rather than a rewrite of the grouping passes so the content clustering remains available for genuinely loose files, and it can be disabled with `FILEID_RESTRUCTURE_RESPECT=0` for comparison. macOS ships it first; the shared Rust engine needs the same stage before Windows/Linux match.
+
+## 2026-10-20 — Restructure respect moves skip the anchor strip
+
+The anchor strip drops every move out of a folder whose moves mostly share one destination. The respect stage produces exactly that shape on purpose: every loose photo from one shoot goes to the same dated event, every misfiled RAW in a JPEGs folder goes to `RAWs`. With the stage on, the only moves left are those it chose to keep, so the strip runs only when `FILEID_RESTRUCTURE_RESPECT=0`, and folders that still have a move count as Mixed rather than Keep. The library root is never classified Anchor on either engine.
+
+## 2026-10-20 — Restructure step cells are Preview · Review · Move
+
+The Prototype v3 contract named the middle step "Shortcuts". The macOS engine has no shortcut mode (it moves files and journals them for Undo), so the step is "Review" and the apply bar and floating undo bar became the three pinned cells. `Theme.spring` is the tight 0.35 / 0.78 spring app-wide; segmented bars and accent buttons grew to the 28 pt minimum target.
+
+## 2026-10-20 — WinUI keeps Alt+1–9 and adds Ctrl+1–9; default control radius 6
+
+Ctrl+1–9 jump to pages in the macOS order and Alt+1–9 still work for existing users. The WinUI default `ControlCornerRadius` moved from 0 to 6, which rounds stock controls app-wide to the v3 scale.
+
+## 2026-10-20 — Benchmark peak memory is decimal GB on every engine
+
+`peakResidentGB` was GiB on macOS and GB in the shared engine. The contract now says decimal gigabytes (bytes / 1e9); macOS converts the same way. Figures recorded before this date on macOS read about 7% low.
+
+
+## 2026-10-20 — zip 2 → 9 for RUSTSEC-2026-0367/0368/0369
+
+Three advisories against `zip` (SUID bits, symlink targets and permissions applied during `ZipArchive::extract`) failed `cargo-deny`. FileID's extractor (`util/zip.rs`) never calls `extract`, skips symlinks and special entries and never applies Unix modes, so it was not exposed; the crate was upgraded anyway rather than ignored, since 9.0.5 supports Rust 1.88 (inside the 1.90 pin) and the only API change touching FileID is that `file_names()` now yields fallible names. New transitive crates: `zlib-rs` (Zlib), `nix` (MIT), `typed-path` (MIT/Apache-2.0), all on the license allowlist. Engine, CLI, TUI and GTK lockfiles move together.

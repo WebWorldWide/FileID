@@ -90,6 +90,38 @@ pub fn remember_active_tab(tab: &str) {
     set_entries(&[("activeTab", Value::String(tab.to_owned()))]);
 }
 
+/// The page last used in a sidebar area (macOS `lastTab.<Area>`).
+pub fn area_page(area: &str) -> Option<String> {
+    get_string(&format!("lastTab.{area}"))
+}
+
+pub fn remember_area_page(area: &str, page: &str) {
+    set_entries(&[(&format!("lastTab.{area}"), Value::String(page.to_owned()))]);
+}
+
+pub fn forget_folder() {
+    let Some(path) = settings_path() else { return };
+    let mut map = load_map(&path);
+    map.remove("lastFolderPath");
+    map.remove("lastFolderDisplay");
+    save_map(&path, &map);
+}
+
+/// Sidebar visibility across launches (Windows `sidebarVisible`).
+pub fn sidebar_visible() -> bool {
+    let Some(path) = settings_path() else {
+        return true;
+    };
+    load_map(&path)
+        .get("sidebarVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+pub fn remember_sidebar_visible(visible: bool) {
+    set_entries(&[("sidebarVisible", Value::Bool(visible))]);
+}
+
 /// Has the user dismissed the first-launch Welcome sheet? Mirrors the Windows
 /// `welcomeSheetSeen` key / macOS `@AppStorage("welcomeSheetSeen")`.
 pub fn welcome_sheet_seen() -> bool {

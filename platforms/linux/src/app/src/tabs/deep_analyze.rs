@@ -499,14 +499,14 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
             if !crate::model_license::ensure_or_prompt(button, kind) {
                 return;
             }
-        let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
-            model_kind: kind.to_string(),
-            skip_existing: ui.skip_check.is_active(),
-            tags_only: false,
-            propose_renames: true,
-            file_ids: None,
-            excluded_folders: None,
-        });
+            let payload = CommandPayload::DeepAnalyzeAll(DeepAnalyzeAllPayload {
+                model_kind: kind.to_string(),
+                skip_existing: ui.skip_check.is_active(),
+                tags_only: false,
+                propose_renames: true,
+                file_ids: None,
+                excluded_folders: None,
+            });
             if send_cmd(&ui, payload) {
                 begin_run(&ui);
             }
@@ -818,9 +818,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.download_card.set_visible(true);
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
-        EngineEvent::Error { .. } | EngineEvent::Exited => {
-            end_run(ui)
-        }
+        EngineEvent::Error { .. } | EngineEvent::Exited => end_run(ui),
         _ => {}
     }
 }
@@ -1313,32 +1311,10 @@ where
 
 // ─── Static card builders ────────────────────────────────────────────────────
 
-fn build_header() -> gtk::Box {
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(14)
-        .build();
-    let icon = gtk::Image::from_icon_name("starred-symbolic");
-    icon.set_pixel_size(30);
-    icon.add_css_class("gold-accent");
-    icon.set_valign(gtk::Align::Start);
-    let text = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(4)
-        .build();
-    text.append(
-        &gtk::Label::builder()
-            .label("Deep Analyze")
-            .xalign(0.0)
-            .css_classes(["title-1"])
-            .build(),
-    );
-    text.append(&wrap_caption(
+fn build_header() -> gtk::Label {
+    wrap_caption(
         "Reads photos, videos, documents, PDFs, and audio metadata to write useful descriptions and smart filenames.",
-    ));
-    row.append(&icon);
-    row.append(&text);
-    row
+    )
 }
 
 fn build_explainer() -> gtk::Box {

@@ -62,14 +62,14 @@ struct SankeyFlowView: View {
             HStack(spacing: 6) {
                 Image(systemName: "tray.and.arrow.up.fill")
                     .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
                 Text("FROM")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(0.8)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
                 Text("\(layout.sources.count)")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
             }
             .frame(width: nodeColW, alignment: .leading)
             Spacer(minLength: 0)
@@ -84,14 +84,14 @@ struct SankeyFlowView: View {
             HStack(spacing: 6) {
                 Text("\(layout.destinations.count)")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
                 Text("TO")
                     .font(.system(size: 10, weight: .bold))
                     .tracking(0.8)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
                 Image(systemName: "tray.and.arrow.down.fill")
                     .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text2)
             }
             .frame(width: nodeColW, alignment: .trailing)
         }
@@ -119,22 +119,23 @@ struct SankeyFlowView: View {
                     // 2. Source column.
                     ForEach(layout.sources) { node in
                         if let slot = layout.srcSlots[node.id] {
-                            nodeView(node, slot: slot,
-                                      isFocused: isNodeFocused(node))
+                            Button {
+                                if node.id == Self.otherSourceID {
+                                    onTapSourceRollup(layout.rollupSourceFolders)
+                                } else {
+                                    // The full path (identityKey), not the basename:
+                                    // same-named folders would otherwise drill into
+                                    // the first match.
+                                    onTapSource(node.identityKey)
+                                }
+                            } label: {
+                                nodeView(node, slot: slot, isFocused: isNodeFocused(node))
+                            }
+                            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+                            .accessibilityLabel("From \(node.label)")
+                            .accessibilityHint("Shows the files moving out of this folder")
                                 .frame(width: nodeColW)
                                 .position(x: nodeColW / 2, y: slot.midY)
-                                .onTapGesture {
-                                    if node.id == Self.otherSourceID {
-                                        onTapSourceRollup(layout.rollupSourceFolders)
-                                    } else {
-                                        // Pass the FULL path (identityKey),
-                                        // not the basename `label` — two source
-                                        // folders sharing a basename otherwise both
-                                        // drill into the first match. Mirrors the
-                                        // hover path + TreeDiffView's callback.
-                                        onTapSource(node.identityKey)
-                                    }
-                                }
                                 .onHover { hovering in
                                     hoverBus.set(
                                         hovering && node.id != Self.otherSourceID
@@ -148,18 +149,21 @@ struct SankeyFlowView: View {
                     // 3. Destination column.
                     ForEach(layout.destinations) { node in
                         if let slot = layout.dstSlots[node.id] {
-                            nodeView(node, slot: slot,
-                                      isFocused: isNodeFocused(node))
+                            Button {
+                                if node.id == Self.otherDestID {
+                                    onTapDestRollup(layout.rollupDestBuckets)
+                                } else {
+                                    onTapDestination(node.label)
+                                }
+                            } label: {
+                                nodeView(node, slot: slot, isFocused: isNodeFocused(node))
+                            }
+                            .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.m))
+                            .accessibilityLabel("To \(node.label)")
+                            .accessibilityHint("Shows the files moving into this folder")
                                 .frame(width: nodeColW)
                                 .position(x: totalW - nodeColW / 2,
                                             y: slot.midY)
-                                .onTapGesture {
-                                    if node.id == Self.otherDestID {
-                                        onTapDestRollup(layout.rollupDestBuckets)
-                                    } else {
-                                        onTapDestination(node.label)
-                                    }
-                                }
                                 .onHover { hovering in
                                     hoverBus.set(
                                         hovering && node.id != Self.otherDestID
@@ -316,13 +320,13 @@ struct SankeyFlowView: View {
             }
             VStack(alignment: .leading, spacing: 0) {
                 Text(node.label)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(Theme.Font.body(12.5, .semibold))
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(isRollup ? .secondary : .primary)
+                    .truncationMode(.head)
+                    .foregroundStyle(isRollup ? Theme.text2 : Theme.text1)
                 Text("\(node.count) file\(node.count == 1 ? "" : "s")")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .font(Theme.Font.body(11.5, .medium).monospacedDigit())
+                    .foregroundStyle(Theme.text3)
             }
             Spacer(minLength: 0)
         }
@@ -356,7 +360,7 @@ struct SankeyFlowView: View {
         )
         .frame(height: slot.height)
         .contentShape(Rectangle())
-        .help("\(node.count) file\(node.count == 1 ? "" : "s") · tap to see them")
+        .help("\(node.label) · \(node.count) file\(node.count == 1 ? "" : "s") · click to see them")
         .animation(.easeOut(duration: 0.18), value: isFocused)
     }
 
@@ -483,7 +487,7 @@ struct SankeyFlowView: View {
                         .foregroundStyle(Theme.gold)
                     Text("file\(count == 1 ? "" : "s") moving")
                         .font(Theme.Font.body(12, .semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Theme.text1)
                     Spacer(minLength: 0)
                 }
                 HStack(spacing: 5) {
@@ -492,13 +496,13 @@ struct SankeyFlowView: View {
                         .truncationMode(.middle)
                     Image(systemName: "arrow.right")
                         .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.text3)
                     Text(bucket)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
                 .font(Theme.Font.mono(10.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text2)
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
             .frame(width: tooltipW, alignment: .leading)

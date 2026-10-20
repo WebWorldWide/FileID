@@ -159,21 +159,11 @@ struct Cleanup {
 
 pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Header ──────────────────────────────────────────────────────────────
-    let title = gtk::Label::builder()
-        .label("Cleanup")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
     let subtitle = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
         .css_classes(["dim-label"])
         .build();
-    let title_col = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .build();
-    title_col.append(&title);
 
     let pill_exact = gtk::Button::builder()
         .label("Exact")
@@ -194,7 +184,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let filler = gtk::Box::builder().hexpand(true).build();
 
     let select_nonkeepers_btn = gtk::Button::builder()
-        .label("Select all non-keepers")
+        .label("Select extra copies")
         .css_classes(["pill"])
         .build();
     let clear_btn = gtk::Button::builder()
@@ -203,7 +193,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .sensitive(false)
         .build();
     let delete_btn = gtk::Button::builder()
-        .label("Delete 0 selected (0 B)")
+        .label("Delete selected")
         .css_classes(["destructive-action"])
         .sensitive(false)
         .build();
@@ -221,7 +211,6 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    header_row.append(&title_col);
     header_row.append(&pillbox);
     header_row.append(&filler);
     header_row.append(&actions_box);
@@ -1033,9 +1022,11 @@ impl Cleanup {
                     plural(n_groups)
                 )
             }
+        } else if n_groups == 0 {
+            "No verified duplicate groups".to_string()
         } else {
             format!(
-                "{n_groups} duplicate group{} · {} reclaimable if you keep 1 per group",
+                "{n_groups} verified duplicate group{} · {} to reclaim",
                 plural(n_groups),
                 format_bytes(reclaimable),
             )
@@ -1048,10 +1039,14 @@ impl Cleanup {
         }
         self.subtitle.set_text(&subtitle);
 
-        self.delete_btn.set_label(&format!(
-            "Delete {total_sel} selected ({})",
-            format_bytes(total_sel_bytes)
-        ));
+        if total_sel == 0 {
+            self.delete_btn.set_label("Delete selected");
+        } else {
+            self.delete_btn.set_label(&format!(
+                "Delete {total_sel} selected · {}",
+                format_bytes(total_sel_bytes)
+            ));
+        }
         self.delete_btn
             .set_sensitive(total_sel > 0 && !self.deleting.get() && !self.restoring.get());
         self.clear_btn.set_sensitive(total_sel > 0);

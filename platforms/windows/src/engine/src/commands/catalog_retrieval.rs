@@ -106,6 +106,8 @@ pub(super) fn search(
         );
     }
     if !quoted.is_empty() && time.is_none() {
+        let seen: std::collections::HashSet<i64> = hits.iter().map(|h| h.file_id).collect();
+        hits.extend(tag_hits(conn, query, filters, (&kinds, &people, &events))?.into_iter().filter(|h| !seen.contains(&h.file_id)));
         for (table, kind) in [("doc_fts", "documentText"), ("ocr_fts", "ocrText")] {
             let sql = format!(
                 "SELECT f.id,f.path_text,'{kind}',snippet({table},0,'','','…',16),'{kind}:' || f.id,NULL,NULL FROM {table} JOIN files f ON f.id={table}.rowid WHERE {filters} AND {table} MATCH ?1 ORDER BY bm25({table}) LIMIT 100"
@@ -118,6 +120,78 @@ pub(super) fn search(
         }
     }
     Ok(hits)
+}
+
+/// Files whose scan tags match the query words, best first. Each word matches
+/// the start of a tag word ("grass" hits "grassland", "sky" hits "blue_sky"),
+/// and only files matching the most words are kept so a filler word in the
+/// question can't hide a real match. Mirrors macOS `CatalogStore.tagHits`.
+fn tag_hits(
+    conn: &Connection,
+    query: &str,
+    filters: &str,
+    (kinds, people, events): (&Option<String>, &Option<String>, &Option<String>),
+) -> Result<Vec<CatalogHit>> {
+    let mut words: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 3)
+        .map(str::to_owned)
+        .collect();
+    words.sort();
+    words.dedup();
+    words.truncate(6);
+    if words.is_empty() {
+        return Ok(vec![]);
+    }
+    let forms: Vec<Vec<String>> = words.iter().map(|w| word_forms(w)).collect();
+    let mut next = 5;
+    let score = forms
+        .iter()
+        .map(|word| {
+            let likes = word
+                .iter()
+                .map(|_| {
+                    next += 1;
+                    format!("(' ' || REPLACE(LOWER(t.tag),'_',' ')) LIKE ?{}", next - 1)
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            format!("EXISTS (SELECT 1 FROM tags t WHERE t.file_id=f.id AND t.source IN ('auto','user','vlm') AND ({likes}))")
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    let sql = format!(
+        "WITH scored AS (SELECT f.id,f.path_text,f.kind,{score} AS score FROM files f WHERE {filters} AND ?1 IS NOT NULL) \
+         SELECT s.id,s.path_text,s.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT REPLACE(TRIM(tag),'_',' ') AS tag FROM tags WHERE file_id=s.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL \
+         FROM scored s WHERE s.score>0 AND s.score=(SELECT MAX(score) FROM scored) ORDER BY s.id DESC LIMIT 100"
+    );
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];
+    for form in forms.iter().flatten() {
+        args.push(Box::new(format!("% {form}%")));
+    }
+    Ok(conn
+        .prepare(&sql)?
+        .query_map(rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())), hit)?
+        .collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The word plus its singular stems, so "dogs" and "beaches" reach the singular
+/// scan tags. Mirrors macOS `CatalogStore.wordForms`.
+fn word_forms(word: &str) -> Vec<String> {
+    if word.chars().count() < 4 {
+        return vec![word.to_owned()];
+    }
+    if let Some(stem) = word.strip_suffix("ies") {
+        return vec![word.to_owned(), format!("{stem}y")];
+    }
+    if let Some(stem) = word.strip_suffix("es") {
+        return vec![word.to_owned(), stem.to_owned(), format!("{stem}e")];
+    }
+    match word.strip_suffix('s') {
+        Some(stem) if !word.ends_with("ss") => vec![word.to_owned(), stem.to_owned()],
+        _ => vec![word.to_owned()],
+    }
 }
 
 pub(super) type KnownPeople = Vec<(i64, Vec<String>)>;
@@ -137,6 +211,34 @@ pub(super) fn known(conn: &Connection) -> Result<(KnownPeople, KnownEvents)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scanned_tags_answer_without_descriptions() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for id in 1..=3 {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,100,0,'image','jpg')", params![id, format!("/fixture/IMG_{id}.jpg")]).unwrap();
+        }
+        conn.execute("INSERT INTO tags(file_id,tag,source,score) VALUES(1,'grassland','auto',0.9),(1,'dog','auto',0.8),(2,'blue_sky','auto',0.9),(2,'grass','auto',0.7),(3,'grassy_knoll','rejected',0.9)", []).unwrap();
+        let ids = |q: &str| search(&conn, q, &[], &[], &[], None).unwrap().into_iter().map(|h| h.file_id).collect::<Vec<_>>();
+        assert_eq!(ids("photos with grass"), vec![2, 1]);
+        assert_eq!(ids("dog on grass"), vec![1], "files matching every word outrank partial matches");
+        assert_eq!(ids("sky"), vec![2]);
+        assert!(ids("ass").is_empty(), "matches start at a tag word");
+        let hits = search(&conn, "grass", &["video".into()], &[], &[], None).unwrap();
+        assert!(hits.is_empty(), "kind filter applies");
+        assert!(search(&conn, "grass", &[], &[], &[], None).unwrap()[1].text.starts_with("Tags: grassland"));
+        assert_eq!(ids("dogs on grass"), vec![1], "plural words reach singular tags");
+    }
+    #[test]
+    fn plural_words_add_singular_stems() {
+        assert_eq!(word_forms("dogs"), ["dogs", "dog"]);
+        assert_eq!(word_forms("puppies"), ["puppies", "puppy"]);
+        assert_eq!(word_forms("beaches"), ["beaches", "beach", "beache"]);
+        assert_eq!(word_forms("faces"), ["faces", "fac", "face"]);
+        assert_eq!(word_forms("grass"), ["grass"]);
+        assert_eq!(word_forms("cats"), ["cats", "cat"]);
+        assert_eq!(word_forms("bus"), ["bus"]);
+    }
     #[test]
     fn filters_apply_before_limits_and_exclude_failed_stale_and_unknown() {
         let conn = Connection::open_in_memory().unwrap();

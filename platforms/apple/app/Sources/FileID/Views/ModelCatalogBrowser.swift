@@ -30,14 +30,14 @@ struct ModelCatalogBrowser: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Find a local model").font(Theme.Font.body(20, .semibold))
                     Text("\(MLXModelCatalog.entries.count) audited catalog entries · \(Int(ramGB)) GB Mac")
-                        .font(Theme.Font.body(13.5)).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
                 }
                 Spacer()
-                Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.plain).help("Close model browser").accessibilityLabel("Close model browser")
+                DSIconButton("Close model browser", systemImage: "xmark") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
             }
             HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                Image(systemName: "magnifyingglass").foregroundStyle(Theme.text3)
                 TextField("Search model, publisher or license", text: $query).textFieldStyle(.plain)
                     .accessibilityLabel("Search models")
             }.padding(10).background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
@@ -49,6 +49,7 @@ struct ModelCatalogBrowser: View {
                 Toggle("Fits this Mac", isOn: $fitsOnly)
                 Toggle("Downloaded", isOn: $installedOnly)
             }.font(Theme.Font.body(12))
+            ScrollViewReader { proxy in
             List(selection: $selection) {
                 ForEach(filtered, id: \.rawValue) { kind in
                     HStack(alignment: .top, spacing: 12) {
@@ -56,9 +57,9 @@ struct ModelCatalogBrowser: View {
                             .foregroundStyle(kind.supportsVision ? Theme.info : Theme.ai).frame(width: 22)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(kind.displayName).font(Theme.Font.body(13.5, .semibold)).lineLimit(1)
-                            Text(kind.sourceRepo).font(Theme.Font.body(12)).foregroundStyle(.secondary).lineLimit(1)
+                            Text(kind.sourceRepo).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(1)
                             Text("\(kind.supportsVision ? "Vision + chat" : "Text + chat") · \(kind.licenseName)")
-                                .font(Theme.Font.body(11)).foregroundStyle(.secondary).lineLimit(1)
+                                .font(Theme.Font.body(11)).foregroundStyle(Theme.text3).lineLimit(1)
                         }
                         Spacer(minLength: 8)
                         VStack(alignment: .trailing, spacing: 4) {
@@ -75,20 +76,36 @@ struct ModelCatalogBrowser: View {
             }.dsList().listStyle(.inset).overlay {
                 if filtered.isEmpty {
                     VStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(.secondary)
+                        Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
                         Text("No models match these filters").font(Theme.Font.body(14, .semibold))
                         Button("Reset filters") { query = ""; fitsOnly = false; installedOnly = false; role = "all" }
                     }
                 }
             }
+            .frame(minHeight: 220)
+            .onChange(of: selection) { _, id in
+                guard let id else { return }
+                withAnimation(Theme.quick) { proxy.scrollTo(id) }
+            }
+            .onChange(of: engine.benchmarkModelKind) { _, _ in
+                if let selection { proxy.scrollTo(selection) }
+            }
+            .onAppear { if let id = initialSelection?.rawValue { proxy.scrollTo(id, anchor: .center) } }
+            }
             if let selected {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(selected.displayName).font(Theme.Font.body(14, .semibold)).lineLimit(2)
-                    Text("Estimated memory: \(String(format: "%.1f", selected.ramBudgetGB)) GB. Runtime compatibility is registered; quality and speed vary by model.")
-                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                    Group {
+                        if let peak = engine.benchmarkResults[selected.rawValue]?.peakResidentGB {
+                            Text("Uses about \(String(format: "%.1f", peak)) GB on this Mac (measured). Quality and speed vary by model.")
+                        } else {
+                            Text("Estimated memory: \(String(format: "%.1f", selected.ramBudgetGB)) GB. Quality and speed vary by model; benchmark it to measure this Mac.")
+                        }
+                    }
+                    .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                     if let entry = selected.catalogEntry {
                         Text("\(entry.quantization.bits)-bit · \(entry.bases.count) audited upstream license\(entry.bases.count == 1 ? "" : "s")")
-                            .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                            .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                     }
                     ModelBenchmarkPanel(engine: engine, kind: selected)
                 }
@@ -102,10 +119,10 @@ struct ModelCatalogBrowser: View {
                     Button("Cancel") { engine.cancelPrewarm() }
                 }
             }
-            if !statusMessage.isEmpty { Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(.secondary).textSelection(.enabled) }
+            if !statusMessage.isEmpty { Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).textSelection(.enabled) }
             HStack {
                 Text("Downloads require your action. Inference stays on this Mac.")
-                    .font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                    .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 Spacer()
                 Button(selected.map { ModelInstallStatus.isInstalled(kind: $0) ? "Load model" : "Download & load" } ?? "Download & load") {
                     if let selected {
@@ -116,7 +133,7 @@ struct ModelCatalogBrowser: View {
                     if let selected { onSelect(selected); dismiss() }
                 }.buttonStyle(.dsPrimary).tint(Theme.gold).disabled(selected == nil || selected?.fits(ramGB: ramGB) != true)
             }
-        }.padding(24).frame(minWidth: 600, idealWidth: 760, minHeight: 520, idealHeight: 650)
+        }.padding(24).frame(minWidth: 640, idealWidth: 780, minHeight: 680, idealHeight: 760)
             .onAppear { selection = initialSelection?.rawValue; engine.refreshModelCatalog() }
             .onChange(of: engine.lastErrorSignal) { _, _ in
                 if let error = engine.lastError, let selected, error.modelKind == selected.rawValue || error.kind.hasPrefix("prewarm") { statusMessage = error.message }
@@ -158,7 +175,7 @@ struct ModelBenchmarkPanel: View {
                     Text(Self.phaseLabel(progress.phase)).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                 }
             } else if let result = engine.benchmarkResults[kind.rawValue] {
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 4) {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
                     GridRow {
                         metric("Cold load", String(format: "%.1f s", result.loadSeconds))
                         metric("Reading", result.promptTokensPerSecond.map { "\(Int($0.rounded())) tok/s" })
@@ -187,10 +204,11 @@ struct ModelBenchmarkPanel: View {
 
     @ViewBuilder
     private func metric(_ label: String, _ value: String?) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
-            Text(value ?? "—").font(Theme.Font.body(13, .semibold)).monospacedDigit().foregroundStyle(Theme.text1)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+            Text(value ?? "—").font(Theme.Font.body(15, .semibold)).monospacedDigit().foregroundStyle(Theme.text1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     static func phaseLabel(_ phase: String) -> String {

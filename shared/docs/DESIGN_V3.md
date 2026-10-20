@@ -79,12 +79,13 @@ Vertical base `#0B0B0C → #0F0A08 (42%) → #1B0D06 (78%) → #2A1206`, a warm 
 - **Chat**: Looking-in chips, messages with mono role labels (You gold, model lavender), citation chips `[n] name · time`, textarea + Send/Stop, model toggle; 300 px Sources pane.
 - **Best Takes**: 260 px Groups pane with Possible-group suggestion (lavender wash), Goal field, recommendation row with tone rail, take cards (TAKE n, outcome, why, source colour, Sharpness bar, Met/Missed/Unclear, ☆ Prefer).
 - **Cleanup**: metric row (Groups, Extra copies, Space, Kept) + Trash all extra copies; group panels (kind label, reason, Trash n) with KEEP/TRASH tiles (keeper 2 px gold ring, others 60% opacity).
-- **Restructure**: three step cells (Preview · Shortcuts · Move), Sort by + Pattern + Use Deep Analyze names, metric row, Now/After panels (stacked colour bars, tree with colour dots), Moves sample (From → To) with status/bar and Make shortcuts / Move files / Remove shortcuts / Undo move.
+- **Restructure**: three step cells (Preview · Review · Move; macOS has no shortcut mode), Sort by + Pattern + Use Deep Analyze names, metric row, Now/After panels (stacked colour bars, tree with colour dots), Moves sample (From → To) with status/bar and Make shortcuts / Move files / Remove shortcuts / Undo move.
 - **File Tools**: 01 · Recipe (Photo/Video/Chapters, file checklist), 02 · Output (aspect tiles 30 px frames, Resolution, format bars), 380 px 03 · Preview pane (gold-framed preview, outputs with bars, Preview/Export/Undo).
 - **Settings**: Appearance (Lava lamp Full/Calm/Off), Processing radios, Models (INSTALLED · size in pink), Index (Stored, Size, Delete index… danger).
 - **Welcome**: icon + serif title + mono subtitle, `1 · Install models` rows (name, job, Required/Optional, status, bar), `2 · Choose a folder`, Later / Install all · size / Scan <folder>.
 
 ## Status
 
-- macOS: shell, sidebar, title bar, pipeline block, design system, lava v3, grain, fonts, Library, People cards, Cleanup groups, Settings Appearance, Welcome — landed. Remaining macOS: Library Selected pane, Moments timeline tracks, Takes/Tools/Chat panel layouts, Restructure step cells.
-- Windows / Linux: not started; port the tokens and shell first (title bar, areas, sidebar, pipeline block), then pages in the order above. Keep `LavaLampBackground` ports (Win2D / GTK snapshot) on the v3 recipe.
+- macOS: every page is on v3 — shell, sidebar, title bar, pipeline block, design system (focus rings, 28 pt targets, Reduce Motion), lava, grain, fonts, Library (Selected pane), People, Cleanup, Settings, Welcome, Search & Moments (timeline tracks), Chat (Sources pane), Best Takes, File Tools, Restructure (step cells). Measured layout for the ports: [DESIGN_V3_PORT.md](DESIGN_V3_PORT.md).
+- GTK: shell landed (title bar, area sidebar, scan card, page headers, corner scale, bundled Archivo/Instrument Serif, high contrast). Pages next, from DESIGN_V3_PORT.md.
+- WinUI: shell landed (48 px title bar, area sidebar, scan card, page headers, radius scale; workbenches are pages). CI-verified only. Pages next. Keep `LavaLampBackground` ports (Win2D / GTK snapshot) on the v3 recipe.

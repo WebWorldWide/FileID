@@ -25,7 +25,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}"
+                <TextBlock Text="Cleanup" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
                            AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Review duplicate groups. FileID verifies complete file bytes before trashing; trashed items stay recoverable."
                            Style="{StaticResource BodyTextBlockStyle}"

@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// One row inside the unified Restructure surface. Carries no
-/// background of its own — the parent owns the material plane so
-/// adjacent rows don't read as competing cards.
+/// One row in the Recommendations panel. The panel owns the background, so
+/// rows only draw the hover tint and the outcome rail.
 struct RestructureRecommendationRow<ExpandedContent: View>: View {
     let outcome: RestructureOutcome
     let headline: String
@@ -13,10 +12,8 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
     var isInformational = false
     var isExpanded = false
     var isHighlighted = false
-    /// When supplied, the row derives its hover-highlight from the shared
-    /// bus inside its OWN body — so the read doesn't live in the parent's
-    /// body and trigger a full re-render (re-passing the proposal array)
-    /// on every mouse-move.
+    /// Read here rather than in the parent so a hover only re-renders this
+    /// row, not the page (which would re-pass the proposal array).
     var hoverBus: RestructureHoverBus? = nil
 
     var onToggleApproval: () -> Void = {}
@@ -26,140 +23,78 @@ struct RestructureRecommendationRow<ExpandedContent: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 14) {
-                iconBadge
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                        .fill(outcome.tint.opacity(0.16))
+                    Image(systemName: outcome.icon)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(outcome.tint)
+                }
+                .frame(width: 30, height: 30)
+                .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(headline).font(Theme.Font.body(13.5, .semibold))
+                    Text(headline).font(Theme.Font.body(13.5, .semibold)).foregroundStyle(Theme.text1)
                     Text(bodyText)
-                        .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12.5))
+                        .foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
                     if !isInformational {
-                        actionRow.padding(.top, 4)
+                        HStack(spacing: 8) {
+                            Button(action: onToggleExpand) {
+                                Label(isExpanded ? "Hide files" : "Review files", systemImage: isExpanded ? "chevron.down" : "chevron.right")
+                            }
+                            .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+                            .help(isExpanded ? "Collapse the file list" : "Show every file this group moves")
+                            if isApproved {
+                                Button("Skip these", action: onToggleApproval)
+                                    .buttonStyle(.dsGhost)
+                                    .help("Leave these files where they are")
+                            } else {
+                                Button { onToggleApproval() } label: { Label("Include", systemImage: "checkmark") }
+                                    .buttonStyle(DSAccentOutlineButtonStyle(color: outcome.tint, height: Theme.Metrics.hitTarget))
+                                    .help("Include these files in the move")
+                            }
+                        }
+                        .padding(.top, 4)
                     }
                 }
                 Spacer(minLength: 0)
-                if !isInformational {
-                    countBadge
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(fileCount.formatted())
+                        .font(Theme.Font.mono(20, .semibold))
+                        .foregroundStyle(isInformational ? Theme.text2 : outcome.tint)
+                    MetaText(folderCount == 1 ? "1 folder" : "\(folderCount.formatted()) folders", size: 11.5)
                 }
+                .accessibilityElement(children: .combine)
             }
-            .padding(.horizontal, 18).padding(.vertical, 14)
+            .padding(.horizontal, 14).padding(.vertical, 12)
 
             if isExpanded && !isInformational {
-                Divider().opacity(0.18).padding(.leading, 64)
+                Hairline(color: Theme.hairlineSoft)
                 expandedContent()
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.025), ignoresSafeAreaEdges: [])
-                    .transition(
-                        .asymmetric(
-                            insertion: .opacity.combined(with: .move(edge: .top)),
-                            removal: .opacity
-                        )
-                    )
+                    .background(Color.white.opacity(0.02), ignoresSafeAreaEdges: [])
+                    .transition(.opacity)
             }
         }
         .opacity(isApproved || isInformational ? 1.0 : 0.55)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
-                highlighted ? outcome.tint.opacity(0.06) : Color.clear
-            )
-        )
+        .background(highlighted ? outcome.tint.opacity(0.06) : Color.clear, ignoresSafeAreaEdges: [])
         .overlay(alignment: .leading) {
-            Capsule()
-                .fill(outcome.tint)
-                .frame(width: 3)
-                .padding(.vertical, 6)
-                .opacity(highlighted ? 1.0 : 0.0)
+            Rectangle().fill(outcome.tint).frame(width: 3).opacity(highlighted ? 1 : 0)
         }
         .contentShape(Rectangle())
         .onHover(perform: onHover)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: isExpanded)
-        .animation(.easeInOut(duration: 0.18), value: isApproved)
-        .animation(.easeInOut(duration: 0.18), value: highlighted)
+        .animation(Theme.springStandard, value: isExpanded)
+        .animation(Theme.spring, value: isApproved)
+        .animation(Theme.spring, value: highlighted)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(headline + (isApproved || isInformational ? "" : ", skipped"))
     }
 
-    /// Parent-provided flag OR, when a hover bus is supplied, derived here
-    /// so the observable read lives in this row's body.
     private var highlighted: Bool {
         isHighlighted || (hoverBus?.touchesOutcome(outcome) ?? false)
-    }
-
-    @ViewBuilder
-    private var iconBadge: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(outcome.tint.opacity(0.18))
-                .frame(width: 38, height: 38)
-            Image(systemName: outcome.icon)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(outcome.tint)
-        }
-    }
-
-    @ViewBuilder
-    private var countBadge: some View {
-        VStack(alignment: .trailing, spacing: 1) {
-            Text("\(fileCount)")
-                .font(.system(size: 22, weight: .bold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(outcome.tint)
-            Text(folderCount == 1 ? "1 folder" : "\(folderCount) folders")
-                .font(Theme.Font.mono(10.5))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    @ViewBuilder
-    private var actionRow: some View {
-        HStack(spacing: 8) {
-            reviewButton
-            approveButton
-        }
-    }
-
-    @ViewBuilder
-    private var reviewButton: some View {
-        Button(action: onToggleExpand) {
-            HStack(spacing: 4) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(Theme.Font.body(12, .semibold))
-                Text(isExpanded ? "Hide files" : "Review files")
-                    .font(Theme.Font.body(12, .semibold))
-            }
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
-                    isExpanded ? outcome.tint.opacity(0.7) : Color.secondary.opacity(0.5),
-                    lineWidth: 1
-                )
-            )
-            .foregroundStyle(isExpanded ? outcome.tint : .secondary)
-        }
-        .buttonStyle(.plain)
-        .help(isExpanded ? "Collapse the file list." : "Expand to see every file this card affects.")
-    }
-
-    @ViewBuilder
-    private var approveButton: some View {
-        let label = isApproved ? "Skip these" : "Approve"
-        let icon  = isApproved ? "xmark.circle" : "checkmark.circle.fill"
-        let bgFill: Color = isApproved
-            ? Color.secondary.opacity(0.15)
-            : outcome.tint.opacity(0.85)
-        let fg: Color = isApproved ? .primary : .black
-        Button(action: onToggleApproval) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(Theme.Font.body(12))
-                Text(label).font(Theme.Font.body(12, .semibold))
-            }
-            .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(bgFill))
-            .foregroundStyle(fg)
-        }
-        .buttonStyle(.plain)
-        .help(isApproved
-              ? "Exclude this card's files from the next apply."
-              : "Include this card's files when you apply.")
     }
 }

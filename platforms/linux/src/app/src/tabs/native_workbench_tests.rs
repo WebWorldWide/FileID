@@ -24,6 +24,37 @@ fn button(root: &gtk::Widget, text: &str) -> gtk::Button {
         .find(|b| b.label().as_deref() == Some(text))
         .unwrap_or_else(|| panic!("Missing button: {text}"))
 }
+fn tooltip_button(root: &gtk::Widget, tooltip: &str) -> gtk::Button {
+    descendants(root)
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .find(|b| b.tooltip_text().as_deref() == Some(tooltip))
+        .unwrap_or_else(|| panic!("Missing button with tooltip: {tooltip}"))
+}
+fn first_with_class(root: &gtk::Widget, class: &str) -> gtk::Button {
+    descendants(root)
+        .into_iter()
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .find(|b| b.has_css_class(class))
+        .unwrap_or_else(|| panic!("Missing button with class: {class}"))
+}
+fn in_job_row(widget: &gtk::Widget) -> bool {
+    let mut parent = widget.parent();
+    while let Some(ancestor) = parent {
+        if ancestor.has_css_class("v3-job-row") {
+            return true;
+        }
+        parent = ancestor.parent();
+    }
+    false
+}
+fn job_buttons(root: &gtk::Widget) -> Vec<gtk::Button> {
+    descendants(root)
+        .into_iter()
+        .filter(in_job_row)
+        .filter_map(|w| w.downcast::<gtk::Button>().ok())
+        .collect()
+}
 fn entry(root: &gtk::Widget, hint: &str) -> gtk::Entry {
     descendants(root)
         .into_iter()
@@ -92,7 +123,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     }
     let engine = Rc::new(RefCell::new(EngineClient::new()));
     let catalog = workbenches::catalog(engine.clone());
-    let tools = workbenches::tools(engine.clone());
+    let (tools, tools_ui) = super::file_tools::build_tools(engine.clone());
     let chat = workbenches::chat(engine.clone());
     let deep = deep_analyze::build_deep_analyze_tab(engine.clone());
     let restructure = restructure::build_restructure_tab(engine.clone());
@@ -112,33 +143,37 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .content(&stack)
         .build();
     window.present();
-    let _rx = engine.borrow_mut().spawn();
+    EngineClient::start(&engine);
     wait(|| engine.borrow().is_ready());
-    wait(|| button(&tools, "Preview").is_sensitive());
+    wait(|| !tools_ui.state.borrow().capabilities.is_empty());
 
-    entry(&catalog, "Search names, text, chapters and sampled frames").set_text("photo-fixture");
-    button(&catalog, "Search").emit_clicked();
+    let query = entry(&catalog, "Search names, captions, chapters");
+    query.set_text("photo-fixture");
+    query.emit_activate();
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
-    button(&catalog, "Chapters").emit_clicked();
+    first_with_class(&catalog, "v3-rail").emit_clicked();
+    button(&catalog, "+ Add chapter").emit_clicked();
     entry(&catalog, "Chapter title").set_text("Reviewed marker");
-    button(&catalog, "Add / save chapter").emit_clicked();
+    button(&catalog, "Add chapter").emit_clicked();
     wait(|| text(&catalog).contains("Reviewed marker"));
-    button(&catalog, "Delete").emit_clicked();
+    tooltip_button(&catalog, "Delete chapter").emit_clicked();
     wait(|| !text(&catalog).contains("Reviewed marker"));
-    button(&catalog, "Undo chapter edit").emit_clicked();
+    button(&catalog, "Undo last edit").emit_clicked();
     wait(|| text(&catalog).contains("Reviewed marker"));
-    button(&catalog, "Edit").emit_clicked();
+    button(&catalog, "Rename").emit_clicked();
     entry(&catalog, "Chapter title").set_text("Changed marker");
-    button(&catalog, "Add / save chapter").emit_clicked();
+    button(&catalog, "Save chapter").emit_clicked();
     wait(|| text(&catalog).contains("Changed marker"));
-    button(&catalog, "Undo chapter edit").emit_clicked();
+    button(&catalog, "Undo last edit").emit_clicked();
     wait(|| {
         text(&catalog).contains("Reviewed marker") && !text(&catalog).contains("Changed marker")
     });
-    assert!(!descendants(&catalog)
+    assert!(!job_buttons(&catalog)
         .into_iter()
-        .filter_map(|w| w.downcast::<gtk::Button>().ok())
-        .any(|b| matches!(b.label().as_deref(), Some("Pause" | "Resume" | "Retry" | "Cancel"))));
+        .any(|b| matches!(
+            b.label().as_deref(),
+            Some("Pause" | "Resume" | "Retry" | "Cancel")
+        )));
     let read = fileid_engine::db::open_read(&db_path).unwrap();
     assert_eq!(
         read.query_row(
@@ -153,9 +188,12 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         let conn = fileid_engine::db::open_writer(&db_path).unwrap();
         conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-index-job','catalogIndex','[1]','{}','paused',0,'Synthetic paused index; no model inference ran',0,0)",[]).unwrap();
     }
-    button(&catalog, "Refresh jobs").emit_clicked();
-    wait(|| text(&catalog).contains("catalogIndex · paused"));
-    button(&catalog, "Cancel").emit_clicked();
+    wait(|| text(&catalog).contains("Catalog index") && text(&catalog).contains("Paused"));
+    job_buttons(&catalog)
+        .into_iter()
+        .find(|b| b.label().as_deref() == Some("Cancel"))
+        .expect("paused index job offers Cancel")
+        .emit_clicked();
     wait(|| {
         read.query_row(
             "SELECT state FROM catalog_jobs WHERE id='fixture-index-job'",
@@ -165,24 +203,23 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .unwrap()
             == "cancelled"
     });
-    button(&catalog, "Refresh jobs").emit_clicked();
-    wait(|| text(&catalog).contains("catalogIndex · cancelled"));
+    wait(|| text(&catalog).contains("Cancelled"));
 
-    let search_mode = descendants(&catalog)
-        .into_iter()
-        .filter_map(|w| w.downcast::<gtk::DropDown>().ok())
-        .next()
-        .unwrap();
-    search_mode.set_selected(1);
-    button(&catalog, "Search").emit_clicked();
+    button(&catalog, "Hybrid").emit_clicked();
+    query.emit_activate();
     wait(|| text(&catalog).contains("Using keyword search"));
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
 
     stack.set_visible_child_name("tools");
-    entry(&tools, "Catalog file IDs, comma separated (up to 100)").set_text("1");
-    entry(&tools, "Existing absolute output folder").set_text(destination.to_str().unwrap());
+    tools_ui.use_destination(destination.to_str().unwrap());
+    let first_check = |root: &gtk::Widget| {
+        descendants(root).into_iter().find_map(|w| w.downcast::<gtk::CheckButton>().ok())
+    };
+    wait(|| first_check(&tools).is_some());
+    first_check(&tools).unwrap().set_active(true);
+    wait(|| button(&tools, "Preview").is_sensitive());
     button(&tools, "Preview").emit_clicked();
-    wait(|| button(&tools, "Execute preview").is_sensitive());
+    wait(|| button(&tools, "Export").is_sensitive());
     assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
     let dimension = descendants(&tools)
         .into_iter()
@@ -190,69 +227,55 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         .next()
         .unwrap();
     dimension.set_value(1024.0);
-    assert!(!button(&tools, "Execute preview").is_sensitive());
+    assert!(!button(&tools, "Export").is_sensitive());
     button(&tools, "Preview").emit_clicked();
-    wait(|| button(&tools, "Execute preview").is_sensitive());
-    button(&tools, "Execute preview").emit_clicked();
+    wait(|| button(&tools, "Export").is_sensitive());
+    button(&tools, "Export").emit_clicked();
     wait(|| text(&tools).contains("Export complete"));
     let photo_export = destination.join("photo-fixture - Export.png");
     assert!(photo_export.is_file());
     assert_eq!(std::fs::read(&source).unwrap(), png);
-    button(&tools, "Last export").emit_clicked();
-    wait(|| text(&tools).contains("Last export operation"));
-    let photo_receipts = text(&tools);
-    button(&tools, "Undo last export").emit_clicked();
+    button(&tools, "Show last export").emit_clicked();
+    wait(|| text(&tools).contains("photo-fixture - Export.png"));
+    button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
         wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
         assert!(!photo_export.exists());
-        assert!(text(&tools).contains("Recoverable at"));
     } else {
-        assert!(!button(&tools, "Undo last export").is_sensitive());
-        assert!(text(&tools).contains("Export Undo unavailable"));
+        assert!(!button(&tools, "Undo").is_sensitive());
         assert!(photo_export.is_file());
-        assert!(photo_receipts.contains(photo_export.to_str().unwrap()));
-        assert!(text(&tools).contains(photo_export.to_str().unwrap()));
     }
     assert_eq!(std::fs::read(&source).unwrap(), png);
-    let dropdowns = descendants(&tools)
-        .into_iter()
-        .filter_map(|w| w.downcast::<gtk::DropDown>().ok())
-        .collect::<Vec<_>>();
-    dropdowns[0].set_selected(1);
-    dropdowns[1].set_selected(3);
+    button(&tools, "Chapters").emit_clicked();
+    button(&tools, "JSON").emit_clicked();
+    wait(|| first_check(&tools).is_some());
+    first_check(&tools).unwrap().set_active(true);
+    wait(|| button(&tools, "Preview").is_sensitive());
     button(&tools, "Preview").emit_clicked();
-    wait(|| button(&tools, "Execute preview").is_sensitive());
-    button(&tools, "Execute preview").emit_clicked();
+    wait(|| button(&tools, "Export").is_sensitive());
+    button(&tools, "Export").emit_clicked();
     wait(|| text(&tools).contains("Export complete"));
     let chapter_export = destination.join("photo-fixture - Chapters.json");
     assert!(std::fs::read_to_string(&chapter_export)
         .unwrap()
         .contains("Reviewed marker"));
-    button(&tools, "Undo last export").emit_clicked();
+    button(&tools, "Undo").emit_clicked();
     if workbenches::LINUX_TOOL_UNDO_SAFETY_ACCEPTED {
         wait(|| text(&tools).contains("Exports moved to internal recovery storage"));
         assert!(!chapter_export.exists());
     } else {
         assert!(chapter_export.is_file());
-        assert!(!button(&tools, "Undo last export").is_sensitive());
+        assert!(!button(&tools, "Undo").is_sensitive());
     }
     let preserved_files = count(&read, "files");
 
     stack.set_visible_child_name("chat");
-    entry(&chat, "Ask about indexed files (maximum 2000 characters)").set_text("photo-fixture");
+    chat.activate_action("chat.ask", Some(&"photo-fixture".to_variant())).unwrap();
     button(&chat, "Send").emit_clicked();
-    wait(|| text(&chat).contains("user: photo-fixture"));
-    assert!(text(&chat).contains(source.to_str().unwrap()));
+    wait(|| text(&chat).contains("photo-fixture") && text(&chat).contains("You"));
+    wait(|| text(&chat).contains("photo-fixture.png"));
     assert_eq!(count(&read, "catalog_chat"), 2);
-    button(&chat, "History").emit_clicked();
-    wait(|| text(&chat).contains("Local conversation history"));
-    assert!(text(&chat).contains("user: photo-fixture"));
-    entry(&chat, "Conversation ID").set_text("other-conversation");
-    button(&chat, "History").emit_clicked();
-    wait(|| text(&chat).contains("Local conversation history"));
-    assert!(!text(&chat).contains("user: photo-fixture"));
-    entry(&chat, "Conversation ID").set_text("linux-default");
-    button(&chat, "Clear conversation").emit_clicked();
+    button(&chat, "Clear").emit_clicked();
     wait(|| text(&chat).contains("Conversation deleted"));
     assert_eq!(count(&read, "catalog_chat"), 0);
     assert_eq!(count(&read, "files"), preserved_files);
@@ -262,7 +285,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     stack.set_visible_child_name("deep");
     assert!(text(&deep).contains("Deep Analyze"));
     stack.set_visible_child_name("restructure");
-    assert!(text(&restructure).contains("Restructure"));
+    assert!(text(&restructure).contains("Preview the proposed moves"));
     assert!(source.is_file());
     assert_eq!(count(&read, "files"), preserved_files);
     engine

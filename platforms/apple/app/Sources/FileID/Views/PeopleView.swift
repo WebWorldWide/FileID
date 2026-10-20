@@ -52,7 +52,7 @@ struct PeopleView: View {
             if let s = mergeStatus {
                 Text(s)
                     .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 6)
             }
@@ -197,7 +197,7 @@ struct PeopleView: View {
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
                 Text("\(count) face\(count == 1 ? "" : "s") await processing. Unknown people are excluded.")
                     .font(Theme.Font.body(13.5))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
             if mergeMode || unknownMode {
                 bulkActionStrip
@@ -283,7 +283,7 @@ struct PeopleView: View {
             if mergeMode {
                 Text("\(mergeChecked.count) selected to merge")
                     .font(Theme.Font.body(13.5))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                 Spacer()
                 Button {
                     if mergeChecked.count >= 2 { activeSheet = .mergeTargetPicker }
@@ -296,7 +296,7 @@ struct PeopleView: View {
             } else if unknownMode {
                 Text("\(unknownChecked.count) selected to mark unknown")
                     .font(Theme.Font.body(13.5))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                 Spacer()
                 Button {
                     bulkMarkUnknown()
@@ -364,11 +364,11 @@ struct PeopleView: View {
     private var skipNamingRow: some View {
         HStack(spacing: 10) {
             Image(systemName: "forward.circle")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(13.5))
             Text("Don't want to name anyone?")
                 .font(Theme.Font.body(12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
             Button {
                 let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
                 engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
@@ -379,7 +379,7 @@ struct PeopleView: View {
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary.opacity(0.6), lineWidth: 1))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
             .buttonStyle(.plain)
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
@@ -403,7 +403,7 @@ struct PeopleView: View {
                 .font(Theme.Font.body(13.5))
             Text("Names set — keep going.")
                 .font(Theme.Font.body(12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
             Button {
                 let modelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
                 engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
@@ -569,12 +569,12 @@ struct PeopleView: View {
             HStack(spacing: 8) {
                 Image(systemName: showHiddenUnknowns
                       ? "eye.slash" : "person.crop.circle.badge.questionmark")
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(Theme.text3)
                 Text(showHiddenUnknowns
                      ? "\(hiddenUnknownCount) marked unknown — currently visible"
                      : "\(hiddenUnknownCount) hidden as unknown")
                     .font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                 Spacer()
                 Button(showHiddenUnknowns ? "Hide them" : "Show them") {
                     showHiddenUnknowns.toggle()
@@ -807,7 +807,12 @@ private struct PersonCard: View {
             orientation = 1
         }
         guard !Task.isCancelled else { return }
-        thumbnail = ThumbnailService.cropFace(in: full, bbox: bbox, sourceOrientation: orientation) ?? full
+        let box = UncheckedImage(full)
+        let cropped = await Task.detached(priority: .userInitiated) {
+            ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation).map(UncheckedImage.init)
+        }.value
+        guard !Task.isCancelled else { return }
+        thumbnail = cropped?.image ?? full
     }
 
 }
@@ -842,7 +847,7 @@ private struct PersonDetailSheet: View {
             if selectMode {
                 Text("\(checked.count) selected")
                     .font(Theme.Font.mono(11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                 Spacer()
                 Button {
                     showMoveTargetPicker = true
@@ -889,7 +894,7 @@ private struct PersonDetailSheet: View {
                     Spacer()
                     Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
                         .font(Theme.Font.mono(11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                     Button("Done") { dismiss() }
                         .keyboardShortcut(.defaultAction)
                 }
@@ -899,7 +904,7 @@ private struct PersonDetailSheet: View {
                             .font(Theme.Font.body(13.5))
                         Text("Excludes this person from AI clustering and from Deep Analyze captions. Their photos stay in the library.")
                             .font(Theme.Font.body(11))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.text3)
                     }
                 }
                 .toggleStyle(DSCheckboxToggleStyle())
@@ -918,7 +923,7 @@ private struct PersonDetailSheet: View {
                     }
                     Text("Deep Analyze captions will reference this person as **“\(deepAnalyzeRef)”**.")
                         .font(Theme.Font.body(11))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 if !isUnknown && person.fileCount > 0 {
                     tagAllPhotosButton
@@ -932,7 +937,7 @@ private struct PersonDetailSheet: View {
             photoGridToolbar
             if let status = moveStatus {
                 Text(status).font(Theme.Font.body(12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                     .padding(.horizontal, 16).padding(.vertical, 4)
             }
             ScrollView {
@@ -1019,7 +1024,7 @@ private struct PersonDetailSheet: View {
                 }
             }
             if let s = tagBatchStatus {
-                Text(s).font(Theme.Font.body(11)).foregroundStyle(.secondary)
+                Text(s).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
             }
         }
     }
@@ -1105,7 +1110,7 @@ private struct PersonDetailSheet: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(Theme.Font.body(12, .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain).font(Theme.Font.body(13.5)).padding(.horizontal, 10).frame(height: 30).background(Color.black.opacity(0.3), ignoresSafeAreaEdges: []).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.hairlineStrong, lineWidth: 1))
                 .frame(minWidth: 140)
@@ -1159,6 +1164,7 @@ private struct PersonFileTile: View {
         .task(id: file.id) {
             img = await ThumbnailService.shared.thumbnail(for: file.url, size: 240)
         }
+        .onDisappear { img = nil }
         .contextMenu {
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -1178,7 +1184,7 @@ private struct PersonFileTile: View {
         if let i = img {
             Image(nsImage: i).resizable().scaledToFill()
         } else {
-            Image(systemName: "photo").foregroundStyle(.secondary)
+            Image(systemName: "photo").foregroundStyle(Theme.text3)
         }
     }
 
@@ -1218,7 +1224,7 @@ private struct MovePhotosTargetPicker: View {
                     Text("Move \(fileIDs.count) photo\(fileIDs.count == 1 ? "" : "s") to…")
                         .font(Theme.Font.body(16, .semibold))
                     Text("Pick the person these photos actually show. Only the selected photos move; the rest of \(sourcePerson.displayName)'s group stays put.")
-                        .font(Theme.Font.body(12)).foregroundStyle(.secondary)
+                        .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
@@ -1291,7 +1297,7 @@ private struct SuggestedMergesSheet: View {
                         .font(Theme.Font.body(14, .semibold))
                     Text("\(candidates.count) cluster pairs look like they might be the same person.")
                         .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 Button("Done", action: onDismiss)
@@ -1299,7 +1305,7 @@ private struct SuggestedMergesSheet: View {
             }
             Text("These pairs were close enough to look like the same person, but not close enough to merge automatically. Review and merge the ones that match.")
                 .font(Theme.Font.body(12))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
             HStack(spacing: 8) {
                 // Bulk-accept the highest-confidence ("Very likely same",
                 // cosine ≥ 0.55) pairs in one click. Lets the user clear
@@ -1326,7 +1332,7 @@ private struct SuggestedMergesSheet: View {
                         .font(Theme.Font.body(13.5, .semibold))
                         .padding(.horizontal, 12).padding(.vertical, 7)
                         .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.secondary, lineWidth: 1))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                 }
                 .buttonStyle(.plain)
                 .disabled(candidates.isEmpty || inFlight)
@@ -1344,7 +1350,7 @@ private struct SuggestedMergesSheet: View {
                         .font(Theme.Font.body(13.5, .semibold))
                     Text("Every cluster centroid is either reliably the same person (already merged) or reliably different. Re-run after adding more photos.")
                         .font(Theme.Font.body(12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.text3)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 400)
                 }
@@ -1377,7 +1383,7 @@ private struct SuggestedMergesSheet: View {
             HStack(spacing: 12) {
                 miniCard(a)
                 Image(systemName: "arrow.left.and.right")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
                 miniCard(b)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
@@ -1410,7 +1416,7 @@ private struct SuggestedMergesSheet: View {
                     .lineLimit(1)
                 Text("\(p.fileCount) photo\(p.fileCount == 1 ? "" : "s")")
                     .font(Theme.Font.body(11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.text3)
             }
         }
         .frame(width: 170, alignment: .leading)
@@ -1457,7 +1463,7 @@ private struct MergeTargetPickerSheet: View {
             }
             Text("Pick which one becomes the primary. The others will be absorbed — their photos move into the primary, and the source clusters disappear.")
                 .font(Theme.Font.body(13.5))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
             Divider().opacity(0.3)
             ScrollView {
@@ -1473,11 +1479,11 @@ private struct MergeTargetPickerSheet: View {
                                         .font(Theme.Font.body(13.5, .semibold))
                                     Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
                                         .font(Theme.Font.body(12))
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(Theme.text3)
                                 }
                                 Spacer()
                                 Image(systemName: "arrow.triangle.merge")
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Theme.text3)
                             }
                             .padding(10)
                             .background(
@@ -1567,4 +1573,10 @@ private struct FaceModelInstallPanel: View {
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
         }
     }
+}
+
+/// Moves an NSImage across a task boundary; the image is never mutated.
+struct UncheckedImage: @unchecked Sendable {
+    let image: NSImage
+    init(_ image: NSImage) { self.image = image }
 }

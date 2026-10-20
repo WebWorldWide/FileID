@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use adw::prelude::*;
 use gtk::glib;
 
-use crate::engine_client::{texture_from_decoded, DecodedImage, EngineClient, EngineEvent};
+use crate::engine_client::{texture_from_decoded, CancelToken, DecodedImage, EngineClient, EngineEvent, ThumbReply};
 use fileid_engine::ipc::{
     BulkActionResult, CommandPayload, Empty, MarkPersonsAsUnknownPayload, MergeClustersPayload,
     RenamePersonPayload,
@@ -397,15 +397,10 @@ struct Ui {
 
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Header ────────────────────────────────────────────────────────────────
-    let title = gtk::Label::builder()
-        .label("People")
-        .xalign(0.0)
-        .css_classes(["title-1"])
-        .build();
     let count_label = gtk::Label::builder()
         .label("")
         .xalign(0.0)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "numeric"])
         .build();
     let actions_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -417,7 +412,6 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .build();
-    title_row.append(&title);
     title_row.append(&count_label);
     title_row.append(&title_spacer);
     title_row.append(&actions_box);
@@ -1130,11 +1124,11 @@ fn load_card_thumb(ui: &Rc<Ui>, pic: &gtk::Picture, key: PersonThumbKey) {
         pic.set_paintable(Some(&tex));
         return;
     }
-    let rx = request_face_thumbnail(key.path.clone(), key.bbox.clone(), CARD_THUMB_PX);
+    let rx = request_face_thumbnail(&ui.engine, pic, key.path.clone(), key.bbox.clone(), CARD_THUMB_PX);
     let pic_weak = pic.downgrade();
     let ui = ui.clone();
     glib::MainContext::default().spawn_local(async move {
-        let Ok(Some(decoded)) = rx.recv().await else {
+        let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
             return;
         };
         let tex = texture_from_decoded(decoded);
@@ -1344,19 +1338,39 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     btn_row.append(&done_btn);
     body.append(&btn_row);
 
-    let photos = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .max_children_per_line(6)
-        .min_children_per_line(2)
-        .column_spacing(8)
-        .row_spacing(8)
-        .homogeneous(true)
-        .valign(gtk::Align::Start)
+    // A virtualized grid: only tiles on screen exist, and a recycled tile
+    // drops its pending crop and bitmap (a person can have 500 photos).
+    let photos = gtk::gio::ListStore::new::<glib::BoxedAnyObject>();
+    let photo_factory = gtk::SignalListItemFactory::new();
+    photo_factory.connect_setup(|_, item| {
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            item.set_child(Some(&build_photo_tile()));
+        }
+    });
+    {
+        let engine = ui.engine.clone();
+        photo_factory.connect_bind(move |_, item| {
+            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+                bind_photo_tile(&engine, item);
+            }
+        });
+    }
+    photo_factory.connect_unbind(|_, item| {
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            unbind_photo_tile(item);
+        }
+    });
+    let photo_grid = gtk::GridView::builder()
+        .model(&gtk::NoSelection::new(Some(photos.clone())))
+        .factory(&photo_factory)
+        .min_columns(2)
+        .max_columns(6)
+        .css_classes(["fileid-tab"])
         .build();
     let photos_scroll = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
-        .child(&photos)
+        .child(&photo_grid)
         .build();
     body.append(&photos_scroll);
 
@@ -1727,14 +1741,12 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let Some(photos) = photos_weak.upgrade() else {
             return;
         };
-        for face in files {
-            let tile = build_photo_tile(&face);
-            photos.append(&tile);
-        }
+        let items: Vec<glib::BoxedAnyObject> = files.into_iter().map(glib::BoxedAnyObject::new).collect();
+        photos.splice(0, photos.n_items(), &items);
     });
 }
 
-fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
+fn build_photo_tile() -> gtk::Box {
     let pic = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .height_request(118)
@@ -1742,8 +1754,6 @@ fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
         .css_classes(["tile-thumb"])
         .build();
     let name = gtk::Label::builder()
-        .label(basename(&face.path))
-        .tooltip_text(format!("File #{}, face #{}", face.file_id, face.face_id))
         .xalign(0.5)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .max_width_chars(14)
@@ -1757,20 +1767,65 @@ fn build_photo_tile(face: &PersonFace) -> gtk::Widget {
         .build();
     vbox.append(&pic);
     vbox.append(&name);
+    vbox
+}
 
+thread_local! {
+    static PHOTO_TOKENS: RefCell<HashMap<usize, CancelToken>> = RefCell::new(HashMap::new());
+}
+
+fn photo_tile_parts(item: &gtk::ListItem) -> Option<(gtk::Picture, gtk::Label)> {
+    let vbox = item.child()?;
+    let pic = vbox.first_child()?.downcast::<gtk::Picture>().ok()?;
+    let name = pic.next_sibling()?.downcast::<gtk::Label>().ok()?;
+    Some((pic, name))
+}
+
+fn bind_photo_tile(engine: &Rc<RefCell<EngineClient>>, item: &gtk::ListItem) {
+    let Some(face) = item
+        .item()
+        .and_downcast::<glib::BoxedAnyObject>()
+        .map(|object| object.borrow::<PersonFace>().clone())
+    else {
+        return;
+    };
+    let Some((pic, name)) = photo_tile_parts(item) else { return };
+    name.set_text(&basename(&face.path));
+    name.set_tooltip_text(Some(&format!("File #{}, face #{}", face.file_id, face.face_id)));
+    pic.set_paintable(None::<&gtk::gdk::Texture>);
+    let cancel = CancelToken::default();
+    let key = item.as_ptr() as usize;
+    if let Some(previous) = PHOTO_TOKENS.with_borrow_mut(|tokens| tokens.insert(key, cancel.clone())) {
+        previous.store(true, std::sync::atomic::Ordering::Release);
+    }
     let (thumbnail_path, thumbnail_bbox) =
         face_thumbnail_source(Some(face.face_id), &face.path, face.bbox.as_deref());
-    let rx = request_face_thumbnail(thumbnail_path, thumbnail_bbox, PHOTO_THUMB_PX);
+    let rx = engine.borrow().request_decode(
+        move || cropped_texture(&thumbnail_path, thumbnail_bbox.as_deref(), PHOTO_THUMB_PX),
+        cancel.clone(),
+    );
     let pic_weak = pic.downgrade();
     glib::MainContext::default().spawn_local(async move {
-        let Ok(Some(decoded)) = rx.recv().await else {
+        let Ok(ThumbReply::Image(decoded)) = rx.recv().await else {
             return;
         };
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
         if let Some(pic) = pic_weak.upgrade() {
             pic.set_paintable(Some(&texture_from_decoded(decoded)));
         }
     });
-    vbox.upcast()
+}
+
+fn unbind_photo_tile(item: &gtk::ListItem) {
+    let key = item.as_ptr() as usize;
+    if let Some(token) = PHOTO_TOKENS.with_borrow_mut(|tokens| tokens.remove(&key)) {
+        token.store(true, std::sync::atomic::Ordering::Release);
+    }
+    if let Some((pic, _)) = photo_tile_parts(item) {
+        pic.set_paintable(None::<&gtk::gdk::Texture>);
+    }
 }
 
 // ── Merge-target picker (manual merge mode) ───────────────────────────────────
@@ -2319,17 +2374,21 @@ fn face_thumbnail_source_in(
     }
 }
 
+/// Face crops decode on the engine client's bounded thumbnail workers, and a
+/// tile's pending crop is dropped once the picture is disposed.
 fn request_face_thumbnail(
+    engine: &Rc<RefCell<EngineClient>>,
+    pic: &gtk::Picture,
     path: String,
     bbox: Option<String>,
     max_px: i32,
-) -> async_channel::Receiver<Option<DecodedImage>> {
-    let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let image = cropped_texture(&path, bbox.as_deref(), max_px);
-        let _ = tx.send_blocking(image);
-    });
-    rx
+) -> async_channel::Receiver<ThumbReply> {
+    let cancel = CancelToken::default();
+    let on_destroy = cancel.clone();
+    pic.connect_destroy(move |_| on_destroy.store(true, std::sync::atomic::Ordering::Release));
+    engine
+        .borrow()
+        .request_decode(move || cropped_texture(&path, bbox.as_deref(), max_px), cancel)
 }
 
 fn cropped_texture(path: &str, bbox: Option<&str>, max_px: i32) -> Option<DecodedImage> {
