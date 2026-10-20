@@ -1718,15 +1718,17 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
 /// Camera RAW: decode the largest embedded JPEG preview (≥ 1024 px) and apply
 /// the RAW container's orientation. None falls back to the full decoders.
 fn decode_raw_preview(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<(Vec<u8>, u32, u32)> {
-    decode_raw_preview_at_least(path, bytes, 1024)
+    decode_raw_preview_at_least(path, bytes, 1024, JPEG_SCALED_DECODE_FLOOR_EDGE)
 }
 
 /// Upright RGB of a RAW's largest embedded preview whose long edge is at least
-/// `min_edge`. Thumbnails accept smaller previews than the scan does.
+/// `min_edge`, DCT-scaled down to no less than `scale_floor` on the long edge.
+/// Thumbnails accept smaller previews than the scan does.
 pub(crate) fn decode_raw_preview_at_least(
     path: &std::path::Path,
     bytes: Option<&[u8]>,
     min_edge: u32,
+    scale_floor: u32,
 ) -> Option<(Vec<u8>, u32, u32)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mmap;
@@ -1745,7 +1747,7 @@ pub(crate) fn decode_raw_preview_at_least(
             return None;
         }
         let orientation = raw_orientation(bytes, jpeg);
-        let (buf, w, h) = decode_jpeg_scaled(jpeg).or_else(|| {
+        let (buf, w, h) = decode_jpeg_scaled_to(jpeg, scale_floor).or_else(|| {
             let rgb = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?.into_rgb8();
             let (w, h) = rgb.dimensions();
             Some((rgb.into_raw(), w, h))
@@ -1791,7 +1793,13 @@ const JPEG_SCALED_DECODE_FLOOR_EDGE: u32 = 2048;
 /// full decoder" — for small images, non-RGB/L8 outputs (CMYK etc.), or any
 /// decode error, so behavior for every non-oversized or unusual file is
 /// byte-identical to before.
-pub(crate) fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    decode_jpeg_scaled_to(bytes, JPEG_SCALED_DECODE_FLOOR_EDGE)
+}
+
+/// [`decode_jpeg_scaled`] keeping at least `floor` pixels on the long edge.
+pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let floor = floor.max(1);
     // Diagnostic / bail-out switch: FILEID_JPEG_SCALED_DECODE=0 restores
     // full-resolution decode for every file (also the A/B control lever).
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1808,11 +1816,11 @@ pub(crate) fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let long = pw.max(ph);
     // DCT scales are powers of two; below 2× the floor even 1/2 would land
     // under it, so only genuinely oversized frames take this path.
-    if long < JPEG_SCALED_DECODE_FLOOR_EDGE * 2 {
+    if long < floor.saturating_mul(2) {
         return None;
     }
     let req = |d: u32| -> u16 {
-        ((u64::from(d) * u64::from(JPEG_SCALED_DECODE_FLOOR_EDGE)) / u64::from(long))
+        ((u64::from(d) * u64::from(floor)) / u64::from(long))
             .clamp(1, u64::from(u16::MAX)) as u16
     };
     // jpeg-decoder picks the smallest DCT scale whose output covers the
