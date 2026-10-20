@@ -512,6 +512,8 @@ button.gold-button.compact { min-height: 28px; padding: 0 12px; font-size: 13px;
 pub fn install() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(CSS);
+    let high_contrast = gtk::CssProvider::new();
+    high_contrast.load_from_string(HIGH_CONTRAST_CSS);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -519,5 +521,38 @@ pub fn install() {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     }
-    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+    let style = adw::StyleManager::default();
+    style.set_color_scheme(adw::ColorScheme::ForceDark);
+    apply_high_contrast(&high_contrast, style.is_high_contrast());
+    style.connect_high_contrast_notify(move |style| apply_high_contrast(&high_contrast, style.is_high_contrast()));
 }
+
+fn apply_high_contrast(provider: &gtk::CssProvider, on: bool) {
+    let Some(display) = gtk::gdk::Display::default() else { return };
+    gtk::style_context_remove_provider_for_display(&display, provider);
+    if on {
+        gtk::style_context_add_provider_for_display(&display, provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+    }
+}
+
+/// The system high-contrast setting, which also stills the lava lamp.
+pub fn high_contrast() -> bool {
+    adw::StyleManager::default().is_high_contrast()
+}
+
+/// macOS `Theme.adaptive(normal:increased:)` under Increase Contrast: hairlines
+/// 0.08/0.06/0.14 → 0.34/0.26/0.5, text3 → #D6D9DD, text2 → #EBEDEF, and a solid
+/// base behind the UI instead of the lava (Reduce Transparency).
+const HIGH_CONTRAST_CSS: &str = r#"
+.dim-label, .tile-caption { color: alpha(#FFFFFF, 0.85); }
+.meta, .pop-meta, .scan-sub, .stat-key, .stat-trailing, .tone-muted, .tone-paused, .section-label, .kv-key { color: #D6D9DD; }
+.page-meta, .scan-step, .tone-text2, .nav-row image, .chip { color: #EBEDEF; }
+.glass-card, .padded-card, .fileid-glass, .file-tile { border-color: alpha(#FFFFFF, 0.34); }
+.fileid-sidebar { border-right-color: alpha(#FFFFFF, 0.34); }
+.selected-pane { border-left-color: alpha(#FFFFFF, 0.34); }
+headerbar.fileid-titlebar, .page-header { border-bottom-color: alpha(#FFFFFF, 0.34); }
+.kv-row, .pop-row, .pop-footer, .scan-stats, .boxed-list > row { border-color: alpha(#FFFFFF, 0.26); }
+.tb-control, menubutton.tb-control > button, .area-switcher, .tb-search, .chip, .scan-card, button.secondary, entry, popover.fileid-popover > contents { border-color: alpha(#FFFFFF, 0.5); }
+separator { background-color: alpha(#FFFFFF, 0.34); }
+.fileid-scrim { background-color: #0B0B0C; }
+"#;

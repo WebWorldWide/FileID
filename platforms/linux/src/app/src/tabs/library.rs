@@ -178,7 +178,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let count_label = gtk::Label::builder()
         .label("0 files")
         .xalign(0.0)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "numeric"])
         .build();
     let title_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)

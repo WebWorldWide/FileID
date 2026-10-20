@@ -400,7 +400,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let count_label = gtk::Label::builder()
         .label("")
         .xalign(0.0)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "numeric"])
         .build();
     let actions_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)

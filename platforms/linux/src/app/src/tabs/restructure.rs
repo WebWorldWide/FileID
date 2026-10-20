@@ -136,7 +136,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .label("0 selected")
         .xalign(0.0)
         .hexpand(true)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "numeric"])
         .build();
     let apply_button = gtk::Button::builder()
         .label("Apply selected")
