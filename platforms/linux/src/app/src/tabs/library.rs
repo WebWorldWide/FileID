@@ -945,6 +945,41 @@ fn open_preview(
 
     load();
 
+    // A scan that finishes while the preview is open refreshes only the row
+    // on screen (new caption, smart name, faces), not the frozen list.
+    let closed = Rc::new(Cell::new(false));
+    let events = engine.borrow_mut().subscribe();
+    glib::MainContext::default().spawn_local(clone!(
+        #[strong]
+        rows,
+        #[strong]
+        idx,
+        #[strong]
+        closed,
+        #[weak]
+        meta_scroll,
+        #[weak]
+        dialog,
+        async move {
+            while let Ok(event) = events.recv().await {
+                if closed.get() {
+                    break;
+                }
+                if !matches!(event, EngineEvent::ScanComplete(_)) {
+                    continue;
+                }
+                let Some(id) = rows.borrow().get(idx.get()).map(|row| row.id) else { continue };
+                let Ok(Some(row)) = crate::engine_client::read_file_row(id).recv().await else { continue };
+                if closed.get() || rows.borrow().get(idx.get()).map(|row| row.id) != Some(id) {
+                    continue;
+                }
+                rows.borrow_mut()[idx.get()] = row.clone();
+                dialog.set_title(&row.name);
+                meta_scroll.set_child(Some(&build_meta(&row)));
+            }
+        }
+    ));
+
     let full = engine.borrow().query_files(QuerySpec {
         search: query.0,
         kind: query.1,
@@ -978,7 +1013,10 @@ fn open_preview(
     dialog.connect_closed(clone!(
         #[weak]
         video,
+        #[strong]
+        closed,
         move |_| {
+            closed.set(true);
             if let Some(stream) = video.media_stream() {
                 stream.pause();
             }
