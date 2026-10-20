@@ -292,7 +292,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             if (!string.IsNullOrEmpty(ViewModel.ErrorMessage)) return ViewModel.ErrorMessage!;
             if (ViewModel.IsLoading) return "Scanning for duplicates…";
             if (ViewModel.Groups.Count == 0) return "No duplicates found yet — run a scan first.";
-            return $"{ViewModel.Groups.Count} duplicate groups";
+            return $"{ViewModel.Groups.Count:N0} duplicate group{(ViewModel.Groups.Count == 1 ? "" : "s")}";
         }
     }
 
@@ -307,21 +307,30 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         get
         {
             if (ViewModel.Groups.Count == 0) return string.Empty;
-            long files = 0;
             long bytes = 0;
             int eligibleGroups = 0;
+            int skipped = 0;
             foreach (var g in ViewModel.Groups)
             {
-                if (g.IsSkipped) continue;
+                if (g.IsSkipped) { skipped++; continue; }
                 eligibleGroups++;
                 foreach (var m in g.Members)
                 {
-                    if (!m.IsKeeper) { files++; bytes += m.SizeBytes; }
+                    if (!m.IsKeeper) bytes += m.SizeBytes;
                 }
             }
-            if (files == 0) return $"{eligibleGroups} group{(eligibleGroups == 1 ? "" : "s")} • no non-keepers selected";
-            return $"{eligibleGroups} group{(eligibleGroups == 1 ? "" : "s")} • {files} non-keeper file{(files == 1 ? "" : "s")} • {FormatSize(bytes)} reclaimable";
+            return FormatHeadline(eligibleGroups, bytes, skipped);
         }
+    }
+
+    /// <summary>macOS CleanupView headline: verified groups, decimal size
+    /// reclaimable if one copy per group is kept, and skipped groups.</summary>
+    internal static string FormatHeadline(int eligibleGroups, long bytes, int skipped)
+    {
+        var skippedText = skipped > 0 ? $" · {skipped:N0} skipped" : string.Empty;
+        if (eligibleGroups == 0) return "No verified duplicate groups" + skippedText;
+        return $"{eligibleGroups:N0} verified duplicate group{(eligibleGroups == 1 ? "" : "s")} · "
+            + $"{FormatSize(bytes)} reclaimable if you keep 1 per group{skippedText}";
     }
 
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
@@ -477,13 +486,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         return requests;
     }
 
-    private static string FormatSize(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
-        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
-    }
+    private static string FormatSize(long bytes) => FileID.Services.ByteFormat.File(bytes);
 
     private void OnGroupFlyoutOpening(object sender, object e)
     {

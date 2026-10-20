@@ -402,17 +402,7 @@ internal sealed class DuplicateMember : INotifyPropertyChanged
         }
     }
 
-    public string SizeDisplay
-    {
-        get
-        {
-            var b = SizeBytes;
-            if (b < 1024) return $"{b} B";
-            if (b < 1024 * 1024) return $"{b / 1024.0:0.#} KB";
-            if (b < 1024L * 1024 * 1024) return $"{b / (1024.0 * 1024):0.#} MB";
-            return $"{b / (1024.0 * 1024 * 1024):0.##} GB";
-        }
-    }
+    public string SizeDisplay => FileID.Services.ByteFormat.File(SizeBytes);
 
     private bool _isKeeper;
     public bool IsKeeper

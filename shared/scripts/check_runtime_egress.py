@@ -158,7 +158,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "c50846c16a67365d48caa6e6206f4aa291a384ac93b17a1d85923fdc5449f117",
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "7a98a1cac07b0089ea8e80a692bb8ddae8750ff422e506f643fe54e0191f2fea",
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "41a9af4acae4d9e39b00ff51e9cf16629277299304faafd9e474bd041c67e7ee",
-  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "d126da2898769a375613c9d53e89e908cc2dd3c0c8d700db6d592374e1b5d5fe",
+  "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "94c28e9dce1e71b85e9cb4335a1d274ece183f9a8eea18db0223bdbc31f5db1a",
   "platforms/windows/src/FileID.App/Views/Sidebar/SidebarProcessingControl.xaml.cs": "6ccb19b2886e3492fb439721aafbe4d8273935616caad88833c63725095c97d3",
   "platforms/windows/src/engine/src/commands/bulk.rs": "acd9f70c831539d27340e94574caac8578eb8efe963d3515d722987788434811",
   "platforms/windows/src/engine/src/commands/prewarm.rs": "d421167edf8b636c7682c5034a6d260981a702e89b2b924573cfa1e5790aecd2",
