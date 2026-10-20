@@ -180,7 +180,40 @@ fn spawn_query_worker() -> Arc<QueryWorkerState> {
     state
 }
 
-const RESPAWN_CAP: u32 = 5;
+const RESPAWN_DELAYS: [Duration; 3] = [Duration::from_secs(1), Duration::from_secs(4), Duration::from_secs(16)];
+const RESPAWN_WINDOW: Duration = Duration::from_secs(60);
+const STABLE_READY: Duration = Duration::from_secs(30);
+
+/// macOS `EngineClient` respawn budget: three restarts per 60 s, backing off
+/// 1/4/16 s. Only 30 s of continuous Ready refills it; clearing it on every
+/// Ready would let a ready-then-crash engine loop forever.
+#[derive(Debug, Default)]
+struct RespawnBudget {
+    attempts: Vec<Instant>,
+    last_ready_at: Option<Instant>,
+}
+
+impl RespawnBudget {
+    fn record_ready(&mut self, now: Instant) {
+        self.last_ready_at = Some(now);
+    }
+
+    fn next_delay(&mut self, now: Instant) -> Option<Duration> {
+        if self
+            .last_ready_at
+            .is_some_and(|ready| now.saturating_duration_since(ready) >= STABLE_READY)
+        {
+            self.attempts.clear();
+        }
+        self.last_ready_at = None;
+        self.attempts
+            .retain(|at| now.saturating_duration_since(*at) < RESPAWN_WINDOW);
+        let delay = *RESPAWN_DELAYS.get(self.attempts.len())?;
+        self.attempts.push(now);
+        Some(delay)
+    }
+}
+
 const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
 const RAW_EVENT_CAP: usize = 8;
@@ -199,7 +232,7 @@ pub struct EngineClient {
     thumb_tx: Option<Sender<ThumbJob>>,
     query_worker: Arc<QueryWorkerState>,
     next_id: u64,
-    respawns: u32,
+    respawn_budget: RespawnBudget,
     ready: bool,
     /// Bumped on every spawn; a health answer counts only for the live one.
     generation: u64,
@@ -225,7 +258,7 @@ impl EngineClient {
             thumb_tx: None,
             query_worker: spawn_query_worker(),
             next_id: 0,
-            respawns: 0,
+            respawn_budget: RespawnBudget::default(),
             ready: false,
             generation: 0,
             pending_health: None,
@@ -347,9 +380,7 @@ impl EngineClient {
                         // A `ready` can race in from the previous generation
                         // during a respawn; only our own nonce settles it.
                         let probe = {
-                            let mut client = client.borrow_mut();
-                            client.respawns = 0;
-                            client.begin_health_probe()
+                            client.borrow_mut().begin_health_probe()
                         };
                         if let Some((request_id, generation)) = probe {
                             let mut client = client.borrow_mut();
@@ -363,9 +394,12 @@ impl EngineClient {
                         continue;
                     }
                     RawEvent::Health { request_id, pid } => {
-                        if !client.borrow_mut().settle_health_probe(&request_id, pid) {
+                        let mut settled = client.borrow_mut();
+                        if !settled.settle_health_probe(&request_id, pid) {
                             continue;
                         }
+                        settled.respawn_budget.record_ready(Instant::now());
+                        drop(settled);
                         EngineState::Ready
                     }
                     RawEvent::State(state) => state,
@@ -584,23 +618,19 @@ fn retire_exited_child(this: &Rc<RefCell<EngineClient>>) {
 }
 
 fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
-    let attempt = {
-        let mut client = this.borrow_mut();
-        client.respawns += 1;
-        client.respawns
-    };
-    if attempt > RESPAWN_CAP {
+    let delay = this.borrow_mut().respawn_budget.next_delay(Instant::now());
+    let Some(delay) = delay else {
         let raw_tx = this.borrow().raw_tx.clone();
         emit_from_main(
             &raw_tx,
             RawEvent::State(EngineState::Failed(
-                "engine crashed repeatedly — giving up. Restart the app.".into(),
+                "Engine exited 3 times within 60 s; relaunch the app.".into(),
             )),
         );
         return;
-    }
+    };
     let weak = Rc::downgrade(this);
-    glib::timeout_add_local_once(Duration::from_millis(400 * u64::from(attempt)), move || {
+    glib::timeout_add_local_once(delay, move || {
         if let Some(client) = weak.upgrade() {
             if !client.borrow().shutting_down.load(Ordering::Relaxed) {
                 spawn_process(&client);
@@ -952,6 +982,39 @@ mod tests {
         let (tx, rx) = async_channel::unbounded();
         drain_engine_stdout(Cursor::new(stream), tx);
         std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_ready_then_crash_flap_exhausts_the_respawn_budget() {
+        let mut budget = RespawnBudget::default();
+        let start = Instant::now();
+        let mut delays = Vec::new();
+        for cycle in 0..4u64 {
+            let at = start + Duration::from_secs(cycle * 5);
+            budget.record_ready(at);
+            delays.push(budget.next_delay(at + Duration::from_secs(1)));
+        }
+        assert_eq!(
+            delays,
+            [Some(Duration::from_secs(1)), Some(Duration::from_secs(4)), Some(Duration::from_secs(16)), None]
+        );
+    }
+
+    #[test]
+    fn a_stable_engine_refills_the_budget_and_old_attempts_age_out() {
+        let mut budget = RespawnBudget::default();
+        let start = Instant::now();
+        for _ in 0..3 {
+            assert!(budget.next_delay(start).is_some());
+        }
+        assert!(budget.next_delay(start).is_none());
+        budget.record_ready(start + Duration::from_secs(10));
+        assert_eq!(budget.next_delay(start + Duration::from_secs(41)), Some(Duration::from_secs(1)));
+        let mut aging = RespawnBudget::default();
+        for _ in 0..3 {
+            aging.next_delay(start);
+        }
+        assert_eq!(aging.next_delay(start + Duration::from_secs(61)), Some(Duration::from_secs(1)));
     }
 
     #[test]
