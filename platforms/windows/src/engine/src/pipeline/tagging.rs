@@ -1638,7 +1638,7 @@ fn open_read_sequential(p: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// holding a momentary lock). Genuine errors (not found, access denied)
 /// fail fast without burning retries. Named historically for the image
 /// path; reused for Doc/Pdf/Audio under the same hardening rationale.
-fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let p = crate::util::path_safety::to_extended_length(path);
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..3u32 {
@@ -1718,6 +1718,16 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
 /// Camera RAW: decode the largest embedded JPEG preview (≥ 1024 px) and apply
 /// the RAW container's orientation. None falls back to the full decoders.
 fn decode_raw_preview(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<(Vec<u8>, u32, u32)> {
+    decode_raw_preview_at_least(path, bytes, 1024)
+}
+
+/// Upright RGB of a RAW's largest embedded preview whose long edge is at least
+/// `min_edge`. Thumbnails accept smaller previews than the scan does.
+pub(crate) fn decode_raw_preview_at_least(
+    path: &std::path::Path,
+    bytes: Option<&[u8]>,
+    min_edge: u32,
+) -> Option<(Vec<u8>, u32, u32)> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mmap;
         let bytes: &[u8] = if let Some(pre_read) = bytes {
@@ -1731,7 +1741,7 @@ fn decode_raw_preview(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<(V
         let (w, h) = image::ImageReader::with_format(std::io::Cursor::new(jpeg), image::ImageFormat::Jpeg)
             .into_dimensions()
             .ok()?;
-        if w.max(h) < 1024 {
+        if w.max(h) < min_edge {
             return None;
         }
         let orientation = raw_orientation(bytes, jpeg);
@@ -1781,7 +1791,7 @@ const JPEG_SCALED_DECODE_FLOOR_EDGE: u32 = 2048;
 /// full decoder" — for small images, non-RGB/L8 outputs (CMYK etc.), or any
 /// decode error, so behavior for every non-oversized or unusual file is
 /// byte-identical to before.
-fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_jpeg_scaled(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     // Diagnostic / bail-out switch: FILEID_JPEG_SCALED_DECODE=0 restores
     // full-resolution decode for every file (also the A/B control lever).
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2690,7 +2700,7 @@ fn local_unix_seconds_to_year(unix: f64) -> Option<i32> {
 /// Hard cap on image dimensions. A 100 KB JPEG can decode to a 4 GB raw
 /// buffer; reject before decode to avoid OOM-ing a worker. 50 MP =
 /// ~150 MB RGB8 — within budget for legitimate photo + scanner output.
-const MAX_DECODED_PIXELS: u64 = 50_000_000;
+pub(crate) const MAX_DECODED_PIXELS: u64 = 50_000_000;
 
 /// Run OCR on an RGB buffer. Returns None if no text or OCR isn't
 /// available on this system.
@@ -2719,7 +2729,7 @@ async fn run_ocr_blocking(rgb: Vec<u8>, w: u32, h: u32) -> anyhow::Result<Option
 /// unapplied, every downstream consumer — phash, CLIP, RAM++, face detection —
 /// sees a sideways frame, which both breaks cross-platform parity and costs
 /// real face recall on portrait photos.
-fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
+pub(crate) fn exif_orientation(bytes: &[u8]) -> Option<image::metadata::Orientation> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
         .ok()?;

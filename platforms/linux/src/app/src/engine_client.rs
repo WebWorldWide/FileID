@@ -929,8 +929,12 @@ fn thumbnail_worker(rx: Receiver<ThumbJob>) {
 }
 
 fn image_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
+    let raw = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(fileid_engine::pipeline::raw_preview::is_raw_extension);
     let length = std::fs::metadata(path).ok()?.len();
-    if length > THUMB_MAX_BYTES {
+    if !raw && length > THUMB_MAX_BYTES {
         return None;
     }
     fileid_engine::shell::thumbnail::render_at(path, dim).ok()
