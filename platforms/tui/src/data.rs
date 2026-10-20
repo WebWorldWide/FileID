@@ -513,9 +513,7 @@ fn load_dupes_until(
         max_candidates: DUP_CANDIDATE_CAP as u64,
         max_bytes: DUP_READ_BUDGET_BYTES,
     };
-    let Some(listing) = dupes::exact_groups(conn, caps, should_cancel)? else {
-        return Ok((Vec::new(), false, 0));
-    };
+    let listing = dupes::exact_groups(conn, caps, should_cancel)?;
     let candidate_count = (listing.admitted + listing.skipped_candidates) as i64;
     let partial = listing.is_partial() || listing.unreadable > 0;
     let mut groups: Vec<DupGroup> = listing

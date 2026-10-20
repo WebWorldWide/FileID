@@ -52,36 +52,27 @@ impl ExactListing {
     }
 }
 
-/// Every active, content-hashed file sharing its size with another. Stored-hash
-/// twin classes (same hash + size — near-certain duplicates) are admitted first,
-/// then the remaining same-size classes by potential reclaim. Classes are taken
-/// whole or not at all, so a split class can never pair. The stored hash only
-/// ranks; every admitted file is still re-hashed by [`exact_groups`], so files
-/// whose stored hashes come from different recipes still meet by size.
-/// `None` when no file has a content hash yet.
-pub fn exact_candidates(conn: &Connection, caps: ExactCaps) -> Result<Option<ExactCandidates>> {
-    let hashed: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM files WHERE failed = 0 AND content_hash IS NOT NULL)",
-        [],
-        |row| row.get(0),
-    )?;
-    if !hashed {
-        return Ok(None);
-    }
+/// Every active file sharing its size with another — the macOS Cleanup rule:
+/// membership is the whole same-size class, because stored content hashes are
+/// never byte-proof (legacy and current recipes, stale or missing hashes).
+/// The stored hash only ranks: classes sharing a stored (hash, size) —
+/// near-certain duplicates — are admitted first, then the remaining same-size
+/// classes by potential reclaim. Classes are taken whole or not at all, so a
+/// split class can never pair; [`exact_groups`] re-hashes every admitted file.
+pub fn exact_candidates(conn: &Connection, caps: ExactCaps) -> Result<ExactCandidates> {
     let mut stmt = conn.prepare(
-        "WITH hashed AS ( \
-             SELECT id, path_text, size_bytes, content_hash FROM files \
-             WHERE failed = 0 AND content_hash IS NOT NULL \
+        "WITH active AS ( \
+             SELECT id, path_text, size_bytes, content_hash FROM files WHERE failed = 0 AND size_bytes >= 0 \
          ), \
-         sizes AS (SELECT size_bytes AS s FROM hashed GROUP BY size_bytes HAVING COUNT(*) > 1), \
+         sizes AS (SELECT size_bytes AS s FROM active GROUP BY size_bytes HAVING COUNT(*) > 1), \
          twins AS ( \
-             SELECT content_hash AS h, size_bytes AS s FROM hashed \
+             SELECT content_hash AS h, size_bytes AS s FROM active WHERE content_hash IS NOT NULL \
              GROUP BY content_hash, size_bytes HAVING COUNT(*) > 1 \
          ) \
          SELECT f.id, f.path_text, f.size_bytes, \
                 (t.h IS NOT NULL) AS is_twin, \
                 CASE WHEN t.h IS NOT NULL THEN HEX(f.content_hash) ELSE CAST(f.size_bytes AS TEXT) END AS class_key \
-         FROM hashed f JOIN sizes z ON z.s = f.size_bytes \
+         FROM active f JOIN sizes z ON z.s = f.size_bytes \
          LEFT JOIN twins t ON t.h = f.content_hash AND t.s = f.size_bytes \
          ORDER BY is_twin DESC, f.size_bytes DESC, class_key, f.path_text, f.id",
     )?;
@@ -118,24 +109,22 @@ pub fn exact_candidates(conn: &Connection, caps: ExactCaps) -> Result<Option<Exa
             out.skipped_bytes = out.skipped_bytes.saturating_add(bytes);
         }
     }
-    Ok(Some(out))
+    Ok(out)
 }
 
 /// [`exact_candidates`] re-hashed and grouped. `cancel` stops hashing early;
 /// files not reached count as unreadable.
-pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> bool) -> Result<Option<ExactListing>> {
-    let Some(selected) = exact_candidates(conn, caps)? else {
-        return Ok(None);
-    };
+pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> bool) -> Result<ExactListing> {
+    let selected = exact_candidates(conn, caps)?;
     let admitted = selected.candidates.len() as u64;
     let grouping = group_exact_duplicates_until(selected.candidates, cancel);
-    Ok(Some(ExactListing {
+    Ok(ExactListing {
         groups: grouping.groups,
         admitted,
         unreadable: grouping.skipped,
         skipped_candidates: selected.skipped_candidates,
         skipped_bytes: selected.skipped_bytes,
-    }))
+    })
 }
 
 /// Perceptual near-duplicates: connected components of active files whose
@@ -454,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_groups_need_a_content_hash_and_merge_hash_recipes() {
+    fn exact_groups_verify_every_same_size_file_whatever_its_stored_hash() {
         let conn = library();
         let twin_a = temp_file("twin-a", b"twin-bytes");
         let twin_b = temp_file("twin-b", b"twin-bytes");
@@ -462,7 +451,7 @@ mod tests {
         let unhashed = temp_file("unhashed", b"twin-bytes");
         let straddle_a = temp_file("straddle-a", b"same-bytes!!");
         let straddle_b = temp_file("straddle-b", b"same-bytes!!");
-        assert!(exact_groups(&conn, WIDE, || false).unwrap().is_none());
+        assert!(exact_groups(&conn, WIDE, || false).unwrap().groups.is_empty());
         insert(&conn, &twin_a, 10, Some(b"\x0a"), None);
         insert(&conn, &twin_b, 10, Some(b"\x0a"), None);
         insert(&conn, &legacy, 10, Some(b"\x0b"), None);
@@ -470,14 +459,14 @@ mod tests {
         insert(&conn, &straddle_a, 12, Some(b"\x01"), None);
         insert(&conn, &straddle_b, 12, Some(b"\x02"), None);
 
-        let listing = exact_groups(&conn, WIDE, || false).unwrap().unwrap();
+        let listing = exact_groups(&conn, WIDE, || false).unwrap();
         let mut groups: Vec<Vec<i64>> = listing.groups.iter().map(|g| g.files.iter().map(|f| f.id).collect()).collect();
         for group in &mut groups {
             group.sort_unstable();
         }
         groups.sort();
-        assert_eq!(groups, vec![vec![1, 2, 3], vec![5, 6]], "unhashed row 4 must not be a candidate");
-        assert_eq!(listing.unreadable, 0);
+        assert_eq!(groups, vec![vec![1, 2, 3, 4], vec![5, 6]]);
+        assert_eq!((listing.admitted, listing.unreadable), (6, 0));
         assert!(!listing.is_partial());
         for path in [twin_a, twin_b, legacy, unhashed, straddle_a, straddle_b] {
             let _ = std::fs::remove_file(path);
@@ -493,10 +482,10 @@ mod tests {
         insert(&conn, &b, 10, Some(b"\x0a"), None);
         insert(&conn, std::path::Path::new("/absent/c1.bin"), 600_000_000_000, Some(b"\x0c\x01"), None);
         insert(&conn, std::path::Path::new("/absent/c2.bin"), 600_000_000_000, Some(b"\x0c\x02"), None);
-        let listing = exact_groups(&conn, WIDE, || false).unwrap().unwrap();
+        let listing = exact_groups(&conn, WIDE, || false).unwrap();
         assert_eq!(listing.groups.len(), 1);
         assert_eq!((listing.skipped_candidates, listing.skipped_bytes), (2, 1_200_000_000_000));
-        let tight = exact_candidates(&conn, ExactCaps { max_candidates: 1, max_bytes: 1 << 40 }).unwrap().unwrap();
+        let tight = exact_candidates(&conn, ExactCaps { max_candidates: 1, max_bytes: 1 << 40 }).unwrap();
         assert!(tight.candidates.is_empty() && tight.is_partial());
         let _ = std::fs::remove_file(a);
         let _ = std::fs::remove_file(b);

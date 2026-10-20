@@ -5,15 +5,15 @@
 //! non-interactive stdin.
 //!
 //! - `--exact`   fully SHA-256 re-hashes same-size candidates (byte-identical files),
-//!   so legacy BLAKE3 and current stored identities group together safely.
+//!   so it works on any indexed library and stored hash recipes never matter.
 //! - `--similar` groups by perceptual-hash Hamming distance (default ≤ 8,
 //!   mirroring the engine's near-dup threshold). `--threshold` overrides it.
 //!   Similar groups are transitively chained, so `--similar --apply` can
 //!   over-delete; it is gated behind an explicit `--yes` (see `apply_run`).
 //!
-//! Both signals are written by the full engine scan pipeline; the CLI's
+//! Perceptual hashes are written by the full engine scan pipeline; the CLI's
 //! model-free `scan` does not compute them, so on a CLI-only-indexed library
-//! these report "no … in DB" until a full engine scan has run.
+//! `--similar` reports "no … in DB" until a full engine scan has run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -115,10 +115,8 @@ impl ListingPartial {
     }
 }
 
-fn exact_buckets(conn: &rusqlite::Connection) -> Result<(Option<Vec<ExactDuplicateGroup>>, usize)> {
-    let Some(selected) = dupes::exact_candidates(conn, EXACT_CAPS)? else {
-        return Ok((None, 0));
-    };
+fn exact_buckets(conn: &rusqlite::Connection) -> Result<Vec<ExactDuplicateGroup>> {
+    let selected = dupes::exact_candidates(conn, EXACT_CAPS)?;
     if selected.is_partial() {
         anyhow::bail!(
             "exact dedupe would leave {} same-size file(s) ({} bytes) unverified; safety budget is {} files / {} bytes",
@@ -128,16 +126,11 @@ fn exact_buckets(conn: &rusqlite::Connection) -> Result<(Option<Vec<ExactDuplica
             EXACT_CAPS.max_bytes
         );
     }
-    let grouping = group_exact_duplicates(selected.candidates);
-    Ok((Some(grouping.groups), grouping.skipped))
+    Ok(group_exact_duplicates(selected.candidates).groups)
 }
 
-fn exact_groups(
-    conn: &rusqlite::Connection,
-) -> Result<(Option<Vec<ExactGroup>>, usize, ListingPartial)> {
-    let Some(listing) = dupes::exact_groups(conn, EXACT_CAPS, || false)? else {
-        return Ok((None, 0, ListingPartial::default()));
-    };
+fn exact_groups(conn: &rusqlite::Connection) -> Result<(Vec<ExactGroup>, usize, ListingPartial)> {
+    let listing = dupes::exact_groups(conn, EXACT_CAPS, || false)?;
     let groups = listing
         .groups
         .into_iter()
@@ -154,24 +147,12 @@ fn exact_groups(
         skipped_candidates: listing.skipped_candidates,
         skipped_bytes: listing.skipped_bytes,
     };
-    Ok((Some(groups), listing.unreadable, partial))
+    Ok((groups, listing.unreadable, partial))
 }
 
-fn render_exact(
-    ctx: &Ctx,
-    groups: &Option<Vec<ExactGroup>>,
-    skipped: usize,
-    partial: ListingPartial,
-) {
+fn render_exact(ctx: &Ctx, groups: &[ExactGroup], skipped: usize, partial: ListingPartial) {
     match groups {
-        None => {
-            println!("{}", ctx.bold("Exact duplicates: none computed."));
-            ctx.progress(&format!(
-                "  {}",
-                ctx.dim("no content hashes in DB — run a full engine scan to populate them")
-            ));
-        }
-        Some(groups) if groups.is_empty() => {
+        [] => {
             if partial.is_partial() {
                 println!(
                     "{}",
@@ -181,7 +162,7 @@ fn render_exact(
                 println!("{}", ctx.bold("Exact duplicates: none."));
             }
         }
-        Some(groups) => {
+        groups => {
             println!("{} exact-duplicate group(s):", groups.len());
             for g in groups {
                 println!(
@@ -219,14 +200,8 @@ fn render_exact(
     }
 }
 
-fn exact_json(
-    groups: &Option<Vec<ExactGroup>>,
-    skipped: usize,
-    partial: ListingPartial,
-) -> serde_json::Value {
-    match groups {
-        None => serde_json::json!({ "available": false, "skipped": 0, "complete": true }),
-        Some(groups) => serde_json::json!({
+fn exact_json(groups: &[ExactGroup], skipped: usize, partial: ListingPartial) -> serde_json::Value {
+    serde_json::json!({
             "available": true,
             "complete": skipped == 0 && !partial.is_partial(),
             "skipped": skipped,
@@ -239,8 +214,7 @@ fn exact_json(
                 "sizeBytes": g.files[0].1,
                 "files": g.files.iter().map(|(p, _)| p).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
-        }),
-    }
+    })
 }
 
 // ---- near-duplicate (phash Hamming) -----------------------------------------
@@ -865,13 +839,7 @@ fn exact_group_still_matches(guard: &ExactGroupGuard, victims: &[Victim]) -> boo
 /// Exact-duplicate victims: every byte-identical copy beyond the first
 /// (kept) one. Keeper = lexicographically-first path (deterministic).
 fn exact_victims(conn: &rusqlite::Connection) -> Result<VictimSet> {
-    let (buckets, _) = exact_buckets(conn)?;
-    let Some(buckets) = buckets else {
-        return Ok(VictimSet {
-            available: false,
-            groups: Vec::new(),
-        });
-    };
+    let buckets = exact_buckets(conn)?;
     let groups = buckets
         .into_iter()
         .map(|group| {
@@ -1179,9 +1147,7 @@ mod tests {
             )
             .unwrap();
         }
-        let (groups, skipped) = exact_buckets(&conn).unwrap();
-        let groups = groups.unwrap();
-        assert_eq!(skipped, 0);
+        let groups = exact_buckets(&conn).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].files.len(), 2);
         let _ = std::fs::remove_file(a);
