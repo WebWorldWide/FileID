@@ -182,12 +182,12 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
             // channel, not the global engine-status error.
             tracing::warn!(?err, "CLIP text embed failed");
             if crate::models::runtime::error_has_device_removed_marker(&err) {
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "gpu_device_removed".into(),
-                    message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-                    path: None,
-                    model_kind: Some("mobileclip_text".into()),
-                }))))
+                sink.send(EngineError::new(
+                    "gpu_device_removed",
+                    crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
+                )
+                .with_model("mobileclip_text")
+                .into_event())
                 .await;
             }
             sink.send(IpcEvent::now(EventPayload::ClipTextEmbedding(Wrap::new(

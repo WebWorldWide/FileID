@@ -45,14 +45,12 @@ async fn reject_stranded_decoders(
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
     active: usize,
 ) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "decoder_shutdown_incomplete".into(),
-        message: format!(
+    sink.send(EngineError::event(
+        "decoder_shutdown_incomplete",
+        format!(
             "{active} decoder worker(s) from the previous scan are still stopping. Wait and retry; restart FileID if they do not exit."
         ),
-        path: None,
-        model_kind: None,
-    }))))
+    ))
     .await;
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Failed,
@@ -65,12 +63,10 @@ async fn reject_gpu_device_removed(
     sink: &Sink,
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
 ) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "gpu_device_removed".into(),
-        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "gpu_device_removed",
+        crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
+    ))
     .await;
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Failed,
@@ -117,12 +113,10 @@ pub(crate) async fn handle_start_scan(
         }
     };
     if already_running {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "scan_already_running".into(),
-            message: "A scan is already running. Cancel it before starting a new one.".into(),
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event(
+            "scan_already_running",
+            "A scan is already running. Cancel it before starting a new one.",
+        ))
         .await;
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
         return;
@@ -264,15 +258,13 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_load_failed".into(),
-                message: format!(
+            sink.send(EngineError::event(
+                "model_load_failed",
+                format!(
                     "The inference engine couldn't load its models: {err}.\n\
                      Try reinstalling models from Settings → Local AI.{runtime_hint}"
                 ),
-                path: None,
-                model_kind: None,
-            }))))
+            ))
             .await;
             *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed");
@@ -284,19 +276,15 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_load_timeout".into(),
-                message:
-                    "Loading inference models took longer than 120 seconds. The native \
+            sink.send(EngineError::event(
+                "model_load_timeout",
+                "Loading inference models took longer than 120 seconds. The native \
                      loader cannot be cancelled safely, so FileID will reject another scan \
                      until it finishes. Restart the engine before retrying if it remains stuck.\n\nTry:\n\
                      • Close other memory- or GPU-heavy apps.\n\
                      • Reinstall the models from Settings → Local AI.\n\
-                     • Pick a smaller Deep Analyze model in Settings → Local AI."
-                        .into(),
-                path: None,
-                model_kind: None,
-            }))))
+                     • Pick a smaller Deep Analyze model in Settings → Local AI.",
+            ))
             .await;
             let late_result = load_task.await;
             drop(ep_guard);
@@ -347,9 +335,9 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_load_failed".into(),
-                message: format!(
+            sink.send(EngineError::event(
+                "model_load_failed",
+                format!(
                     "These installed AI models failed to load, so the scan was stopped: {}.\n\n\
                      The model files are likely incomplete or blocked by antivirus. \
                      Reinstall them from Settings → Local AI, then scan again. \
@@ -358,9 +346,7 @@ pub(crate) async fn handle_start_scan(
                      on future scans.)",
                     failed_to_load.join(", ")
                 ),
-                path: None,
-                model_kind: None,
-            }))))
+            ))
             .await;
             *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed (post-load)");
@@ -397,12 +383,12 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "scan_failed".into(),
-                message: format!("Scan failed: {err}"),
-                path: Some(payload.root_path),
-                model_kind: None,
-            }))))
+            sink.send(EngineError::new(
+                "scan_failed",
+                format!("Scan failed: {err}"),
+            )
+            .with_path(payload.root_path)
+            .into_event())
             .await;
             tracing::warn!("[SCAN] handle_start_scan exiting: scan_failed");
             return;

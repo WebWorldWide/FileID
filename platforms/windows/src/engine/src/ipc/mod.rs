@@ -1221,6 +1221,30 @@ pub struct EngineError {
     pub model_kind: Option<String>,
 }
 
+impl EngineError {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self { kind: kind.into(), message: message.into(), path: None, model_kind: None }
+    }
+
+    pub fn event(kind: impl Into<String>, message: impl Into<String>) -> IpcEvent {
+        Self::new(kind, message).into_event()
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn with_model(mut self, model_kind: impl Into<String>) -> Self {
+        self.model_kind = Some(model_kind.into());
+        self
+    }
+
+    pub fn into_event(self) -> IpcEvent {
+        IpcEvent::now(EventPayload::Error(Wrap::new(self)))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub level: LogLevel,

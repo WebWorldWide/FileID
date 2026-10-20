@@ -314,25 +314,20 @@ async fn async_main() -> Result<()> {
             dirs
         );
         tracing::error!(message = %msg, "[EP] CUDA DLL registration failed");
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "cuda_dll_registration_failed".into(),
-            message: msg,
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event("cuda_dll_registration_failed", msg))
         .await;
     }
 
     if db_conn.is_none() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "db_open_failed".into(),
-            message: format!(
+        sink.send(EngineError::new(
+            "db_open_failed",
+            format!(
                 "Could not open or migrate the database at {}. The engine cannot scan. Check %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl for the underlying error.",
                 db_path.display()
             ),
-            path: Some(db_path.display().to_string()),
-            model_kind: None,
-        }))))
+        )
+        .with_path(db_path.display().to_string())
+        .into_event())
         .await;
         tracing::error!("engine starting without a writable DB — aborting");
         // Drop the sink so the writer task sees EOF, then await it
@@ -354,15 +349,15 @@ async fn async_main() -> Result<()> {
         let verdict = db::quick_check(&conn.lock());
         if let Err(detail) = verdict {
             tracing::error!(%detail, "database failed PRAGMA quick_check");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "db_integrity_check_failed".into(),
-                message: format!(
+            sink.send(EngineError::new(
+                "db_integrity_check_failed",
+                format!(
                     "The library database failed an integrity check ({detail}). It may be \
                      corrupted. Open Settings and wipe the library, then run a scan to rebuild it."
                 ),
-                path: Some(db_path.display().to_string()),
-                model_kind: None,
-            }))))
+            )
+            .with_path(db_path.display().to_string())
+            .into_event())
             .await;
         }
     }
@@ -567,16 +562,11 @@ async fn async_main() -> Result<()> {
                             if handled.is_err() {
                                 tracing::error!("panic in IPC command handler; engine continuing");
                                 dispatch_sink
-                                    .send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                                        EngineError {
-                                            kind: "command_handler_panic".into(),
-                                            message: "an internal error interrupted a command; \
-                                                      the engine kept running"
-                                                .into(),
-                                            path: None,
-                                            model_kind: None,
-                                        },
-                                    ))))
+                                    .send(EngineError::event(
+                                        "command_handler_panic",
+                                        "an internal error interrupted a command; \
+                                                      the engine kept running",
+                                    ))
                                     .await;
                             }
                             if dispatch_command_shutdown_requested
@@ -589,12 +579,10 @@ async fn async_main() -> Result<()> {
                         Ok(BoundedRead::Oversized(seen)) => {
                             // SEC: rejected mid-read, never allocated past the cap.
                             tracing::warn!(bytes_seen = seen, "oversized ipc frame; rejecting");
-                            dispatch_sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                                kind: "oversized_ipc_frame".into(),
-                                message: oversized_frame_message(seen),
-                                path: None,
-                                model_kind: None,
-                            })))).await;
+                            dispatch_sink.send(EngineError::event(
+                                "oversized_ipc_frame",
+                                oversized_frame_message(seen),
+                            )).await;
                             // Drain to next newline so we resync with the next frame.
                             let _ = bounded_read::drain_to_newline(&mut reader).await;
                         }
@@ -640,12 +628,10 @@ async fn async_main() -> Result<()> {
         Ok(guard) => Some(guard),
         Err(_) => {
             tracing::error!("active mutation did not quiesce before shutdown deadline");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "shutdown_quiescence_timeout".into(),
-                message: "FileID could not finish cancelling active work before shutdown. Recovery journals remain available and the WAL was left intact.".into(),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "shutdown_quiescence_timeout",
+                "FileID could not finish cancelling active work before shutdown. Recovery journals remain available and the WAL was left intact.",
+            ))
             .await;
             None
         }
@@ -659,10 +645,10 @@ async fn async_main() -> Result<()> {
     };
     if let Some(error) = &native_cleanup_error {
         tracing::error!(%error, "Native cleanup failed at shutdown");
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "native_cleanup_failed_at_shutdown".into(),
-            message: error.to_string(), path: None, model_kind: None,
-        })))).await;
+        sink.send(EngineError::event(
+            "native_cleanup_failed_at_shutdown",
+            error.to_string(),
+        )).await;
     }
 
     if let Some(index) = catalog_index {
@@ -675,12 +661,10 @@ async fn async_main() -> Result<()> {
         });
         if let Some(Err(err)) = checkpoint_outcome {
             tracing::warn!(?err, "WAL checkpoint at shutdown failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "checkpoint_failed_at_shutdown".into(),
-                message: "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.".into(),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "checkpoint_failed_at_shutdown",
+                "WAL not truncated at shutdown — your data is safe, but a previous read may show stale state on next launch.",
+            ))
             .await;
         }
     }
@@ -951,43 +935,34 @@ impl Drop for FaceClusterActiveGuard {
 }
 
 async fn emit_scan_busy(sink: &Sink) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "scan_already_running".into(),
-        message: "A scan is already running or queued. Cancel it before starting a new one."
-            .into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "scan_already_running",
+        "A scan is already running or queued. Cancel it before starting a new one.",
+    ))
     .await;
 }
 
 async fn emit_face_clustering_busy(sink: &Sink) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "face_clustering_busy".into(),
-        message: "Face clustering is already running.".into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "face_clustering_busy",
+        "Face clustering is already running.",
+    ))
     .await;
 }
 
 async fn emit_restructure_busy(sink: &Sink) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "restructure_already_running".into(),
-        message: "A restructure apply or undo is already running — wait for it to finish or cancel it first.".into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "restructure_already_running",
+        "A restructure apply or undo is already running — wait for it to finish or cancel it first.",
+    ))
     .await;
 }
 
 async fn emit_deep_analyze_busy(sink: &Sink) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "deep_analyze_already_running".into(),
-        message: "A Deep Analyze pass is already running — wait for it to finish or cancel it first.".into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "deep_analyze_already_running",
+        "A Deep Analyze pass is already running — wait for it to finish or cancel it first.",
+    ))
     .await;
 }
 
@@ -1078,16 +1053,11 @@ async fn spawn_mutation_with_interval<F>(
                             .as_ref()
                             .is_some_and(|coord| coord.is_paused());
                         if scan_paused {
-                            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                                EngineError {
-                                    kind: "library_busy".into(),
-                                    message: "The library scan is paused, so this action can't run yet. \
-                                              Resume or cancel the scan, then try again."
-                                        .into(),
-                                    path: None,
-                                    model_kind: None,
-                                },
-                            ))))
+                            sink.send(EngineError::event(
+                                "library_busy",
+                                "The library scan is paused, so this action can't run yet. \
+                                              Resume or cancel the scan, then try again.",
+                            ))
                             .await;
                             if let Some(event) = rejection_event {
                                 sink.send(event).await;
@@ -1131,12 +1101,7 @@ fn trash_rejection_event(file_ids: &[i64], message: &str) -> IpcEvent {
 }
 
 fn command_error_event(kind: &str, message: &str) -> IpcEvent {
-    IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: kind.into(),
-        message: message.into(),
-        path: None,
-        model_kind: None,
-    })))
+    EngineError::event(kind, message)
 }
 
 fn scan_rejection_event() -> IpcEvent {
@@ -1211,12 +1176,10 @@ async fn handle_line(
             // serde's error carries position info, not the line content,
             // so no user path can leak through the message.
             tracing::warn!(%err, "ipc decode failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "command_decode_failed".into(),
-                message: format!("Command frame could not be decoded: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "command_decode_failed",
+                format!("Command frame could not be decoded: {err}"),
+            ))
             .await;
             return;
         }
@@ -1281,12 +1244,7 @@ async fn handle_line(
             }
             _ => None,
         };
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "command_limit_exceeded".into(),
-            message,
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event("command_limit_exceeded", message))
         .await;
         if let Some(event) = terminal {
             sink.send(event).await;
@@ -1323,12 +1281,10 @@ async fn handle_line(
                     pid: std::process::id() as i32,
                 }))
             } else {
-                EventPayload::Error(Wrap::new(EngineError {
-                    kind: "invalid_health_request".into(),
-                    message: "Health request ID must contain 1–128 ASCII letters, digits, underscores or hyphens.".into(),
-                    path: None,
-                    model_kind: None,
-                }))
+                EventPayload::Error(Wrap::new(EngineError::new(
+                    "invalid_health_request",
+                    "Health request ID must contain 1–128 ASCII letters, digits, underscores or hyphens.",
+                )))
             };
             sink.send(IpcEvent::now(response)).await;
         }
@@ -2117,15 +2073,13 @@ async fn handle_line(
 }
 
 async fn emit_db_unavailable(sink: &Sink, command: &str) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "db_unavailable".into(),
-        message: format!(
+    sink.send(EngineError::event(
+        "db_unavailable",
+        format!(
             "Cannot run '{command}': the engine couldn't open the SQLite database \
              at startup. Check %LOCALAPPDATA%\\FileID\\logs\\ for the open error."
         ),
-        path: None,
-        model_kind: None,
-    }))))
+    ))
     .await;
 }
 

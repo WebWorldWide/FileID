@@ -1206,12 +1206,10 @@ pub(crate) async fn handle_run_face_clustering(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "face clustering failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "face_clustering_failed".into(),
-                message: format!("Face clustering failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "face_clustering_failed",
+                format!("Face clustering failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
@@ -1221,12 +1219,10 @@ pub(crate) async fn handle_run_face_clustering(
             // clustering closure panics — a JoinError otherwise fires no
             // completion/error event, leaving auto-clustering stuck for the
             // session.
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "face_clustering_failed".into(),
-                message: format!("Face clustering task did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "face_clustering_failed",
+                format!("Face clustering task did not complete: {err}"),
+            ))
             .await;
         }
     }

@@ -225,16 +225,16 @@ pub(crate) async fn handle_prewarm_model(
     // genuinely unregistered kind — otherwise the unknown-kind message below
     // would mislead the user into thinking the model itself is the problem.
     if let Err(err) = crate::paths::models_dir() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "models_dir_unavailable".into(),
-            message: format!(
+        sink.send(EngineError::new(
+            "models_dir_unavailable",
+            format!(
                 "FileID couldn't resolve its models folder, so '{model_kind}' \
                  can't be installed: {err}. Check that the %LOCALAPPDATA% (or \
                  %USERPROFILE%) environment variable is set."
             ),
-            path: None,
-            model_kind: Some(model_kind.clone()),
-        }))))
+        )
+        .with_model(model_kind.clone())
+        .into_event())
         .await;
         tracing::warn!(model_kind = %model_kind, outcome = "models_dir_unavailable", "[PREWARM] exiting");
         return;
@@ -243,16 +243,16 @@ pub(crate) async fn handle_prewarm_model(
     let model = match registry::lookup_full(&model_kind) {
         LookupResult::Found(m) => m,
         LookupResult::Unknown => {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "unknown_model".into(),
-                message: format!(
+            sink.send(EngineError::new(
+                "unknown_model",
+                format!(
                     "This FileID engine doesn't recognize the model '{model_kind}'. \
                      The engine is most likely older than the app — reinstall or \
                      rebuild FileID so the app and engine match, then try again."
                 ),
-                path: None,
-                model_kind: Some(model_kind.clone()),
-            }))))
+            )
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             tracing::warn!(model_kind = %model_kind, outcome = "unknown_model", "[PREWARM] exiting");
             return;
@@ -281,17 +281,17 @@ pub(crate) async fn handle_prewarm_model(
     if let Ok(models_dir) = crate::paths::models_dir() {
         if let Some(available) = platform::available_disk_bytes(&models_dir) {
             if available < required_free {
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "model_download_disk_full".into(),
-                    message: format!(
+                sink.send(EngineError::new(
+                    "model_download_disk_full",
+                    format!(
                         "{} needs about {:.1} GB free while verified download parts are staged, but only {:.1} GB is available on the models drive. Free space and try again; no download was started.",
                         model.display_name,
                         required_free as f64 / 1_073_741_824.0,
                         available as f64 / 1_073_741_824.0,
                     ),
-                    path: None,
-                    model_kind: Some(model_kind.clone()),
-                }))))
+                )
+                .with_model(model_kind.clone())
+                .into_event())
                 .await;
                 tracing::warn!(model_kind = %model_kind, required_free, available, outcome = "insufficient_disk", "[PREWARM] exiting");
                 return;
@@ -422,12 +422,12 @@ pub(crate) async fn handle_prewarm_model(
         // "prewarm_cancelled" as a no-op) instead of a red "download failed —
         // check your connection / Retry" pill.
         if cancel.load(Ordering::Relaxed) {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "prewarm_cancelled".into(),
-                message: format!("Download of {model_kind} cancelled."),
-                path: None,
-                model_kind: Some(model_kind.clone()),
-            }))))
+            sink.send(EngineError::new(
+                "prewarm_cancelled",
+                format!("Download of {model_kind} cancelled."),
+            )
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
             return;
@@ -448,12 +448,13 @@ pub(crate) async fn handle_prewarm_model(
             .iter()
             .any(|(_, _, err)| crate::downloader::chain_has_disk_full(err));
         let (kind, hint) = download_failure_kind_and_hint(pin_failure, disk_full);
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: kind.into(),
-            message: format!("{summary}.\n\n{hint}"),
-            path: Some(first_dest.display().to_string()),
-            model_kind: Some(model_kind.clone()),
-        }))))
+        sink.send(EngineError::new(
+            kind,
+            format!("{summary}.\n\n{hint}"),
+        )
+        .with_path(first_dest.display().to_string())
+        .with_model(model_kind.clone())
+        .into_event())
         .await;
         tracing::warn!(model_kind = %model_kind, outcome = "download_failed", error_kind = kind, failed = errs.len(), "[PREWARM] exiting");
         return;
@@ -493,12 +494,12 @@ pub(crate) async fn handle_prewarm_model(
             download_parallel(http_client.clone(), req, cancel.clone(), progress_cb).await
         {
             if cancel.load(Ordering::Relaxed) {
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "prewarm_cancelled".into(),
-                    message: format!("Download of {model_kind} cancelled."),
-                    path: None,
-                    model_kind: Some(model_kind.clone()),
-                }))))
+                sink.send(EngineError::new(
+                    "prewarm_cancelled",
+                    format!("Download of {model_kind} cancelled."),
+                )
+                .with_model(model_kind.clone())
+                .into_event())
                 .await;
                 tracing::info!(model_kind = %model_kind, outcome = "cancelled", "[PREWARM] exiting");
                 return;
@@ -508,12 +509,13 @@ pub(crate) async fn handle_prewarm_model(
                 crate::downloader::chain_has_pin_failure(&err),
                 crate::downloader::chain_has_disk_full(&err),
             );
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: kind.into(),
-                message: format!("Couldn't download {label}.\n\n{hint}"),
-                path: Some(file.dest.display().to_string()),
-                model_kind: Some(model_kind.clone()),
-            }))))
+            sink.send(EngineError::new(
+                kind,
+                format!("Couldn't download {label}.\n\n{hint}"),
+            )
+            .with_path(file.dest.display().to_string())
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             tracing::warn!(model_kind = %model_kind, outcome = "download_failed", error_kind = kind, file = %label, "[PREWARM] exiting");
             return;
@@ -523,14 +525,15 @@ pub(crate) async fn handle_prewarm_model(
             tokio::task::spawn_blocking(move || util::zip::extract_into_parent(&dest)).await;
         if extract.unwrap_or(Err(anyhow::anyhow!("zip extract panicked"))).is_err() {
             tracing::warn!(file = %label, "zip extract failed; path-bearing details suppressed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "zip_extract_failed".into(),
-                message: format!(
+            sink.send(EngineError::new(
+                "zip_extract_failed",
+                format!(
                     "Couldn't extract {label}. The archive was rejected or couldn't be promoted safely; retry the download."
                 ),
-                path: Some(file.dest.display().to_string()),
-                model_kind: Some(model_kind.clone()),
-            }))))
+            )
+            .with_path(file.dest.display().to_string())
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             tracing::warn!(model_kind = %model_kind, outcome = "zip_extract_failed", file = %label, "[PREWARM] exiting");
             return;
@@ -557,30 +560,31 @@ pub(crate) async fn handle_prewarm_model(
         if let Some(parent) = sentinel.parent() {
             if let Err(err) = tokio::fs::create_dir_all(parent).await {
                 tracing::error!(?err, dir = %crate::platform::redact_path_for_log(parent), "could not create .sentinels dir");
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "sentinel_dir_create_failed".into(),
-                    message: format!(
+                sink.send(EngineError::new(
+                    "sentinel_dir_create_failed",
+                    format!(
                         "Couldn't create the sentinel directory at {}. Model {} is downloaded but not registered as installed; try again.",
                         parent.display(),
                         model.display_name
                     ),
-                    path: Some(parent.display().to_string()),
-                    model_kind: Some(model_kind.clone()),
-                }))))
+                )
+                .with_path(parent.display().to_string())
+                .with_model(model_kind.clone())
+                .into_event())
                 .await;
                 return;
             }
         }
         let Some(attestation) = registry::installation_attestation(&model) else {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "sentinel_attestation_failed".into(),
-                message: format!(
+            sink.send(EngineError::new(
+                "sentinel_attestation_failed",
+                format!(
                     "Couldn't attest the installed files for {}. The model was not marked installed; try again.",
                     model.display_name
                 ),
-                path: None,
-                model_kind: Some(model_kind.clone()),
-            }))))
+            )
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             return;
         };
@@ -590,16 +594,17 @@ pub(crate) async fn handle_prewarm_model(
             // A failed write can leave a partial .tmp behind; remove it (mirroring
             // the rename path below) so a half-written marker isn't left on disk.
             let _ = tokio::fs::remove_file(&tmp).await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "sentinel_write_failed".into(),
-                message: format!(
+            sink.send(EngineError::new(
+                "sentinel_write_failed",
+                format!(
                     "Couldn't write the install marker for {}: {err}. The model is \
                      downloaded but not registered as installed; try again.",
                     model.display_name
                 ),
-                path: Some(tmp.display().to_string()),
-                model_kind: Some(model_kind.clone()),
-            }))))
+            )
+            .with_path(tmp.display().to_string())
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             return;
         }
@@ -611,16 +616,17 @@ pub(crate) async fn handle_prewarm_model(
                 "sentinel rename failed"
             );
             let _ = tokio::fs::remove_file(&tmp).await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "sentinel_rename_failed".into(),
-                message: format!(
+            sink.send(EngineError::new(
+                "sentinel_rename_failed",
+                format!(
                     "Couldn't finalize the install marker for {}: {err}. The model is \
                      downloaded but not registered as installed; try again.",
                     model.display_name
                 ),
-                path: Some(sentinel.display().to_string()),
-                model_kind: Some(model_kind.clone()),
-            }))))
+            )
+            .with_path(sentinel.display().to_string())
+            .with_model(model_kind.clone())
+            .into_event())
             .await;
             return;
         }

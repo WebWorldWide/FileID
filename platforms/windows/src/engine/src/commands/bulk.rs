@@ -2476,22 +2476,18 @@ pub(crate) async fn handle_find_merge_suggestions(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "find_merge_suggestions failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "find_merge_suggestions_failed".into(),
-                message: format!("Find merge suggestions failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "find_merge_suggestions_failed",
+                format!("Find merge suggestions failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
             tracing::warn!(?err, "find_merge_suggestions spawn failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "find_merge_suggestions_failed".into(),
-                message: format!("Find merge suggestions worker failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "find_merge_suggestions_failed",
+                format!("Find merge suggestions worker failed: {err}"),
+            ))
             .await;
         }
     }

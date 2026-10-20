@@ -528,12 +528,12 @@ fn event_exemplars() -> Vec<EventPayload> {
             failed_files: 1,
             total_seconds: 7.1,
         })),
-        EventPayload::Error(Wrap::new(EngineError {
-            kind: "vision_failed".into(),
-            message: "inference failed".into(),
-            path: Some(r"C:\Users\adam\Pictures\bad.jpg".into()),
-            model_kind: Some("mobileclip_s2".into()),
-        })),
+        EventPayload::Error(Wrap::new(EngineError::new(
+            "vision_failed",
+            "inference failed",
+        )
+        .with_path(r"C:\Users\adam\Pictures\bad.jpg")
+        .with_model("mobileclip_s2"))),
         EventPayload::Log(Wrap::new(LogLine {
             level: LogLevel::Info,
             message: "hello".into(),

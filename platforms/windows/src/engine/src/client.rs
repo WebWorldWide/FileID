@@ -297,12 +297,7 @@ mod tests {
 
     #[test]
     fn errors_and_early_exit_are_distinct_outcomes() {
-        let error = EventPayload::Error(Wrap::new(EngineError {
-            kind: "models_not_installed".into(),
-            message: "install".into(),
-            path: None,
-            model_kind: None,
-        }));
+        let error = EventPayload::Error(Wrap::new(EngineError::new("models_not_installed", "install")));
         let mut sink = Vec::new();
         let input = stream(&[error, complete()]);
         assert!(matches!(

@@ -963,12 +963,10 @@ async fn stop_cancelled_plan(
     if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "plan_restructure_cancelled".into(),
-        message: "Restructure planning was cancelled.".into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "plan_restructure_cancelled",
+        "Restructure planning was cancelled.",
+    ))
     .await;
     true
 }
@@ -986,12 +984,10 @@ pub(crate) async fn handle_plan_restructure(
     let library_root = payload.library_root.clone();
     let library_root_path = Path::new(&library_root);
     if !library_root_path.is_absolute() || !library_root_path.is_dir() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "plan_restructure_root".into(),
-            message: "Restructure planning requires an existing absolute library root.".into(),
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event(
+            "plan_restructure_root",
+            "Restructure planning requires an existing absolute library root.",
+        ))
         .await;
         return;
     }
@@ -1055,22 +1051,18 @@ pub(crate) async fn handle_plan_restructure(
                     }
                     Ok(Err(err)) => {
                         tracing::warn!(?err, "large restructure planning failed");
-                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                            kind: "plan_restructure_failed".into(),
-                            message: format!("Restructure planning did not complete: {err}"),
-                            path: None,
-                            model_kind: None,
-                        }))))
+                        sink.send(EngineError::event(
+                            "plan_restructure_failed",
+                            format!("Restructure planning did not complete: {err}"),
+                        ))
                         .await;
                     }
                     Err(err) => {
                         tracing::warn!(?err, "large restructure planning task failed");
-                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                            kind: "plan_restructure_failed".into(),
-                            message: format!("Restructure planning did not complete: {err}"),
-                            path: None,
-                            model_kind: None,
-                        }))))
+                        sink.send(EngineError::event(
+                            "plan_restructure_failed",
+                            format!("Restructure planning did not complete: {err}"),
+                        ))
                         .await;
                     }
                 }
@@ -1118,12 +1110,10 @@ pub(crate) async fn handle_plan_restructure(
                 if stop_cancelled_plan(&sink, &cancel).await {
                     return;
                 }
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "plan_restructure_db".into(),
-                    message: format!("planRestructure query failed: {err}"),
-                    path: None,
-                    model_kind: None,
-                }))))
+                sink.send(EngineError::event(
+                    "plan_restructure_db",
+                    format!("planRestructure query failed: {err}"),
+                ))
                 .await;
                 return;
             }
@@ -1133,12 +1123,10 @@ pub(crate) async fn handle_plan_restructure(
                 // plan…" status recovers instead of awaiting forever (mirrors
                 // the face_clustering PAR-111 JoinError handling).
                 tracing::warn!(?err, "planRestructure spawn_blocking failed");
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "plan_restructure_failed".into(),
-                    message: format!("Restructure planning did not complete: {err}"),
-                    path: None,
-                    model_kind: None,
-                }))))
+                sink.send(EngineError::event(
+                    "plan_restructure_failed",
+                    format!("Restructure planning did not complete: {err}"),
+                ))
                 .await;
                 return;
             }
@@ -1519,23 +1507,19 @@ pub(crate) async fn handle_plan_restructure(
         Ok(Ok(encoded)) => encoded,
         Ok(Err(err)) => {
             tracing::warn!(?err, "persisting paged restructure plan failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "plan_restructure_store".into(),
-                message: format!("Could not store the restructure plan: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "plan_restructure_store",
+                format!("Could not store the restructure plan: {err}"),
+            ))
             .await;
             return;
         }
         Err(err) => {
             tracing::warn!(?err, "encoding restructure plan task failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "plan_restructure_failed".into(),
-                message: format!("Restructure planning did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "plan_restructure_failed",
+                format!("Restructure planning did not complete: {err}"),
+            ))
             .await;
             return;
         }
@@ -1610,22 +1594,18 @@ pub(crate) async fn handle_undo_restructure(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "undoRestructure failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "undo_restructure".into(),
-                message: format!("Undo failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "undo_restructure",
+                format!("Undo failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
             tracing::warn!(?err, "undoRestructure spawn_blocking failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "undo_restructure".into(),
-                message: format!("Undo did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "undo_restructure",
+                format!("Undo did not complete: {err}"),
+            ))
             .await;
         }
     }
@@ -1701,12 +1681,10 @@ pub(crate) async fn handle_apply_restructure(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "apply_restructure".into(),
-                message: format!("Apply failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "apply_restructure",
+                format!("Apply failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
@@ -1715,12 +1693,10 @@ pub(crate) async fn handle_apply_restructure(
             // instead of hanging forever (ApplyRestructureAsync has no app-side
             // timeout; mirrors the face_clustering PAR-111 JoinError handling).
             tracing::warn!(?err, "applyRestructure spawn_blocking failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "apply_restructure".into(),
-                message: format!("Apply did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "apply_restructure",
+                format!("Apply did not complete: {err}"),
+            ))
             .await;
         }
     }

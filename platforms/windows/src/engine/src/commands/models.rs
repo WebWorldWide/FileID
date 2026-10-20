@@ -111,12 +111,10 @@ pub(crate) fn build(role: Option<&str>, physical_memory_gb: f64, vram_mb: u64) -
 
 pub async fn handle(sink: Sink, payload: ListModelsPayload) {
     if !payload.is_valid() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "invalid_list_models_request".into(),
-            message: "listModels needs a 1–128 character ASCII request ID and a known role.".into(),
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event(
+            "invalid_list_models_request",
+            "listModels needs a 1–128 character ASCII request ID and a known role.",
+        ))
         .await;
         return;
     }

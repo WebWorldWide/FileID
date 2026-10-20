@@ -594,16 +594,14 @@ impl ScanSession {
                 zero_byte_rejected,
                 "[SCAN] files changed after zero-byte discovery; preserving catalog rows"
             );
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                crate::ipc::EngineError {
-                    kind: "discovery_partial".into(),
-                    message: format!(
+            sink.send(crate::ipc::EngineError::new(
+                "discovery_partial",
+                format!(
                         "{zero_byte_rejected} file(s) changed after zero-byte discovery; their catalog rows were preserved for the next scan."
                     ),
-                    path: Some(root.to_string_lossy().into_owned()),
-                    model_kind: None,
-                },
-            ))))
+            )
+            .with_path(root.to_string_lossy().into_owned())
+            .into_event())
             .await;
         }
 
@@ -698,14 +696,10 @@ impl ScanSession {
             // "GPU device suspended — restart the app to recover" banner
             // instead of the generic cancelled state. Emit BEFORE
             // PhaseChanged(Failed) so IPC consumers see the cause first.
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                crate::ipc::EngineError {
-                    kind: "gpu_device_removed".into(),
-                    message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-                    path: None,
-                    model_kind: None,
-                },
-            ))))
+            sink.send(crate::ipc::EngineError::event(
+                "gpu_device_removed",
+                crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
+            ))
             .await;
             on_phase(SessionPhase::Failed);
             // Terminal Failed phase via the guaranteed (backpressuring)
@@ -900,12 +894,7 @@ fn discovery_notice(
     } else {
         return None;
     };
-    Some(crate::ipc::EngineError {
-        kind: kind.into(),
-        message,
-        path: Some(root.to_string()),
-        model_kind: None,
-    })
+    Some(crate::ipc::EngineError::new(kind, message).with_path(root.to_string()))
 }
 
 fn should_emit_batch_summary(batch_index: u32, processed_total: u64, last_emitted: u64) -> bool {
