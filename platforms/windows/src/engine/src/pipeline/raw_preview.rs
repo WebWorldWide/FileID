@@ -1,13 +1,17 @@
 //! Largest embedded JPEG preview in a camera RAW file.
 //!
-//! Sony ARW, Nikon NEF, Canon CR2, Olympus ORF, Pentax PEF and DNG are TIFF
-//! containers that carry a camera-rendered JPEG (often full size); Fujifilm
-//! RAF points at one from its header. Decoding that JPEG is an order of
-//! magnitude cheaper than demosaicing the sensor data, and on Linux it is the
-//! only way the scan can read these files at all. Mirrors the macOS scan,
-//! which takes ImageIO's embedded preview when it is large enough.
+//! Sony ARW, Nikon NEF, Canon CR2, Olympus ORF, Panasonic RW2, Pentax PEF and
+//! DNG are TIFF containers that carry a camera-rendered JPEG (often full size);
+//! Fujifilm RAF points at one from its header and Canon CR3 keeps one in an
+//! ISO-BMFF `PRVW` box. Decoding that JPEG is an order of magnitude cheaper
+//! than demosaicing the sensor data, and on Linux it is the only way the scan
+//! can read these files at all. Mirrors the macOS scan, which takes ImageIO's
+//! embedded preview when it is large enough.
 
-const RAW_EXTENSIONS: &[&str] = &["arw", "srf", "sr2", "nef", "nrw", "cr2", "orf", "pef", "dng", "raf", "rw2", "3fr", "erf", "mef", "mos", "iiq", "srw"];
+const RAW_EXTENSIONS: &[&str] = &[
+    "arw", "srf", "sr2", "nef", "nrw", "cr2", "cr3", "orf", "pef", "dng", "raf", "rw2", "rwl", "3fr", "erf", "mef",
+    "mos", "iiq", "srw",
+];
 
 pub fn is_raw_extension(ext: &str) -> bool {
     RAW_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
@@ -20,6 +24,8 @@ pub fn largest_embedded_jpeg(bytes: &[u8]) -> Option<&[u8]> {
         let offset = u32::from_be_bytes(bytes[84..88].try_into().ok()?) as usize;
         let length = u32::from_be_bytes(bytes[88..92].try_into().ok()?) as usize;
         candidates.push((offset, length));
+    } else if is_bmff(bytes) {
+        Bmff { bytes }.walk(0, bytes.len(), 0, &mut candidates, &mut None);
     } else {
         let tiff = Tiff::new(bytes)?;
         tiff.collect(&mut candidates);
@@ -32,6 +38,88 @@ pub fn largest_embedded_jpeg(bytes: &[u8]) -> Option<&[u8]> {
         })
         .max_by_key(|&(_, length)| length)
         .map(|(offset, length)| &bytes[offset..offset + length])
+}
+
+/// EXIF orientation (1-8) the RAW container records in IFD0, or None. Reads
+/// ORF and RW2 headers, which the generic EXIF reader rejects, and the CR3
+/// `CMT1` TIFF block.
+pub fn orientation(bytes: &[u8]) -> Option<u16> {
+    let value = if is_bmff(bytes) {
+        let mut cmt1 = None;
+        Bmff { bytes }.walk(0, bytes.len(), 0, &mut Vec::new(), &mut cmt1);
+        let (start, end) = cmt1?;
+        Tiff::new(&bytes[start..end])?.ifd0_value(0x0112)?
+    } else {
+        Tiff::new(bytes)?.ifd0_value(0x0112)?
+    };
+    u16::try_from(value).ok().filter(|v| (1..=8).contains(v))
+}
+
+fn is_bmff(bytes: &[u8]) -> bool {
+    bytes.get(4..8) == Some(b"ftyp")
+}
+
+struct Bmff<'a> {
+    bytes: &'a [u8],
+}
+
+impl Bmff<'_> {
+    fn be32(&self, at: usize) -> Option<usize> {
+        Some(u32::from_be_bytes(self.bytes.get(at..at + 4)?.try_into().ok()?) as usize)
+    }
+
+    /// Boxes in `[start, end)` as (payload start, box end, fourcc).
+    fn boxes(&self, start: usize, end: usize) -> Vec<(usize, usize, [u8; 4])> {
+        let mut out = Vec::new();
+        let mut at = start;
+        while at + 8 <= end && out.len() < 256 {
+            let (Some(size), Some(name)) = (self.be32(at), self.bytes.get(at + 4..at + 8)) else { break };
+            let name: [u8; 4] = name.try_into().unwrap_or_default();
+            let (header, size) = match size {
+                0 => (8, end - at),
+                1 => {
+                    let Some(large) = self.bytes.get(at + 8..at + 16) else { break };
+                    let large = u64::from_be_bytes(large.try_into().unwrap_or_default());
+                    (16, usize::try_from(large).unwrap_or(usize::MAX))
+                }
+                n => (8, n),
+            };
+            let Some(box_end) = at.checked_add(size).filter(|e| size >= header && *e <= end) else { break };
+            out.push((at + header, box_end, name));
+            at = box_end;
+        }
+        out
+    }
+
+    fn walk(&self, start: usize, end: usize, depth: usize, out: &mut Vec<(usize, usize)>, cmt1: &mut Option<(usize, usize)>) {
+        if depth > 4 {
+            return;
+        }
+        for (payload, box_end, name) in self.boxes(start, end) {
+            match &name {
+                b"moov" => self.walk(payload, box_end, depth + 1, out, cmt1),
+                // Canon's metadata uuid lists its children right after the
+                // 16-byte uuid; the preview uuid has 8 more header bytes.
+                b"uuid" => {
+                    if let Some(skip) = [16, 24].into_iter().find(|skip| {
+                        self.boxes(payload + skip, box_end)
+                            .first()
+                            .is_some_and(|(_, _, child)| child.iter().all(u8::is_ascii_alphanumeric))
+                    }) {
+                        self.walk(payload + skip, box_end, depth + 1, out, cmt1);
+                    }
+                }
+                b"PRVW" | b"THMB" => {
+                    let window = self.bytes.get(payload..box_end.min(payload + 64)).unwrap_or_default();
+                    if let Some(soi) = window.windows(3).position(|w| w == [0xFF, 0xD8, 0xFF]) {
+                        out.push((payload + soi, box_end - payload - soi));
+                    }
+                }
+                b"CMT1" => *cmt1 = Some((payload, box_end)),
+                _ => {}
+            }
+        }
+    }
 }
 
 /// Baseline or progressive JPEG. Raw sensor data is often stored as lossless
@@ -90,6 +178,22 @@ impl<'a> Tiff<'a> {
         Some(if self.little { u32::from_le_bytes(b) } else { u32::from_be_bytes(b) })
     }
 
+    fn ifd0_value(&self, wanted: u16) -> Option<u32> {
+        let ifd = self.u32(4)? as usize;
+        let count = self.u16(ifd)?;
+        (0..count as usize).find_map(|i| {
+            let entry = ifd + 2 + i * 12;
+            if self.u16(entry)? != wanted {
+                return None;
+            }
+            match (self.u16(entry + 2)?, self.u32(entry + 4)?) {
+                (3, 1) => self.u16(entry + 8).map(u32::from),
+                (4 | 13, 1) => self.u32(entry + 8),
+                _ => None,
+            }
+        })
+    }
+
     fn collect(&self, out: &mut Vec<(usize, usize)>) {
         let mut queue = vec![self.u32(4).unwrap_or(0) as usize];
         let mut seen = std::collections::HashSet::new();
@@ -114,6 +218,11 @@ impl<'a> Tiff<'a> {
                     _ => None,
                 };
                 match tag {
+                    0x002E if kind == 7 => {
+                        if let Some(offset) = self.u32(entry + 8) {
+                            out.push((offset as usize, n as usize));
+                        }
+                    }
                     0x0201 => jpeg_offset = value,
                     0x0202 => jpeg_length = value,
                     0x0103 => compression = value.unwrap_or(0),
@@ -215,6 +324,92 @@ mod tests {
         let lossless = [0xFF, 0xD8, 0xFF, 0xC3, 0x00, 0x0B, 8, 0, 16, 0, 16, 1, 1, 0x11, 0];
         assert!(!is_viewable_jpeg(&lossless), "lossless sensor data is not a preview");
         assert!(is_viewable_jpeg(&jpeg(8, 8)));
+    }
+
+    fn ifd_entry(b: &mut Vec<u8>, tag: u16, kind: u16, count: u32, value: u32) {
+        b.extend_from_slice(&tag.to_le_bytes());
+        b.extend_from_slice(&kind.to_le_bytes());
+        b.extend_from_slice(&count.to_le_bytes());
+        b.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Little-endian TIFF-style header with `magic`, IFD0 holding orientation 6
+    /// and, when given, a JpgFromRaw (0x002E, UNDEFINED) preview like Panasonic.
+    fn tiff_with(magic: u16, jpg_from_raw: Option<&[u8]>) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&magic.to_le_bytes());
+        b.extend_from_slice(&8u32.to_le_bytes());
+        let entries = 1 + u16::from(jpg_from_raw.is_some());
+        let data_at = 8 + 2 + usize::from(entries) * 12 + 4;
+        b.extend_from_slice(&entries.to_le_bytes());
+        if let Some(jpeg) = jpg_from_raw {
+            ifd_entry(&mut b, 0x002E, 7, jpeg.len() as u32, data_at as u32);
+        }
+        b.extend_from_slice(&0x0112u16.to_le_bytes());
+        b.extend_from_slice(&3u16.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&[6, 0, 0, 0]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        if let Some(jpeg) = jpg_from_raw {
+            b.extend_from_slice(jpeg);
+        }
+        b
+    }
+
+    fn bmff_box(name: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut b = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(name);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    /// Canon CR3 layout: moov → Canon uuid (CMT1 TIFF + THMB thumbnail), then
+    /// the preview uuid holding PRVW, then mdat.
+    fn fake_cr3(thumb: &[u8], preview: &[u8]) -> Vec<u8> {
+        let mut canon = vec![0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b, 0x6a, 0x48];
+        canon.extend(bmff_box(b"CMT1", &tiff_with(42, None)));
+        let mut thmb = vec![0u8; 16];
+        thmb.extend_from_slice(thumb);
+        canon.extend(bmff_box(b"THMB", &thmb));
+        let mut prvw_uuid = vec![0xea, 0xf4, 0x2b, 0x5e, 0x1c, 0x98, 0x4b, 0x88, 0xb9, 0xfb, 0xb7, 0xdc, 0x40, 0x6e, 0x4d, 0x16];
+        prvw_uuid.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        let mut prvw = vec![0u8; 16];
+        prvw.extend_from_slice(preview);
+        prvw_uuid.extend(bmff_box(b"PRVW", &prvw));
+        let mut out = bmff_box(b"ftyp", b"crx \0\0\0\x01crx isom");
+        out.extend(bmff_box(b"moov", &bmff_box(b"uuid", &canon)));
+        out.extend(bmff_box(b"uuid", &prvw_uuid));
+        out.extend(bmff_box(b"mdat", &[0u8; 32]));
+        out
+    }
+
+    #[test]
+    fn panasonic_jpg_from_raw_is_found() {
+        let preview = jpeg(1920, 1080);
+        let rw2 = tiff_with(0x55, Some(&preview));
+        assert_eq!(largest_embedded_jpeg(&rw2).map(<[u8]>::len), Some(preview.len()));
+        assert_eq!(orientation(&rw2), Some(6));
+        assert!(is_raw_extension("RW2") && is_raw_extension("rwl"));
+    }
+
+    #[test]
+    fn canon_cr3_preview_and_orientation_are_found() {
+        let thumb = jpeg(160, 120);
+        let preview = jpeg(1620, 1080);
+        let cr3 = fake_cr3(&thumb, &preview);
+        let found = largest_embedded_jpeg(&cr3).expect("PRVW preview");
+        let img = image::load_from_memory_with_format(found, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!((img.width(), img.height()), (1620, 1080));
+        assert_eq!(orientation(&cr3), Some(6));
+        assert!(is_raw_extension("CR3"));
+    }
+
+    #[test]
+    fn olympus_header_orientation_is_read() {
+        assert_eq!(orientation(&tiff_with(0x4F52, None)), Some(6));
+        assert_eq!(orientation(b"FUJIFILMCCD-RAW 0201"), None);
+        assert_eq!(orientation(&fake_raw(&jpeg(8, 8), &jpeg(16, 16))), None);
     }
 
     /// `FILEID_RAW_SAMPLE=/path/to/file.ARW cargo test raw_preview -- --ignored`
