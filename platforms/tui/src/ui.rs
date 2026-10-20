@@ -12,7 +12,8 @@ use ratatui::Frame;
 
 use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, DownloadState, Tab};
 use crate::context::terminal_text;
-use crate::data::{human_size, short, PLAN_CAP};
+use crate::data::{short, PLAN_CAP};
+use fileid_engine::util::display::{self, file_size_i64, fmt_date};
 
 // ── Palette — lifted from the design's terminal panels (NOT the beige page) ──
 /// Main panel background (`#141417`). Painted under the whole UI so light
@@ -253,8 +254,8 @@ fn render_model_banner(f: &mut Frame, app: &App, area: Rect) -> Rect {
     rows[1]
 }
 
-/// The AI-model install gauge (the SHARED CONTRACT made visible). A gold-tinted
-/// band pinned above every tab while a `fileid models download` runs: a title
+/// The AI-model install gauge. A gold-tinted band pinned above every tab while
+/// models download: a title
 /// row (`⟳ Installing AI models…`, or a green `✓ … press s to scan` once done),
 /// a ratatui [`Gauge`] (gold fill on a dark track, the overall percent centered),
 /// and — where there's room — the live label beneath (`arcface · 182/271 MB · …`).
@@ -568,7 +569,7 @@ fn render_file_detail(f: &mut Frame, app: &App, area: Rect, file: Option<&crate:
                 fr.extension.to_uppercase()
             ),
         ),
-        kv("Size", &human_size(fr.size)),
+        kv("Size", &file_size_i64(fr.size)),
         kv(
             "Modified",
             &fr.modified.map_or_else(|| "—".into(), fmt_date),
@@ -1713,7 +1714,7 @@ fn name_pad(
 /// name, and a right-aligned size.
 fn file_row(content_w: usize, fr: &crate::data::FileRow) -> Vec<Span<'static>> {
     let (code, color) = kind_code(&fr.kind);
-    let size = human_size(fr.size);
+    let size = file_size_i64(fr.size);
     let sizew = size.chars().count();
     let (name, pad) = name_pad(content_w, 5, sizew, &basename(&fr.path), 1, 4); // 5 = "CODE " field
     vec![
@@ -1727,7 +1728,7 @@ fn file_row(content_w: usize, fr: &crate::data::FileRow) -> Vec<Span<'static>> {
 /// One People group row: a per-person coloured face dot (cycled by id, the
 /// terminal stand-in for the mockup's distinct avatar gradients), the name
 /// (faint when still unnamed), and a right-aligned photo/face tally.
-fn person_row(content_w: usize, p: &crate::data::PersonRow) -> Vec<Span<'static>> {
+fn person_row(content_w: usize, p: &crate::data::Person) -> Vec<Span<'static>> {
     let named = p.name != "Unnamed" && p.name != "Unknown";
     let avatar = [LAVENDER, CYAN, PINK, GOLD, GREEN];
     let dot_color = avatar[(p.id.unsigned_abs() as usize) % avatar.len()];
@@ -1751,7 +1752,7 @@ fn dup_row(content_w: usize, g: &crate::data::DupGroup) -> Vec<Span<'static>> {
     let count = format!("{}×", g.copies);
     let cw = count.chars().count();
     let name = g.paths.first().map_or_else(String::new, |p| basename(p));
-    let size = human_size(g.size);
+    let size = file_size_i64(g.size);
     let sizew = size.chars().count();
     let (name_t, pad) = name_pad(content_w, cw + 1, sizew, &name, 1, 4);
     vec![
@@ -1860,7 +1861,7 @@ fn friendly_kind(kind: &str) -> &'static str {
 }
 
 fn basename(path: &str) -> String {
-    terminal_text(path.rsplit(['/', '\\']).next().unwrap_or(path))
+    terminal_text(display::basename(path))
 }
 
 /// Show the destination relative to its trailing segments (the category folder +
@@ -1872,37 +1873,7 @@ fn rel_dest(dest: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    let s = terminal_text(s);
-    if s.chars().count() <= max {
-        s
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
-/// Unix seconds → `YYYY-MM-DD HH:MM` UTC (Howard Hinnant civil-from-days; no
-/// deps). Ported from the CLI's `info::unix_to_date`.
-fn fmt_date(secs: f64) -> String {
-    if !secs.is_finite() || secs <= 0.0 {
-        return "—".to_string();
-    }
-    let total = secs as i64;
-    let days = total.div_euclid(86_400);
-    let rem = total.rem_euclid(86_400);
-    let (hh, mm) = (rem / 3600, (rem % 3600) / 60);
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    format!("{year:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC")
+    display::truncate(&terminal_text(s), max)
 }
 
 #[cfg(test)]
@@ -1938,13 +1909,6 @@ mod tests {
     fn rel_dest_keeps_two_tail_segments() {
         assert_eq!(rel_dest("/lib/Images/2021/p.jpg"), "2021/p.jpg");
         assert_eq!(rel_dest("/lib/Images/2021/p\x1b[2J.jpg"), "2021/p�[2J.jpg");
-    }
-
-    #[test]
-    fn fmt_date_epoch_and_known() {
-        assert_eq!(fmt_date(0.0), "—");
-        // 2021-01-01 00:00 UTC == 1609459200
-        assert_eq!(fmt_date(1_609_459_200.0), "2021-01-01 00:00 UTC");
     }
 
     #[test]

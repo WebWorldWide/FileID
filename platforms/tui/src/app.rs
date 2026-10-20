@@ -105,7 +105,7 @@ pub struct App {
     pub browser: Option<Browser>,
 
     // ── AI-model download (Settings `D`) ────────────────────────────────────
-    /// A `fileid models download --all` is in flight (drives the status line +
+    /// An AI-model download is in flight (drives the status line +
     /// blocks a second concurrent download).
     pub downloading: bool,
     /// Set when the user presses `D`; `main` consumes it, spawns the download
@@ -442,7 +442,7 @@ impl App {
         self.reload_requested = true;
     }
 
-    /// Arm a `fileid models download` (the global `D` key): `main`
+    /// Arm an AI-model download (the global `D` key): `main`
     /// consumes `download_requested` next tick and spawns the worker thread.
     /// Guarded so a second download — or a download racing a live scan — can't
     /// start. Never blocks: the spawned thread streams progress to the status
@@ -1931,7 +1931,7 @@ mod tests {
         );
     }
 
-    /// The porcelain gauge state: `DownloadProgress` advances the bar + label,
+    /// The install gauge state: `DownloadProgress` advances the bar + label,
     /// the final 100/done flips `done`, and the worker's terminal `Done` clears
     /// the gauge — the exact lifecycle `ui.rs` renders.
     #[test]

@@ -38,6 +38,8 @@ impl ExactCandidates {
 #[derive(Debug, Default)]
 pub struct ExactListing {
     pub groups: Vec<ExactDuplicateGroup>,
+    /// Candidates admitted under the caps and re-hashed.
+    pub admitted: u64,
     /// Admitted candidates that were missing, unreadable, changed or cancelled.
     pub unreadable: usize,
     pub skipped_candidates: u64,
@@ -125,9 +127,11 @@ pub fn exact_groups(conn: &Connection, caps: ExactCaps, cancel: impl Fn() -> boo
     let Some(selected) = exact_candidates(conn, caps)? else {
         return Ok(None);
     };
+    let admitted = selected.candidates.len() as u64;
     let grouping = group_exact_duplicates_until(selected.candidates, cancel);
     Ok(Some(ExactListing {
         groups: grouping.groups,
+        admitted,
         unreadable: grouping.skipped,
         skipped_candidates: selected.skipped_candidates,
         skipped_bytes: selected.skipped_bytes,

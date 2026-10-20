@@ -10,16 +10,19 @@
 //! into unchanged (see README "Stubbed").
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender as Sender;
 
 use anyhow::Result;
 use rusqlite::params;
 
-use fileid_engine::pipeline::discovery::FileKind;
-use fileid_engine::pipeline::restructure::{self, FileForClassify};
-use fileid_engine::util::content_hash::{group_exact_duplicates_until, ExactDuplicateCandidate};
+use fileid_engine::pipeline::restructure;
+use fileid_engine::read::people::active_people;
+pub use fileid_engine::read::people::Person;
+use fileid_engine::read::restructure::{library_root, plan_row_to_file, PLAN_FILES_SQL};
+use fileid_engine::read::text::{escape_like, fts_phrase_query};
+use fileid_engine::read::{dupes, dupes::ExactCaps};
 
 /// Max rows pulled into any one list — keeps the snapshot bounded on huge
 /// libraries while staying well past what fits on screen.
@@ -27,7 +30,7 @@ const ROW_CAP: usize = 5_000;
 const DUP_GROUP_CAP: usize = 1_000;
 const DUP_MEMBER_CAP: usize = 100;
 const DUP_CANDIDATE_CAP: usize = 5_000;
-const DUP_READ_BUDGET_BYTES: i64 = 64 * 1024 * 1024 * 1024;
+const DUP_READ_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub(crate) const PLAN_CAP: usize = 3_000;
 static ACTIVE_DUPE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -41,14 +44,6 @@ pub struct FileRow {
     pub modified: Option<f64>,
     pub has_text: bool,
     pub has_faces: bool,
-}
-
-#[derive(Clone)]
-pub struct PersonRow {
-    pub id: i64,
-    pub name: String,
-    pub faces: i64,
-    pub files: i64,
 }
 
 #[derive(Clone)]
@@ -92,7 +87,7 @@ pub struct Snapshot {
     pub query: String,
     pub files: Vec<FileRow>,
     pub files_truncated: bool,
-    pub people: Vec<PersonRow>,
+    pub people: Vec<Person>,
     pub analyses: Vec<AnalyzeRow>,
     pub analyses_truncated: bool,
     pub dupes: Vec<DupGroup>,
@@ -119,10 +114,9 @@ pub enum LoadMsg {
     },
     Status(String),
     ScanPartial(String),
-    /// Structured AI-model install progress, parsed from the CLI's porcelain
-    /// `PROGRESS\t{percent}\t{label}` line (see [`crate::models`]): `percent` is
-    /// the 0–100 overall figure, `label` a short human string like
-    /// `arcface · 182/271 MB · 3.4 MB/s · model 2/9`. Drives the install gauge.
+    /// AI-model install progress from [`crate::models`]: `percent` is the 0–100
+    /// overall figure, `label` a short human string like
+    /// `arcface · 182/271 MB · 3.4 MB/s · model 2/5`. Drives the install gauge.
     DownloadProgress {
         percent: u16,
         label: String,
@@ -226,7 +220,7 @@ pub(crate) fn load(
     )?;
 
     let _ = send_versioned(tx, generation, LoadMsg::Status("Reading people…".into()));
-    let people = load_people(&conn)?;
+    let people = active_people(&conn, Some(ROW_CAP))?;
 
     let _ = send_versioned(
         tx,
@@ -360,14 +354,10 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
 fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Result<Vec<i64>> {
     let mut ids = Vec::with_capacity(cap);
     let mut seen = HashSet::with_capacity(cap);
-    let fts = raw
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let fts = fts_phrase_query(raw);
 
     for table in ["doc_fts", "ocr_fts"] {
-        if ids.len() >= cap {
+        if fts.is_empty() || ids.len() >= cap {
             break;
         }
         let sql = format!(
@@ -388,12 +378,7 @@ fn search_file_ids(conn: &rusqlite::Connection, raw: &str, cap: usize) -> Result
     }
 
     if ids.len() < cap {
-        let escaped = raw
-            .to_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let like = format!("%{escaped}%");
+        let like = format!("%{}%", escape_like(&raw.to_lowercase()));
         let mut stmt = conn.prepare(
             "SELECT id FROM files \
              WHERE failed = 0 AND lower(COALESCE(path_search, path_text)) LIKE ?1 ESCAPE '\\' \
@@ -485,35 +470,6 @@ fn load_snippets(conn: &rusqlite::Connection, file_ids: &[i64]) -> Result<HashMa
     Ok(out)
 }
 
-fn load_people(conn: &rusqlite::Connection) -> Result<Vec<PersonRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT p.id, p.name, p.first_name, p.last_name, p.is_unknown, \
-            (SELECT COUNT(DISTINCT fp.file_id) FROM face_prints fp JOIN files f ON f.id = fp.file_id \
-             WHERE fp.person_id = p.id AND f.failed = 0) AS files, \
-            (SELECT COUNT(*) FROM face_prints fp JOIN files f ON f.id = fp.file_id \
-             WHERE fp.person_id = p.id AND f.failed = 0) AS faces \
-         FROM persons p WHERE EXISTS ( \
-             SELECT 1 FROM face_prints fp JOIN files f ON f.id = fp.file_id \
-             WHERE fp.person_id = p.id AND f.failed = 0 \
-         ) ORDER BY faces DESC, p.id ASC LIMIT ?1",
-    )?;
-    let rows = stmt
-        .query_map(params![ROW_CAP as i64], |r| {
-            let name: Option<String> = r.get(1)?;
-            let first: Option<String> = r.get(2)?;
-            let last: Option<String> = r.get(3)?;
-            let is_unknown = r.get::<_, Option<i64>>(4)?.unwrap_or(0) != 0;
-            Ok(PersonRow {
-                id: r.get(0)?,
-                name: display_name(name, first, last, is_unknown),
-                files: r.get(5)?,
-                faces: r.get(6)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 fn load_analyses(conn: &rusqlite::Connection) -> Result<(Vec<AnalyzeRow>, bool, i64)> {
     let filter = "failed = 0 AND (NULLIF(TRIM(vlm_description), '') IS NOT NULL OR NULLIF(TRIM(vlm_proposed_name), '') IS NOT NULL)";
     let total: i64 = conn.query_row(
@@ -544,31 +500,6 @@ fn load_analyses(conn: &rusqlite::Connection) -> Result<(Vec<AnalyzeRow>, bool, 
     Ok((rows, truncated, total))
 }
 
-fn display_name(
-    name: Option<String>,
-    first: Option<String>,
-    last: Option<String>,
-    is_unknown: bool,
-) -> String {
-    if let Some(n) = name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        return n.to_string();
-    }
-    let composed = [first.as_deref(), last.as_deref()]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !composed.is_empty() {
-        composed
-    } else if is_unknown {
-        "Unknown".to_string()
-    } else {
-        "Unnamed".to_string()
-    }
-}
-
 #[cfg(test)]
 fn load_dupes(conn: &rusqlite::Connection) -> Result<(Vec<DupGroup>, bool, i64)> {
     load_dupes_until(conn, || false)
@@ -578,50 +509,16 @@ fn load_dupes_until(
     conn: &rusqlite::Connection,
     should_cancel: impl Fn() -> bool,
 ) -> Result<(Vec<DupGroup>, bool, i64)> {
-    let candidate_stats: (i64, i64) = conn.query_row(
-        "WITH candidate_sizes AS ( \
-             SELECT size_bytes FROM files WHERE failed = 0 AND content_hash IS NOT NULL \
-             GROUP BY size_bytes HAVING COUNT(*) > 1 \
-         ) \
-         SELECT COUNT(*), COALESCE(SUM(MAX(f.size_bytes, 0)), 0) FROM files f \
-         JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
-         WHERE f.failed = 0 AND f.content_hash IS NOT NULL",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    let candidate_count = candidate_stats.0;
-    let mut stmt = conn.prepare(
-        "WITH candidate_sizes AS ( \
-             SELECT size_bytes FROM files WHERE failed = 0 AND content_hash IS NOT NULL \
-             GROUP BY size_bytes HAVING COUNT(*) > 1 \
-         ) \
-         SELECT f.id, f.path_text, f.size_bytes \
-         FROM files f JOIN candidate_sizes s ON s.size_bytes = f.size_bytes \
-         WHERE f.failed = 0 AND f.content_hash IS NOT NULL \
-         ORDER BY f.size_bytes, f.path_text, f.id LIMIT ?1",
-    )?;
-    let queried = stmt
-        .query_map(params![DUP_CANDIDATE_CAP as i64], |row| {
-            Ok(ExactDuplicateCandidate {
-                id: row.get(0)?,
-                path: PathBuf::from(row.get::<_, String>(1)?),
-                indexed_size: row.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut selected_bytes = 0i64;
-    let mut candidates = Vec::with_capacity(queried.len());
-    for candidate in queried {
-        let bytes = candidate.indexed_size.max(0);
-        if bytes > DUP_READ_BUDGET_BYTES - selected_bytes {
-            break;
-        }
-        selected_bytes += bytes;
-        candidates.push(candidate);
-    }
-    let grouping = group_exact_duplicates_until(candidates, should_cancel);
-    let skipped = grouping.skipped;
-    let mut groups: Vec<DupGroup> = grouping
+    let caps = ExactCaps {
+        max_candidates: DUP_CANDIDATE_CAP as u64,
+        max_bytes: DUP_READ_BUDGET_BYTES,
+    };
+    let Some(listing) = dupes::exact_groups(conn, caps, should_cancel)? else {
+        return Ok((Vec::new(), false, 0));
+    };
+    let candidate_count = (listing.admitted + listing.skipped_candidates) as i64;
+    let partial = listing.is_partial() || listing.unreadable > 0;
+    let mut groups: Vec<DupGroup> = listing
         .groups
         .into_iter()
         .map(|group| DupGroup {
@@ -636,53 +533,23 @@ fn load_dupes_until(
         })
         .collect();
     groups.sort_by(|a, b| b.copies.cmp(&a.copies).then_with(|| a.paths.cmp(&b.paths)));
-    let candidate_truncated = candidate_count > DUP_CANDIDATE_CAP as i64;
-    let byte_truncated = candidate_stats.1 > DUP_READ_BUDGET_BYTES;
     let group_truncated = groups.len() > DUP_GROUP_CAP;
     groups.truncate(DUP_GROUP_CAP);
-    Ok((
-        groups,
-        candidate_truncated || byte_truncated || group_truncated || skipped > 0,
-        candidate_count,
-    ))
+    Ok((groups, partial || group_truncated, candidate_count))
 }
 
 /// Build a read-only restructure preview by feeding indexed file metadata into
-/// the engine's pure `restructure::classify` — the identical rule cascade the
-/// desktop apps and CLI use. Read-only: nothing is moved.
+/// the engine's pure `restructure::classify` — the identical loader and rule
+/// cascade the desktop apps and CLI use. Read-only: nothing is moved.
 fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)> {
-    let (root, candidate_count) = plan_root_and_count(conn)?;
-    if candidate_count == 0 {
+    let Some((root, candidate_count)) = library_root(conn)? else {
         return Ok((Vec::new(), false, 0));
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT f.id, f.path_text, f.extension, f.modified_at, f.created_at, \
-            f.location_lat, f.location_lon, f.has_text, f.vlm_proposed_name, \
-            (SELECT p.name FROM face_prints fp JOIN persons p ON p.id = fp.person_id \
-             WHERE fp.file_id = f.id LIMIT 1) AS person_name \
-         FROM files f WHERE f.failed = 0 ORDER BY f.scanned_at DESC, f.id DESC LIMIT ?1",
-    )?;
-    let files: Vec<FileForClassify> = stmt
-        .query_map(params![PLAN_CAP as i64], |r| {
-            let path: String = r.get(1)?;
-            let ext: Option<String> = r.get(2)?;
-            Ok(FileForClassify {
-                file_id: r.get(0)?,
-                source: PathBuf::from(path),
-                kind: FileKind::from_extension(ext.as_deref().unwrap_or("")),
-                modified_unix: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                created_unix: r.get(4)?,
-                person_name: r.get(9)?,
-                location_lat: r.get(5)?,
-                location_lon: r.get(6)?,
-                has_text: r.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
-                vlm_proposed: r.get(8)?,
-                identity: None,
-            })
-        })?
+    };
+    let mut stmt = conn.prepare(PLAN_FILES_SQL)?;
+    let files = stmt
+        .query_map(params!["", "", ""], plan_row_to_file)?
+        .take(PLAN_CAP)
         .collect::<rusqlite::Result<Vec<_>>>()?;
-
     let plan = restructure::classify(&files, &root)
         .into_iter()
         .map(|m| PlanRow {
@@ -693,58 +560,6 @@ fn compute_plan(conn: &rusqlite::Connection) -> Result<(Vec<PlanRow>, bool, i64)
         })
         .collect();
     Ok((plan, candidate_count > PLAN_CAP as i64, candidate_count))
-}
-
-fn plan_root_and_count(conn: &rusqlite::Connection) -> Result<(PathBuf, i64)> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM files WHERE failed = 0", [], |row| {
-        row.get(0)
-    })?;
-    if count == 0 {
-        return Ok((
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            0,
-        ));
-    }
-    // The longest common string prefix of a sorted set equals that of its first
-    // and last members; comparing path components of those indexed extremes is
-    // therefore exact without transferring every catalog path into the TUI.
-    let first: String = conn.query_row(
-        "SELECT path_text FROM files WHERE failed = 0 ORDER BY path_text ASC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?;
-    let last: String = conn.query_row(
-        "SELECT path_text FROM files WHERE failed = 0 ORDER BY path_text DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    )?;
-    let first = PathBuf::from(first);
-    let last = PathBuf::from(last);
-    Ok((
-        common_ancestor([first.as_path(), last.as_path()].into_iter()),
-        count,
-    ))
-}
-
-/// Longest shared directory prefix of all sources; falls back to the current
-/// working directory when there's nothing in common.
-fn common_ancestor<'a>(paths: impl Iterator<Item = &'a Path>) -> PathBuf {
-    let mut prefix: Option<Vec<Component<'a>>> = None;
-    for p in paths {
-        let parent = p.parent().unwrap_or(p);
-        let comps: Vec<Component> = parent.components().collect();
-        prefix = Some(match prefix {
-            None => comps,
-            Some(prev) => {
-                let n = prev.iter().zip(&comps).take_while(|(a, b)| a == b).count();
-                prev.into_iter().take(n).collect()
-            }
-        });
-    }
-    match prefix {
-        Some(comps) if !comps.is_empty() => comps.into_iter().map(Component::as_os_str).collect(),
-        _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-    }
 }
 
 /// Trim a long absolute path for one-line display: keep the last few segments.
@@ -776,21 +591,6 @@ pub fn short(path: &str) -> String {
     format!("…{tail}")
 }
 
-/// Human-readable byte size (mirrors the CLI's `human_size`).
-pub fn human_size(bytes: i64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    format!("{size:.1} {}", UNITS[unit])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,21 +617,6 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
-    }
-
-    #[test]
-    fn human_size_scales() {
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(1024), "1.0 KB");
-        assert_eq!(human_size(1024 * 1024), "1.0 MB");
-    }
-
-    #[test]
-    fn common_ancestor_of_siblings() {
-        let a = PathBuf::from("/home/u/Pictures/2021/a.jpg");
-        let b = PathBuf::from("/home/u/Pictures/2022/b.jpg");
-        let root = common_ancestor([a.as_path(), b.as_path()].into_iter());
-        assert_eq!(root, PathBuf::from("/home/u/Pictures"));
     }
 
     #[test]
@@ -933,13 +718,8 @@ mod tests {
         );
         let (matches, _) = load_files(&conn, "needle").unwrap();
         assert!(matches.is_empty());
-        let (_, count) = plan_root_and_count(&conn).unwrap();
+        let (_, count) = library_root(&conn).unwrap().unwrap();
         assert_eq!(count, 1);
-        let people = load_people(&conn).unwrap();
-        assert_eq!(people.len(), 1);
-        assert_eq!(people[0].id, 10);
-        assert_eq!(people[0].files, 1);
-        assert_eq!(people[0].faces, 2);
     }
 
     #[test]
@@ -978,7 +758,7 @@ mod tests {
         }
         tx.commit().unwrap();
 
-        let (root, count) = plan_root_and_count(&conn).unwrap();
+        let (root, count) = library_root(&conn).unwrap().unwrap();
         assert_eq!(root, PathBuf::from("/library"));
         assert_eq!(count, (PLAN_CAP + 5) as i64);
         let (plan, truncated, candidates) = compute_plan(&conn).unwrap();
@@ -1063,7 +843,7 @@ mod tests {
                 "INSERT INTO files \
                  (id, path_text, path_hash, size_bytes, modified_at, scanned_at, kind, extension, content_hash) \
                  VALUES (?1, printf('/huge-%d.bin', ?1), ?1, ?2, 0, 0, 'other', '', X'01')",
-                params![id, DUP_READ_BUDGET_BYTES + 1],
+                params![id, DUP_READ_BUDGET_BYTES as i64 + 1],
             )
             .unwrap();
         }
