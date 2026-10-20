@@ -1365,17 +1365,11 @@ private struct PDFPreview: View {
 /// Toolbar's "Open with default app" covers full-fidelity preview.
 private struct UniversalPreview: View {
     let url: URL
-    @State private var img: NSImage?
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.3)
-            if let img {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(20)
-            } else {
+            AsyncThumbnail(url: url, size: 1024, contentMode: .fit) {
                 VStack(spacing: 10) {
                     Image(systemName: iconForExtension(url.pathExtension))
                         .font(.system(size: 96, weight: .light))
@@ -1388,9 +1382,7 @@ private struct UniversalPreview: View {
                         .foregroundStyle(Theme.text3)
                 }
             }
-        }
-        .task(id: url) {
-            img = await ThumbnailService.shared.thumbnail(for: url, size: 1024)
+            .padding(20)
         }
     }
 

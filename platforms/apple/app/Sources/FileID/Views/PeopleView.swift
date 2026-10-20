@@ -1078,7 +1078,6 @@ private struct PersonFileTile: View {
     let file: FileRow
     var selectMode: Bool = false
     var isChecked: Bool = false
-    @State private var img: NSImage?
 
     var body: some View {
         VStack(spacing: 4) {
@@ -1098,10 +1097,6 @@ private struct PersonFileTile: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
-        .task(id: file.id) {
-            img = await ThumbnailService.shared.thumbnail(for: file.url, size: 240)
-        }
-        .onDisappear { img = nil }
         .contextMenu {
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -1116,13 +1111,8 @@ private struct PersonFileTile: View {
             : "")
     }
 
-    @ViewBuilder
     private var tile: some View {
-        if let i = img {
-            Image(nsImage: i).resizable().scaledToFill()
-        } else {
-            Image(systemName: "photo").foregroundStyle(Theme.text3)
-        }
+        AsyncThumbnail(url: file.url, size: 240) { Image(systemName: "photo").foregroundStyle(Theme.text3) }
     }
 
     @ViewBuilder

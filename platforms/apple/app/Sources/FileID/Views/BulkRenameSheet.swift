@@ -257,7 +257,6 @@ private struct BulkRenameRow: View {
     let isSelected: Bool
     let onToggle: (Int64) -> Void
 
-    @State private var thumb: NSImage?
 
     var body: some View {
         let oldName = file.url.lastPathComponent
@@ -272,24 +271,17 @@ private struct BulkRenameRow: View {
                 .foregroundStyle(isSelected ? Theme.gold : .secondary)
                 .onTapGesture { onToggle(file.id) }
 
-            // Thumbnail — reuses ThumbnailService (QuickLookThumbnailing
-            // backed). Works for images, videos, PDFs, and Office docs.
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Color.secondary.opacity(0.10))
                     .frame(width: 64, height: 64)
-                if let thumb {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 64, height: 64)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
-                        .transition(.opacity)
-                } else {
+                AsyncThumbnail(url: file.url, size: 96) {
                     Image(systemName: kindFallbackIcon(file.kind))
                         .font(Theme.Font.body(16, .semibold))
                         .foregroundStyle(Theme.text3)
                 }
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
             }
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
@@ -322,9 +314,6 @@ private struct BulkRenameRow: View {
             RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(isSelected ? Theme.gold.opacity(0.05) : Color.clear)
         )
-        .task(id: file.id) {
-            thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 96)
-        }
     }
 
     private func kindFallbackIcon(_ kind: String) -> String {
