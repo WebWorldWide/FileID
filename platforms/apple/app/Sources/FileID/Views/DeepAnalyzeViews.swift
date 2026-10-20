@@ -591,7 +591,7 @@ struct DeepAnalyzeView: View {
                     }
                     GridRow {
                         Text("Estimated batch time").foregroundStyle(Theme.text3)
-                        Text(formatDuration(seconds: pendingMins * 60))
+                        Text(DurationText.short(pendingMins * 60))
                             .font(Theme.Font.body(13, .medium)).monospacedDigit()
                     }
                 }
@@ -775,7 +775,7 @@ struct DeepAnalyzeView: View {
                         Text("Working…").font(Theme.Font.body(14, .semibold))
                         Spacer()
                         if let eta = p.etaSeconds {
-                            Text("ETA \(formatDuration(seconds: eta))")
+                            Text("ETA \(DurationText.short(eta))")
                                 .font(Theme.Font.mono(12.5)).foregroundStyle(Theme.gold)
                         }
                     }
@@ -817,7 +817,7 @@ struct DeepAnalyzeView: View {
                     Text(c.cancelled ? "Cancelled" : "Last run complete").font(Theme.Font.body(14, .semibold))
                     Spacer()
                 }
-                Text("\(c.processed) processed · \(c.failed) failed · \(formatDuration(seconds: c.totalSeconds)) wall time")
+                Text("\(c.processed) processed · \(c.failed) failed · \(DurationText.short(c.totalSeconds)) wall time")
                     .font(Theme.Font.mono(12.5)).foregroundStyle(Theme.text3)
             }
         }
@@ -839,16 +839,6 @@ struct DeepAnalyzeView: View {
                 }
             }
         }
-    }
-
-    private func formatDuration(seconds: Double) -> String {
-        let s = max(0, Int(seconds.rounded()))
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
     }
 }
 

@@ -348,7 +348,7 @@ struct LibraryView: View {
                 Text(String(format: "%.0f files per second", p.filesPerSecond))
                     .foregroundStyle(Theme.gold)
                 if let eta = p.etaSeconds, eta > 0 {
-                    Text("about \(formatETA(eta)) left")
+                    Text("about \(DurationText.short(eta)) left")
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
@@ -370,14 +370,6 @@ struct LibraryView: View {
         )
         .padding(.horizontal, 20)
         .padding(.top, 16)
-    }
-
-    private func formatETA(_ seconds: Double) -> String {
-        let s = Int(seconds.rounded())
-        let h = s / 3600; let m = (s % 3600) / 60; let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
     }
 
     // MARK: - Deep Analyze live headline
@@ -417,7 +409,7 @@ struct LibraryView: View {
             if let p {
                 HStack(spacing: 16) {
                     if let eta = p.etaSeconds, eta > 0 {
-                        Text("ETA \(formatETA(eta))")
+                        Text("ETA \(DurationText.short(eta))")
                     }
                     if let cur = p.currentPath {
                         Text("Now: \((cur as NSString).lastPathComponent)")

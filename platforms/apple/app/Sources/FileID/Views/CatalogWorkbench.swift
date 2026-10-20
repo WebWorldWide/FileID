@@ -151,7 +151,7 @@ struct CatalogWorkbench: View {
 
     private func hitMeta(_ hit: CatalogHit) -> String {
         var parts: [String] = []
-        if let time = hit.startSeconds { parts.append(Timecode.string(time)) }
+        if let time = hit.startSeconds { parts.append(DurationText.clock(time)) }
         if let page = hit.page { parts.append("Page \(page)") }
         switch hit.kind {
         case "sampledFrame": parts.append("Sampled frame, unverified")
@@ -172,7 +172,7 @@ struct CatalogWorkbench: View {
         let video = isVideo(hit.path)
         return Panel {
             PanelHeader("Player") {
-                MetaText(video && duration > 0 ? Timecode.string(clock.seconds) + " / " + Timecode.string(duration) : hitMeta(hit), size: 12)
+                MetaText(video && duration > 0 ? DurationText.clock(clock.seconds) + " / " + DurationText.clock(duration) : hitMeta(hit), size: 12)
                     .monospacedDigit()
             }
             VStack(alignment: .leading, spacing: 12) {
@@ -294,7 +294,7 @@ struct CatalogWorkbench: View {
         return HStack(alignment: .center, spacing: 12) {
             Button { seek(chapter.startSeconds) } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(Timecode.string(chapter.startSeconds))
+                    Text(DurationText.clock(chapter.startSeconds))
                         .font(Theme.Font.mono(12, .medium)).foregroundStyle(current ? Theme.gold : Theme.text2)
                         .frame(width: 56, alignment: .leading)
                     VStack(alignment: .leading, spacing: 2) {
@@ -309,7 +309,7 @@ struct CatalogWorkbench: View {
                 .frame(minHeight: Theme.Metrics.hitTarget)
             }
             .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
-            .accessibilityLabel("\(chapter.title), at \(Timecode.spoken(chapter.startSeconds))")
+            .accessibilityLabel("\(chapter.title), at \(DurationText.spoken(chapter.startSeconds))")
             .accessibilityHint("Plays from this chapter")
             StatusPill(text: status.0, color: status.1)
             if draft {
@@ -380,11 +380,11 @@ struct CatalogWorkbench: View {
                     Text(appearance.text).font(Theme.Font.body(13)).foregroundStyle(Theme.text1).lineLimit(1)
                     Spacer(minLength: 0)
                     if let time = appearance.startSeconds {
-                        Button(Timecode.string(time)) { seek(time) }
+                        Button(DurationText.clock(time)) { seek(time) }
                             .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                             .font(Theme.Font.mono(12))
                             .disabled(player == nil)
-                            .accessibilityLabel("Play from \(Timecode.spoken(time))")
+                            .accessibilityLabel("Play from \(DurationText.spoken(time))")
                     } else {
                         MetaText("Sampled image", size: 11.5)
                     }
@@ -627,7 +627,7 @@ struct MomentTimeline: View {
                     while t <= duration + 0.001 {
                         let px = x(t, size.width)
                         context.fill(Path(CGRect(x: px, y: 0, width: 1, height: 5)), with: .color(Theme.hairlineStrong))
-                        let label = context.resolve(Text(Timecode.string(t)).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3))
+                        let label = context.resolve(Text(DurationText.clock(t)).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3))
                         let anchor: UnitPoint = t == 0 ? .topLeading : (t + step > duration + 0.001 ? .topTrailing : .top)
                         context.draw(label, at: CGPoint(x: px, y: 7), anchor: anchor)
                         t += step
@@ -663,7 +663,7 @@ struct MomentTimeline: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name)
-        .accessibilityValue("\(value), playhead at \(Timecode.spoken(playhead))")
+        .accessibilityValue("\(value), playhead at \(DurationText.spoken(playhead))")
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: onSeek(min(duration, playhead + 5))
@@ -758,20 +758,3 @@ enum MediaPlayback {
     }
 }
 
-enum Timecode {
-    static func string(_ seconds: Double) -> String {
-        let total = Int(max(0, seconds.isFinite ? seconds : 0).rounded(.down))
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-    }
-
-    static func spoken(_ seconds: Double) -> String {
-        let total = Int(max(0, seconds.isFinite ? seconds : 0).rounded(.down))
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        var parts: [String] = []
-        if h > 0 { parts.append("\(h) hour\(h == 1 ? "" : "s")") }
-        if m > 0 { parts.append("\(m) minute\(m == 1 ? "" : "s")") }
-        parts.append("\(s) second\(s == 1 ? "" : "s")")
-        return parts.joined(separator: " ")
-    }
-}
