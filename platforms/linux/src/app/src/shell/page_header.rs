@@ -1,6 +1,7 @@
 use gtk::prelude::*;
 
-use super::{hbox, label, section_label, spacer, vbox, Page};
+use super::Page;
+use crate::v3::{hbox, label, section as section_label, spacer, vbox};
 
 /// Crumb (AREA / PAGE), serif 34 title and trailing page meta over a hairline.
 #[derive(Clone)]

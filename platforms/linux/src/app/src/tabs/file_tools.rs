@@ -326,9 +326,7 @@ impl ToolsUi {
                 .valign(gtk::Align::Center)
                 .build();
             check.update_property(&[gtk::accessible::Property::Label(&file.name)]);
-            let row = v3::hbox(10);
-            row.add_css_class("v3-row-pad");
-            row.add_css_class("v3-soft-row");
+            let row = v3::list_row(10);
             row.append(&check);
             let text = v3::vbox(1);
             text.append(&v3::mono(&file.name, "s12"));
@@ -632,11 +630,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     preview_body.append(&capability);
     let outputs = v3::vbox(0);
     preview_body.append(&outputs);
-    let pane_scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&preview_body)
-        .build();
+    let pane_scroll = v3::scroller(&preview_body);
     pane.append(&pane_scroll);
     let actions = v3::vbox(8);
     actions.add_css_class("v3-panel-pad");

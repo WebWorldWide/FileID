@@ -392,11 +392,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
         .tightening_threshold(760)
         .child(&thread)
         .build();
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&clamp)
-        .build();
+    let scroll = v3::scroller(&clamp);
     column.append(&scroll);
 
     let composer_box = v3::vbox(8);

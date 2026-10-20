@@ -4,9 +4,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::status::{percent, Job, JobAction, Status, Tone};
-use super::{
-    grouped, hbox, label, matching_pages, section_label, set_tone, spacer, vbox, Action, GrainBar,
-};
+use super::{grouped, matching_pages, set_tone, Action, GrainBar};
+use crate::v3::{hbox, label, section as section_label, spacer, vbox};
 
 #[derive(Debug, PartialEq)]
 pub struct SearchItem {

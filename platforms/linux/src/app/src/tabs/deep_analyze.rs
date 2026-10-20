@@ -1142,7 +1142,7 @@ impl ProposedRow {
 }
 
 fn query_status(active: String) -> async_channel::Receiver<StatusCounts> {
-    spawn_db(move |conn| status_counts(conn, &active))
+    crate::engine_client::read_db(move |conn| status_counts(conn, &active))
 }
 
 fn status_counts(conn: &rusqlite::Connection, active: &str) -> StatusCounts {
@@ -1180,7 +1180,7 @@ fn status_counts(conn: &rusqlite::Connection, active: &str) -> StatusCounts {
 }
 
 fn query_proposed() -> async_channel::Receiver<Vec<ProposedRow>> {
-    spawn_db(|conn| {
+    crate::engine_client::read_db(|conn| {
         let mut stmt = match conn.prepare(
             "SELECT id, path_text, extension, vlm_proposed_name, vlm_description FROM files \
              WHERE vlm_proposed_name IS NOT NULL AND vlm_proposed_name <> '' \
@@ -1213,7 +1213,7 @@ fn query_proposed() -> async_channel::Receiver<Vec<ProposedRow>> {
 }
 
 fn query_tag_groups(people: bool) -> async_channel::Receiver<Vec<(String, Vec<i64>)>> {
-    spawn_db(move |conn| {
+    crate::engine_client::read_db(move |conn| {
         let sql = if people {
             "SELECT fp.file_id, p.title, p.first_name, p.middle_name, p.last_name, p.suffix, p.name \
              FROM face_prints fp INNER JOIN persons p ON p.id = fp.person_id \
@@ -1274,38 +1274,6 @@ fn person_tag_name(parts: &[String], legacy: &str) -> String {
         legacy.trim().to_string()
     } else {
         parts.join(" ")
-    }
-}
-
-/// Run a closure against a fresh read-only DB connection off the main loop.
-/// Returns `T::default()` if no scan DB exists yet (mirrors `query_files`).
-fn spawn_db<T, F>(f: F) -> async_channel::Receiver<T>
-where
-    T: Default + Send + 'static,
-    F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
-{
-    let (tx, rx) = async_channel::bounded::<T>(1);
-    std::thread::spawn(move || {
-        let value = run_db(f);
-        let _ = tx.send_blocking(value);
-    });
-    rx
-}
-
-fn run_db<T, F>(f: F) -> T
-where
-    T: Default,
-    F: FnOnce(&rusqlite::Connection) -> T,
-{
-    let Ok(db_path) = fileid_engine::paths::db_path() else {
-        return T::default();
-    };
-    if !db_path.exists() {
-        return T::default();
-    }
-    match fileid_engine::db::open_read(&db_path) {
-        Ok(conn) => f(&conn),
-        Err(_) => T::default(),
     }
 }
 

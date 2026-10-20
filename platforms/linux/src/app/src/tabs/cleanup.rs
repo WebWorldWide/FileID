@@ -2019,7 +2019,7 @@ fn build_group(
         members.push(Member {
             id: r.id,
             path: r.path.clone(),
-            name: file_name(&r.path),
+            name: crate::v3::file_name(&r.path),
             size: r.size,
             modified: r.modified,
             kind: r.kind.clone(),
@@ -2165,13 +2165,6 @@ fn plural(n: usize) -> &'static str {
     } else {
         "s"
     }
-}
-
-fn file_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn hex(bytes: &[u8]) -> String {

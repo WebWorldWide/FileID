@@ -1790,7 +1790,7 @@ fn bind_photo_tile(engine: &Rc<RefCell<EngineClient>>, item: &gtk::ListItem) {
         return;
     };
     let Some((pic, name)) = photo_tile_parts(item) else { return };
-    name.set_text(&basename(&face.path));
+    name.set_text(&crate::v3::file_name(&face.path));
     name.set_tooltip_text(Some(&format!("File #{}, face #{}", face.file_id, face.face_id)));
     pic.set_paintable(None::<&gtk::gdk::Texture>);
     let cancel = CancelToken::default();
@@ -2511,13 +2511,6 @@ fn plural(n: i64) -> &'static str {
     } else {
         "s"
     }
-}
-
-fn basename(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn sim_markup(s: f32) -> String {

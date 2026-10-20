@@ -114,12 +114,12 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     let contents: Vec<(&'static str, gtk::Widget)> = vec![
         ("library", crate::tabs::library::build(engine.clone())),
         ("people", crate::tabs::people::build(engine.clone())),
-        ("moments", crate::tabs::workbenches::catalog(engine.clone())),
+        ("moments", crate::tabs::moments::catalog(engine.clone())),
         (
             "deep-analyze",
             crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone()),
         ),
-        ("chat", crate::tabs::workbenches::chat(engine.clone())),
+        ("chat", crate::tabs::chat::chat(engine.clone())),
         (
             "cleanup",
             crate::tabs::cleanup::build_cleanup_tab(engine.clone()),
@@ -128,7 +128,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
             "restructure",
             crate::tabs::restructure::build_restructure_tab(engine.clone()),
         ),
-        ("tools", crate::tabs::workbenches::tools(engine.clone())),
+        ("tools", crate::tabs::file_tools::tools(engine.clone())),
         ("settings", crate::tabs::settings::build(engine.clone())),
     ];
     let mut headers = Vec::new();
@@ -154,7 +154,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .transition_duration(if crate::spring::animations_enabled() { 240 } else { 0 })
         .build();
     let close_slot = slot.clone();
-    inspector.set_child(Some(&crate::tabs::workbenches::chat_inspector(
+    inspector.set_child(Some(&crate::tabs::chat::inspector(
         engine.clone(),
         Rc::new(move || {
             if let Some(shell) = close_slot.get().and_then(Weak::upgrade) {
@@ -498,18 +498,9 @@ impl Shell {
         if self.counting.replace(true) {
             return;
         }
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let count = fileid_engine::paths::db_path()
-                .ok()
-                .filter(|path| path.exists())
-                .and_then(|path| fileid_engine::db::open_read(&path).ok())
-                .and_then(|conn| {
-                    conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
-                        .ok()
-                })
-                .unwrap_or(0);
-            let _ = tx.send_blocking(count.max(0) as u64);
+        let rx = crate::engine_client::read_db(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .map_or(0, |count| count.max(0) as u64)
         });
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {

@@ -35,17 +35,11 @@ enum ReviewFilter {
 
 impl ReviewFilter {
     fn title(&self) -> String {
-        let base = |path: &str| {
-            std::path::Path::new(path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_owned())
-        };
         match self {
             ReviewFilter::All => "All moves".into(),
             ReviewFilter::Group(Outcome::Tidy) => "Tidying".into(),
             ReviewFilter::Group(Outcome::Reorganize) => "Reorganizing".into(),
-            ReviewFilter::Drill(Drill::Source(folder)) => format!("From {}", base(folder)),
+            ReviewFilter::Drill(Drill::Source(folder)) => format!("From {}", v3::file_name(folder)),
             ReviewFilter::Drill(Drill::Bucket(bucket)) => format!("To {bucket}"),
             ReviewFilter::Drill(Drill::Sources(_)) => "Other folders".into(),
             ReviewFilter::Drill(Drill::Buckets(_)) => "Other destinations".into(),
@@ -237,10 +231,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         cell.add_css_class("v3-metric");
         let head = v3::hbox(6);
         head.append(
-            &gtk::Box::builder()
-                .css_classes(["v3-dot", tone.css()])
-                .valign(gtk::Align::Center)
-                .build(),
+            &v3::dot(tone.css()),
         );
         head.append(&v3::label(label, &["v3-meta"]));
         cell.append(&head);
@@ -322,11 +313,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     staying.append(&staying_list);
     content.append(&staying);
 
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&content)
-        .build();
+    let scroll = v3::scroller(&content);
     let page = v3::vbox(0);
     page.add_css_class("fileid-tab");
     page.append(&strip_outer);
@@ -888,17 +875,12 @@ impl Ui {
             plural(files as usize, "file")
         ));
         for (full, folder, count) in library.staying.iter().take(500) {
-            let row = v3::hbox(10);
-            row.add_css_class("v3-row-pad");
-            row.add_css_class("v3-soft-row");
+            let row = v3::list_row(10);
             row.add_css_class("v3-staying-row");
             let lit = full.clone();
             self.bus.track(&row, Hover::Source(full.clone()), move |hover| hover.touches_source(&lit));
             row.append(
-                &gtk::Box::builder()
-                    .css_classes(["v3-dot", "tone-done"])
-                    .valign(gtk::Align::Center)
-                    .build(),
+                &v3::dot("tone-done"),
             );
             let name = v3::mono(folder, "s12");
             name.set_hexpand(true);
@@ -954,11 +936,7 @@ impl Ui {
             list.append(&self.bucket_section(name, indices, indices));
         }
         column.append(
-            &gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .vexpand(true)
-                .child(&list)
-                .build(),
+            &v3::scroller(&list),
         );
         dialog.set_child(Some(&column));
         let close = dialog.downgrade();
@@ -998,16 +976,7 @@ impl Ui {
             .iter()
             .map(|m| v3::parent_name(&m.source))
             .collect();
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let library = fileid_engine::paths::db_path()
-                .ok()
-                .filter(|path| path.exists())
-                .and_then(|path| fileid_engine::db::open_read(&path).ok())
-                .map(|conn| library_under(&conn, &root, &moved_from))
-                .unwrap_or_default();
-            let _ = tx.send_blocking(library);
-        });
+        let rx = crate::engine_client::read_db(move |conn| library_under(conn, &root, &moved_from));
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let Ok(library) = rx.recv().await else { return };

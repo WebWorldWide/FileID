@@ -77,14 +77,6 @@ pub struct MapLayout {
     pub rollup_dests: Vec<String>,
 }
 
-fn basename(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| path.to_owned())
-}
-
 fn plural(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
@@ -113,7 +105,7 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
         .iter()
         .map(|(folder, count, junk)| Node {
             id: format!("src:{folder}"),
-            label: basename(folder),
+            label: crate::v3::file_name(folder),
             key: (*folder).to_owned(),
             count: *count,
             tint: None,

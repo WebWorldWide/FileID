@@ -373,10 +373,7 @@ impl MapView {
         }
         match best {
             Some((_, flow)) => {
-                let source = std::path::Path::new(&flow.source_folder)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let source = v3::file_name(&flow.source_folder);
                 self.overlay.set_tooltip_text(Some(&format!(
                     "{source} → {}\n{}",
                     flow.bucket,
@@ -415,10 +412,7 @@ impl MapView {
             if filter == 2 && !junk {
                 continue;
             }
-            let shown = std::path::Path::new(folder)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| folder.to_string());
+            let shown = v3::file_name(folder);
             sources.push((folder.to_string(), shown, *count as u64, Some(*junk)));
         }
         let mut dests: Vec<(String, u64, bool)> = buckets.iter().map(|(b, c)| (b.to_string(), *c as u64, false)).collect();

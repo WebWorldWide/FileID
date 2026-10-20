@@ -23,17 +23,7 @@ pub(super) struct FileDetails {
 /// People and tags for one file, read off the main loop on a short-lived
 /// read connection (one per selection, never per tile).
 pub(super) fn read_details(file_id: i64) -> async_channel::Receiver<FileDetails> {
-    let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
-        let details = fileid_engine::paths::db_path()
-            .ok()
-            .filter(|path| path.exists())
-            .and_then(|path| fileid_engine::db::open_read(&path).ok())
-            .map(|conn| details_from(&conn, file_id))
-            .unwrap_or_default();
-        let _ = tx.send_blocking(details);
-    });
-    rx
+    crate::engine_client::read_db(move |conn| details_from(conn, file_id))
 }
 
 fn details_from(conn: &rusqlite::Connection, file_id: i64) -> FileDetails {
@@ -59,13 +49,6 @@ fn details_from(conn: &rusqlite::Connection, file_id: i64) -> FileDetails {
             TAG_LIMIT,
         ),
     }
-}
-
-pub(super) fn parent_folder(path: &str) -> String {
-    std::path::Path::new(path)
-        .parent()
-        .map(|parent| parent.to_string_lossy().into_owned())
-        .unwrap_or_default()
 }
 
 pub(super) fn kv_row(key: &str, value: &str) -> gtk::Box {
@@ -251,7 +234,7 @@ impl SelectedPane {
                 .upgrade()
                 .and_then(|pane| pane.current.borrow().clone())
             {
-                super::library::show_in_files(button, &row.path);
+                crate::v3::show_in_files(button, &row.path);
             }
         });
         let weak = Rc::downgrade(&pane);
@@ -260,7 +243,7 @@ impl SelectedPane {
                 .upgrade()
                 .and_then(|pane| pane.current.borrow().clone())
             {
-                super::library::open_default(button, &row.path);
+                crate::v3::open_file(button, &row.path);
             }
         });
         pane
@@ -277,7 +260,7 @@ impl SelectedPane {
             return;
         }
         self.name.set_text(&row.name);
-        let folder = parent_folder(&row.path);
+        let folder = crate::v3::parent_name(&row.path);
         self.folder.set_text(&folder);
         self.folder.set_tooltip_text(Some(&folder));
         while let Some(child) = self.facts.first_child() {
@@ -368,6 +351,5 @@ mod tests {
             }
         );
         assert_eq!(details_from(&conn, 9), FileDetails::default());
-        assert_eq!(parent_folder("/photos/2024/a.jpg"), "/photos/2024");
     }
 }

@@ -949,26 +949,36 @@ fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
-fn file_row_at_path(path: &Path, id: i64) -> Result<Option<FileRow>> {
+fn file_row_on(conn: &rusqlite::Connection, id: i64) -> Result<Option<FileRow>> {
     use rusqlite::OptionalExtension;
-    let conn = fileid_engine::db::open_read(path)?;
     Ok(conn
         .query_row(&format!("SELECT {FILE_COLUMNS} FROM files f WHERE f.id = ?1 AND f.failed = 0"), [id], file_row)
         .optional()?)
 }
 
-/// One file's current row, read off the main loop (the preview refreshes
-/// what it shows after a scan).
-pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
+/// Runs `read` on a fresh read-only connection off the main loop; the
+/// default value when no library database exists yet or it can't be opened.
+pub fn read_db<T, F>(read: F) -> Receiver<T>
+where
+    T: Default + Send + 'static,
+    F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
+{
     let (tx, rx) = async_channel::bounded(1);
     thread::spawn(move || {
-        let row = fileid_engine::paths::db_path()
+        let value = fileid_engine::paths::db_path()
             .ok()
             .filter(|path| path.exists())
-            .and_then(|path| file_row_at_path(&path, id).ok().flatten());
-        let _ = tx.send_blocking(row);
+            .and_then(|path| fileid_engine::db::open_read(&path).ok())
+            .map(|conn| read(&conn))
+            .unwrap_or_default();
+        let _ = tx.send_blocking(value);
     });
     rx
+}
+
+/// One file's current row (the preview refreshes what it shows after a scan).
+pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
+    read_db(move |conn| file_row_on(conn, id).ok().flatten())
 }
 
 fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i64)> {
@@ -1762,9 +1772,11 @@ mod tests {
         assert_eq!(query("needle", None, 10).0[0].kind, "pdf");
         assert_eq!(query("", Some("image"), 10).1, 1);
         assert!(query_files_at_path(&fixture.join("missing.sqlite"), &QuerySpec { limit: 10, ..QuerySpec::default() }).is_err());
-        assert_eq!(file_row_at_path(&db_path, 2).unwrap().unwrap().name, "image.png");
-        assert!(file_row_at_path(&db_path, 4).unwrap().is_none());
-        assert!(file_row_at_path(&db_path, 99).unwrap().is_none());
+        let conn = fileid_engine::db::open_read(&db_path).unwrap();
+        assert_eq!(file_row_on(&conn, 2).unwrap().unwrap().name, "image.png");
+        assert!(file_row_on(&conn, 4).unwrap().is_none());
+        assert!(file_row_on(&conn, 99).unwrap().is_none());
+        drop(conn);
         std::fs::remove_dir_all(fixture).unwrap();
     }
 }

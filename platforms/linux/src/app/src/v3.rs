@@ -89,7 +89,9 @@ pub fn wrapped(text: &str, classes: &[&str]) -> gtk::Label {
 }
 
 pub fn section(text: &str) -> gtk::Label {
-    label(&text.to_uppercase(), &["section-label"])
+    let label = label(&text.to_uppercase(), &["section-label"]);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    label
 }
 
 pub fn meta(text: &str) -> gtk::Label {
@@ -114,6 +116,31 @@ pub fn spacer() -> gtk::Box {
     let spacer = hbox(0);
     spacer.set_hexpand(true);
     spacer
+}
+
+/// A vertical-only scroll area that fills the space it is given.
+pub fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(child)
+        .build()
+}
+
+/// A list row: 6 / 14 padding over a soft hairline.
+pub fn list_row(spacing: i32) -> gtk::Box {
+    let row = hbox(spacing);
+    row.add_css_class("v3-row-pad");
+    row.add_css_class("v3-soft-row");
+    row
+}
+
+/// The 7 px status dot in a tone class.
+pub fn dot(tone_class: &str) -> gtk::Box {
+    gtk::Box::builder()
+        .css_classes(["v3-dot", tone_class])
+        .valign(gtk::Align::Center)
+        .build()
 }
 
 pub fn clear(container: &gtk::Box) {

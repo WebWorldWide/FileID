@@ -88,7 +88,7 @@ label, button, entry, headerbar, .nav-row, row, popover, gridview, listview {
 .meta { font-size: 11.5px; color: @fileid_text3; }
 /* Corner scale xs 4 / s 6 / m 8 / l 10: controls s, cards and rows m, panels and floating cards l. */
 button, entry, .pill, .chip { border-radius: 6px; }
-.card, .glass-card, .padded-card, .fileid-glass, popover > contents { border-radius: 10px; }
+.card, popover > contents { border-radius: 10px; }
 check { border-radius: 4px; }
 radio, switch, switch > slider, progressbar > trough, progressbar > trough > progress { border-radius: 99px; }
 
@@ -105,24 +105,17 @@ window { background-color: @fileid_base; }
    the drifting gold/orange blobs actually read (macOS frosts, doesn't black-out). */
 .fileid-scrim { background-color: alpha(#0A0A0C, 0.18); }
 
-/* ── Glass card: dark frosted fill + hairline highlight + soft depth ──────── */
-/* GTK has no backdrop blur; approximate the Windows AcrylicBrush (black @0.5 +
-   white @0.06 + 1px white @0.08) with a dark translucent fill + highlight. */
-.glass-card, .padded-card {
+/* ── Panel: frosted fill (no backdrop blur in GTK), radius 10, strong hairline ── */
+.glass-card, .fileid-glass, .v3-panel {
     background-color: alpha(#18181B, 0.78);
-    border: 1px solid alpha(#FFFFFF, 0.11);
+    border: 1px solid alpha(#FFFFFF, 0.112);
     border-radius: 10px;
-    padding: 14px;
     box-shadow: none;
 }
-.fileid-glass {
-    background-color: alpha(#18181B, 0.78);
-    border: 1px solid alpha(#FFFFFF, 0.11);
-    border-radius: 10px;
-}
+.glass-card { padding: 14px; }
 
 /* ── Title bar (Prototype v3): 48 px over bg1, bottom hairline ───────────── */
-headerbar, .fileid-headerbar {
+headerbar {
     background: transparent;
     box-shadow: none;
     border: none;
@@ -161,14 +154,6 @@ headerbar windowcontrols button:hover { background-color: alpha(#FFFFFF, 0.10); 
 .nav-row image { color: @fileid_text2; }
 .nav-row.active image { color: @fileid_gold; }
 .nav-badge { font-size: 11.5px; font-weight: 500; font-feature-settings: "tnum"; }
-
-/* Settings / page section headings — readable uppercase divider. */
-.settings-heading {
-    color: alpha(#FFFFFF, 0.62);
-    font-size: 10pt;
-    font-weight: 800;
-    letter-spacing: 1px;
-}
 
 /* ── Buttons: brand the stock greys ──────────────────────────────────────── */
 button {
@@ -292,8 +277,6 @@ spinner { color: @fileid_gold; }
 /* ── Accents ─────────────────────────────────────────────────────────────── */
 .gold-accent     { color: @fileid_gold; }
 .lavender-accent { color: @fileid_lavender; }
-.cyan-accent     { color: @fileid_cyan; }
-.pink-accent     { color: @fileid_pink; }
 
 /* ── File tile ───────────────────────────────────────────────────────────── */
 .file-tile {
@@ -324,11 +307,6 @@ spinner { color: @fileid_gold; }
     font-size: 10pt;
     font-weight: 700;
     margin-top: 2px;
-}
-
-.people-flow-banner {
-    padding: 10px 12px;
-    border-color: alpha(@fileid_gold, 0.35);
 }
 
 /* Centered ▶ badge over video tile keyframes. */
@@ -590,7 +568,6 @@ spinbutton.v3-number > text { font-family: "JetBrains Mono", "Roboto Mono", "Dej
 spinbutton.v3-number > button { min-width: 20px; min-height: 26px; padding: 0; border: none; background: transparent; }
 .v3-toggle-row { min-height: 28px; }
 .v3-dashed { padding: 26px; border-radius: 10px; border: 1px dashed alpha(#FFFFFF, 0.16); }
-.v3-panel { background-color: alpha(#18181B, 0.78); border-radius: 10px; border: 1px solid alpha(#FFFFFF, 0.112); }
 .v3-panel-header { padding: 10px 14px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); min-height: 28px; }
 .v3-panel-footer { padding: 8px 14px; background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.08); border-radius: 0 0 10px 10px; }
 .v3-soft-row { border-bottom: 1px solid alpha(#FFFFFF, 0.06); }
@@ -774,7 +751,7 @@ const HIGH_CONTRAST_CSS: &str = r#"
 .dim-label, .tile-caption { color: alpha(#FFFFFF, 0.85); }
 .meta, .pop-meta, .scan-sub, .stat-key, .stat-trailing, .tone-muted, .tone-paused, .section-label, .kv-key { color: #D6D9DD; }
 .page-meta, .scan-step, .tone-text2, .nav-row image, .chip { color: #EBEDEF; }
-.glass-card, .padded-card, .fileid-glass, .file-tile { border-color: alpha(#FFFFFF, 0.34); }
+.glass-card, .fileid-glass, .file-tile { border-color: alpha(#FFFFFF, 0.34); }
 .fileid-sidebar { border-right-color: alpha(#FFFFFF, 0.34); }
 .selected-pane { border-left-color: alpha(#FFFFFF, 0.34); }
 headerbar.fileid-titlebar, .page-header { border-bottom-color: alpha(#FFFFFF, 0.34); }
