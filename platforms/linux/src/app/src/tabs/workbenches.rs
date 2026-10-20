@@ -48,23 +48,6 @@ fn page(body: &gtk::Box) -> gtk::Widget {
         .build()
         .upcast()
 }
-fn evidence(hit: &CatalogHit) -> String {
-    format!(
-        "#{} · {} · {}{}{}\n{}",
-        hit.file_id,
-        hit.path,
-        if hit.kind == "sampledFrame" {
-            "sampled frame, unverified"
-        } else {
-            &hit.kind
-        },
-        hit.start_seconds
-            .map(|s| format!(" · {s:.1}s"))
-            .unwrap_or_default(),
-        hit.page.map(|p| format!(" · page {p}")).unwrap_or_default(),
-        hit.text
-    )
-}
 /// Video and audio by the engine's own classifier, so every extension the
 /// scan treats as media (MTS, M2TS, 3GP, MPG, Opus, AIFF, ...) plays in place.
 pub(super) fn is_playable_media(path: &str) -> bool {
@@ -74,65 +57,6 @@ pub(super) fn is_playable_media(path: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| matches!(FileKind::from_extension(ext), FileKind::Video | FileKind::Audio))
 }
-fn open(hit: &CatalogHit, status: &gtk::Label) {
-    if !std::path::Path::new(&hit.path).is_file() {
-        status.set_label("File is unavailable offline or has moved.");
-        return;
-    }
-    let is_media = hit.kind != "page" && is_playable_media(&hit.path);
-    if is_media {
-        play_inline(&hit.path, hit.start_seconds, status);
-        return;
-    }
-    let uri = gio::File::for_path(&hit.path).uri();
-    match gio::AppInfo::launch_default_for_uri(&uri, gio::AppLaunchContext::NONE) {
-        Ok(()) => status.set_label("Opened in the local default application."),
-        Err(e) => status.set_label(&format!("Could not open file: {e}")),
-    }
-}
-
-/// Plays a matching video or audio file inside FileID, starting at the
-/// matched moment when there is one.
-fn play_inline(path: &str, start_seconds: Option<f64>, status: &gtk::Label) {
-    let media = gtk::MediaFile::for_filename(path);
-    if let Some(seconds) = start_seconds.filter(|s| s.is_finite() && *s > 0.0) {
-        let micros = (seconds * 1_000_000.0) as i64;
-        media.connect_prepared_notify(move |stream| {
-            if stream.is_prepared() && stream.is_seekable() {
-                stream.seek(micros);
-            }
-        });
-    }
-    let video = gtk::Video::builder()
-        .media_stream(&media)
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-    let dialog = adw::Dialog::builder()
-        .title(
-            std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        )
-        .content_width(900)
-        .content_height(560)
-        .build();
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-    toolbar.set_content(Some(&video));
-    dialog.set_child(Some(&toolbar));
-    let on_close = media.clone();
-    dialog.connect_closed(move |_| on_close.pause());
-    dialog.present(Some(status));
-    media.play();
-    status.set_label(if start_seconds.is_some() {
-        "Playing from the matched moment."
-    } else {
-        "Playing in FileID."
-    });
-}
-
 pub fn catalog(engine: Engine) -> gtk::Widget {
     super::moments::catalog(engine)
 }
@@ -607,133 +531,8 @@ fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     (page(&body), ui)
 }
 
-fn dispatch_chat(
-    engine: &Engine,
-    state: &Rc<RefCell<ChatState>>,
-    status: &gtk::Label,
-    request: ChatRequest,
-) {
-    if let Err(error) = engine
-        .borrow_mut()
-        .send(CommandPayload::ChatRequest(ChatRequestPayload { request }))
-    {
-        state.borrow_mut().interrupted();
-        status.set_label(&format!("Chat transport failed: {error}. Persisted outcomes are unconfirmed; refresh history after reconnecting."));
-    }
-}
-
 pub fn chat(engine: Engine) -> gtk::Widget {
-    let body = column();
-    let conversation = entry("Conversation ID");
-    conversation.set_text("linux-default");
-    body.append(&conversation);
-    let status=label("Persistent keyword retrieval chat. Local model summary/streaming is unavailable; citations are indexed evidence, not verified inference.");
-    body.append(&status);
-    let transcript = column();
-    body.append(&transcript);
-    let input = entry("Ask about indexed files (maximum 2000 characters)");
-    input.set_max_length(2000);
-    body.append(&input);
-    let actions = row();
-    body.append(&actions);
-    let state = Rc::new(RefCell::new(ChatState::default()));
-    let send: Rc<dyn Fn(&str)> = {
-        let engine = engine.clone();
-        let conversation = conversation.clone();
-        let input = input.clone();
-        let state = state.clone();
-        let status = status.clone();
-        Rc::new(move |action| {
-            let id = conversation.text().trim().to_owned();
-            if id.is_empty() {
-                status.set_label("Enter a conversation ID.");
-                return;
-            }
-            if action == "send" && input.text().trim().is_empty() {
-                return;
-            }
-            let r = ChatRequest {
-                request_id: request_id(),
-                conversation_id: id,
-                action: action.into(),
-                text: if action == "send" {
-                    Some(input.text().into())
-                } else {
-                    None
-                },
-                use_model: Some(false),
-                model_kind: None,
-            };
-            let dispatch = state.borrow_mut().begin(&r);
-            match dispatch {
-                Ok(true) => { status.set_label("Waiting for engine retrieval…"); dispatch_chat(&engine,&state,&status,r); }
-                Ok(false) => status.set_label("Clear deferred until the outstanding persisted write finishes. No deletion is confirmed yet."),
-                Err(reason) => status.set_label(reason),
-            }
-        })
-    };
-    for (text, action) in [
-        ("Send", "send"),
-        ("History", "history"),
-        ("Clear conversation", "clear"),
-        ("Stop", "cancel"),
-    ] {
-        let send = send.clone();
-        button(&actions, text, move || send(action));
-    }
-    {
-        let state = state.clone();
-        let transcript = transcript.clone();
-        conversation.connect_changed(move |_| {
-            state.borrow_mut().display.clear();
-            clear(&transcript);
-        });
-    }
-    let rx = engine.borrow_mut().subscribe();
-    glib::MainContext::default().spawn_local(async move {
-        while let Ok(ev) = rx.recv().await {
-            match ev {
-                EngineState::Ready => send("history"),
-                EngineState::ChatResponse(r) => {
-                    let deferred = state.borrow_mut().finish(&r);
-                    if let Some(request) = deferred {
-                        dispatch_chat(&engine, &state, &status, request);
-                    }
-                    if !chat_matches(
-                        &mut state.borrow_mut().display,
-                        &r.request_id,
-                        &r.conversation_id,
-                        conversation.text().trim(),
-                        &r.status,
-                    ) {
-                        continue;
-                    }
-                    status.set_label(&format!("{} · {}", r.status, r.message));
-                    clear(&transcript);
-                    for m in r.messages {
-                        transcript.append(&label(&format!("{}: {}", m.role, m.text)));
-                    }
-                    for hit in r.hits {
-                        let hr = row();
-                        hr.append(&label(&evidence(&hit)));
-                        let s = status.clone();
-                        button(&hr, "Open citation", move || open(&hit, &s));
-                        transcript.append(&hr);
-                    }
-                }
-                EngineState::Failed(e) => {
-                    state.borrow_mut().interrupted();
-                    status.set_label(&e);
-                }
-                EngineState::Exited => {
-                    state.borrow_mut().interrupted();
-                    status.set_label("Engine exited; request interrupted.");
-                }
-                _ => {}
-            }
-        }
-    });
-    page(&body)
+    super::chat::chat(engine)
 }
 
 #[cfg(test)]

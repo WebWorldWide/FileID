@@ -271,20 +271,12 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     let preserved_files = count(&read, "files");
 
     stack.set_visible_child_name("chat");
-    entry(&chat, "Ask about indexed files (maximum 2000 characters)").set_text("photo-fixture");
+    chat.activate_action("chat.ask", Some(&"photo-fixture".to_variant())).unwrap();
     button(&chat, "Send").emit_clicked();
-    wait(|| text(&chat).contains("user: photo-fixture"));
-    assert!(text(&chat).contains(source.to_str().unwrap()));
+    wait(|| text(&chat).contains("photo-fixture") && text(&chat).contains("You"));
+    wait(|| text(&chat).contains("photo-fixture.png"));
     assert_eq!(count(&read, "catalog_chat"), 2);
-    button(&chat, "History").emit_clicked();
-    wait(|| text(&chat).contains("Local conversation history"));
-    assert!(text(&chat).contains("user: photo-fixture"));
-    entry(&chat, "Conversation ID").set_text("other-conversation");
-    button(&chat, "History").emit_clicked();
-    wait(|| text(&chat).contains("Local conversation history"));
-    assert!(!text(&chat).contains("user: photo-fixture"));
-    entry(&chat, "Conversation ID").set_text("linux-default");
-    button(&chat, "Clear conversation").emit_clicked();
+    button(&chat, "Clear").emit_clicked();
     wait(|| text(&chat).contains("Conversation deleted"));
     assert_eq!(count(&read, "catalog_chat"), 0);
     assert_eq!(count(&read, "files"), preserved_files);

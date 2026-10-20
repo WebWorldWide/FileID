@@ -1,5 +1,6 @@
 // Native GTK tabs share the typed engine connection.
 
+mod chat;
 pub mod cleanup;
 pub mod deep_analyze;
 pub mod library;

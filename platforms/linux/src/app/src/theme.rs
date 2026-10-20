@@ -672,6 +672,12 @@ button.v3-chapter-button { min-height: 28px; padding: 2px 6px; border: none; bor
 button.v3-chapter-button:hover { background-color: alpha(#FFFFFF, 0.045); }
 .v3-job-row { padding: 10px 14px; }
 button.v3-mono-button { font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 12px; }
+.v3-chat-header { padding: 10px 26px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-composer-box { padding: 12px 26px; border-top: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-sources-header { padding: 12px 14px; }
+.v3-role { font-size: 11.5px; font-weight: 600; }
+.v3-message-body { font-size: 13.5px; color: @fileid_text1; }
+.v3-citations { margin-left: 12px; }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
