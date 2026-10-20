@@ -387,6 +387,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnViewModelPropertyChanged), () => OnViewModelPropertyChangedCore(e));
+
+    private void OnViewModelPropertyChangedCore(System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
         if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
