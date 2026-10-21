@@ -344,6 +344,14 @@ impl Status {
                 idle: false,
             };
         }
+        if !self.engine_ready {
+            return Activity {
+                label: "Getting ready…",
+                tone: Tone::Muted,
+                fraction: 0.0,
+                idle: true,
+            };
+        }
         Activity {
             label: "Idle",
             tone: Tone::Info,

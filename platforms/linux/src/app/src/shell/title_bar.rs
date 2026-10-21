@@ -493,6 +493,9 @@ impl TitleBar {
         let activity = status.activity();
         set_tone(&self.activity_dot, activity.tone);
         self.activity_label.set_text(activity.label);
+        self.activity_label.set_tooltip_text((!status.engine_ready).then_some(
+            "FileID is starting its background helper. This takes a few seconds.",
+        ));
         self.activity_bar.set(activity.fraction, activity.tone);
         self.activity_pct.set_visible(!activity.idle);
         self.activity_pct.set_text(&percent(activity.fraction));

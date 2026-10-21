@@ -557,6 +557,11 @@ impl ScanCard {
         self.scan.set_sensitive(can_start);
         let folder = status.folder.as_deref().unwrap_or("folder");
         self.scan_content.set_label(&format!("Scan {folder}"));
+        self.scan.set_tooltip_text(Some(if status.engine_ready {
+            "Read every file in this folder (Ctrl+R). Nothing is moved or changed."
+        } else {
+            "FileID is still getting ready. Try again in a moment."
+        }));
         self.rescan.set_visible(controls == ScanControls::Rescan);
         self.rescan.set_sensitive(can_start);
         self.rescan_content.set_label(if status.stopped() {
