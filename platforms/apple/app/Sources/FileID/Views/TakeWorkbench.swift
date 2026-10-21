@@ -75,7 +75,7 @@ struct TakeWorkbench: View {
                         if let recommendation { recommendationRow(recommendation) }
                         if !takes.isEmpty { takeGrid }
                         else if selectedEvent == nil {
-                            DashedNotice(title: "Pick the best take", subtitle: "Group two or more attempts at the same moment, say what should happen, and FileID scores each one against that goal.")
+                            DashedNotice(title: "Pick the best take", subtitle: "1. Search for your clips on the left.  2. Put two or more tries of the same shot in a group and say what should happen.  3. FileID scores each try so you can pick the best.")
                         }
                     }
                     .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
@@ -97,7 +97,7 @@ struct TakeWorkbench: View {
     private var groupsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Find clips to group", text: $clipQuery, icon: "magnifyingglass") {
+                DSTextField(placeholder: "Search your videos", text: $clipQuery, icon: "magnifyingglass") {
                     guard !clipQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                     send("search", query: clipQuery)
                 }
@@ -105,7 +105,7 @@ struct TakeWorkbench: View {
                     Button("Find related") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .disabled(pool.count < 2)
-                        .help("Suggest groups of clips that look alike and were taken close together")
+                        .help(pool.count < 2 ? "Search for at least two videos first" : "Suggest groups of clips that look alike and were filmed close together")
                     Button { newGroup() } label: { Label("New group", systemImage: "plus") }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                 }
@@ -126,7 +126,7 @@ struct TakeWorkbench: View {
                                 ToastCenter.shared.show("Name the group and describe the outcome, then save")
                             }
                         }
-                        MetaText("From visual similarity and file dates. It does not know whether the goal happened.", size: 11.5)
+                        MetaText("Based on how the clips look and when they were filmed. Check them before saving.", size: 11.5)
                             .padding(.horizontal, 14).padding(.vertical, 6)
                         Hairline(color: Theme.hairlineSoft).padding(.vertical, 4)
                     }
@@ -142,7 +142,7 @@ struct TakeWorkbench: View {
                         .accessibilityLabel("\(event.title), \(event.fileIDs.count) clips, goal: \(event.goal)")
                     }
                     if events.isEmpty {
-                        MetaText("No groups yet. Find clips above, then make a group.").padding(.horizontal, 14).padding(.vertical, 8)
+                        MetaText("No groups yet. Search for videos above, then press New group.").padding(.horizontal, 14).padding(.vertical, 8)
                     }
                 }
                 .padding(.bottom, 10)
@@ -214,14 +214,14 @@ struct TakeWorkbench: View {
                     .keyboardShortcut("s", modifiers: .command)
                     .help(canSave ? "Save (⌘S)" : "Needs a name, a goal and at least two clips")
                 if let event = selectedEvent {
-                    Button("Analyze goal") { analyzeGoal(event) }
+                    Button("Score takes") { analyzeGoal(event) }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .disabled(!canAnalyzeGoal(event))
-                        .help("Score every clip against the saved goal. Needs videos and a visual model loaded in Deep Analyze.")
+                        .help("Check each clip against the goal. Uses the description model from Describe Files.")
                     Button("Refresh scores") { load(event.id) }.buttonStyle(.dsGhost)
                 }
                 Spacer(minLength: 8)
-                MetaText(pool.isEmpty ? "Find clips on the left to add them." : "Scores are drafts from sampled frames. Originals are never changed.", size: 11.5)
+                MetaText(pool.isEmpty ? "Search on the left to add clips." : "Scores are suggestions from a few frames. Your videos are never changed.", size: 11.5)
                     .lineLimit(2)
             }
         }
@@ -354,7 +354,7 @@ struct TakeWorkbench: View {
             goalJobID = nil
             load(eventID)
         } else if job.state == "failed" {
-            message = job.error ?? "Goal analysis failed. Existing reviewed scores are preserved."
+            message = job.error ?? "Scoring didn't finish. Scores you already reviewed are kept."
         }
     }
 
@@ -375,7 +375,7 @@ struct TakeWorkbench: View {
         if !engine.send(.catalogRequest(request: request)) {
             pendingID = ""
             pendingAction = ""
-            ToastCenter.shared.show("The engine is unavailable.")
+            ToastCenter.shared.show("FileID is still getting ready. Try again in a moment.")
         }
     }
 
@@ -441,7 +441,7 @@ private struct SuggestionRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(names.joined(separator: ", ")).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text1).lineLimit(2)
             HStack(spacing: 8) {
-                Text("\(names.count) clips · similarity \(String(format: "%.2f", suggestion.similarity))")
+                Text("\(names.count) clips · \(Int((suggestion.similarity * 100).rounded()))% alike")
                     .font(Theme.Font.body(11.5)).foregroundStyle(Theme.ai)
                 Spacer(minLength: 4)
                 Button("Review", action: onReview)
@@ -501,7 +501,7 @@ private struct TakeCard: View {
                 }
                 Spacer(minLength: 4)
                 Circle().fill(reviewedByUser ? Theme.gold : (isDraft ? Theme.ai : Theme.text3)).frame(width: 7, height: 7)
-                    .help(reviewedByUser ? "Reviewed by you" : (isDraft ? "Scored by the model from sampled frames" : "No score yet"))
+                    .help(reviewedByUser ? "Reviewed by you" : (isDraft ? "Suggested by FileID from a few frames" : "No score yet"))
                     .accessibilityLabel(reviewedByUser ? "Reviewed by you" : (isDraft ? "Model draft" : "No score"))
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
