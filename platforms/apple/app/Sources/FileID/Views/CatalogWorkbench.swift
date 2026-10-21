@@ -97,7 +97,7 @@ struct CatalogWorkbench: View {
     private var resultsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Search names, descriptions, chapters", text: $query, icon: "magnifyingglass", onSubmit: search)
+                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
                 HStack(spacing: 8) {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)
