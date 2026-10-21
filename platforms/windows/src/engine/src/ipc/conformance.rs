@@ -563,6 +563,7 @@ fn event_exemplars() -> Vec<EventPayload> {
             description: "A sunset over the ocean".into(),
             proposed_name: Some("Sunset Over Ocean.jpg".into()),
             model_kind: "qwen2_5_vl_7b".into(),
+            inherited_from_file_id: Some(41),
         })),
         EventPayload::DeepAnalyzeComplete(Wrap::new(DeepAnalyzeComplete {
             processed: 100,

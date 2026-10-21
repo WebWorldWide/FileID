@@ -904,7 +904,8 @@
               "fileID":       { "type": "integer" },
               "description":  { "type": "string" },
               "proposedName": { "type": ["string", "null"] },
-              "modelKind":    { "type": "string" }
+              "modelKind":    { "type": "string" },
+              "inheritedFromFileID": { "type": ["integer", "null"], "description": "Set when this file shares the caption and tags of a near-identical file (burst frame or RAW+JPEG pair) that the model analyzed; the value is that file's files.id. Absent or null when the model analyzed this file itself." }
             }
           }
         }

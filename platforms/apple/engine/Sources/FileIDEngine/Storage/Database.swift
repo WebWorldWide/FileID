@@ -531,6 +531,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v25_ocr_text_source") { db in
             try db.execute(sql: CatalogSchema.v25)
         }
+        m.registerMigration("v26_vlm_inherited_from") { db in
+            try db.execute(sql: CatalogSchema.v26)
+        }
         return m
     }
 

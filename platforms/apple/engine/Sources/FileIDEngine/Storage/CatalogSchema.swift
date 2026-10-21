@@ -304,4 +304,7 @@ CREATE TRIGGER ocr_text_vlm_invalidate AFTER UPDATE OF size_bytes,modified_at ON
  DELETE FROM ocr_text WHERE file_id=new.id AND source='vlm';
 END;
 """#
+    static let v26 = #"""
+ALTER TABLE files ADD COLUMN vlm_inherited_from INTEGER;
+"""#
 }
