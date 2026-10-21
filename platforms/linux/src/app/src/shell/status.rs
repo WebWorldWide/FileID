@@ -47,7 +47,7 @@ impl Tone {
     }
 }
 
-pub const STAGES: [&str; 5] = ["Scan", "Tag", "Faces", "Captions", "Done"];
+pub const STAGES: [&str; 5] = ["Find files", "Tag", "Faces", "Describe (optional)", "Done"];
 
 #[derive(Debug, Default, Clone)]
 pub struct Status {
@@ -165,10 +165,10 @@ impl Status {
     pub fn pipeline(&self) -> Pipeline {
         let stage = self.stage();
         let (title, fraction, bar, accent, sub) = self.pipeline_state();
-        let stage_tone = if stage == 3 && self.deep_running {
-            Tone::Ai
-        } else {
-            accent
+        let stage_tone = match (stage, self.deep_running) {
+            (3, true) => Tone::Ai,
+            (3, false) => Tone::Muted,
+            _ => accent,
         };
         Pipeline {
             title,
@@ -200,12 +200,16 @@ impl Status {
                 Some(ScanPhase::PostScan) => "Grouping faces",
                 _ => "Scanning",
             };
-            let sub = if discovering {
-                format!("{} found", grouped(p.discovered))
-            } else if p.files_per_second > 0.0 {
-                format!("{} · {:.0}/s", Self::scan_of_total(p), p.files_per_second)
-            } else {
-                Self::scan_of_total(p)
+            let left = p
+                .eta_seconds
+                .filter(|s| *s > 0.0)
+                .map_or_else(String::new, |s| format!(" · about {} left", format_eta(s)));
+            let sub = match self.phase {
+                Some(ScanPhase::Discovering) => {
+                    format!("{} files found so far", grouped(p.discovered))
+                }
+                Some(ScanPhase::PostScan) => "Finding the same person across photos".to_owned(),
+                _ => format!("{}{left}", Self::scan_of_total(p)),
             };
             return (
                 title.into(),
@@ -217,17 +221,21 @@ impl Status {
         }
         if self.scan_running() {
             return (
-                "Starting".into(),
+                "Starting…".into(),
                 0.0,
                 Tone::Gold,
                 Tone::Gold,
-                format!("Reading {folder}"),
+                format!("FileID reads every file in {folder}. Nothing is moved or changed."),
             );
         }
         if let (true, Some(d)) = (self.deep_running, self.deep.as_ref()) {
-            let sub = format!("{} of {} captioned", grouped(d.processed), grouped(d.total));
+            let sub = format!(
+                "{} of {} files described",
+                grouped(d.processed),
+                grouped(d.total)
+            );
             return (
-                "Writing captions".into(),
+                "Describing files".into(),
                 fraction(d.processed, d.total),
                 Tone::Ai,
                 Tone::Ai,
@@ -236,20 +244,24 @@ impl Status {
         }
         if let Some(done) = self.deep_done.filter(|n| *n > 0) {
             return (
-                "Everything analyzed".into(),
+                "All done".into(),
                 1.0,
                 Tone::Done,
                 Tone::Done,
-                format!("{} files captioned", grouped(done)),
+                format!("{} files described", grouped(done)),
             );
         }
         match (self.phase, self.progress.as_ref()) {
             (Some(ScanPhase::Cancelled), p) => {
                 let sub = p.map_or_else(String::new, |p| {
-                    format!("{} of {} tagged", grouped(p.processed), grouped(p.total))
+                    format!(
+                        "{} of {} files read. Scan again to finish; finished files are skipped.",
+                        grouped(p.processed),
+                        grouped(p.total)
+                    )
                 });
                 return (
-                    "Scan cancelled".into(),
+                    "Scan stopped".into(),
                     self.scan_fraction(),
                     Tone::Paused,
                     Tone::Muted,
@@ -262,27 +274,39 @@ impl Status {
                     0.0,
                     Tone::Paused,
                     Tone::Danger,
-                    "Check the engine log".into(),
+                    "Try Scan again.".into(),
                 );
             }
             _ => {}
         }
         if self.total_files > 0 || self.phase == Some(ScanPhase::Completed) {
-            let sub = format!("{} files · captions not started", grouped(self.total_files));
-            return ("Scan complete".into(), 1.0, Tone::Gold, Tone::Gold, sub);
+            let sub = format!("{} files ready to browse", grouped(self.total_files));
+            return ("Scan complete".into(), 1.0, Tone::Done, Tone::Done, sub);
         }
         let title = if self.start_requested {
-            "Starting"
+            "Starting…"
         } else {
-            "Not scanned yet"
+            "Ready to scan"
         };
         (
             title.into(),
             0.0,
             Tone::Gold,
             Tone::Text2,
-            format!("{folder} is ready to scan"),
+            format!("FileID reads every file in {folder}. Nothing is moved or changed."),
         )
+    }
+
+    pub fn shows_next_step(&self) -> bool {
+        !self.scan_running()
+            && self.stage() == 3
+            && !self.deep_running
+            && self.deep_done.unwrap_or(0) == 0
+            && self.total_files > 0
+    }
+
+    pub fn stopped(&self) -> bool {
+        matches!(self.phase, Some(ScanPhase::Cancelled | ScanPhase::Failed))
     }
 
     pub fn controls(&self) -> ScanControls {
@@ -314,7 +338,7 @@ impl Status {
         }
         if let (true, Some(d)) = (self.deep_running, self.deep.as_ref()) {
             return Activity {
-                label: "Captions",
+                label: "Describing",
                 tone: Tone::Ai,
                 fraction: fraction(d.processed, d.total),
                 idle: false,
@@ -347,7 +371,11 @@ impl Status {
                     percent(frac)
                 )
             } else {
-                format!("{:?}", self.phase.unwrap_or(ScanPhase::Idle)).to_uppercase()
+                match self.phase {
+                    Some(ScanPhase::Cancelled) => "STOPPED".to_owned(),
+                    Some(ScanPhase::Failed) => "FAILED".to_owned(),
+                    phase => format!("{:?}", phase.unwrap_or(ScanPhase::Idle)).to_uppercase(),
+                }
             };
             let tone = if completed {
                 Tone::Done
@@ -377,13 +405,8 @@ impl Status {
         if let (true, Some(d)) = (self.deep_running, self.deep.as_ref()) {
             let frac = fraction(d.processed, d.total);
             jobs.push(Job {
-                name: "Deep Analyze",
-                sub: format!(
-                    "{} of {} · {}",
-                    grouped(d.processed),
-                    grouped(d.total),
-                    d.model_kind
-                ),
+                name: "Describing files",
+                sub: format!("{} of {} files", grouped(d.processed), grouped(d.total)),
                 state: percent(frac),
                 tone: Tone::Ai,
                 fraction: frac,
@@ -392,7 +415,7 @@ impl Status {
             });
         } else if let Some(done) = self.deep_done.filter(|n| *n > 0) {
             jobs.push(Job {
-                name: "Deep Analyze",
+                name: "Describing files",
                 sub: format!("{} files", grouped(done)),
                 state: "DONE".into(),
                 tone: Tone::Done,
@@ -434,7 +457,7 @@ impl Status {
             },
             "restructure" => self
                 .restructure_plan
-                .then(|| ("Plan".to_owned(), Tone::Gold)),
+                .then(|| ("Ready".to_owned(), Tone::Gold)),
             _ => None,
         }
     }
@@ -447,7 +470,6 @@ impl Status {
                 _ => String::new(),
             },
             "restructure" => self.folder.clone().unwrap_or_default(),
-            "settings" => "Linux".into(),
             _ => String::new(),
         }
     }
@@ -464,7 +486,8 @@ impl Status {
             .eta_seconds
             .filter(|s| *s > 0.0 && self.scan_running())
             .map(|s| format!("{} left", format_eta(s)));
-        let rate = (p.files_per_second > 0.0).then(|| format!("{:.1}/s", p.files_per_second));
+        let rate = (p.files_per_second > 0.0)
+            .then(|| format!("{:.0} files a second", p.files_per_second));
         let memory_tone = if p.resident_mb > 1200 {
             Tone::Warning
         } else {
@@ -472,7 +495,7 @@ impl Status {
         };
         let mut rows = vec![
             ("Found", grouped(p.discovered), eta, Tone::Text2),
-            ("Tagged", grouped(p.processed), rate, Tone::Text2),
+            ("Read", grouped(p.processed), rate, Tone::Text2),
             (
                 "Memory",
                 format!("{} MB", p.resident_mb),
@@ -535,8 +558,11 @@ mod tests {
             ..Status::default()
         };
         let p = status.pipeline();
-        assert_eq!(p.title, "Not scanned yet");
-        assert_eq!(p.sub, "Photos is ready to scan");
+        assert_eq!(p.title, "Ready to scan");
+        assert_eq!(
+            p.sub,
+            "FileID reads every file in Photos. Nothing is moved or changed."
+        );
         assert_eq!(p.stage, 0);
         assert_eq!(status.controls(), ScanControls::Scan);
         assert!(status.can_start());
@@ -548,7 +574,7 @@ mod tests {
         let status = scanning(250, 1000);
         let p = status.pipeline();
         assert_eq!(p.title, "Scanning");
-        assert_eq!(p.sub, "250 of 1,000 files · 142/s");
+        assert_eq!(p.sub, "250 of 1,000 files · about 2m left");
         assert!((p.fraction - 0.25).abs() < 1e-9);
         assert_eq!((p.stage, p.bar), (1, Tone::Gold));
         assert_eq!(status.controls(), ScanControls::Running { paused: false });
@@ -592,7 +618,10 @@ mod tests {
         };
         let p = status.pipeline();
         assert_eq!((p.title.as_str(), p.stage), ("Scan complete", 3));
-        assert_eq!(p.sub, "12,400 files · captions not started");
+        assert_eq!(p.sub, "12,400 files ready to browse");
+        assert_eq!(p.accent, Tone::Done);
+        assert_eq!(p.stage_tone, Tone::Muted);
+        assert!(status.shows_next_step());
         assert_eq!(status.controls(), ScanControls::Rescan);
         assert_eq!(status.badge("library"), Some(("12k".into(), Tone::Muted)));
         assert_eq!(status.jobs()[0].state, "DONE");
@@ -609,11 +638,14 @@ mod tests {
         let p = status.pipeline();
         assert_eq!(
             (p.title.as_str(), p.bar, p.stage_tone),
-            ("Writing captions", Tone::Ai, Tone::Ai)
+            ("Describing files", Tone::Ai, Tone::Ai)
         );
+        assert!(!status.shows_next_step());
         assert_eq!(status.badge("deep-analyze"), Some(("25%".into(), Tone::Ai)));
         assert_eq!(status.page_meta("deep-analyze"), "30 / 120");
-        assert_eq!(status.activity().label, "Captions");
+        assert_eq!(status.activity().label, "Describing");
+        assert_eq!(status.jobs()[1].name, "Describing files");
+        assert_eq!(status.jobs()[1].sub, "30 of 120 files");
         assert_eq!(status.jobs()[1].action, Some(JobAction::CancelDeep));
 
         status.deep_running = false;
@@ -621,8 +653,9 @@ mod tests {
         let p = status.pipeline();
         assert_eq!(
             (p.title.as_str(), p.stage, p.bar),
-            ("Everything analyzed", 4, Tone::Done)
+            ("All done", 4, Tone::Done)
         );
+        assert!(!status.shows_next_step());
         assert!(status.activity().idle);
     }
 
@@ -634,8 +667,13 @@ mod tests {
             progress: Some(progress(ScanPhase::Cancelled, 5, 20)),
             ..Status::default()
         };
-        assert_eq!(cancelled.pipeline().title, "Scan cancelled");
-        assert_eq!(cancelled.jobs()[0].state, "CANCELLED");
+        assert_eq!(cancelled.pipeline().title, "Scan stopped");
+        assert_eq!(
+            cancelled.pipeline().sub,
+            "5 of 20 files read. Scan again to finish; finished files are skipped."
+        );
+        assert_eq!(cancelled.jobs()[0].state, "STOPPED");
+        assert!(cancelled.stopped());
         let failed = Status {
             phase: Some(ScanPhase::Failed),
             ..cancelled
@@ -658,7 +696,7 @@ mod tests {
         assert_eq!(status.badge("people"), Some(("14".into(), Tone::Muted)));
         assert_eq!(
             status.badge("restructure"),
-            Some(("Plan".into(), Tone::Gold))
+            Some(("Ready".into(), Tone::Gold))
         );
     }
 
@@ -671,7 +709,8 @@ mod tests {
             rows[0],
             ("Found", "400".into(), Some("2m left".into()), Tone::Text2)
         );
-        assert_eq!(rows[1].2.as_deref(), Some("142.4/s"));
+        assert_eq!(rows[1].0, "Read");
+        assert_eq!(rows[1].2.as_deref(), Some("142 files a second"));
         assert_eq!(rows[3], ("Failed", "3".into(), None, Tone::Danger));
         assert!(Status::default().stats().is_empty());
         assert_eq!(format_eta(3725.0), "1h 2m");

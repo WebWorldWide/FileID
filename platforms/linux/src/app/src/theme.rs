@@ -438,6 +438,8 @@ button.gold-button.compact { min-height: 28px; padding: 0 12px; font-size: 13px;
 .scan-pct { font-size: 12.5px; font-weight: 600; font-feature-settings: "tnum"; }
 .scan-step { font-size: 12px; color: @fileid_text2; }
 .scan-sub { font-size: 12px; color: @fileid_text3; }
+button.next-step { background: transparent; border: none; box-shadow: none; padding: 0; min-height: 22px; color: @fileid_gold; font-size: 12px; font-weight: 500; }
+button.next-step:hover { background: transparent; color: shade(@fileid_gold, 1.1); }
 .step-seg { min-height: 3px; border-radius: 99px; background-color: alpha(#FFFFFF, 0.12); }
 .step-seg.past { background-color: alpha(#CFD3D8, 0.7); }
 .step-seg.current.tone-gold { background-color: @fileid_gold; }

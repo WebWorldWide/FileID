@@ -177,19 +177,24 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let explainer = build_explainer();
     content.append(&explainer);
 
-    // Status card.
-    let lbl_active = mono_value(vlm_by_key(default_kind).display);
-    let lbl_total = mono_value("0");
-    let lbl_pending = mono_value("0");
-    let lbl_eta = mono_value("0s");
+    let lbl_active = value_label(vlm_by_key(default_kind).display);
+    lbl_active.set_tooltip_text(Some("Change the description model below"));
+    let lbl_total = value_label("0 files");
+    let lbl_pending = value_label("0 files");
+    let lbl_eta_key = dim_key("Time needed");
+    let lbl_eta = value_label("");
+    let status_empty = wrap_caption(
+        "No files to describe yet. Scan a folder first; its photos, videos and documents appear here.",
+    );
     content.append(&build_status_card(
+        &status_empty,
         &lbl_active,
         &lbl_total,
         &lbl_pending,
+        &lbl_eta_key,
         &lbl_eta,
     ));
 
-    // Model picker (rows populated after `ui` exists).
     let picker_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(6)
@@ -211,50 +216,37 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     download_card.set_visible(false);
     content.append(&build_picker_card(&picker_box, &download_card));
 
-    // Actions card.
-    let naming_banner = build_naming_banner();
-    let skip_check =
-        gtk::CheckButton::with_label("Skip files already analyzed by the active model");
+    let (naming_banner, naming_dismiss) = build_naming_banner();
+    let skip_check = gtk::CheckButton::with_label("Only files not described yet");
     skip_check.set_active(true);
+    skip_check.set_tooltip_text(Some(&skip_tooltip(default_kind)));
     let run_btn = gtk::Button::builder()
-        .label("Analyze entire library")
+        .label("Describe files")
         .sensitive(false)
         .css_classes(["gold-button"])
         .build();
     let folder_btn = gtk::Button::builder()
-        .label("Analyze a folder…")
+        .label("Describe a folder…")
         .css_classes(["pill"])
+        .tooltip_text("Describe only the files in one folder")
         .sensitive(vlm_runtime_available())
         .build();
     let cancel_btn = gtk::Button::builder()
-        .label("Cancel")
-        .css_classes(["destructive-action"])
+        .label("Stop")
+        .css_classes(["pill"])
+        .tooltip_text("Stop describing. Files already described keep their descriptions.")
         .visible(false)
         .build();
+    let run_meta = wrap_caption("");
     content.append(&build_actions_card(
         &naming_banner,
         &skip_check,
         &run_btn,
         &folder_btn,
         &cancel_btn,
+        &run_meta,
     ));
 
-    let apply_status = gtk::Label::builder()
-        .xalign(0.0)
-        .css_classes(["dim-label"])
-        .wrap(true)
-        .build();
-    let apply_tags = gtk::Button::builder()
-        .label("Apply tags")
-        .css_classes(["pill"])
-        .build();
-    let apply_people = gtk::Button::builder()
-        .label("Apply people as tags")
-        .css_classes(["pill"])
-        .build();
-    content.append(&build_apply_card(&apply_status, &apply_tags, &apply_people));
-
-    // Smart-names list.
     let smart_count = gtk::Label::builder()
         .xalign(1.0)
         .css_classes(["dim-label"])
@@ -263,18 +255,45 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .selection_mode(gtk::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
-    let smart_apply_all = gtk::Button::builder()
-        .label("Apply all renames")
+    let review_btn = gtk::Button::builder()
+        .label("Review suggested names…")
         .css_classes(["gold-button"])
+        .halign(gtk::Align::Start)
         .build();
-    let smart_card = build_smart_card(&smart_count, &smart_list, &smart_apply_all);
+    let smart_revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .child(&smart_list)
+        .reveal_child(false)
+        .build();
+    let smart_card = build_smart_card(&smart_count, &review_btn, &smart_revealer);
     smart_card.set_visible(false);
     content.append(&smart_card);
 
-    // Live, event-driven cards.
-    let starting_subtitle = wrap_caption(
-        "Loading the on-device model. The first image usually appears in 5–15 seconds.",
-    );
+    let apply_status = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .wrap(true)
+        .build();
+    let apply_tags = gtk::Button::builder()
+        .label("Add tags to files")
+        .css_classes(["pill"])
+        .build();
+    let apply_people = gtk::Button::builder()
+        .label("Add people's names to files")
+        .css_classes(["pill"])
+        .build();
+    let apply_all = gtk::Button::builder()
+        .label("Add tags and names")
+        .css_classes(["pill"])
+        .build();
+    content.append(&build_apply_card(
+        &apply_status,
+        &apply_tags,
+        &apply_people,
+        &apply_all,
+    ));
+
+    let starting_subtitle = wrap_caption(STARTING_SUBTITLE);
     let starting_card = build_starting_card(&starting_subtitle);
     starting_card.set_visible(false);
     content.append(&starting_card);
@@ -283,10 +302,10 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .show_text(false)
         .css_classes(["gold-accent"])
         .build();
-    let progress_count = mono_value("0 / 0");
+    let progress_count = value_label("");
     let progress_eta = gtk::Label::builder()
         .xalign(1.0)
-        .css_classes(["gold-accent"])
+        .css_classes(["lavender-accent", "numeric"])
         .build();
     let progress_file = gtk::Label::builder()
         .xalign(0.0)
@@ -306,11 +325,14 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     content.append(&progress_card);
 
     let completion_icon = gtk::Label::new(None);
+    let completion_title = heading("Finished");
     let completion_label = gtk::Label::builder()
         .xalign(0.0)
+        .wrap(true)
         .css_classes(["dim-label"])
         .build();
-    let completion_card = build_completion_card(&completion_icon, &completion_label);
+    let completion_card =
+        build_completion_card(&completion_icon, &completion_title, &completion_label);
     completion_card.set_visible(false);
     content.append(&completion_card);
 
@@ -331,24 +353,29 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .css_classes(["fileid-tab"])
         .build();
 
-    // ── Shared state ─────────────────────────────────────────────────────────
     let ui = Rc::new(DeepUi {
         engine,
         in_flight: Cell::new(false),
         apply_in_flight: Cell::new(false),
         apply_generation: Cell::new(0),
         active_kind: Cell::new(default_kind),
+        counts: Cell::new(StatusCounts::default()),
+        tip_dismissed: Cell::new(false),
         lbl_active,
         lbl_total,
         lbl_pending,
+        lbl_eta_key,
         lbl_eta,
+        status_empty,
         run_btn,
         cancel_btn,
         skip_check,
+        run_meta,
         naming_banner,
         apply_status,
         apply_tags,
         apply_people,
+        apply_all,
         picker_box,
         pick_rows: RefCell::new(Vec::new()),
         download_card,
@@ -357,6 +384,8 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         smart_card,
         smart_count,
         smart_list,
+        review_btn,
+        smart_revealer,
         proposed: RefCell::new(Vec::new()),
         starting_card,
         starting_subtitle,
@@ -367,6 +396,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         progress_file,
         progress_caption,
         completion_card,
+        completion_title,
         completion_label,
         completion_icon,
         last_card,
@@ -374,8 +404,16 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         last_name,
     });
 
+    {
+        let ui = ui.clone();
+        naming_dismiss.connect_clicked(move |_| {
+            ui.tip_dismissed.set(true);
+            sync_run_state(&ui);
+        });
+    }
     populate_picker(&ui);
-    wire_actions(&ui, &folder_btn, &smart_apply_all);
+    wire_actions(&ui, &folder_btn);
+    sync_run_state(&ui);
 
     // ── Live engine events → cards ───────────────────────────────────────────
     glib::MainContext::default().spawn_local(clone!(
@@ -415,15 +453,20 @@ struct DeepUi {
     apply_in_flight: Cell<bool>,
     apply_generation: Cell<u64>,
     active_kind: Cell<&'static str>,
+    counts: Cell<StatusCounts>,
+    tip_dismissed: Cell<bool>,
 
     lbl_active: gtk::Label,
     lbl_total: gtk::Label,
     lbl_pending: gtk::Label,
+    lbl_eta_key: gtk::Label,
     lbl_eta: gtk::Label,
+    status_empty: gtk::Label,
 
     run_btn: gtk::Button,
     cancel_btn: gtk::Button,
     skip_check: gtk::CheckButton,
+    run_meta: gtk::Label,
     naming_banner: gtk::Box,
 
     picker_box: gtk::Box,
@@ -435,6 +478,8 @@ struct DeepUi {
     smart_card: gtk::Box,
     smart_count: gtk::Label,
     smart_list: gtk::ListBox,
+    review_btn: gtk::Button,
+    smart_revealer: gtk::Revealer,
     proposed: RefCell<Vec<ProposedRow>>,
 
     starting_card: gtk::Box,
@@ -446,6 +491,7 @@ struct DeepUi {
     progress_file: gtk::Label,
     progress_caption: gtk::Label,
     completion_card: gtk::Box,
+    completion_title: gtk::Label,
     completion_label: gtk::Label,
     completion_icon: gtk::Label,
     last_card: gtk::Box,
@@ -455,6 +501,7 @@ struct DeepUi {
     apply_status: gtk::Label,
     apply_tags: gtk::Button,
     apply_people: gtk::Button,
+    apply_all: gtk::Button,
 }
 
 // ─── Command routing ─────────────────────────────────────────────────────────
@@ -464,6 +511,7 @@ fn send_cmd(ui: &Rc<DeepUi>, payload: CommandPayload) -> bool {
         Ok(payload) => payload,
         Err(error) => {
             ui.completion_icon.set_text("!");
+            ui.completion_title.set_text("Not started");
             ui.completion_label.set_text(&error);
             reveal(&ui.completion_card);
             return false;
@@ -475,25 +523,24 @@ fn send_cmd(ui: &Rc<DeepUi>, payload: CommandPayload) -> bool {
             tracing::warn!(target: "deep_analyze", "send failed: {error}");
             end_run(ui);
             ui.completion_icon.set_text("!");
-            ui.completion_label
-                .set_text(&format!("Command could not be sent: {error}"));
+            ui.completion_title.set_text("Not started");
+            ui.completion_label.set_text(NOT_READY);
             reveal(&ui.completion_card);
             false
         }
     }
 }
 
-fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Button) {
-    // Analyze entire library → deepAnalyzeAll.
+fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button) {
     ui.run_btn.connect_clicked(clone!(
         #[strong]
         ui,
         move |button| {
-            if ui.in_flight.get() {
+            if ui.in_flight.get() || run_blocker(&ui).is_some() {
                 return;
             }
             // Gate a restricted-model (e.g. Gemma) download behind license
-            // acceptance, like macOS gates every Deep Analyze entry point. On
+            // acceptance, like macOS gates every describe entry point. On
             // acceptance the gate re-emits this click so the run proceeds.
             let kind = ui.active_kind.get();
             if !crate::model_license::ensure_or_prompt(button, kind) {
@@ -513,7 +560,6 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
         }
     ));
 
-    // Analyze a picked folder → deepAnalyzeFolder.
     folder_btn.connect_clicked(clone!(
         #[strong]
         ui,
@@ -527,7 +573,7 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
                 return;
             }
             let dialog = gtk::FileDialog::builder()
-                .title("Pick a folder to Deep Analyze")
+                .title("Choose a folder to describe")
                 .modal(true)
                 .build();
             let parent = btn.root().and_downcast::<gtk::Window>();
@@ -553,7 +599,6 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
         }
     ));
 
-    // Cancel → deepAnalyzeCancel.
     ui.cancel_btn.connect_clicked(clone!(
         #[strong]
         ui,
@@ -562,30 +607,54 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
         }
     ));
 
-    // Apply all smart-name renames → renameFiles.
-    apply_all.connect_clicked(clone!(
+    ui.review_btn.connect_clicked(clone!(
         #[strong]
         ui,
-        move |_| {
-            let renames: Vec<RenameEntry> = ui
-                .proposed
-                .borrow()
-                .iter()
-                .map(|r| RenameEntry {
-                    file_id: r.id,
-                    new_name: r.new_name(),
-                })
-                .collect();
-            if renames.is_empty() {
+        move |button| {
+            let open = !ui.smart_revealer.reveals_child();
+            ui.smart_revealer.set_reveal_child(open);
+            button.set_label(if open {
+                "Hide suggested names"
+            } else {
+                "Review suggested names…"
+            });
+        }
+    ));
+
+    ui.skip_check.connect_toggled(clone!(
+        #[strong]
+        ui,
+        move |_| sync_run_state(&ui),
+    ));
+
+    ui.apply_all.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |button| {
+            let count = ui.proposed.borrow().len();
+            if count == 0 {
+                apply_file_tags_modes(&ui, &[false, true]);
                 return;
             }
-            if send_cmd(
-                &ui,
-                CommandPayload::RenameFiles(RenameFilesPayload { renames }),
-            ) {
-                schedule_refresh(&ui, 900);
-            }
-            apply_file_tags_modes(&ui, &[false, true]);
+            let files = plural(count, "file");
+            let dialog = adw::AlertDialog::new(
+                Some(&format!("Rename {files} to the suggested names?")),
+                Some(
+                    "The files keep their folders; only their names change. Tags and people are added too. FileID can't undo renames yet.",
+                ),
+            );
+            let confirm = format!("Rename {files}");
+            dialog.add_responses(&[("cancel", "Cancel"), ("rename", confirm.as_str())]);
+            dialog.set_response_appearance("rename", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            let ui = ui.clone();
+            dialog.connect_response(None, move |_, response| {
+                if response == "rename" {
+                    rename_all(&ui);
+                }
+            });
+            dialog.present(Some(button));
         }
     ));
 
@@ -601,6 +670,28 @@ fn wire_actions(ui: &Rc<DeepUi>, folder_btn: &gtk::Button, apply_all: &gtk::Butt
     ));
 }
 
+fn rename_all(ui: &Rc<DeepUi>) {
+    let renames: Vec<RenameEntry> = ui
+        .proposed
+        .borrow()
+        .iter()
+        .map(|r| RenameEntry {
+            file_id: r.id,
+            new_name: r.new_name(),
+        })
+        .collect();
+    if renames.is_empty() {
+        return;
+    }
+    if send_cmd(
+        ui,
+        CommandPayload::RenameFiles(RenameFilesPayload { renames }),
+    ) {
+        schedule_refresh(ui, 900);
+    }
+    apply_file_tags_modes(ui, &[false, true]);
+}
+
 fn apply_file_tags(ui: &Rc<DeepUi>, people: bool) {
     apply_file_tags_modes(ui, &[people]);
 }
@@ -611,14 +702,13 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
     }
     let generation = ui.apply_generation.get().wrapping_add(1);
     ui.apply_generation.set(generation);
-    ui.apply_tags.set_sensitive(false);
-    ui.apply_people.set_sensitive(false);
+    sync_apply_buttons(ui);
     ui.apply_status.set_text(if modes.len() == 1 && modes[0] {
-        "Reading named people…"
+        "Reading people's names…"
     } else if modes.len() == 1 {
-        "Reading analyzed tags…"
+        "Reading tags…"
     } else {
-        "Reading analyzed tags and named people…"
+        "Reading tags and people's names…"
     });
     let modes = modes.to_vec();
     let ui = ui.clone();
@@ -649,7 +739,7 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
         }
 
         if expected_results == 0 {
-            finish_apply_tags(&ui, generation, "Nothing to apply yet. Name people in People or run Deep Analyze first.");
+            finish_apply_tags(&ui, generation, "Nothing to add yet.");
             return;
         }
 
@@ -664,7 +754,7 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
                 finish_apply_tags(
                     &timeout_ui,
                     generation,
-                    "Timed out waiting for the engine to finish applying tags. Check the engine status and try again.",
+                    "FileID didn't finish adding tags. Try again in a moment.",
                 );
             }
         });
@@ -685,16 +775,19 @@ fn apply_file_tags_modes(ui: &Rc<DeepUi>, modes: &[bool]) {
         }
         if received_results == expected_results {
             let status = if failed == 0 {
-                format!("Applied tags to {succeeded} file updates ({requested_files} queued).")
+                format!("Done: added {} to files.", plural(succeeded as usize, "tag"))
             } else {
-                format!("Applied {succeeded} file updates; {failed} failed. Check the engine log for details.")
+                format!(
+                    "Added {}; {failed} of {requested_files} couldn't be written.",
+                    plural(succeeded as usize, "tag")
+                )
             };
             finish_apply_tags(&ui, generation, &status);
         } else if ui.apply_in_flight.get() && ui.apply_generation.get() == generation {
             finish_apply_tags(
                 &ui,
                 generation,
-                "The engine stopped before tag application completed. Check the engine status and try again.",
+                "FileID restarted before the tags were added. Try again.",
             );
         }
     });
@@ -705,10 +798,112 @@ fn finish_apply_tags(ui: &Rc<DeepUi>, generation: u64, status: &str) {
         return;
     }
     ui.apply_in_flight.set(false);
-    ui.apply_tags.set_sensitive(true);
-    ui.apply_people.set_sensitive(true);
+    sync_apply_buttons(ui);
     ui.apply_status.set_text(status);
 }
+
+fn sync_apply_buttons(ui: &DeepUi) {
+    let idle = !ui.apply_in_flight.get();
+    let named = ui.counts.get().named_people > 0;
+    ui.apply_tags.set_sensitive(idle);
+    ui.apply_people.set_sensitive(idle && named);
+    ui.apply_people.set_tooltip_text(Some(if named {
+        "Tag each photo with the names of the people in it"
+    } else {
+        "Name someone on the People page first"
+    }));
+    ui.apply_all.set_sensitive(idle);
+    let renames = ui.proposed.borrow().len();
+    if renames > 0 {
+        ui.apply_all
+            .set_label(&format!("Add tags and rename {}", plural(renames, "file")));
+        ui.apply_all.set_tooltip_text(Some(
+            "Adds tags and people, and renames files to their suggested names. You confirm first.",
+        ));
+    } else {
+        ui.apply_all.set_label("Add tags and names");
+        ui.apply_all
+            .set_tooltip_text(Some("Adds tags and people's names to the files"));
+    }
+}
+
+fn run_blocker(ui: &DeepUi) -> Option<String> {
+    if !vlm_runtime_available() {
+        return Some(
+            "Describing isn't available in this Flatpak yet: it needs a reviewed llama-mtmd-cli, which isn't bundled."
+                .into(),
+        );
+    }
+    let kind = vlm_by_key(ui.active_kind.get());
+    let ram = fileid_engine::platform::physical_memory_gb();
+    if ram > 0.0 && !vlm_fits(kind.key, ram, 0.0, None) {
+        return Some(format!(
+            "{} needs more memory than this computer has. Choose a smaller model below.",
+            kind.display
+        ));
+    }
+    if ui.in_flight.get() {
+        return Some("FileID is already describing files.".into());
+    }
+    let counts = ui.counts.get();
+    if counts.total_files == 0 {
+        return Some("Scan a folder first.".into());
+    }
+    if ui.skip_check.is_active() && counts.pending == 0 {
+        return Some(
+            "Every file is already described. Turn off \"Only files not described yet\" to describe them again."
+                .into(),
+        );
+    }
+    None
+}
+
+fn sync_run_state(ui: &DeepUi) {
+    let counts = ui.counts.get();
+    let in_flight = ui.in_flight.get();
+    let count = if ui.skip_check.is_active() {
+        counts.pending
+    } else {
+        counts.total_files
+    }
+    .max(0) as usize;
+    ui.run_btn.set_label(&if count > 0 {
+        format!("Describe {}", plural(count, "file"))
+    } else {
+        "Describe files".to_string()
+    });
+    let names_waiting = !ui.proposed.borrow().is_empty();
+    ui.run_btn.set_css_classes(if names_waiting {
+        &["pill"]
+    } else {
+        &["gold-button"]
+    });
+    let blocker = run_blocker(ui);
+    ui.run_btn.set_sensitive(blocker.is_none());
+    ui.run_btn.set_tooltip_text(Some(blocker.as_deref().unwrap_or(
+        "Write a description and a suggested name for each file. You can stop at any time.",
+    )));
+    ui.cancel_btn.set_visible(in_flight);
+    match blocker.filter(|_| !in_flight) {
+        Some(reason) => ui.run_meta.set_text(&reason),
+        None => ui
+            .run_meta
+            .set_text("You can keep using your computer while this runs."),
+    }
+    ui.naming_banner.set_visible(
+        counts.people > 0 && counts.named_people == 0 && !in_flight && !ui.tip_dismissed.get(),
+    );
+    sync_apply_buttons(ui);
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    format!(
+        "{} {noun}{}",
+        crate::shell::grouped(count as u64),
+        if count == 1 { "" } else { "s" }
+    )
+}
+
 
 /// Optimistic refresh after a fire-and-forget command (the engine's
 /// `renameResult` events aren't surfaced on the current `EngineEvent` surface,
