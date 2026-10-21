@@ -1449,6 +1449,11 @@ fn predecode_one(
     budget: &Arc<PredecodeBudget>,
     legacy: bool,
 ) -> Option<PreDecoded> {
+    #[cfg(test)]
+    assert!(
+        file.path.file_name().is_none_or(|name| name != "fileid-test-decoder-panic"),
+        "injected decoder panic"
+    );
     {
         let decode_started = Instant::now();
 
@@ -1551,14 +1556,12 @@ fn predecode_one(
                         .as_deref()
                         .and_then(probe_image_decode_reservation_bytes)
                         .unwrap_or_else(|| budget.capacity());
-                    let Some((result, guard)) = decode_reserved(
+                    let (result, guard) = decode_reserved(
                         budget,
                         reservation,
                         coord,
                         || decode_image_sync(&file.path, file_bytes.as_deref()),
-                    ) else {
-                        return None;
-                    };
+                    )?;
                     budget_guard = Some(guard);
                     Some(result)
                 }
@@ -1566,14 +1569,12 @@ fn predecode_one(
                     // Media Foundation negotiates a <=1280px RGB32 working frame;
                     // its bounded fallback rejects native BGRA + RGB peaks above
                     // this shared reservation before allocating the retained RGB.
-                    let Some((result, guard)) = decode_reserved(
+                    let (result, guard) = decode_reserved(
                         budget,
                         crate::shell::video::VIDEO_DECODE_RESERVATION_BYTES,
                         coord,
                         || decode_video_keyframe_sync(&file.path),
-                    ) else {
-                        return None;
-                    };
+                    )?;
                     budget_guard = Some(guard);
                     Some(result)
                 }
@@ -1588,14 +1589,12 @@ fn predecode_one(
                         .and_then(|s| s.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
                     if is_obj {
-                        let Some((result, guard)) = decode_reserved(
+                        let (result, guard) = decode_reserved(
                             budget,
                             budget.capacity(),
                             coord,
                             || crate::pipeline::obj_render::render_obj_to_rgb(&file.path),
-                        ) else {
-                            return None;
-                        };
+                        )?;
                         match result {
                             Ok(frame) => {
                                 budget_guard = Some(guard);
@@ -3300,6 +3299,39 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("full decoder output queue must remain cancellation-aware");
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn decoder_panic_on_one_file_fails_that_file_and_keeps_decoding() {
+        let dir = std::env::temp_dir().join(format!("fileid-decoder-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = ["fileid-test-decoder-panic", "after.txt"];
+        for name in names {
+            std::fs::write(dir.join(name), b"text").unwrap();
+        }
+        let (raw_tx, raw_rx) = async_channel::bounded(names.len());
+        let (predecoded_tx, predecoded_rx) = async_channel::bounded(names.len());
+        for name in names {
+            raw_tx
+                .send_blocking(DiscoveredFile {
+                    path: dir.join(name),
+                    kind: FileKind::Doc,
+                    size_bytes: 4,
+                    modified_unix: 0.0,
+                    created_unix: None,
+                    online_only: false,
+                    file_ref: None,
+                })
+                .unwrap();
+        }
+        drop(raw_tx);
+        run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), false);
+        let failed = predecoded_rx.try_recv().expect("panicking file still reported");
+        assert!(matches!(failed.decoded, Some(Err(_))));
+        let next = predecoded_rx.try_recv().expect("decoder kept running");
+        assert_eq!(next.file.path, dir.join("after.txt"));
+        assert!(next.content_hash.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

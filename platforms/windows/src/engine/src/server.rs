@@ -546,14 +546,7 @@ async fn async_main() -> Result<()> {
                             )
                             .await;
                             if handled.is_err() {
-                                tracing::error!("panic in IPC command handler; engine continuing");
-                                d.sink
-                                    .send(EngineError::event(
-                                        "command_handler_panic",
-                                        "an internal error interrupted a command; \
-                                                      the engine kept running",
-                                    ))
-                                    .await;
+                                emit_handler_panic(&d.sink).await;
                             }
                             if d.command_shutdown_requested
                                 .load(std::sync::atomic::Ordering::Acquire)
@@ -968,7 +961,7 @@ async fn spawn_mutation<F>(
         gate,
         sink,
         scan_state,
-        None,
+        Some(scan_rejection_event()),
         operation,
         std::time::Duration::from_secs(2),
     )
@@ -1054,9 +1047,44 @@ async fn spawn_mutation_with_interval<F>(
                 }
             },
         };
-        operation.await;
+        if futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(operation))
+            .await
+            .is_err()
+        {
+            emit_handler_panic(&sink).await;
+            if let Some(event) = rejection_event {
+                sink.send(event).await;
+            }
+        }
     });
     let _ = registered_rx.await;
+}
+
+async fn emit_handler_panic(sink: &Sink) {
+    tracing::error!("panic in IPC command handler; engine continuing");
+    sink.send(EngineError::event(
+        "command_handler_panic",
+        "an internal error interrupted a command; the engine kept running",
+    ))
+    .await;
+}
+
+/// `tokio::spawn` for a command handler: a panic still answers the app with a
+/// `command_handler_panic` error instead of dying silently in a JoinHandle
+/// nobody awaits.
+fn spawn_guarded<F>(sink: &Sink, handler: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let sink = sink.clone();
+    tokio::spawn(async move {
+        if futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(handler))
+            .await
+            .is_err()
+        {
+            emit_handler_panic(&sink).await;
+        }
+    });
 }
 
 fn bulk_rejection_event(action: &str, file_ids: &[i64], message: &str) -> IpcEvent {
@@ -1319,24 +1347,24 @@ async fn handle_line(d: &Dispatcher, line: &str) {
     let ids = cmd.payload.target_ids();
     match cmd.payload {
         CommandPayload::ChatRequest(payload) => {
-            tokio::spawn(commands::chat::handle(sink.clone(), db.cloned(), payload.request));
+            spawn_guarded(sink, commands::chat::handle(sink.clone(), db.cloned(), payload.request));
         }
         CommandPayload::ToolRequest(payload) => {
             let sink = sink.clone();
             let database = db.cloned();
-            tokio::spawn(async move { commands::tools::handle(sink, database, payload.request).await; });
+            spawn_guarded(&sink.clone(), commands::tools::handle(sink, database, payload.request));
         }
         CommandPayload::CatalogRequest(payload) => {
             let sink = sink.clone();
             let database = db.cloned();
             let index = catalog_index.cloned();
-            tokio::spawn(async move { commands::catalog::handle(sink, database, index, payload.request).await; });
+            spawn_guarded(&sink.clone(), commands::catalog::handle(sink, database, index, payload.request));
         }
         CommandPayload::ListModels(payload) => {
-            tokio::spawn(commands::models::handle(sink.clone(), payload));
+            spawn_guarded(sink, commands::models::handle(sink.clone(), payload));
         }
         CommandPayload::BenchmarkModel(payload) => {
-            tokio::spawn(commands::benchmark::handle(sink.clone(), payload));
+            spawn_guarded(sink, commands::benchmark::handle(sink.clone(), payload));
         }
         CommandPayload::CancelBenchmark(_) => commands::benchmark::cancel(),
         CommandPayload::HealthCheck(payload) => {
@@ -1374,9 +1402,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let sink = sink.clone();
             let model_kind = payload.model_kind.clone();
             let http_client = http_client.clone();
-            tokio::spawn(async move {
-                commands::prewarm::handle_prewarm_model(sink, model_kind, http_client).await;
-            });
+            spawn_guarded(&sink.clone(), commands::prewarm::handle_prewarm_model(sink, model_kind, http_client));
         }
         CommandPayload::CancelPrewarm(payload) => {
             // Per-model when modelKind is set (one row's Cancel), all in-flight
@@ -1492,10 +1518,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             d.dispatch_mutation(action, &ids, "Could not merge people", payload, commands::bulk::handle_merge_clusters).await;
         }
         CommandPayload::EmbedTextQuery(payload) => {
-            let sink_c = sink.clone();
-            tokio::spawn(async move {
-                commands::embed::handle_embed_text_query(sink_c, payload).await;
-            });
+            spawn_guarded(sink, commands::embed::handle_embed_text_query(sink.clone(), payload));
         }
         CommandPayload::RenamePerson(payload) => {
             d.dispatch_mutation(action, &ids, "The person could not be renamed", payload, commands::bulk::handle_rename_person).await;
@@ -1521,9 +1544,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             };
             let sink_c = sink.clone();
             let path_c = db_path.clone();
-            tokio::spawn(async move {
-                commands::bulk::handle_find_merge_suggestions(sink_c, path_c).await;
-            });
+            spawn_guarded(sink, commands::bulk::handle_find_merge_suggestions(sink_c, path_c));
         }
         CommandPayload::MarkPersonsDifferent(payload) => {
             d.dispatch_mutation(action, &ids, "The verdict could not be saved", payload, commands::bulk::handle_mark_persons_different).await;
@@ -1535,9 +1556,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             };
             let sink_c = sink.clone();
             let db_c = db.clone();
-            tokio::spawn(async move {
-                commands::embed::handle_embed_image_query(sink_c, db_c, payload).await;
-            });
+            spawn_guarded(sink, commands::embed::handle_embed_image_query(sink_c, db_c, payload));
         }
         CommandPayload::DeepAnalyzeFile(payload) => {
             let model_kind = payload.model_kind.clone();
@@ -1639,10 +1658,7 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             .await;
         }
         CommandPayload::GenerateVideoThumbnail(payload) => {
-            let sink_c = sink.clone();
-            tokio::spawn(async move {
-                commands::thumbnail::handle_generate_video_thumbnail(sink_c, payload).await;
-            });
+            spawn_guarded(sink, commands::thumbnail::handle_generate_video_thumbnail(sink.clone(), payload));
         }
         CommandPayload::PurgeExcluded(payload) => {
             d.dispatch_mutation(action, &ids, "Excluded files could not be purged", payload, commands::scan::handle_purge_excluded).await;
@@ -1846,6 +1862,61 @@ mod tests {
                 }
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn panicking_spawned_handler_still_answers_with_an_error() {
+        let (sink, mut events) = Sink::channel_for_test(4);
+        spawn_guarded(&sink, async {
+            panic!("injected handler panic");
+        });
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("panic must be answered")
+            .expect("event");
+        assert!(matches!(
+            event.payload,
+            EventPayload::Error(Wrap { inner: EngineError { ref kind, .. } }) if kind == "command_handler_panic"
+        ));
+    }
+
+    #[tokio::test]
+    async fn panicking_mutation_emits_its_terminal_and_releases_the_gate() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let (sink, mut events) = Sink::channel_for_test(8);
+        let scan_state: Arc<parking_lot::Mutex<Option<coordinator::ScanCoordinator>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        spawn_mutation_with_rejection(
+            &gate,
+            &sink,
+            &scan_state,
+            bulk_rejection_event("applyTags", &[7], "interrupted"),
+            async {
+                panic!("injected mutation panic");
+            },
+        )
+        .await;
+        let first = events.recv().await.expect("panic error");
+        let second = events.recv().await.expect("terminal");
+        assert!(matches!(
+            first.payload,
+            EventPayload::Error(Wrap { inner: EngineError { ref kind, .. } }) if kind == "command_handler_panic"
+        ));
+        assert!(matches!(second.payload, EventPayload::BulkActionResult(_)));
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_c = ran.clone();
+        spawn_mutation(&gate, &sink, &scan_state, async move {
+            ran_c.store(true, std::sync::atomic::Ordering::Release);
+        })
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !ran.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the mutation gate must be free after a panic");
     }
 
     #[tokio::test]
