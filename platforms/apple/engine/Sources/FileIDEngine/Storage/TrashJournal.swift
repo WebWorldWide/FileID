@@ -37,7 +37,7 @@ enum TrashJournal {
     static let maxBatches = 50
     private static let lock = NSLock()
 
-    static var url: URL { EngineStateRoot.directory.appendingPathComponent("trash-journal.json") }
+    static var defaultURL: URL { EngineStateRoot.directory.appendingPathComponent("trash-journal.json") }
 
     static func snapshot(_ db: GRDB.Database, fileID: Int64) throws -> [TableRow] {
         var out: [TableRow] = []
@@ -80,41 +80,41 @@ enum TrashJournal {
         }
     }
 
-    static func load() -> [Batch] {
+    static func load(at url: URL = defaultURL) -> [Batch] {
         guard let data = try? Data(contentsOf: url) else { return [] }
         return (try? JSONDecoder().decode([Batch].self, from: data)) ?? []
     }
 
-    static func save(_ batches: [Batch]) throws {
+    static func save(_ batches: [Batch], at url: URL = defaultURL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(Array(batches.suffix(maxBatches))).write(to: url, options: [.atomic])
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
-    static func append(_ batch: Batch) throws {
+    static func append(_ batch: Batch, at url: URL = defaultURL) throws {
         lock.lock(); defer { lock.unlock() }
-        try save(load() + [batch])
+        try save(load(at: url) + [batch], at: url)
     }
 
-    static func take(_ id: String) -> Batch? {
+    static func take(_ id: String, at url: URL = defaultURL) -> Batch? {
         lock.lock(); defer { lock.unlock() }
-        var batches = load()
+        var batches = load(at: url)
         guard let index = batches.firstIndex(where: { $0.id == id }) else { return nil }
         let batch = batches.remove(at: index)
-        try? save(batches)
+        try? save(batches, at: url)
         return batch
     }
 
-    static func putBack(_ batch: Batch) {
+    static func putBack(_ batch: Batch, at url: URL = defaultURL) {
         lock.lock(); defer { lock.unlock() }
-        try? save(load() + [batch])
+        try? save(load(at: url) + [batch], at: url)
     }
 
     /// Moves each file back from the Trash and re-inserts its catalog rows.
     /// Items that cannot be restored stay in the journal for a later retry.
-    static func restore(batchID: String, database: Database,
+    static func restore(batchID: String, database: Database, journal: URL = defaultURL,
                         move: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }) async -> BulkActionResult {
-        guard let batch = take(batchID) else {
+        guard let batch = take(batchID, at: journal) else {
             return BulkActionResult(action: "restoreFromTrash", succeeded: 0, failed: 1,
                                     messages: [BulkActionItem(ok: false, message: "Nothing to put back: this Trash batch is unknown or already restored.")])
         }
@@ -149,7 +149,7 @@ enum TrashJournal {
                 messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Restored the file, but the catalog update failed; rescan the folder."))
             }
         }
-        if !leftover.isEmpty { putBack(Batch(id: batch.id, createdAt: batch.createdAt, items: leftover)) }
+        if !leftover.isEmpty { putBack(Batch(id: batch.id, createdAt: batch.createdAt, items: leftover), at: journal) }
         return BulkActionResult(action: "restoreFromTrash", succeeded: messages.filter(\.ok).count,
                                 failed: messages.filter { !$0.ok }.count, messages: messages)
     }
