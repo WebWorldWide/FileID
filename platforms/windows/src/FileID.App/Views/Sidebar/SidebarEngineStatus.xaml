@@ -3,7 +3,7 @@
     SidebarEngineStatus — engine state banner anchored at the bottom of
     the sidebar. Three states:
 
-      Starting → soft gold dot + glow, "Engine starting…"
+      Starting → soft gold dot + glow, "Getting ready…"
       Ready    → soft green dot + glow, "Engine ready" (tooltip has details)
       Crashed  → soft red dot + glow,   last error message
 
@@ -61,7 +61,7 @@
                  the actual reason. -->
             <TextBlock x:Name="StatusText"
                        Grid.Column="1"
-                       Text="Engine starting..."
+                       Text="Getting ready…"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorPrimaryBrush}"
                        VerticalAlignment="Center"

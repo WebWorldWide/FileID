@@ -168,8 +168,14 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         var engine = EngineClient.Instance;
         var phase = engine.Phase ?? engine.LastProgress?.Phase;
         if (phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan) return;
+        if (engine.GpuDeviceRemoved || engine.State == EngineClient.LifecycleState.Crashed) return;
         try
         {
+            if (engine.State != EngineClient.LifecycleState.Ready)
+            {
+                await engine.WaitForReadyAsync(TimeSpan.FromSeconds(30));
+            }
+            if (!string.Equals(FolderPath, path, StringComparison.Ordinal)) return;
             await engine.StartScanAsync(path, FolderDisplay);
         }
         catch (Exception ex)

@@ -64,7 +64,7 @@ public sealed partial class SidebarEngineStatus : UserControl
         switch (ec.State)
         {
             case EngineClient.LifecycleState.Starting:
-                ApplyStatus(StatusAccent.Gold, "Engine starting…", "Engine is launching.");
+                ApplyStatus(StatusAccent.Gold, "Getting ready…", "FileID is starting its background helper. This takes a few seconds.");
                 break;
             case EngineClient.LifecycleState.Ready:
                 // Ready but with a recent error — show red so the user notices.
