@@ -849,7 +849,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         catch (Exception ex)
         {
             DebugLog.Warn("Verify cuDNN failed: " + ex.Message);
-            CudnnDiagnosticsText.Text = "Couldn't re-probe (engine not ready): " + ex.Message;
+            CudnnDiagnosticsText.Text = "Couldn't check: " + ex.Message;
             CudnnDiagnosticsText.Visibility = Visibility.Visible;
         }
         finally

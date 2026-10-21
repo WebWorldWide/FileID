@@ -270,8 +270,8 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DebugLog.Error("[WIPE] stage 2 timed out; refusing to delete a live engine's database.");
             await ShowAlertAsync(
-                "Wipe cancelled",
-                "FileID couldn't confirm that the engine stopped, so no library files were deleted. Restart the engine from Settings after it exits.");
+                "Start over stopped",
+                "FileID couldn't confirm its background helper stopped, so nothing was deleted. Restart it from Settings › Engine, then try again.");
             return;
         }
         DebugLog.Info("[WIPE] stage 2 complete");
@@ -363,7 +363,7 @@ public sealed partial class SidebarFolderHeader : UserControl
         else
         {
             await ShowAlertAsync(
-                "Wipe partially failed",
+                "Start over didn't finish",
                 $"Couldn't delete some database files: {failureDetail}\n\n" +
                 "The engine has been restarted and the folder cleared, but old library data may still be present. " +
                 "If a later scan surfaces old data, close FileID, delete " +
