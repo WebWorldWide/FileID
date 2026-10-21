@@ -13,4 +13,5 @@ opt-level     = 3
 lto           = "fat"
 codegen-units = 1
 strip         = "symbols"
-panic         = "abort"
+# Unwind, not abort: the app runs engine code in-process (DB opens, chat,
+# reads), and the engine contains handler panics rather than crashing.
