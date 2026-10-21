@@ -15,6 +15,7 @@ pub mod identity_clustering;
 pub mod deep_analyze;
 pub(crate) mod deep_analyze_naming;
 pub mod near_duplicate_grouping;
+pub mod take_scoring;
 pub mod video_scene_selection;
 pub mod restructure;
 pub mod restructure_apply;

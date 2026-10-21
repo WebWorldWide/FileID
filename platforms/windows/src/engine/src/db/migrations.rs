@@ -499,7 +499,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 26, "expected 26 applied migrations");
+        assert_eq!(n, 27, "expected 27 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -578,7 +578,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 26);
+        assert_eq!(n, 27);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -672,7 +672,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 26] = [
+        const CANONICAL: [&str; 27] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",

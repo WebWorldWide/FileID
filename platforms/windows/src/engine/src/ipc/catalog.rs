@@ -122,6 +122,101 @@ pub struct CatalogTakeGroupSuggestion {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogTakeBox {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeShot {
+    #[serde(rename = "primaryFileID")]
+    pub primary_file_id: i64,
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeAutoGroup {
+    pub group_key: String,
+    pub kind: String,
+    pub status: String,
+    pub captured_at: f64,
+    pub similarity: f64,
+    pub shots: Vec<CatalogTakeShot>,
+}
+
+impl CatalogTakeAutoGroup {
+    pub fn file_ids(&self) -> Vec<i64> {
+        self.shots.iter().flat_map(|s| s.file_ids.iter().copied()).collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeQuality {
+    #[serde(rename = "primaryFileID")]
+    pub primary_file_id: i64,
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+    pub path: String,
+    pub score: f64,
+    pub rank: usize,
+    pub recommended: bool,
+    pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharpness: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_blur: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eyes_closed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face_cut_off: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stability: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<CatalogTakeBox>,
+    pub faces: Vec<CatalogTakeBox>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeGoalRanking {
+    pub goal: String,
+    pub status: String,
+    pub order: Vec<i64>,
+    #[serde(rename = "metFileIDs")]
+    pub met_file_ids: Vec<i64>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogTakeDecision {
+    pub group_key: String,
+    pub decision: String,
+    #[serde(rename = "fileIDs")]
+    pub file_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogRequest {
@@ -158,6 +253,8 @@ pub struct CatalogRequest {
     pub event_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_feedback: Option<CatalogTakeFeedback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_decision: Option<CatalogTakeDecision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +276,12 @@ pub struct CatalogResponse {
     pub recommendation: Option<CatalogTakeRecommendation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_take_groups: Option<Vec<CatalogTakeGroupSuggestion>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_groups: Option<Vec<CatalogTakeAutoGroup>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_qualities: Option<Vec<CatalogTakeQuality>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub take_goal_ranking: Option<Box<CatalogTakeGoalRanking>>,
 }
 
 #[cfg(test)]

@@ -5,12 +5,50 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-pub const MAX_GAP_SECONDS: f64 = 2.0;
-pub const MAX_SPAN_SECONDS: f64 = 12.0;
-pub const MIN_COSINE: f32 = 0.97;
-pub const MIN_SEED_COSINE: f32 = 0.955;
-pub const MAX_HAMMING: u32 = 8;
-pub const MAX_GROUP_SIZE: usize = 24;
+/// How close two frames must be to join one group. `NEAR_DUPLICATE` is "the
+/// same picture" (Deep Analyze describes it once); `TAKES` is "another try of
+/// the same shot" (Best Takes compares them); `CLIPS` is repeated video clips.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Thresholds {
+    pub max_gap_seconds: f64,
+    pub max_span_seconds: f64,
+    pub min_cosine: f32,
+    pub min_seed_cosine: f32,
+    pub max_hamming: u32,
+    pub max_group_size: usize,
+}
+
+pub const NEAR_DUPLICATE: Thresholds = Thresholds {
+    max_gap_seconds: 2.0,
+    max_span_seconds: 12.0,
+    min_cosine: 0.97,
+    min_seed_cosine: 0.955,
+    max_hamming: 8,
+    max_group_size: 24,
+};
+pub const TAKES: Thresholds = Thresholds {
+    max_gap_seconds: 4.0,
+    max_span_seconds: 30.0,
+    min_cosine: 0.93,
+    min_seed_cosine: 0.88,
+    max_hamming: 12,
+    max_group_size: 60,
+};
+pub const CLIPS: Thresholds = Thresholds {
+    max_gap_seconds: 900.0,
+    max_span_seconds: 3_600.0,
+    min_cosine: 0.90,
+    min_seed_cosine: 0.86,
+    max_hamming: 0,
+    max_group_size: 24,
+};
+
+pub const MAX_GAP_SECONDS: f64 = NEAR_DUPLICATE.max_gap_seconds;
+pub const MAX_SPAN_SECONDS: f64 = NEAR_DUPLICATE.max_span_seconds;
+pub const MIN_COSINE: f32 = NEAR_DUPLICATE.min_cosine;
+pub const MIN_SEED_COSINE: f32 = NEAR_DUPLICATE.min_seed_cosine;
+pub const MAX_HAMMING: u32 = NEAR_DUPLICATE.max_hamming;
+pub const MAX_GROUP_SIZE: usize = NEAR_DUPLICATE.max_group_size;
 /// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this
 /// similar counts as the same shot even when its file dates differ.
 pub const SIDECAR_COSINE: f32 = 0.90;
@@ -88,6 +126,10 @@ pub fn align_sidecar_times(items: &[Item]) -> Vec<Item> {
 }
 
 pub fn groups(items: &[Item]) -> Vec<Group> {
+    groups_with(items, &NEAR_DUPLICATE)
+}
+
+pub fn groups_with(items: &[Item], limits: &Thresholds) -> Vec<Group> {
     let aligned = align_sidecar_times(items);
     let mut ordered: Vec<&Item> = aligned.iter().collect();
     ordered.sort_by(|l, r| {
@@ -105,7 +147,7 @@ pub fn groups(items: &[Item]) -> Vec<Group> {
     let mut result = Vec::new();
     let mut current: Vec<&Item> = Vec::new();
     for item in ordered {
-        if !current.is_empty() && joins(item, &current) {
+        if !current.is_empty() && joins(item, &current, limits) {
             current.push(item);
         } else {
             if !current.is_empty() {
@@ -120,12 +162,15 @@ pub fn groups(items: &[Item]) -> Vec<Group> {
     result
 }
 
-fn joins(item: &Item, current: &[&Item]) -> bool {
+fn joins(item: &Item, current: &[&Item], limits: &Thresholds) -> bool {
     let last = current[current.len() - 1];
     let (Some(time), Some(last_time), Some(first_time)) = (item.time, last.time, current[0].time) else {
         return false;
     };
-    if current.len() >= MAX_GROUP_SIZE || time - last_time > MAX_GAP_SECONDS || time - first_time > MAX_SPAN_SECONDS {
+    if current.len() >= limits.max_group_size
+        || time - last_time > limits.max_gap_seconds
+        || time - first_time > limits.max_span_seconds
+    {
         return false;
     }
     let item_stem = stem(&item.path);
@@ -138,14 +183,16 @@ fn joins(item: &Item, current: &[&Item]) -> bool {
         return false;
     };
     let to_last = cosine(embedding, last_embedding);
-    if cosine(embedding, seed) < MIN_SEED_COSINE {
+    if cosine(embedding, seed) < limits.min_seed_cosine {
         return false;
     }
-    if to_last >= MIN_COSINE {
+    if to_last >= limits.min_cosine {
         return true;
     }
     match (item.phash, last.phash) {
-        (Some(p), Some(q)) if p != 0 && q != 0 && (p ^ q).count_ones() <= MAX_HAMMING => to_last >= MIN_SEED_COSINE,
+        (Some(p), Some(q)) if p != 0 && q != 0 && (p ^ q).count_ones() <= limits.max_hamming => {
+            to_last >= limits.min_seed_cosine
+        }
         _ => false,
     }
 }

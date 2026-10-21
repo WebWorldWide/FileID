@@ -21,6 +21,7 @@ pub(crate) mod catalog_search;
 pub(crate) mod catalog_retrieval;
 
 pub mod catalog_takes;
+pub mod catalog_take_auto;
 mod catalog_take_suggestions;
 
 pub mod chat;
