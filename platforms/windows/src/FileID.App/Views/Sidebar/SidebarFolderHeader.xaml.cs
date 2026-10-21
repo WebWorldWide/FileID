@@ -100,7 +100,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             var hwnd = (XamlRoot?.ContentIslandEnvironment?.AppWindowId is { Value: not 0 })
                 ? GetParentHwnd()
                 : GetParentHwnd();
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
 
             if (result.FailureReason is not null)
             {
@@ -113,8 +113,8 @@ public sealed partial class SidebarFolderHeader : UserControl
                 return;
             }
 
-            AppViewModel.Instance.FolderPath = result.Path;
             DebugLog.Info($"FolderPicker: chose {PathRedactor.Redact(result.Path)}");
+            await AppViewModel.Instance.ChooseFolderAsync(result.Path);
         }
         catch (Exception ex)
         {

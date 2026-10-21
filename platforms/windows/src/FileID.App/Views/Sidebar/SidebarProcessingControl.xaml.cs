@@ -649,7 +649,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             var hwnd = App.HostWindow is { } window
                 ? WinRT.Interop.WindowNative.GetWindowHandle(window)
                 : IntPtr.Zero;
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
             if (result.FailureReason is not null)
             {
                 await ShowAlertAsync("Couldn't open folder", result.FailureReason);
@@ -657,8 +657,8 @@ public sealed partial class SidebarProcessingControl : UserControl
             }
             if (result.Path is not null)
             {
-                AppViewModel.Instance.FolderPath = result.Path;
                 DebugLog.Info($"FolderPicker: chose {PathRedactor.Redact(result.Path)}");
+                await AppViewModel.Instance.ChooseFolderAsync(result.Path);
             }
         }
         catch (Exception ex)
