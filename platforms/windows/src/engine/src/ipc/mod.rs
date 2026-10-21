@@ -261,6 +261,13 @@ const MAX_EXCLUDED_PATHS: usize = 10_000;
 const MAX_TAGS_PER_COMMAND: usize = 1_024;
 const MAX_APPLY_TAG_OPERATIONS: usize = 100_000;
 const MAX_EXACT_TRASH_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// A Windows long path is 32,767 UTF-16 units, up to three UTF-8 bytes each.
+const MAX_PATH_BYTES: usize = 128 * 1024;
+/// Tags, person names and file names (255 UTF-16 units at most on disk).
+const MAX_NAME_BYTES: usize = 4 * 1024;
+const MAX_MODEL_KIND_BYTES: usize = 128;
+const MAX_TOKEN_BYTES: usize = 1024;
+const MAX_QUERY_BYTES: usize = 64 * 1024;
 
 pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Result<(), String> {
     fn check_len(field: &str, len: usize, max: usize) -> Result<(), String> {
@@ -269,6 +276,21 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
         } else {
             Ok(())
         }
+    }
+
+    /// No real path, name or identifier is this long or holds a NUL.
+    fn check_text(field: &str, value: &str, max: usize) -> Result<(), String> {
+        if value.len() > max {
+            Err(format!("{field} is {} bytes; maximum is {max}", value.len()))
+        } else if value.contains('\0') {
+            Err(format!("{field} contains a NUL character"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_all<'a>(field: &str, values: impl IntoIterator<Item = &'a String>, max: usize) -> Result<(), String> {
+        values.into_iter().try_for_each(|value| check_text(field, value, max))
     }
 
     fn dedupe_ids(ids: &mut Vec<i64>) {
@@ -283,16 +305,59 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
 
     match payload {
         CommandPayload::StartScan(payload) => {
+            check_text("startScan.rootPath", &payload.root_path, MAX_PATH_BYTES)?;
+            check_all("startScan.rootDisplay", &payload.root_display, MAX_PATH_BYTES)?;
             if let Some(paths) = &mut payload.excluded_paths {
                 check_len("startScan.excludedPaths", paths.len(), MAX_EXCLUDED_PATHS)?;
+                check_all("startScan.excludedPaths", paths.iter(), MAX_PATH_BYTES)?;
                 dedupe_strings(paths);
             }
         }
         CommandPayload::PurgeExcluded(payload) => {
             check_len("purgeExcluded.excludedPaths", payload.excluded_paths.len(), MAX_EXCLUDED_PATHS)?;
+            check_all("purgeExcluded.excludedPaths", &payload.excluded_paths, MAX_PATH_BYTES)?;
             dedupe_strings(&mut payload.excluded_paths);
         }
+        CommandPayload::DeepAnalyzeFile(payload) => {
+            check_text("deepAnalyzeFile.modelKind", &payload.model_kind, MAX_MODEL_KIND_BYTES)?;
+        }
+        CommandPayload::DeepAnalyzeFolder(payload) => {
+            check_text("deepAnalyzeFolder.modelKind", &payload.model_kind, MAX_MODEL_KIND_BYTES)?;
+            check_text("deepAnalyzeFolder.pathPrefix", &payload.path_prefix, MAX_PATH_BYTES)?;
+        }
+        CommandPayload::PrewarmModel(payload) => {
+            check_text("prewarmModel.modelKind", &payload.model_kind, MAX_MODEL_KIND_BYTES)?;
+        }
+        CommandPayload::CancelPrewarm(payload) => {
+            check_all("cancelPrewarm.modelKind", &payload.model_kind, MAX_MODEL_KIND_BYTES)?;
+        }
+        CommandPayload::PlanRestructure(payload) => {
+            check_text("planRestructure.libraryRoot", &payload.library_root, MAX_PATH_BYTES)?;
+        }
+        CommandPayload::UndoRestructure(payload) => {
+            check_text("undoRestructure.libraryRoot", &payload.library_root, MAX_PATH_BYTES)?;
+            check_all("undoRestructure.shortcutUndoToken", &payload.shortcut_undo_token, MAX_TOKEN_BYTES)?;
+        }
+        CommandPayload::RenamePerson(payload) => {
+            for value in [&payload.title, &payload.first_name, &payload.middle_name, &payload.last_name, &payload.suffix] {
+                check_all("renamePerson name field", value, MAX_NAME_BYTES)?;
+            }
+        }
+        CommandPayload::EmbedTextQuery(payload) => {
+            check_text("embedTextQuery.query", &payload.query, MAX_QUERY_BYTES)?;
+            check_text("embedTextQuery.queryID", &payload.query_id, MAX_TOKEN_BYTES)?;
+        }
+        CommandPayload::EmbedImageQuery(payload) => {
+            check_text("embedImageQuery.queryID", &payload.query_id, MAX_TOKEN_BYTES)?;
+        }
+        CommandPayload::GenerateVideoThumbnail(payload) => {
+            check_text("generateVideoThumbnail.path", &payload.path, MAX_PATH_BYTES)?;
+        }
+        CommandPayload::RestoreFromTrash(payload) => {
+            check_text("restoreFromTrash.batchID", &payload.batch_id, MAX_TOKEN_BYTES)?;
+        }
         CommandPayload::DeepAnalyzeAll(payload) => {
+            check_text("deepAnalyzeAll.modelKind", &payload.model_kind, MAX_MODEL_KIND_BYTES)?;
             // The schema caps excludedFolders at 256; enforce it here too so the
             // bound doesn't depend solely on each app's own sanitizer (a
             // hand-edited settings.json or a third-party client bypasses those).
@@ -302,17 +367,30 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
                     folders.len(),
                     MAX_EXCLUDED_PATHS,
                 )?;
+                check_all("deepAnalyzeAll.excludedFolders", folders.iter(), MAX_PATH_BYTES)?;
                 dedupe_strings(folders);
             }
         }
         CommandPayload::ApplyRestructure(payload) => {
             check_len("applyRestructure.moves", payload.moves.len(), MAX_RESTRUCTURE_MOVES)?;
+            check_text("applyRestructure.libraryRoot", &payload.library_root, MAX_PATH_BYTES)?;
+            check_all("applyRestructure.planID", &payload.plan_id, MAX_TOKEN_BYTES)?;
+            for entry in &payload.moves {
+                check_text("applyRestructure move source", &entry.source, MAX_PATH_BYTES)?;
+                check_text("applyRestructure move destination", &entry.destination, MAX_PATH_BYTES)?;
+                check_text("applyRestructure move category", &entry.category, MAX_PATH_BYTES)?;
+                check_text("applyRestructure move confidence", &entry.confidence, MAX_TOKEN_BYTES)?;
+                check_all("applyRestructure move reason", &entry.reason, MAX_PATH_BYTES)?;
+                check_all("applyRestructure move tier", &entry.tier, MAX_TOKEN_BYTES)?;
+                check_all("applyRestructure move contentHash", &entry.content_hash, MAX_TOKEN_BYTES)?;
+            }
             let mut seen = std::collections::HashSet::with_capacity(payload.moves.len());
             payload.moves.retain(|entry| seen.insert(entry.file_id));
         }
         CommandPayload::ApplyTags(payload) => {
             check_len("applyTags.fileIDs", payload.file_ids.len(), MAX_BULK_ITEMS)?;
             check_len("applyTags.tags", payload.tags.len(), MAX_TAGS_PER_COMMAND)?;
+            check_all("applyTags.tags", &payload.tags, MAX_NAME_BYTES)?;
             dedupe_ids(&mut payload.file_ids);
             dedupe_strings(&mut payload.tags);
             let operations = payload.file_ids.len().saturating_mul(payload.tags.len());
@@ -324,6 +402,7 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
         }
         CommandPayload::RenameFiles(payload) => {
             check_len("renameFiles.renames", payload.renames.len(), MAX_BULK_ITEMS)?;
+            check_all("renameFiles.newName", payload.renames.iter().map(|entry| &entry.new_name), MAX_NAME_BYTES)?;
             let mut seen = std::collections::HashSet::with_capacity(payload.renames.len());
             payload.renames.retain(|entry| seen.insert(entry.file_id));
         }
@@ -350,6 +429,8 @@ pub(crate) fn normalize_and_validate_command(payload: &mut CommandPayload) -> Re
                             identity.file_id
                         ));
                     }
+                    check_text("trashFiles exact identity path", &identity.path, MAX_PATH_BYTES)?;
+                    check_text("trashFiles exact identity keeperPath", &identity.keeper_path, MAX_PATH_BYTES)?;
                     if identity.path.is_empty()
                         || identity.size_bytes < 0
                         || identity.sha256_hex.len() != 64

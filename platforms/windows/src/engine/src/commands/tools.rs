@@ -154,7 +154,9 @@ fn hash(path: &Path) -> Result<String> {
     }
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
-    let mut bytes = [0u8; 1024 * 1024];
+    // Heap, not stack: a 1 MiB array on a 2 MiB blocking-pool stack can
+    // overflow, and a stack overflow aborts the whole engine.
+    let mut bytes = vec![0u8; 1024 * 1024];
     loop {
         let n = file.read(&mut bytes)?;
         if n == 0 {

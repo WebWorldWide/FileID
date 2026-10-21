@@ -315,9 +315,9 @@ pub(crate) fn jobs(conn: &Connection) -> Result<Vec<CatalogJob>> {
     let mut statement = conn.prepare("SELECT id,kind,file_ids_json,state,progress,error,created_at,updated_at FROM catalog_jobs ORDER BY created_at DESC LIMIT 200")?;
     let rows = statement
         .query_map([], |r| {
-            let json: String = r.get(2)?;
-            let ids = serde_json::from_str(&json)
-                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e)))?;
+            // One malformed row (another engine, a hand edit) must not hide every job.
+            let json: Option<String> = r.get(2)?;
+            let ids = json.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default();
             Ok(CatalogJob {
                 id: r.get(0)?,
                 kind: r.get(1)?,
