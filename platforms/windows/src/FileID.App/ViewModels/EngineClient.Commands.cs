@@ -48,7 +48,7 @@ internal sealed partial class EngineClient
             new DeepAnalyzeOperation(completion),
             out var owner))
         {
-            throw new InvalidOperationException("A Deep Analyze operation is already running.");
+            throw new InvalidOperationException("FileID is already describing files.");
         }
 
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
@@ -81,7 +81,7 @@ internal sealed partial class EngineClient
     {
         if (_deepAnalyzeSlot.ReleaseGeneration(generation) is not { } owner) return;
         owner.Payload.Completion?.TrySetException(
-            new InvalidOperationException("The engine generation ended before Deep Analyze completed."));
+            new InvalidOperationException("FileID restarted before describing finished. Try again."));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandInFlight)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeepAnalyzeCommandAttemptId)));
     }
@@ -99,9 +99,8 @@ internal sealed partial class EngineClient
         if (State != LifecycleState.Ready
             && !(payload is HealthCheckCommand && State == LifecycleState.Starting))
         {
-            var message = $"Engine not ready (state={State}). Wait for Ready by calling WaitForReadyAsync first.";
-            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — {message}");
-            return Task.FromException(new InvalidOperationException(message));
+            DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine not ready (state={State})");
+            return Task.FromException(new InvalidOperationException("FileID is still getting ready. Try again in a moment."));
         }
 
         var generation = SpawnGeneration;
@@ -131,7 +130,7 @@ internal sealed partial class EngineClient
                     if (_stdin is null)
                     {
                         DebugLog.Warn($"[IPC OUT] {commandKind} ABORTED — engine stdin is null (engine not running).");
-                        throw new InvalidOperationException("Engine not running.");
+                        throw new InvalidOperationException("FileID is still getting ready. Try again in a moment.");
                     }
 
                     onWriteStarted?.Invoke();
@@ -657,7 +656,7 @@ internal sealed partial class EngineClient
                     TaskScheduler.Default);
                 _ui.TryEnqueue(() => LastWarning = new EngineError(
                     "deep_analyze_no_confirm",
-                    $"Deep Analyze hasn't responded in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. It may still be running on a large model; check the stream and cancel or retry if it stays stuck.",
+                    $"Describing this file hasn't finished in {DeepAnalyzeFileTimeout.TotalMinutes:0} minutes. A large model can be slow; stop and try again if it stays stuck.",
                     null,
                     modelKind));
                 return;
@@ -667,7 +666,7 @@ internal sealed partial class EngineClient
             {
                 _ui.TryEnqueue(() => LastWarning = new EngineError(
                     "deep_analyze_file_failed",
-                    "Deep Analyze couldn't process the file. It may be an unsupported format or the model may not be installed.",
+                    "FileID couldn't describe this file. Its format may not be supported, or the description model may not be downloaded.",
                     null,
                     modelKind));
             }
@@ -676,7 +675,7 @@ internal sealed partial class EngineClient
         {
             _ui.TryEnqueue(() => LastWarning = new EngineError(
                 "deep_analyze_engine_restarted",
-                "The engine restarted before Deep Analyze completed. Retry the operation.",
+                "FileID restarted before describing finished. Try again.",
                 null,
                 modelKind));
         }
@@ -911,7 +910,7 @@ internal sealed partial class EngineClient
     public async Task ApplyRestructureAsync(string libraryRoot, IReadOnlyList<RestructureMove> moves, bool useSymlinks)
     {
         if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
-            throw new InvalidOperationException("A restructure operation is already running.");
+            throw new InvalidOperationException("Organize Folders is already working. Wait for it to finish.");
         LastError = null;
         LastWarning = null;
         _restructureApplyUsesSymlinks = useSymlinks;
@@ -925,7 +924,7 @@ internal sealed partial class EngineClient
     public async Task UndoRestructureAsync(string libraryRoot)
     {
         if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
-            throw new InvalidOperationException("A restructure operation is already running.");
+            throw new InvalidOperationException("Organize Folders is already working. Wait for it to finish.");
         await SendRestructureUndoCoreAsync(libraryRoot).ConfigureAwait(false);
     }
 
@@ -955,7 +954,7 @@ internal sealed partial class EngineClient
         await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         var generation = SpawnGeneration;
         if (Interlocked.CompareExchange(ref _restructureCommandInFlight, 1, 0) != 0)
-            throw new InvalidOperationException("A restructure operation is already running.");
+            throw new InvalidOperationException("Organize Folders is already working. Wait for it to finish.");
         UndoRestructureInFlight = true;
         var completion = new TaskCompletionSource<RestructureApplyResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var subscription = Events.Subscribe(ev =>
@@ -970,14 +969,14 @@ internal sealed partial class EngineClient
             => DebugLog.SafeRun(nameof(OnLifecycleChanged), () =>
             {
                 if (SpawnGeneration != generation || State != LifecycleState.Ready)
-                    completion.TrySetException(new InvalidOperationException("The engine stopped before confirming restructure undo."));
+                    completion.TrySetException(new InvalidOperationException("FileID stopped before confirming the undo. Check the folder, then try Undo move again."));
             });
         PropertyChanged += OnLifecycleChanged;
         var sendStarted = false;
         try
         {
             if (SpawnGeneration != generation)
-                throw new InvalidOperationException("The engine changed before restructure undo started.");
+                throw new InvalidOperationException("FileID restarted before the undo started. Try Undo move again.");
             sendStarted = true;
             await SendRestructureUndoCoreAsync(libraryRoot).ConfigureAwait(false);
             return await completion.Task.WaitAsync(TimeSpan.FromMinutes(30), ct).ConfigureAwait(false);

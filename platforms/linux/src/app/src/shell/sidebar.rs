@@ -22,11 +22,14 @@ struct ScanCard {
     step: gtk::Label,
     details_toggle: gtk::Button,
     sub: gtk::Label,
+    next_step: gtk::Button,
     details: gtk::Revealer,
     stats: gtk::Box,
     scan: gtk::Button,
     scan_content: adw::ButtonContent,
     rescan: gtk::Button,
+    rescan_content: adw::ButtonContent,
+    pick_button: gtk::Button,
     pause: gtk::Button,
     resume: gtk::Button,
     cancel: gtk::Button,
@@ -64,7 +67,7 @@ impl Sidebar {
             let list = vbox(2);
             list.set_margin_bottom(10);
             for page in area.pages() {
-                let row = nav_row(page.id, page.title, page.icon, &page.tooltip(), &act);
+                let row = nav_row(page, &act);
                 list.append(&row.button);
                 rows.push(row);
             }
@@ -232,8 +235,12 @@ fn area_switcher(
     for area in Area::ALL {
         let button = gtk::Button::builder()
             .label(area.name())
-            .tooltip_text(format!("{} pages ({})", area.name(), area.shortcut_hint()))
+            .tooltip_text(area.tooltip())
             .build();
+        button.update_property(&[gtk::accessible::Property::Label(&format!(
+            "{} pages",
+            area.name()
+        ))]);
         let act = act.clone();
         button.connect_clicked(move |_| act(Action::SelectArea(area)));
         buttons_box.append(&button);
@@ -262,15 +269,11 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
     cr.close_path();
 }
 
-fn nav_row(
-    id: &'static str,
-    title: &str,
-    icon: &str,
-    tooltip: &str,
-    act: &Rc<dyn Fn(Action)>,
-) -> NavRow {
+fn nav_row(page: &'static super::Page, act: &Rc<dyn Fn(Action)>) -> NavRow {
+    let id = page.id;
+    let title = page.title;
     let content = hbox(10);
-    let image = gtk::Image::from_icon_name(icon);
+    let image = gtk::Image::from_icon_name(page.icon);
     image.set_pixel_size(14);
     image.set_size_request(18, -1);
     content.append(&image);
@@ -284,9 +287,12 @@ fn nav_row(
     let button = gtk::Button::builder()
         .child(&content)
         .css_classes(["nav-row"])
-        .tooltip_text(tooltip)
+        .tooltip_text(page.tooltip())
         .build();
-    button.update_property(&[gtk::accessible::Property::Label(&format!("{title} page"))]);
+    button.update_property(&[
+        gtk::accessible::Property::Label(&format!("{title} page")),
+        gtk::accessible::Property::Description(page.summary),
+    ]);
     let act = act.clone();
     button.connect_clicked(move |_| act(Action::Navigate(id)));
     NavRow { id, button, badge }
@@ -319,18 +325,14 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     frame.append(&stack);
 
     let pick = vbox(8);
-    pick.append(&label("Pick a folder to start", &["scan-title"]));
-    let (pick_button, _) = icon_button(
-        "folder-new-symbolic",
-        "Pick a folder…",
-        &["gold-button", "compact"],
-    );
+    pick.append(&label("Start with a folder", &["scan-title"]));
+    let (pick_button, _) = icon_button("folder-new-symbolic", "Choose folder…", &["secondary"]);
     pick_button.set_halign(gtk::Align::Start);
-    pick_button.set_tooltip_text(Some("Pick a folder (Ctrl+O)"));
+    pick_button.set_tooltip_text(Some("Choose a folder to scan (Ctrl+O)"));
     let act_pick = act.clone();
     pick_button.connect_clicked(move |_| act_pick(Action::PickFolder));
     pick.append(&pick_button);
-    pick.append(&label("Or drop a folder on the window.", &["scan-sub"]));
+    pick.append(&label("Or drag a folder onto this window.", &["scan-sub"]));
     stack.add_named(&pick, Some("pick"));
 
     let pipeline = vbox(8);
@@ -374,6 +376,21 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     sub.set_lines(2);
     sub.set_ellipsize(gtk::pango::EllipsizeMode::End);
     pipeline.append(&sub);
+    let next_content = hbox(4);
+    next_content.append(&gtk::Label::new(Some("Next: describe files")));
+    let next_arrow = gtk::Image::from_icon_name("go-next-symbolic");
+    next_arrow.set_pixel_size(10);
+    next_content.append(&next_arrow);
+    let next_step = gtk::Button::builder()
+        .child(&next_content)
+        .css_classes(["next-step"])
+        .halign(gtk::Align::Start)
+        .tooltip_text("Optional: write a description and a clearer name for each file")
+        .visible(false)
+        .build();
+    let act_next = act.clone();
+    next_step.connect_clicked(move |_| act_next(Action::Navigate("deep-analyze")));
+    pipeline.append(&next_step);
     let stats = vbox(4);
     stats.add_css_class("scan-stats");
     let details = gtk::Revealer::builder()
@@ -415,9 +432,11 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         "Scan",
         &["gold-button", "compact"],
     );
-    scan.set_tooltip_text(Some("Scan (Ctrl+R)"));
-    let (rescan, _) = icon_button("view-refresh-symbolic", "Rescan", &["secondary"]);
-    rescan.set_tooltip_text(Some("Rescan (Ctrl+R)"));
+    scan.set_tooltip_text(Some(
+        "Read every file in this folder (Ctrl+R). Nothing is moved or changed.",
+    ));
+    let (rescan, rescan_content) =
+        icon_button("view-refresh-symbolic", "Rescan", &["secondary"]);
     let (pause, _) = icon_button("media-playback-pause-symbolic", "Pause", &["secondary"]);
     let (resume, _) = icon_button(
         "media-playback-start-symbolic",
@@ -425,8 +444,9 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         &["gold-button", "compact"],
     );
     let cancel = gtk::Button::builder()
-        .label("Cancel")
+        .label("Stop")
         .css_classes(["ghost"])
+        .tooltip_text("Stop scanning. Scan again later to pick up where it left off.")
         .build();
     for (button, action) in [
         (&scan, Action::StartScan),
@@ -452,11 +472,14 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         step,
         details_toggle,
         sub,
+        next_step,
         details,
         stats,
         scan,
         scan_content,
         rescan,
+        rescan_content,
+        pick_button,
         pause,
         resume,
         cancel,
@@ -468,6 +491,15 @@ impl ScanCard {
     fn update(&self, status: &Status) {
         let controls = status.controls();
         if controls == ScanControls::PickFolder {
+            if status.total_files > 0 {
+                self.pick_button.remove_css_class("secondary");
+                self.pick_button.add_css_class("gold-button");
+                self.pick_button.add_css_class("compact");
+            } else {
+                self.pick_button.remove_css_class("gold-button");
+                self.pick_button.remove_css_class("compact");
+                self.pick_button.add_css_class("secondary");
+            }
             self.stack.set_visible_child_name("pick");
             return;
         }
@@ -475,6 +507,7 @@ impl ScanCard {
         let p = status.pipeline();
         self.title.set_text(&p.title);
         self.pct.set_text(&super::status::percent(p.fraction));
+        self.pct.set_visible(p.fraction > 0.0);
         set_tone(&self.pct, p.accent);
         self.bar.set(p.fraction, p.bar);
         for (index, segment) in self.segments.iter().enumerate() {
@@ -490,6 +523,7 @@ impl ScanCard {
         self.step
             .set_text(&format!("Step {} of 5 · {}", p.stage + 1, STAGES[p.stage]));
         self.sub.set_text(&p.sub);
+        self.next_step.set_visible(status.shows_next_step());
 
         let rows = status.stats();
         self.details_toggle.set_visible(!rows.is_empty());
@@ -523,8 +557,23 @@ impl ScanCard {
         self.scan.set_sensitive(can_start);
         let folder = status.folder.as_deref().unwrap_or("folder");
         self.scan_content.set_label(&format!("Scan {folder}"));
+        self.scan.set_tooltip_text(Some(if status.engine_ready {
+            "Read every file in this folder (Ctrl+R). Nothing is moved or changed."
+        } else {
+            "FileID is still getting ready. Try again in a moment."
+        }));
         self.rescan.set_visible(controls == ScanControls::Rescan);
         self.rescan.set_sensitive(can_start);
+        self.rescan_content.set_label(if status.stopped() {
+            "Scan again"
+        } else {
+            "Rescan"
+        });
+        self.rescan.set_tooltip_text(Some(&if status.deep_running {
+            "Wait for the current work to finish, then rescan.".to_owned()
+        } else {
+            format!("Look for new or changed files in {folder}. Files already read are skipped.")
+        }));
         self.pause.set_visible(running && !paused);
         self.resume.set_visible(paused);
         self.cancel.set_visible(running);

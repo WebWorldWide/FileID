@@ -17,7 +17,7 @@
     <StackPanel Spacing="6">
         <Grid x:Name="StagesRow" Height="3" ColumnSpacing="4" />
         <TextBlock x:Name="StepText"
-                   Text="Step 1 of 5 · Scan"
+                   Text="Step 1 of 5 · Find files"
                    FontFamily="{StaticResource BodyFontFamily}"
                    FontSize="12"
                    Foreground="{ThemeResource Text2Brush}"

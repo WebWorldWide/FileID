@@ -71,6 +71,7 @@ pub struct TitleBar {
     folder_row_count: gtk::Label,
     no_folder: gtk::Label,
     rescan: gtk::Button,
+    add: gtk::Button,
     folder_footer: gtk::Box,
     search_text: gtk::Text,
     search_popover: gtk::Popover,
@@ -111,7 +112,7 @@ impl TitleBar {
             .valign(gtk::Align::Center)
             .build();
         folder_content.append(&rule);
-        let folder_name = label("No folder", &["tb-folder", "empty"]);
+        let folder_name = label("Choose a folder", &["tb-folder", "empty"]);
         folder_name.set_ellipsize(gtk::pango::EllipsizeMode::End);
         folder_name.set_max_width_chars(22);
         folder_content.append(&folder_name);
@@ -121,7 +122,7 @@ impl TitleBar {
             .child(&folder_content)
             .popover(&folder_popover)
             .css_classes(["tb-control"])
-            .tooltip_text("Switch folder")
+            .tooltip_text("Choose, rescan or close the folder FileID is working on")
             .valign(gtk::Align::Center)
             .build();
         header.pack_start(&folder_button);
@@ -148,17 +149,17 @@ impl TitleBar {
         folder_row_count.set_valign(gtk::Align::Start);
         folder_row.append(&folder_row_count);
         folder_body.append(&folder_row);
-        let no_folder = label("No folder picked yet.", &["pop-meta"]);
+        let no_folder = label("No folder chosen yet.", &["pop-meta"]);
         no_folder.set_margin_start(12);
         no_folder.set_margin_bottom(10);
         folder_body.append(&no_folder);
         let actions = hbox(8);
         actions.add_css_class("pop-actions");
         let add = gtk::Button::builder()
-            .label("Add folder…")
+            .label("Choose folder…")
             .css_classes(["secondary"])
             .build();
-        add.set_tooltip_text(Some("Add folder (Ctrl+O)"));
+        add.set_tooltip_text(Some("Choose a folder to scan (Ctrl+O)"));
         let rescan = gtk::Button::builder()
             .label("Rescan")
             .css_classes(["secondary"])
@@ -169,14 +170,18 @@ impl TitleBar {
         let folder_footer = hbox(8);
         folder_footer.add_css_class("pop-footer");
         let clear = gtk::Button::builder()
-            .label("Clear folder")
+            .label("Close folder")
             .css_classes(["ghost"])
-            .tooltip_text("Drop the current folder selection. Doesn't touch the library.")
+            .tooltip_text(
+                "Stop working on this folder. What FileID learned is kept, and your files are not changed.",
+            )
             .build();
         let wipe = gtk::Button::builder()
-            .label("Wipe library + rescan…")
+            .label("Start over…")
             .css_classes(["ghost", "danger"])
-            .tooltip_text("Delete the current library and run a fresh scan against this folder.")
+            .tooltip_text(
+                "Forget everything FileID learned about this folder and scan it again. Your files are not changed.",
+            )
             .build();
         folder_footer.append(&clear);
         folder_footer.append(&spacer());
@@ -270,7 +275,7 @@ impl TitleBar {
             .child(&activity_content)
             .popover(&activity_popover)
             .css_classes(["tb-control"])
-            .tooltip_text("Activity")
+            .tooltip_text("What FileID is working on right now")
             .valign(gtk::Align::Center)
             .build();
         header.pack_end(&activity_button);
@@ -298,6 +303,7 @@ impl TitleBar {
             folder_row_count,
             no_folder,
             rescan,
+            add,
             folder_footer,
             search_text,
             search_popover,
@@ -468,11 +474,16 @@ impl TitleBar {
                 self.rescan.set_label(&format!("Rescan {name}"));
             }
             None => {
-                self.folder_name.set_text("No folder");
+                self.folder_name.set_text("Choose a folder");
                 self.folder_name.add_css_class("empty");
             }
         }
         let has_folder = status.folder.is_some();
+        self.add.set_label(if has_folder {
+            "Choose another folder…"
+        } else {
+            "Choose folder…"
+        });
         self.folder_row.set_visible(has_folder);
         self.no_folder.set_visible(!has_folder);
         self.rescan.set_visible(has_folder);
@@ -482,6 +493,9 @@ impl TitleBar {
         let activity = status.activity();
         set_tone(&self.activity_dot, activity.tone);
         self.activity_label.set_text(activity.label);
+        self.activity_label.set_tooltip_text((!status.engine_ready).then_some(
+            "FileID is starting its background helper. This takes a few seconds.",
+        ));
         self.activity_bar.set(activity.fraction, activity.tone);
         self.activity_pct.set_visible(!activity.idle);
         self.activity_pct.set_text(&percent(activity.fraction));
@@ -527,7 +541,11 @@ impl TitleBar {
         }
         let mut rows = Vec::new();
         if jobs.is_empty() {
-            let empty = label("Scans and captions appear here.", &["pop-meta"]);
+            let empty = label(
+                "Nothing is running. Scans, descriptions and video analysis show their progress here.",
+                &["pop-meta"],
+            );
+            empty.set_wrap(true);
             empty.set_margin_start(14);
             empty.set_margin_end(14);
             empty.set_margin_top(14);

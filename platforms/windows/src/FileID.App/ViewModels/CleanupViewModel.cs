@@ -358,15 +358,11 @@ internal sealed class DuplicateGroup : INotifyPropertyChanged
             // present them as "likely duplicates — verify before deleting" so the
             // caption never makes a false byte-for-byte guarantee (#3).
             var label = IsApproximate
-                ? $"{MemberCount} likely duplicates — verify before deleting · {ShortHash}"
-                : $"{MemberCount} identical copies · {ShortHash}";
-            return IsSkipped ? $"{label} · SKIPPED" : label;
+                ? $"Probably the same file · {MemberCount} copies · check before removing"
+                : $"Same file · {MemberCount} copies";
+            return IsSkipped ? $"{label} · skipped" : label;
         }
     }
-
-    /// <summary>First 12 chars of the content hash for a compact caption.</summary>
-    private string ShortHash =>
-        ContentHash.Length > 12 ? ContentHash[..12] : ContentHash;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }

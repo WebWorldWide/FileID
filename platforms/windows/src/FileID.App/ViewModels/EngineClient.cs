@@ -883,8 +883,8 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                 var oversize = IpcEvent.Now(new ErrorEvent(new EngineError(
                     "ipc_frame_too_large",
                     "The engine sent a response too large for the app to read, so it was dropped. " +
-                    "If this was a Restructure plan on a very large library, the plan may be incomplete — " +
-                    "try restructuring a subfolder.",
+                    "If this was an Organize Folders plan for a very large folder, the plan may be incomplete. " +
+                    "Try a smaller folder.",
                     null)));
                 _ui.TryEnqueue(() => Apply(oversize, generation));
             }
@@ -1175,7 +1175,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(timeout, TimeSpan.Zero);
         ct.ThrowIfCancellationRequested();
-        var captured = _process ?? throw new InvalidOperationException("The engine is not running.");
+        var captured = _process ?? throw new InvalidOperationException("FileID is still getting ready. Try again in a moment.");
         var generation = SpawnGeneration;
         if (!IsHealthTargetCurrent(generation, SpawnGeneration, captured, _process, ProcessHasExited(captured)))
             throw new InvalidOperationException("The engine changed before its health check.");
@@ -1661,7 +1661,7 @@ internal sealed partial class EngineClient : INotifyPropertyChanged, IDisposable
                             {
                                 DebugLog.SafeRun("EngineClient.RecordRestructureChange", () =>
                                 {
-                                    ChangeLog.Instance.Push($"Restructured {rar.Result.Applied:N0} files", ChangeKind.Restructure, async () =>
+                                    ChangeLog.Instance.Push($"Moved {rar.Result.Applied:N0} files into new folders", ChangeKind.Restructure, async () =>
                                     {
                                         var undoResult = await UndoRestructureAndWaitAsync(operationRoot);
                                         return !undoResult.Cancelled && undoResult.Failed == 0 && undoResult.Applied > 0;

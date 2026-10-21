@@ -12,6 +12,7 @@ using FileID.IpcSchema;
 using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -178,78 +179,126 @@ public sealed partial class DeepAnalyzeView : UserControl
     {
         if (_unloaded) return;
         var sel = SelectionRegistry.Instance.LibrarySelection;
-        AnalyzeSelectedButton.IsEnabled = sel.Count > 0;
-        AnalyzeSelectedText.Text = sel.Count switch
-        {
-            0 => "Selected",
-            1 => "Selected (1)",
-            _ => $"Selected ({sel.Count})",
-        };
-        AnalyzeCurrentButton.IsEnabled = SelectionRegistry.Instance.HasPreviewedFile;
+        AnalyzeSelectedText.Text = sel.Count == 0 ? "Chosen files" : $"Chosen files ({sel.Count:N0})";
+        SyncDeepAnalyzeControls();
     }
 
-    /// <summary>query the DB for any person row with NULL
-    /// name + first_name. Disables Analyze All + shows the gate banner
-    /// when the count is non-zero.</summary>
+    private static bool _namePeopleTipDismissed;
+    private int _eligibleTotal = -1;
+    private int _pendingTotal = -1;
+    private bool _hasPeople;
+    private bool _hasNamedAnyone;
+    private string _countsModel = string.Empty;
+
+    private sealed record LibraryCounts(int Total, int Pending, bool HasPeople, bool HasNamed);
+
     private async System.Threading.Tasks.Task RefreshNamePeopleGateAsync()
     {
-        int unnamed = 0;
+        var model = _activeModel;
+        LibraryCounts? counts = null;
         try
         {
             var dbPath = AppPaths.DbPath;
-            unnamed = await System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    if (!System.IO.File.Exists(dbPath)) return 0;
-                    var conn = new Microsoft.Data.Sqlite.SqliteConnection(
-                        new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                        {
-                            DataSource = dbPath,
-                            Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
-                        }.ToString());
-                    conn.Open();
-                    using var cmd = conn.CreateCommand();
-                    // A cluster is "unnamed" when both `name` (legacy) and
-                    // `first_name` (v5) are NULL — the display falls back
-                    // to "Person N" in PeopleViewModel.
-                    cmd.CommandText = "SELECT COUNT(*) FROM persons WHERE name IS NULL AND first_name IS NULL;";
-                    var result = cmd.ExecuteScalar();
-                    return result is null ? 0 : Convert.ToInt32(result);
-                }
-                catch { return 0; }
-            }).ConfigureAwait(false);
+            counts = await System.Threading.Tasks.Task.Run(() => ReadLibraryCounts(dbPath, model)).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             DebugLog.Warn("RefreshNamePeopleGateAsync failed: " + ex.Message);
-            unnamed = 0;
         }
         if (_unloaded) return;
         DispatcherQueue.TryEnqueue(() =>
         {
             if (_unloaded) return;
-            if (unnamed > 0)
+            if (counts is not null)
             {
-                NamePeopleGateBanner.Visibility = Visibility.Visible;
-                NamePeopleGateText.Text = unnamed == 1
-                    ? "1 face cluster isn't named yet. Naming it first gives sharper captions — or analyze now and name later."
-                    : $"{unnamed} face clusters aren't named yet. Naming them first gives sharper captions — or analyze now and name later.";
-                // Advisory, NOT blocking — mirrors the macOS two-path banner: the
-                // user can name people via the banner button OR run Deep Analyze
-                // now. (Previously this hard-disabled Analyze All, which stranded
-                // anyone who didn't want to name clusters first.)
-                AnalyzeAllButton.IsEnabled = true;
-                ToolTipService.SetToolTip(AnalyzeAllButton, null);
+                _eligibleTotal = counts.Total;
+                _pendingTotal = counts.Pending;
+                _hasPeople = counts.HasPeople;
+                _hasNamedAnyone = counts.HasNamed;
+                _countsModel = model;
             }
-            else
-            {
-                NamePeopleGateBanner.Visibility = Visibility.Collapsed;
-                AnalyzeAllButton.IsEnabled = true;
-                ToolTipService.SetToolTip(AnalyzeAllButton, null);
-            }
+            SyncLibraryStatus();
+            SyncDeepAnalyzeControls();
         });
     }
+
+    private static LibraryCounts? ReadLibraryCounts(string dbPath, string model)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(dbPath)) return new LibraryCounts(0, 0, false, false);
+            using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                {
+                    DataSource = dbPath,
+                    Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
+                }.ToString());
+            conn.Open();
+            int total = 0, pending = 0;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText =
+                    "SELECT COUNT(*), COALESCE(SUM(CASE WHEN vlm_full_model IS $model THEN 0 ELSE 1 END), 0) "
+                    + "FROM files WHERE kind IN ('image','video','pdf') AND failed = 0;";
+                cmd.Parameters.AddWithValue("$model", model);
+                using var reader = cmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    total = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                    pending = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+                }
+            }
+            int people = 0, named = 0;
+            try
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText =
+                    "SELECT COUNT(*), COALESCE(SUM(CASE WHEN name IS NOT NULL OR first_name IS NOT NULL THEN 1 ELSE 0 END), 0) "
+                    + "FROM persons WHERE IFNULL(is_unknown, 0) = 0;";
+                using var reader = cmd.ExecuteReader();
+                if (reader.Read())
+                {
+                    people = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0));
+                    named = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1));
+                }
+            }
+            catch (Exception ex) { DebugLog.Warn("ReadLibraryCounts persons query failed: " + ex.Message); }
+            return new LibraryCounts(total, pending, people > 0, named > 0);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("ReadLibraryCounts failed: " + ex.Message);
+            return null;
+        }
+    }
+
+    private void SyncLibraryStatus()
+    {
+        if (_unloaded) return;
+        var known = _eligibleTotal >= 0;
+        LibraryEmptyText.Visibility = known && _eligibleTotal == 0 ? Visibility.Visible : Visibility.Collapsed;
+        EligibleCountText.Text = known ? $"{_eligibleTotal:N0} files" : "—";
+        PendingCountText.Text = known ? $"{_pendingTotal:N0} files" : "—";
+        var ec = EngineClient.Instance;
+        var running = ec.DeepAnalyzeStarting is not null || ec.DeepAnalyzeProgress is not null;
+        NamePeopleGateBanner.Visibility = _hasPeople && !_hasNamedAnyone && !running && !_namePeopleTipDismissed
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        var canTagPeople = _hasNamedAnyone || !known;
+        ApplyPeopleButton.IsEnabled = _applyInFlight == 0 && canTagPeople;
+        ToolTipService.SetToolTip(ApplyPeopleButton, canTagPeople
+            ? "Tag each photo with the names of the people in it"
+            : "Name someone on the People page first");
+    }
+
+    private void OnDismissNamePeopleTipClicked(object sender, RoutedEventArgs e)
+    {
+        _namePeopleTipDismissed = true;
+        NamePeopleGateBanner.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnSkipExistingClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnSkipExistingClicked), SyncDeepAnalyzeControls);
 
     private void OnGoToPeopleClicked(object sender, RoutedEventArgs e)
     {
@@ -259,7 +308,12 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void OnInstallerChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
-        DispatcherQueue.TryEnqueue(() => { if (!_unloaded) SyncCards(); });
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_unloaded) return;
+            SyncCards();
+            SyncDeepAnalyzeControls();
+        });
     }
 
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
@@ -334,12 +388,12 @@ public sealed partial class DeepAnalyzeView : UserControl
         // instead of letting the model OOM-kill the engine on load.
         if (ramGB is double available && !Fits(kind, available))
         {
-            status.Text = $"Needs {RamBudgetGB(kind):0} GB (you have {available:0})";
+            status.Text = $"Needs {RamBudgetGB(kind):0} GB memory (this PC has {available:0})";
             status.Foreground = ThemeHelper.GetBrushSafe("DestructiveTextBrush");
             bar.Visibility = Visibility.Collapsed;
             installButton.IsEnabled = false;
             ToolTipService.SetToolTip(card,
-                $"This model needs {RamBudgetGB(kind):0} GB resident RAM. With your {available:0} GB machine and the scan engine running, loading it would OOM-kill the engine. Pick a smaller model.");
+                "Too big for this PC's memory. Choose a smaller model.");
             card.Opacity = 0.55;
             card.IsHitTestVisible = false;
             return;
@@ -363,32 +417,32 @@ public sealed partial class DeepAnalyzeView : UserControl
             else
             {
                 var installed = VlmWeightsPresent(kind);
-                status.Text = installed ? "Installed" : "Another model is downloading…";
+                status.Text = installed ? "Ready" : "Another model is downloading…";
                 bar.Visibility = Visibility.Collapsed;
-                installButton.Content = installed ? "Reinstall" : "Install";
+                installButton.Content = installed ? "Download again" : "Download";
             }
             installButton.IsEnabled = false;
             return;
         }
         if (VlmWeightsPresent(kind))
         {
-            status.Text = "Installed";
+            status.Text = "Ready";
             bar.Visibility = Visibility.Collapsed;
-            installButton.Content = "Reinstall";
+            installButton.Content = "Download again";
             installButton.IsEnabled = true;
         }
         else if (slot.Status == ModelInstallStatus.Failed && isThisModel)
         {
-            status.Text = "Install failed — retry?";
+            status.Text = "Download failed. Try again.";
             bar.Visibility = Visibility.Collapsed;
-            installButton.Content = "Install";
+            installButton.Content = "Download";
             installButton.IsEnabled = true;
         }
         else
         {
             status.Text = string.Empty;
             bar.Visibility = Visibility.Collapsed;
-            installButton.Content = "Install";
+            installButton.Content = "Download";
             installButton.IsEnabled = true;
         }
     }
@@ -411,15 +465,7 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private void UpdateActiveModelLabel()
     {
-        ActiveModelText.Text = _activeModel switch
-        {
-            "qwen2_5_vl_7b" => "Active model: Qwen 2.5-VL 7B",
-            "qwen3_vl_4b" => "Active model: Qwen3-VL 4B",
-            "qwen3_vl_8b" => "Active model: Qwen3-VL 8B",
-            "gemma_3_4b" => "Active model: Gemma 3 4B",
-            "mistral_small_3_2" => "Active model: Mistral-Small 3.2",
-            _ => "Active model: Qwen 2.5-VL 7B",
-        };
+        ActiveModelText.Text = ModelDisplayName(AppSettings.IsAllowedVlmKind(_activeModel) ? _activeModel : "qwen2_5_vl_7b");
     }
 
     private int _proposedNameCount;
@@ -457,8 +503,11 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamCard.Visibility = Visibility.Visible;
             CancelButton.IsEnabled = true;
             AnalyzeAllButton.IsEnabled = false;
-            StreamFileNameText.Text = $"{starting.Phase}: {starting.ModelKind}";
-            StreamCaptionText.Text = starting.Message ?? string.Empty;
+            StreamTitleText.Text = "Getting the AI ready…";
+            StreamFileNameText.Text = ModelDisplayName(string.IsNullOrEmpty(starting.ModelKind) ? _activeModel : starting.ModelKind);
+            StreamCaptionText.Text = string.IsNullOrEmpty(starting.Message)
+                ? "Loading the model on this PC. The first description usually appears within 30 seconds."
+                : starting.Message;
             StreamProposedNameText.Text = string.Empty;
             // Reset the smart-rename tally at the start of each run so the pill
             // reflects only THIS run, not a cumulative count across runs.
@@ -467,7 +516,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             SyncProposedNamesPill();
             OverallProgress.Value = 0;
             OverallProgress.IsIndeterminate = true;
-            OverallProgressText.Text = "Preparing…";
+            OverallProgressText.Text = "Getting ready…";
             // Arm the warm-up watchdog so a stalled model load surfaces a
             // dismissible error + reverts the optimistic UI instead of
             // spinning "Preparing…" indefinitely.
@@ -479,6 +528,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamCard.Visibility = Visibility.Visible;
             CancelButton.IsEnabled = true;
             AnalyzeAllButton.IsEnabled = false;
+            StreamTitleText.Text = "Describing files…";
             OverallProgress.IsIndeterminate = false;
 
             var pct = prog.Total == 0 ? 0 : (double)prog.Processed / prog.Total;
@@ -486,9 +536,9 @@ public sealed partial class DeepAnalyzeView : UserControl
             // include ETA + processed/total + per-second rate
             // when the engine reports it.
             var etaSuffix = prog.EtaSeconds is double eta && eta > 0
-                ? $" · {FormatEta(eta)} left"
+                ? $" · about {FormatEta(eta)} left"
                 : string.Empty;
-            OverallProgressText.Text = $"{prog.Processed} / {prog.Total} files{etaSuffix}";
+            OverallProgressText.Text = $"{prog.Processed:N0} of {prog.Total:N0} files{etaSuffix}";
 
             if (!string.IsNullOrEmpty(prog.CurrentPath))
             {
@@ -518,7 +568,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamCaptionText.Text = last.Description ?? string.Empty;
             if (!string.IsNullOrEmpty(last.ProposedName))
             {
-                StreamProposedNameText.Text = $"Proposed name: {last.ProposedName}";
+                StreamProposedNameText.Text = $"Suggested name: {last.ProposedName}";
                 _proposedNameCount++;
                 SyncProposedNamesPill();
             }
@@ -533,26 +583,110 @@ public sealed partial class DeepAnalyzeView : UserControl
             CancelButton.IsEnabled = false;
             AnalyzeAllButton.IsEnabled = true;
             OverallProgress.IsIndeterminate = false;
-            OverallProgressText.Text = complete.Cancelled
-                ? $"Cancelled ({complete.Processed} done, {complete.Failed} failed)"
-                : $"Done — {complete.Processed} captioned in {complete.TotalSeconds:0.#}s ({complete.Failed} failed)";
+            StreamTitleText.Text = complete.Cancelled ? "Stopped" : "Finished";
+            OverallProgressText.Text = $"{complete.Processed:N0} file{(complete.Processed == 1 ? "" : "s")} described"
+                + (complete.Failed > 0 ? $" · {complete.Failed:N0} couldn't be read" : string.Empty)
+                + $" · took {FormatEta(complete.TotalSeconds)}";
             SyncProposedNamesPill();
+            _ = RefreshNamePeopleGateAsync();
         }
 
         SyncDeepAnalyzeControls();
     }
 
-    private void SyncDeepAnalyzeControls()
+    private static Style? _accentStyle;
+    private Brush? _runMetaDefaultBrush;
+
+    private static bool IsDeepAnalyzeBusy(EngineClient ec)
+        => ec.DeepAnalyzeCommandInFlight
+           || ec.DeepAnalyzeStarting is not null
+           || ec.DeepAnalyzeProgress is not null;
+
+    private static string ModelDisplayName(string kind) => kind switch
+    {
+        "qwen2_5_vl_7b" => "Qwen 2.5-VL 7B",
+        "qwen3_vl_4b" => "Qwen3-VL 4B",
+        "qwen3_vl_8b" => "Qwen3-VL 8B",
+        "gemma_3_4b" => "Gemma 3 4B",
+        "mistral_small_3_2" => "Mistral-Small 3.2",
+        _ => kind,
+    };
+
+    private string? ModelBlocker()
     {
         var ec = EngineClient.Instance;
-        var busy = ec.DeepAnalyzeCommandInFlight
-                   || ec.DeepAnalyzeStarting is not null
-                   || ec.DeepAnalyzeProgress is not null;
-        var canStart = !busy && !ec.GpuDeviceRemoved;
+        if (ec.GpuDeviceRemoved) return EngineClient.GpuRestartRequiredMessage;
+        if (PhysicalRamGB() is double ramGB && !Fits(_activeModel, ramGB))
+        {
+            return $"{ModelDisplayName(_activeModel)} needs more memory than this PC has. Choose a smaller model above.";
+        }
+        if (IsDeepAnalyzeBusy(ec)) return "FileID is already describing files.";
+        if (!VlmWeightsPresent(_activeModel))
+        {
+            return $"Download {ModelDisplayName(_activeModel)} above first.";
+        }
+        return null;
+    }
+
+    private string? RunBlocker()
+    {
+        if (ModelBlocker() is { } blocker) return blocker;
+        if (_eligibleTotal == 0) return "Scan a folder first.";
+        if (SkipExistingToggle.IsChecked == true && _eligibleTotal > 0 && _pendingTotal == 0 && _countsModel == _activeModel)
+        {
+            return "Every file is already described. Turn off \"Only files not described yet\" to describe them again.";
+        }
+        return null;
+    }
+
+    private void SyncDeepAnalyzeControls()
+    {
+        if (_unloaded) return;
+        var ec = EngineClient.Instance;
+        var busy = IsDeepAnalyzeBusy(ec);
+        var modelBlocker = ModelBlocker();
+        var blocker = RunBlocker();
         CancelButton.IsEnabled = busy;
-        AnalyzeAllButton.IsEnabled = canStart;
-        AnalyzeSelectedButton.IsEnabled = canStart && SelectionRegistry.Instance.LibrarySelection.Count > 0;
-        AnalyzeCurrentButton.IsEnabled = canStart && SelectionRegistry.Instance.PreviewedFileId is not null;
+        CancelButton.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+
+        AnalyzeAllButton.IsEnabled = blocker is null;
+        var count = SkipExistingToggle.IsChecked == true ? _pendingTotal : _eligibleTotal;
+        AnalyzeAllText.Text = count > 0 && _countsModel == _activeModel
+            ? $"Describe {count:N0} file{(count == 1 ? "" : "s")}"
+            : "Describe files";
+        var tip = blocker ?? "Write a description and a suggested name for each file. You can stop at any time.";
+        ToolTipService.SetToolTip(AnalyzeAllButton, tip);
+        AutomationProperties.SetHelpText(AnalyzeAllButton, tip);
+
+        var selectionCount = SelectionRegistry.Instance.LibrarySelection.Count;
+        AnalyzeSelectedButton.IsEnabled = modelBlocker is null && selectionCount > 0;
+        ToolTipService.SetToolTip(AnalyzeSelectedButton,
+            modelBlocker ?? (selectionCount == 0 ? "Choose files in Library first" : "Describe only the files chosen in Library"));
+        var hasPreview = SelectionRegistry.Instance.PreviewedFileId is not null;
+        AnalyzeCurrentButton.IsEnabled = modelBlocker is null && hasPreview;
+        ToolTipService.SetToolTip(AnalyzeCurrentButton,
+            modelBlocker ?? (hasPreview ? "Describe only the file open in the preview" : "Open a file in Library first"));
+
+        RunMetaText.Text = blocker is not null && !busy
+            ? blocker
+            : "You can keep using your PC while this runs.";
+        _runMetaDefaultBrush ??= RunMetaText.Foreground;
+        RunMetaText.Foreground = blocker is not null && !busy && PhysicalRamGB() is double ram && !Fits(_activeModel, ram)
+            ? ThemeHelper.GetBrushSafe("WarningBrush")
+            : _runMetaDefaultBrush;
+
+        _accentStyle ??= ThemeHelper.GetStyleSafe("AccentButtonStyle");
+        if (_proposedNameCount > 0)
+        {
+            AnalyzeAllButton.ClearValue(FrameworkElement.StyleProperty);
+            ReviewNamesButton.Style = _accentStyle;
+        }
+        else
+        {
+            AnalyzeAllButton.Style = _accentStyle;
+            ReviewNamesButton.ClearValue(FrameworkElement.StyleProperty);
+        }
+        SyncLibraryStatus();
     }
 
     // (Re)arm the warm-up watchdog. Always restarts the interval so a fresh
@@ -603,8 +737,8 @@ public sealed partial class DeepAnalyzeView : UserControl
             CancelButton.IsEnabled = false;
             AnalyzeAllButton.IsEnabled = true;
             SyncSelectionButtons();
-            _ = ShowAlertAsync("Model took too long to load",
-                "The Deep Analyze model didn't finish loading in time. Check the engine logs and try again.");
+            _ = ShowAlertAsync("The AI took too long to start",
+                "The description model didn't finish loading in time. Try again in a moment.");
         });
 
     /// <summary>smart-names pending-rename pill. Shows the
@@ -617,14 +751,21 @@ public sealed partial class DeepAnalyzeView : UserControl
         if (_proposedNameCount > 0)
         {
             ProposedNamesPill.Visibility = Visibility.Visible;
-            ProposedNamesPillText.Text = _proposedNameCount == 1
-                ? "1 smart name pending rename"
-                : $"{_proposedNameCount} smart names pending rename";
+            ProposedNamesPillText.Text = _proposedNameCount == 1 ? "1 file" : $"{_proposedNameCount:N0} files";
         }
         else
         {
             ProposedNamesPill.Visibility = Visibility.Collapsed;
         }
+        ApplyAllText.Text = _proposedNameCount > 0
+            ? $"Add tags and rename {_proposedNameCount:N0} file{(_proposedNameCount == 1 ? "" : "s")}"
+            : "Add tags and names";
+        var applyAllTip = _proposedNameCount > 0
+            ? "Adds tags and people, and renames files to their suggested names. You confirm first."
+            : "Adds tags and people's names to the files";
+        ToolTipService.SetToolTip(ApplyAllButton, applyAllTip);
+        AutomationProperties.SetName(ApplyAllButton, ApplyAllText.Text);
+        SyncDeepAnalyzeControls();
     }
 
     /// <summary>open BulkRenameSheet pre-seeded with every
@@ -659,11 +800,11 @@ public sealed partial class DeepAnalyzeView : UserControl
                 });
             }
             var sheet = new Views.Library.BulkRenameSheet();
-            sheet.SetPlan(plan);
+            sheet.SetPlan(plan, suggested: true);
             var dialog = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = $"Apply {pending.Count} smart rename{(pending.Count == 1 ? "" : "s")}",
+                Title = $"Rename {pending.Count:N0} file{(pending.Count == 1 ? "" : "s")} to the suggested names?",
                 Content = sheet,
                 PrimaryButtonText = "Rename",
                 CloseButtonText = "Close",
@@ -690,11 +831,11 @@ public sealed partial class DeepAnalyzeView : UserControl
 
     private static string FormatEta(double seconds)
     {
-        if (seconds < 60) return $"{seconds:F0}s";
-        if (seconds < 3600) return $"{seconds / 60:F0}m";
+        if (seconds < 60) return $"{Math.Max(1, seconds):F0} sec";
+        if (seconds < 3600) return $"{seconds / 60:F0} min";
         var hours = seconds / 3600;
-        if (hours > 99) return "99+h";
-        return $"{hours:F1}h";
+        if (hours > 99) return "99+ hr";
+        return $"{hours:F1} hr";
     }
 
     private async System.Threading.Tasks.Task LoadStreamThumbAsync(string path)
@@ -811,6 +952,8 @@ public sealed partial class DeepAnalyzeView : UserControl
         _activeModel = id;
         HighlightActiveCard();
         UpdateActiveModelLabel();
+        SyncDeepAnalyzeControls();
+        _ = RefreshNamePeopleGateAsync();
         try
         {
             // Use the shared settings instance so a pending debounced save
@@ -872,7 +1015,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         if (EngineClient.Instance.GpuDeviceRemoved)
         {
             var reason = EngineClient.GpuRestartRequiredMessage;
-            await ShowAlertAsync("Deep Analyze stopped", reason);
+            await ShowAlertAsync("Describing stopped", reason);
             return;
         }
         // Set the optimistic/working UI state BEFORE the await: if the send
@@ -886,7 +1029,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             // Manual pass = full enrichment (caption + smart-rename + tags), so
             // tagsOnly stays false. The background auto-pass uses tagsOnly:true.
-            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsOn, tagsOnly: false, proposeRenames: ProposeRenamesCheck.IsChecked == true);
+            await EngineClient.Instance.DeepAnalyzeAllAsync(_activeModel, SkipExistingToggle.IsChecked == true, tagsOnly: false, proposeRenames: ProposeRenamesCheck.IsChecked == true);
         }
         catch (Exception ex)
         {
@@ -901,11 +1044,11 @@ public sealed partial class DeepAnalyzeView : UserControl
             AnalyzeAllButton.IsEnabled = true;
             if (EngineClient.Instance.GpuDeviceRemoved)
             {
-                await ShowAlertAsync("Deep Analyze stopped", reason);
+                await ShowAlertAsync("Describing stopped", reason);
             }
             else
             {
-                await ShowAlertAsync("Deep Analyze stopped", ex.Message);
+                await ShowAlertAsync("Describing stopped", ex.Message);
             }
         }
     }
@@ -932,7 +1075,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private async System.Threading.Tasks.Task RunApplyAsync(bool keywords, bool people, bool names)
     {
         if (System.Threading.Interlocked.CompareExchange(ref _applyInFlight, 1, 0) != 0) return;
-        SetApplyBusy(true, "Applying…");
+        SetApplyBusy(true, "Adding…");
         int tagged = 0, peopled = 0;
         bool openRenameSheet = false;
         try
@@ -972,16 +1115,16 @@ public sealed partial class DeepAnalyzeView : UserControl
 
         var parts = new System.Collections.Generic.List<string>();
         if (keywords) parts.Add($"{tagged} tagged");
-        if (people) parts.Add($"{peopled} people-tagged");
+        if (people) parts.Add($"{peopled} tagged with names");
         // Tags are written to both a sidecar JSON file and (for JPEG/PNG/MP4 etc.)
         // Explorer's Keywords property. Non-media extensions get sidecar-only —
         // Explorer's Details > Tags column stays blank for those, which is expected.
         string statusNote = (tagged > 0 || peopled > 0)
-            ? " Tags appear in Explorer for supported media files (JPEG, PNG, MP4…); other types use a sidecar file."
+            ? " Tags show in File Explorer for supported media files (JPEG, PNG, MP4…); other types keep them in a separate tag file."
             : string.Empty;
         SetApplyBusy(false, parts.Count == 0
-            ? "Nothing to apply yet."
-            : "Applied — " + string.Join(", ", parts) + "." + statusNote);
+            ? "Nothing to add yet."
+            : "Done: " + string.Join(", ", parts) + "." + statusNote);
 
 
         // Smart names go through the review sheet (correct extension + uniqueness
@@ -996,7 +1139,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         try
         {
             ApplyTagsButton.IsEnabled = !busy;
-            ApplyPeopleButton.IsEnabled = !busy;
+            ApplyPeopleButton.IsEnabled = !busy && (_hasNamedAnyone || _eligibleTotal < 0);
             ApplyAllButton.IsEnabled = !busy;
             ApplyProgressRing.IsActive = busy;
             ApplyProgressRing.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;

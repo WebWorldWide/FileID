@@ -83,10 +83,10 @@ impl CatalogUi {
             .send(CommandPayload::CatalogRequest(Box::new(
                 CatalogRequestPayload { request },
             )));
-        if let Err(e) = sent {
+        if sent.is_err() {
             self.requests.borrow_mut().clear();
             self.searching.set_visible(false);
-            self.set_status(&e.to_string());
+            self.set_status("FileID is still getting ready. Try again in a moment.");
         }
     }
 
@@ -268,7 +268,7 @@ impl CatalogUi {
                     });
                     row.append(&play);
                 }
-                None => row.append(&v3::meta("Sampled image")),
+                None => row.append(&v3::meta("Still frame")),
             }
             self.people.body.append(&row);
         }
@@ -297,7 +297,9 @@ impl CatalogUi {
             rows.push(self.chapter_row(chapter));
         }
         if rows.is_empty() {
-            let empty = v3::meta("No chapters yet. Analyze the video or add one.");
+            let empty =
+                v3::meta("No chapters yet. Press Find moments for suggestions, or add your own at the current time.");
+            empty.set_wrap(true);
             empty.add_css_class("v3-row-pad");
             self.chapters.append(&empty);
         }
@@ -548,7 +550,10 @@ impl CatalogUi {
             if hits.len() == 1 { "" } else { "s" }
         ));
         if hits.is_empty() {
-            let empty = v3::meta("No matches.");
+            let empty = v3::wrapped(
+                "No matches. Try another word, or describe more files so there is more to search.",
+                &["v3-meta"],
+            );
             empty.set_margin_start(14);
             self.hits.append(&empty);
         }
@@ -606,7 +611,7 @@ impl CatalogUi {
             format!("{active} job{}", if active == 1 { "" } else { "s" })
         }));
         if jobs.is_empty() {
-            let empty = v3::meta("Timeline and index jobs appear here.");
+            let empty = v3::wrapped("Nothing waiting. Pick a video and press Find moments.", &["v3-meta"]);
             empty.add_css_class("v3-row-pad");
             self.jobs.append(&empty);
         }
@@ -698,11 +703,11 @@ fn is_image(path: &str) -> bool {
 pub(super) fn hit_kind(hit: &CatalogHit) -> (&'static str, bool) {
     match hit.kind.as_str() {
         "chapter" => ("Chapter", false),
-        "sampledFrame" => ("Sampled frame, unverified", true),
+        "sampledFrame" => ("Video frame, not checked", true),
         "person" => ("Person", false),
         "image" => ("Image match", false),
         "passage" if hit.page.is_some() => ("Text in document", false),
-        "passage" if hit.start_seconds.is_some() => ("Passage", false),
+        "passage" if hit.start_seconds.is_some() => ("Speech or text", false),
         "passage" => ("Text in image", false),
         _ => ("Match", false),
     }
@@ -710,9 +715,9 @@ pub(super) fn hit_kind(hit: &CatalogHit) -> (&'static str, bool) {
 
 fn job_title(kind: &str) -> &'static str {
     match kind {
-        "timelineSample" => "Timeline analysis",
-        "catalogIndex" => "Catalog index",
-        _ => "Catalog job",
+        "timelineSample" => "Video analysis",
+        "catalogIndex" => "Search index",
+        _ => "Video analysis",
     }
 }
 
@@ -744,17 +749,17 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let top = v3::vbox(10);
     top.add_css_class("v3-pane-top");
     let query = gtk::Entry::builder()
-        .placeholder_text("Search names, captions, chapters")
+        .placeholder_text("Search files and videos")
         .primary_icon_name("system-search-symbolic")
         .css_classes(["v3-field"])
         .build();
     query.update_property(&[gtk::accessible::Property::Label(
-        "Search names, captions, chapters",
+        "Search files and videos",
     )]);
     top.append(&query);
     let mode = v3::Segmented::new(&["Keyword", "Hybrid"], 0);
     mode.root.set_tooltip_text(Some(
-        "Hybrid adds a local CLIP query; nothing downloads here.",
+        "Hybrid also searches by what is in photos, using the Search by description model. Nothing downloads here.",
     ));
     top.append(&mode.root);
     let count_row = v3::hbox(8);
@@ -841,11 +846,14 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     timeline.root.add_css_class("v3-panel-pad");
     player.body.append(&timeline.root);
     let footer = player.show_footer();
-    let depth = v3::Segmented::new(&["Quick samples", "Full moments"], 0);
+    let depth = v3::Segmented::new(&["Quick", "Detailed"], 0);
+    depth.root.set_tooltip_text(Some(
+        "Quick looks at one frame every few seconds. Detailed watches short sequences and listens for speech, and takes longer.",
+    ));
     footer.append(&depth.root);
-    let analyze = v3::primary("Analyze", true);
+    let analyze = v3::primary("Find moments", true);
     analyze.set_tooltip_text(Some(
-        "Needs a local visual model from Deep Analyze; nothing downloads automatically.",
+        "Watch this video and suggest chapters. Uses the description model from Describe Files; nothing downloads automatically.",
     ));
     footer.append(&analyze);
     footer.append(&v3::spacer());
@@ -861,7 +869,7 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     chapter_panel.trailing.append(&undo);
     chapter_panel.trailing.append(&add);
     let draft_note = v3::wrapped(
-        "Draft chapters come from sparse samples and can miss brief events. Accept or rename each one.",
+        "Suggested chapters come from a few frames, so short moments can be missed. Check them before relying on them.",
         &["v3-note-ai"],
     );
     draft_note.set_visible(false);
@@ -910,7 +918,7 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let chapters = v3::vbox(0);
     chapter_panel.body.append(&chapters);
     chapter_panel.show_footer().append(&v3::meta(
-        "Chapters live in FileID's catalog. The video file is never changed.",
+        "Chapters are saved in FileID. The video file itself is never changed.",
     ));
     detail.append(&chapter_panel.root);
 
@@ -918,13 +926,13 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     people.root.set_visible(false);
     detail.append(&people.root);
 
-    let jobs_panel = v3::panel("Analysis queue");
+    let jobs_panel = v3::panel("Video analysis");
     let jobs = v3::vbox(0);
     jobs_panel.body.append(&jobs);
     detail.append(&jobs_panel.root);
 
     let detail_stack = gtk::Stack::builder().vhomogeneous(false).build();
-    let empty = v3::dashed_notice("Find a moment", "Search on the left, then pick a result to play it, see its timeline and review its chapters.");
+    let empty = v3::dashed_notice("Find a moment", "Type a word on the left and press Enter. Pick a result to play it, see which parts FileID has looked at, and add or fix chapters.");
     empty.add_css_class("v3-page-pad-inner");
     detail_stack.add_named(&empty, Some("empty"));
     detail_stack.add_named(&detail, Some("detail"));
@@ -1203,11 +1211,11 @@ fn run_search(ui: &Rc<CatalogUi>) {
         .engine
         .borrow_mut()
         .send(CommandPayload::EmbedTextQuery(request));
-    if let Err(e) = sent {
+    if sent.is_err() {
         let fallback = ui.hybrid.borrow_mut().timeout(&id);
         if let Some(r) = fallback {
             ui.search_notice
-                .set_label(&format!("Hybrid unavailable: {e}. Using keyword search."));
+                .set_label("FileID is still getting ready, so this uses keyword search.");
             ui.send("search", r);
         }
         return;
@@ -1217,7 +1225,7 @@ fn run_search(ui: &Rc<CatalogUi>) {
         let fallback = ui.hybrid.borrow_mut().timeout(&id);
         if let Some(r) = fallback {
             ui.search_notice
-                .set_label("Hybrid embedding timed out. Using keyword search; no inference result is fabricated.");
+                .set_label("Hybrid search took too long, so this uses keyword search.");
             ui.send("search", r);
         }
     });
@@ -1278,7 +1286,7 @@ fn subscribe(ui: &Rc<CatalogUi>) {
                 EngineState::Exited => {
                     ui.requests.borrow_mut().clear();
                     ui.searching.set_visible(false);
-                    ui.set_status("Engine exited; pending requests interrupted.");
+                    ui.set_status("FileID's background helper stopped. Try again in a moment.");
                 }
                 _ => {}
             }
@@ -1310,13 +1318,13 @@ mod tests {
         );
         assert_eq!(
             hit_kind(&hit("sampledFrame", Some(3.0), None)),
-            ("Sampled frame, unverified", true)
+            ("Video frame, not checked", true)
         );
         assert_eq!(
             hit_kind(&hit("passage", None, Some(2))).0,
             "Text in document"
         );
-        assert_eq!(hit_kind(&hit("passage", Some(30.0), None)).0, "Passage");
+        assert_eq!(hit_kind(&hit("passage", Some(30.0), None)).0, "Speech or text");
         assert_eq!(hit_kind(&hit("passage", None, None)).0, "Text in image");
     }
 
@@ -1326,6 +1334,6 @@ mod tests {
         assert!(!editor_valid("  ", 0.0, 5.0));
         assert!(!editor_valid("Intro", 6.0, 5.0));
         assert_eq!(job_state("paused"), ("Paused", Tone::Muted));
-        assert_eq!(job_title("timelineSample"), "Timeline analysis");
+        assert_eq!(job_title("timelineSample"), "Video analysis");
     }
 }

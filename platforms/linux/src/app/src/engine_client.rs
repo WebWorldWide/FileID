@@ -703,7 +703,7 @@ fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
         emit_from_main(
             &raw_tx,
             RawEvent::State(EngineState::Failed(
-                "Engine exited 3 times within 60 s; relaunch the app.".into(),
+                "FileID's background helper stopped 3 times in a minute. Quit and reopen FileID.".into(),
             )),
         );
         return;

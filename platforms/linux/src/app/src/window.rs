@@ -22,7 +22,7 @@ use crate::shell::title_bar::TitleBar;
 use crate::shell::{self, Action};
 use fileid_engine::ipc::{CommandPayload, Empty, ScanPhase};
 
-const LIBRARY_SEARCH_HINT: &str = "Search filenames, tags, text in images…";
+const LIBRARY_SEARCH_HINT: &str = "Search by name, tag or text in files";
 
 #[derive(Clone)]
 struct ActiveWindow {
@@ -64,6 +64,7 @@ struct Shell {
     window: adw::ApplicationWindow,
     engine: Rc<RefCell<EngineClient>>,
     stack: adw::ViewStack,
+    detail: gtk::Stack,
     split: adw::OverlaySplitView,
     title_bar: Rc<TitleBar>,
     sidebar: Rc<Sidebar>,
@@ -74,6 +75,7 @@ struct Shell {
     note: RefCell<Option<String>>,
     current: Cell<&'static str>,
     counting: Cell<bool>,
+    scan_when_ready: Cell<bool>,
     inspector: gtk::Revealer,
 }
 
@@ -165,7 +167,14 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     content.append(&stack);
     content.append(&inspector);
-    split.set_content(Some(&content));
+    let detail = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    detail.add_named(&first_run(&act), Some("first-run"));
+    detail.add_named(&content, Some("pages"));
+    split.set_content(Some(&detail));
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&title_bar.header);
     toolbar.set_content(Some(&split));
@@ -198,6 +207,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         window: window.clone(),
         engine: engine.clone(),
         stack,
+        detail,
         split,
         title_bar,
         sidebar,
@@ -208,6 +218,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         note: RefCell::new(None),
         current: Cell::new("library"),
         counting: Cell::new(false),
+        scan_when_ready: Cell::new(false),
         inspector,
     });
     let _ = slot.set(Rc::downgrade(&shell));
@@ -301,7 +312,7 @@ impl Shell {
                 let sent = self.engine.borrow_mut().send(payload);
                 match sent {
                     Ok(()) => self.status.borrow_mut().paused = !resume,
-                    Err(err) => self.set_note(Some(format!("Engine: {err}"))),
+                    Err(_) => self.set_note(Some(NOT_READY.to_owned())),
                 }
             }
             Action::CancelScan => self.send(CommandPayload::CancelScan(Empty {})),
@@ -369,8 +380,8 @@ impl Shell {
 
     fn send(&self, payload: CommandPayload) {
         let sent = self.engine.borrow_mut().send(payload);
-        if let Err(err) = sent {
-            self.set_note(Some(format!("Engine: {err}")));
+        if sent.is_err() {
+            self.set_note(Some(NOT_READY.to_owned()));
         }
     }
 
@@ -411,13 +422,15 @@ impl Shell {
             status.phase = None;
             status.start_requested = false;
         }
+        self.scan_when_ready.set(false);
         self.window.set_title(Some("FileID"));
         crate::app_settings::forget_folder();
     }
 
     fn pick_folder(self: &Rc<Self>) {
         let dialog = gtk::FileDialog::builder()
-            .title("Pick a folder to organize")
+            .title("Choose a folder for FileID to scan. Nothing in it is moved or changed.")
+            .accept_label("Scan This Folder")
             .modal(true)
             .build();
         let weak = Rc::downgrade(self);
@@ -430,9 +443,22 @@ impl Shell {
                 else {
                     return;
                 };
-                shell.set_folder(&path);
+                shell.choose(&path);
             },
         );
+    }
+
+    fn choose(&self, path: &Path) {
+        self.set_folder(path);
+        if self.status.borrow().scan_running() {
+            return;
+        }
+        if self.status.borrow().engine_ready {
+            self.start_scan();
+        } else {
+            self.scan_when_ready.set(true);
+        }
+        self.refresh();
     }
 
     fn start_scan(&self) {
@@ -440,6 +466,7 @@ impl Shell {
         let Some(folder) = folder else {
             return;
         };
+        self.scan_when_ready.set(false);
         if !self.status.borrow().can_start() {
             return;
         }
@@ -452,16 +479,16 @@ impl Shell {
                 self.status.borrow_mut().start_requested = true;
                 self.set_note(None);
             }
-            Err(err) => self.set_note(Some(format!("Scan failed: {err}"))),
+            Err(_) => self.set_note(Some(NOT_READY.to_owned())),
         }
     }
 
     fn confirm_wipe(self: &Rc<Self>) {
         let dialog = adw::AlertDialog::new(
-            Some("Wipe library and rescan from scratch?"),
-            Some("Deletes every tag, caption, face cluster and embedding for this library, then runs the full scan again. Your files are not touched."),
+            Some("Start over with this folder?"),
+            Some("Forgets everything FileID learned about this folder (tags, descriptions, people and search data), then scans it again from the start. Your files are not changed."),
         );
-        dialog.add_responses(&[("cancel", "Cancel"), ("wipe", "Wipe and rescan")]);
+        dialog.add_responses(&[("cancel", "Cancel"), ("wipe", "Start over")]);
         dialog.set_response_appearance("wipe", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
@@ -475,8 +502,8 @@ impl Shell {
                 .engine
                 .borrow_mut()
                 .send(CommandPayload::WipeLibrary(Empty {}));
-            if let Err(err) = wiped {
-                shell.set_note(Some(format!("Engine: {err}")));
+            if wiped.is_err() {
+                shell.set_note(Some(NOT_READY.to_owned()));
                 return;
             }
             {
@@ -521,6 +548,14 @@ impl Shell {
             .map(|path| path.to_string_lossy().into_owned());
         self.title_bar.update(&status, path.as_deref());
         self.sidebar.update(&status);
+        let page = if status.folder.is_none() && status.total_files == 0 {
+            "first-run"
+        } else {
+            "pages"
+        };
+        if self.detail.visible_child_name().as_deref() != Some(page) {
+            self.detail.set_visible_child_name(page);
+        }
         for (id, header) in &self.headers {
             header.set_meta(&status.page_meta(id));
         }
@@ -563,7 +598,7 @@ impl Shell {
                         recount = true;
                     }
                     if phase == ScanPhase::Failed {
-                        note = Some(Some("Scan failed. Check the engine log.".to_owned()));
+                        note = Some(Some("Scan failed. Try Scan again.".to_owned()));
                     }
                 }
                 EngineState::BatchLanded(processed) => {
@@ -609,7 +644,7 @@ impl Shell {
                         .map(|(_, kinds)| kinds.trim().to_owned())
                         .unwrap_or_else(|| "required scan models".to_owned());
                     note = Some(Some(format!(
-                        "Scan blocked: {missing} Install the missing models in Settings, then retry."
+                        "Scan blocked: {missing} Download the missing models in Settings, then try again."
                     )));
                 }
                 EngineState::Error {
@@ -626,18 +661,23 @@ impl Shell {
                     note = match model_kind {
                         Some(_) if kind == "prewarm_cancelled" => None,
                         Some(model) => Some(Some(format!("Model {model}: {message}"))),
-                        None => Some(Some(format!("Engine: {message}"))),
+                        None => Some(Some(message)),
                     };
                 }
                 EngineState::Failed(message) => {
                     status.engine_ready = false;
                     clear_running(&mut status);
-                    note = Some(Some(format!("Engine: {message}")));
+                    note = Some(Some(format!(
+                        "FileID's background helper couldn't start: {message}"
+                    )));
                 }
                 EngineState::Exited => {
                     status.engine_ready = false;
                     clear_running(&mut status);
-                    note = Some(Some("Engine stopped; restarting…".to_owned()));
+                    note = Some(Some(
+                        "FileID's background helper stopped. It restarts on its own; if this stays, quit and reopen FileID."
+                            .to_owned(),
+                    ));
                 }
                 _ => return,
             }
@@ -651,6 +691,9 @@ impl Shell {
         }
         if recount {
             self.count_files();
+        }
+        if self.scan_when_ready.get() && self.status.borrow().engine_ready {
+            self.start_scan();
         }
         self.refresh();
     }
@@ -733,6 +776,93 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
 
 const NAVIGATE_ACTION: &str = "navigate";
 
+const NOT_READY: &str = "FileID is still getting ready. Try again in a moment.";
+
+const FIRST_RUN_STEPS: [(&str, &str, &str); 5] = [
+    (
+        "Library",
+        "Scan a folder",
+        "FileID reads each file, tags what's in your photos and finds faces. Nothing is moved or changed.",
+    ),
+    (
+        "People",
+        "Name the people",
+        "Faces are grouped by person. Type a name once and FileID finds that person everywhere.",
+    ),
+    (
+        "Describe Files",
+        "Describe files (optional)",
+        "A local AI writes a sentence about each file and suggests a clearer name. You approve every rename.",
+    ),
+    (
+        "Search & Moments · Chat",
+        "Search and ask",
+        "Find a photo, video or document by what's in it, or ask a question in Chat.",
+    ),
+    (
+        "Duplicates · Organize Folders",
+        "Tidy up",
+        "Move extra copies to Trash and preview a tidier folder layout before anything moves.",
+    ),
+];
+
+fn first_run(act: &Rc<dyn Fn(Action)>) -> gtk::Widget {
+    use crate::v3::{hbox, label, meta, panel, primary, section, vbox, wrapped};
+    let column = vbox(0);
+    column.set_margin_start(40);
+    column.set_margin_end(40);
+    column.set_margin_top(48);
+    column.set_margin_bottom(48);
+    let intro = vbox(8);
+    intro.set_margin_bottom(26);
+    intro.append(&section("FileID / Get started"));
+    intro.append(&label("FileID", &["title-1", "first-run-title"]));
+    intro.append(&wrapped(
+        "Organizes your photos, videos and documents. Everything runs on this computer, and your files never leave it.",
+        &["first-run-lede"],
+    ));
+    column.append(&intro);
+    let steps = panel("How it works");
+    for (index, (page, title, detail)) in FIRST_RUN_STEPS.iter().enumerate() {
+        let row = hbox(14);
+        row.add_css_class("v3-row-pad");
+        row.add_css_class("v3-soft-row");
+        let number = label(&(index + 1).to_string(), &["first-run-number"]);
+        number.set_valign(gtk::Align::Start);
+        row.append(&number);
+        let text = vbox(3);
+        text.set_hexpand(true);
+        let heading = hbox(8);
+        heading.append(&label(title, &["v3-title-13"]));
+        heading.append(&label(&page.to_uppercase(), &["v3-meta-115"]));
+        text.append(&heading);
+        text.append(&wrapped(detail, &["v3-meta"]));
+        row.append(&text);
+        steps.body.append(&row);
+    }
+    steps.root.set_margin_bottom(20);
+    column.append(&steps.root);
+    let actions = hbox(12);
+    let choose = primary("Choose a folder to scan", false);
+    choose.set_tooltip_text(Some("Choose a folder to scan (Ctrl+O)"));
+    let act = act.clone();
+    choose.connect_clicked(move |_| act(Action::PickFolder));
+    actions.append(&choose);
+    let hint = meta("Or drag a folder onto this window (Ctrl+O).");
+    hint.set_valign(gtk::Align::Center);
+    hint.set_wrap(true);
+    actions.append(&hint);
+    column.append(&actions);
+    let clamp = adw::Clamp::builder()
+        .maximum_size(800)
+        .tightening_threshold(800)
+        .child(&column)
+        .build();
+    let scroll = crate::v3::scroller(&clamp);
+    scroll.add_css_class("fileid-page");
+    scroll.upcast()
+}
+
 fn drop_hint() -> gtk::Box {
     let hint = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -788,7 +918,7 @@ fn install_drop_target(overlay: &gtk::Overlay, hint: &gtk::Box, shell: &Rc<Shell
             return false;
         }
         if let Some(shell) = weak.upgrade() {
-            shell.set_folder(&path);
+            shell.choose(&path);
         }
         true
     });

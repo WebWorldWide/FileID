@@ -275,14 +275,14 @@ impl SelectedPane {
             .append(&kv_row("Size", &file_size_i64(row.size_bytes)));
         if let Some(name) = row.proposed_name.as_ref().filter(|name| !name.is_empty()) {
             self.facts
-                .append(&kv_row("Smart name", &format!("{name}.{}", row.extension)));
+                .append(&kv_row("Suggested name", &format!("{name}.{}", row.extension)));
         }
         if let Some(caption) = row
             .description
             .as_ref()
             .filter(|caption| !caption.is_empty())
         {
-            self.facts.append(&kv_row("Caption", caption));
+            self.facts.append(&kv_row("Description", caption));
         }
         append_details(&self.facts, row.id);
         self.load_picture(&row);

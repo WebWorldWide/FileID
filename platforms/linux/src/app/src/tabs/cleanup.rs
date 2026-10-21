@@ -165,12 +165,14 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
 
     let pill_exact = gtk::Button::builder()
-        .label("Exact")
+        .label("Exact copies")
         .css_classes(["pill", "pill-active"])
+        .tooltip_text("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
         .build();
     let pill_similar = gtk::Button::builder()
-        .label("Similar")
+        .label("Look-alikes")
         .css_classes(["pill"])
+        .tooltip_text("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
         .build();
     let pillbox = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -183,18 +185,21 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let filler = gtk::Box::builder().hexpand(true).build();
 
     let select_nonkeepers_btn = gtk::Button::builder()
-        .label("Select extra copies")
+        .label("Select all extra copies")
         .css_classes(["pill"])
+        .tooltip_text("Choose every copy except the one marked KEEP in each group")
         .build();
     let clear_btn = gtk::Button::builder()
         .label("Clear selection")
         .css_classes(["pill"])
         .sensitive(false)
+        .tooltip_text("Nothing is chosen")
         .build();
     let delete_btn = gtk::Button::builder()
-        .label("Delete selected")
+        .label("Move to Trash")
         .css_classes(["destructive-action"])
         .sensitive(false)
+        .tooltip_text("Choose the copies to remove first: click their pictures, or use Select all extra copies.")
         .build();
     let actions_box = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -247,7 +252,7 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // ── Content (empty state ↔ group list) ──────────────────────────────────
     let empty_page = adw::StatusPage::builder()
         .icon_name("user-trash-symbolic")
-        .title("Nothing to clean up yet")
+        .title("No files yet")
         .vexpand(true)
         .build();
 
@@ -406,14 +411,14 @@ pub fn build_cleanup_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         this.finish_restore(result);
                     }
                     EngineEvent::Exited if this.deleting.get() => {
-                        this.fail_trash("The engine exited before confirming the Trash operation.");
+                        this.fail_trash("FileID restarted before the move to Trash finished. Check Trash, then try again.");
                     }
                     EngineEvent::Exited if this.restoring.get() => {
                         this.restoring.set(false);
                         this.restore_button.set_sensitive(true);
                         this.update_global_summary();
                         this.status_label
-                            .set_text("The engine exited before confirming the restore.");
+                            .set_text("FileID restarted before the files were put back. Check Trash, then try again.");
                         this.reveal_status();
                     }
                     _ => {}
@@ -478,9 +483,9 @@ impl Cleanup {
         self.load_inflight.set(true);
         self.reload_pending.set(false);
         if self.groups.borrow().is_empty() {
-            self.empty_page.set_title("Checking for duplicates…");
+            self.empty_page.set_title("Looking for extra copies…");
             self.empty_page
-                .set_description(Some("Reading the library and verifying files."));
+                .set_description(Some("Reading the library and checking each file byte by byte."));
             self.empty_page.set_icon_name(Some("view-refresh-symbolic"));
             let spinner = gtk::Spinner::new();
             spinner.start();
@@ -570,7 +575,7 @@ impl Cleanup {
         self.list_box.append(&build_banner(mode_similar));
         if let Some(error) = self.last_refresh_error.borrow().as_deref() {
             self.list_box.append(&build_warning_banner(&format!(
-                "Cleanup refresh failed; showing the last verified results. {error}"
+                "Couldn't check for copies again; showing the last results. {error}"
             )));
         }
         if let Some(warning) = self.last_warning.borrow().as_deref() {
@@ -587,24 +592,25 @@ impl Cleanup {
         if let Some(error) = self.last_refresh_error.borrow().as_deref() {
             self.empty_page.set_child(None::<&gtk::Box>);
             self.empty_page.set_icon_name(Some("dialog-error-symbolic"));
-            self.empty_page.set_title("Cleanup refresh failed");
+            self.empty_page.set_title("Couldn't check for copies");
             self.empty_page.set_description(Some(error));
         } else if let Some(warning) = self.last_warning.borrow().as_deref() {
             self.empty_page.set_child(None::<&gtk::Box>);
             self.empty_page
                 .set_icon_name(Some("dialog-warning-symbolic"));
             self.empty_page.set_title(if mode_similar {
-                "Similar comparison not run"
+                "Look-alikes weren't checked"
             } else {
-                "No duplicates in the verified subset"
+                "No extra copies found so far"
             });
             self.empty_page.set_description(Some(warning));
         } else if has_skipped_only {
             self.empty_page
                 .set_icon_name(Some("object-select-symbolic"));
-            self.empty_page.set_title("All duplicate groups skipped");
-            self.empty_page
-                .set_description(Some("You've hidden every group from this view."));
+            self.empty_page.set_title("Every group is hidden");
+            self.empty_page.set_description(Some(
+                "You skipped all the groups. Show them again to keep going.",
+            ));
             let btn = gtk::Button::builder()
                 .label("Show skipped groups again")
                 .halign(gtk::Align::Center)
@@ -620,27 +626,30 @@ impl Cleanup {
         } else if candidates == 0 {
             self.empty_page.set_child(None::<&gtk::Box>);
             self.empty_page.set_icon_name(Some("user-trash-symbolic"));
-            self.empty_page.set_title("Nothing to clean up yet");
+            self.empty_page.set_title("No files yet");
             self.empty_page.set_description(Some(
-                "Pick a folder in the sidebar and click Start Scan. Duplicate copies show up \
-                 here grouped together — pick which copy to keep.",
+                "Scan a folder first. Extra copies of the same file then show up here in groups, \
+                 and you choose which copy to keep.",
             ));
         } else {
             self.empty_page.set_child(None::<&gtk::Box>);
             self.empty_page
                 .set_icon_name(Some("object-select-symbolic"));
             if mode_similar {
-                self.empty_page
-                    .set_title("No visually similar images found");
+                self.empty_page.set_title("No look-alikes");
                 let desc = format!(
-                    "All {candidates} images compared — none are near-identical within the \
-                     similarity threshold. Byte-for-byte duplicates appear under \"Exact\"."
+                    "None of the {} photos look nearly the same as another. Exact copies are \
+                     under Exact copies.",
+                    crate::shell::grouped(candidates as u64)
                 );
                 self.empty_page.set_description(Some(desc.as_str()));
             } else {
-                self.empty_page.set_title("No duplicates found");
-                let desc =
-                    format!("All {candidates} files compared — none are byte-for-byte identical.");
+                self.empty_page.set_title("No extra copies");
+                let desc = format!(
+                    "None of the {} files is an exact copy of another. Try Look-alikes for \
+                     photos that are nearly the same.",
+                    crate::shell::grouped(candidates as u64)
+                );
                 self.empty_page.set_description(Some(desc.as_str()));
             }
         }
@@ -665,11 +674,11 @@ impl Cleanup {
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
             .build();
-        let count_text = format!(
-            "{} {}",
-            group.total_members,
-            if group.is_similar { "images" } else { "copies" }
-        );
+        let count_text = if group.is_similar {
+            format!("Look-alikes · {} photos", group.total_members)
+        } else {
+            format!("Same file · {} copies", group.total_members)
+        };
         let count_badge = gtk::Label::builder()
             .label(count_text.as_str())
             .css_classes(["kind-badge"])
@@ -679,8 +688,11 @@ impl Cleanup {
         if group.is_similar {
             head.append(
                 &gtk::Label::builder()
-                    .label("Visually similar")
+                    .label("perceptual match")
                     .css_classes(["pill"])
+                    .tooltip_text(
+                        "These look nearly the same but are not identical. Check each before removing.",
+                    )
                     .valign(gtk::Align::Center)
                     .build(),
             );
@@ -694,7 +706,7 @@ impl Cleanup {
             );
         }
         let size_text = format!(
-            "{} total · {} if you keep 1",
+            "{} total · {} freed if you keep one",
             file_size_i64(group.total_bytes),
             file_size_i64(group.reclaimable()),
         );
@@ -726,9 +738,10 @@ impl Cleanup {
         // Controls: select menu + per-group delete + skip.
         let member_ids: Rc<Vec<i64>> = Rc::new(group.members.iter().map(|m| m.id).collect());
         let del_btn = gtk::Button::builder()
-            .label("Delete 0 from this group")
+            .label("Move to Trash")
             .css_classes(["destructive-action"])
             .sensitive(false)
+            .tooltip_text("Click the copies you want to remove first")
             .build();
 
         let controls = gtk::Box::builder()
@@ -740,6 +753,7 @@ impl Cleanup {
         let skip_btn = gtk::Button::builder()
             .label("Skip group")
             .css_classes(["pill"])
+            .tooltip_text("Hide this group if these aren't really copies. Nothing is deleted.")
             .build();
         controls.append(&skip_btn);
         card.append(&controls);
@@ -805,7 +819,7 @@ impl Cleanup {
                 .css_classes(["flat"])
                 .build()
         };
-        let b_except = make("All except keeper");
+        let b_except = make("All except KEEP");
         let b_all = make("All");
         let b_none = make("None");
         let b_invert = make("Invert");
@@ -827,7 +841,7 @@ impl Cleanup {
         wire_select(&b_invert, self, &member_ids, &popover, SelectOp::Invert);
 
         let mb = gtk::MenuButton::builder()
-            .label("Select…")
+            .label("Choose…")
             .css_classes(["pill"])
             .build();
         mb.set_popover(Some(&popover));
@@ -865,8 +879,11 @@ impl Cleanup {
         if member.is_keeper {
             overlay.add_overlay(
                 &gtk::Label::builder()
-                    .label("KEEPER")
+                    .label("KEEP")
                     .css_classes(["kind-badge"])
+                    .tooltip_text(
+                        "FileID suggests keeping this copy, usually the largest or sharpest one. The others are copies of it.",
+                    )
                     .halign(gtk::Align::Start)
                     .valign(gtk::Align::Start)
                     .margin_top(6)
@@ -943,7 +960,7 @@ impl Cleanup {
         let toggle = gtk::ToggleButton::builder()
             .active(selected_now)
             .has_frame(false)
-            .tooltip_text(format!("Select {}", member.name))
+            .tooltip_text(format!("Choose {} for Trash", member.name))
             .child(&outer)
             .build();
         let this = self.clone();
@@ -1011,21 +1028,19 @@ impl Cleanup {
 
         let mut subtitle = if mode_similar {
             if n_groups == 0 {
-                "Visually similar images — resizes, re-encodes, crops, and light edits that \
-                 byte-exact matching misses"
-                    .to_string()
+                "Photos that look nearly the same but aren't identical".to_string()
             } else {
                 format!(
-                    "{n_groups} similar group{} · review each before deleting — these are NOT \
-                     byte-identical",
+                    "{n_groups} group{} of look-alikes · check each before removing",
                     plural(n_groups)
                 )
             }
         } else if n_groups == 0 {
-            "No verified duplicate groups".to_string()
+            "No extra copies found".to_string()
         } else {
             format!(
-                "{n_groups} verified duplicate group{} · {} to reclaim",
+                "{} file{} with extra copies · {} can be freed",
+                crate::shell::grouped(n_groups as u64),
                 plural(n_groups),
                 file_size_i64(reclaimable),
             )
@@ -1034,21 +1049,32 @@ impl Cleanup {
             subtitle.push_str(&format!(" · {n_skipped} skipped"));
         }
         if !mode_similar && self.last_warning.borrow().is_some() {
-            subtitle.push_str(" · partial verification");
+            subtitle.push_str(" · more may exist");
         }
         self.subtitle.set_text(&subtitle);
 
         if total_sel == 0 {
-            self.delete_btn.set_label("Delete selected");
+            self.delete_btn.set_label("Move to Trash");
+            self.delete_btn.set_tooltip_text(Some(
+                "Choose the copies to remove first: click their pictures, or use Select all extra copies.",
+            ));
         } else {
             self.delete_btn.set_label(&format!(
-                "Delete {total_sel} selected · {}",
+                "Move {total_sel} to Trash · {}",
                 file_size_i64(total_sel_bytes)
+            ));
+            self.delete_btn.set_tooltip_text(Some(
+                "Move the chosen copies to Trash. You can put them back from Trash.",
             ));
         }
         self.delete_btn
             .set_sensitive(total_sel > 0 && !self.deleting.get() && !self.restoring.get());
         self.clear_btn.set_sensitive(total_sel > 0);
+        self.clear_btn.set_tooltip_text(Some(if total_sel == 0 {
+            "Nothing is chosen"
+        } else {
+            "Unchoose every file"
+        }));
 
         let has_groups = !visible.is_empty();
         self.actions_box.set_visible(has_groups);
@@ -1084,8 +1110,8 @@ impl Cleanup {
         let n = ids.len();
         let heading = format!("Move {n} file{} to Trash?", plural(n));
         let body = format!(
-            "Moves the selected cop{} to Trash. Frees about {}. You can restore them \
-             from Trash if you change your mind.",
+            "Moves the chosen cop{} to Trash. Frees about {}. You can put them back \
+             from Trash.",
             if n == 1 { "y" } else { "ies" },
             file_size_i64(bytes),
         );
@@ -1130,7 +1156,7 @@ impl Cleanup {
         }
 
         self.status_label
-            .set_text("Revalidating exact duplicates before Trash…");
+            .set_text("Checking the copies again before moving them to Trash…");
         let requested: HashSet<i64> = ids.iter().copied().collect();
         let mut represented = HashSet::new();
         let mut checks = Vec::new();
@@ -1241,7 +1267,7 @@ impl Cleanup {
                 this.trash_generation.set(operation.wrapping_add(1));
                 this.deleting.set(false);
                 this.status_label.set_text(&format!(
-                    "No files were trashed; {rejected} selected file{} changed or could not be byte-verified.",
+                    "Nothing was moved to Trash; {rejected} chosen file{} changed since the scan.",
                     plural(rejected)
                 ));
                 this.reveal_status();
@@ -1269,7 +1295,7 @@ impl Cleanup {
             preflight_rejected,
         }));
         self.status_label
-            .set_text("Moving selected files to Trash…");
+            .set_text("Moving the chosen files to Trash…");
         let result = self
             .engine
             .borrow_mut()
@@ -1345,7 +1371,7 @@ impl Cleanup {
         let total_failed = result.failed as usize + pending.preflight_rejected;
         if total_failed == 0 {
             self.status_label.set_text(&format!(
-                "Trashed {} file{} · freed {} · restore from Trash to undo",
+                "Moved {} file{} to Trash · freed {} · restore from Trash to undo",
                 result.succeeded,
                 plural(result.succeeded as usize),
                 file_size_i64(freed),
@@ -1374,14 +1400,14 @@ impl Cleanup {
                 .join(" · ");
             let preflight = if pending.preflight_rejected > 0 {
                 format!(
-                    "{} changed or failed byte verification before Trash. ",
+                    "{} skipped because the file changed since the scan. ",
                     pending.preflight_rejected
                 )
             } else {
                 String::new()
             };
             self.status_label.set_text(&format!(
-                "Trashed {}; {total_failed} were rejected, failed, or need catalog recovery. {preflight}{details}",
+                "Moved {} to Trash; {total_failed} couldn't be moved to Trash. {preflight}{details}",
                 result.succeeded,
             ));
         }
@@ -1582,7 +1608,16 @@ fn update_group_selection_widgets(
     });
     sel_lbl.set_text(&format!("{cnt} selected · {}", file_size_i64(bytes)));
     sel_lbl.set_visible(cnt > 0);
-    del_btn.set_label(&format!("Delete {cnt} from this group"));
+    del_btn.set_label(&if cnt == 0 {
+        "Move to Trash".to_string()
+    } else {
+        format!("Move {cnt} to Trash")
+    });
+    del_btn.set_tooltip_text(Some(if cnt == 0 {
+        "Click the copies you want to remove first"
+    } else {
+        "Move the chosen copies in this group to Trash"
+    }));
     del_btn.set_sensitive(cnt > 0);
 }
 
@@ -1629,18 +1664,17 @@ fn build_banner(mode_similar: bool) -> gtk::Widget {
         (
             "dialog-warning-symbolic",
             "gold-accent",
-            "Visually similar — review before deleting (not identical). These images match by \
-             perceptual hash (resizes, re-encodes, crops, light edits), NOT byte-for-byte. \
-             Nothing is pre-selected: confirm each is a true duplicate, then choose which copies \
-             to Trash.",
+            "Look-alikes are not identical. They may be resized, cropped or edited versions. \
+             Nothing is chosen for you: check each group, then click the copies you want to \
+             remove.",
         )
     } else {
         (
             "dialog-information-symbolic",
             "lavender-accent",
-            "Each group is a set of duplicate copies. The KEEPER (gold badge) is the copy we \
-             recommend you keep — usually the largest / highest quality. Selected copies move to \
-             Trash; you can restore them if you change your mind.",
+            "Each group is the same file saved more than once, checked byte by byte. FileID \
+             marks one copy KEEP; click any other copy to choose it, then press Move to Trash. \
+             You can put files back from Trash.",
         )
     };
     row.append(

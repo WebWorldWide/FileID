@@ -290,9 +290,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         get
         {
             if (!string.IsNullOrEmpty(ViewModel.ErrorMessage)) return ViewModel.ErrorMessage!;
-            if (ViewModel.IsLoading) return "Scanning for duplicates…";
-            if (ViewModel.Groups.Count == 0) return "No duplicates found yet — run a scan first.";
-            return $"{ViewModel.Groups.Count:N0} duplicate group{(ViewModel.Groups.Count == 1 ? "" : "s")}";
+            if (ViewModel.IsLoading) return "Looking for extra copies…";
+            if (ViewModel.Groups.Count == 0) return "No extra copies found. If you haven't scanned a folder yet, scan one first; extra copies of the same file then show up here in groups, and you choose which copy to keep.";
+            return $"{ViewModel.Groups.Count:N0} file{(ViewModel.Groups.Count == 1 ? "" : "s")} with extra copies";
         }
     }
 
@@ -328,9 +328,9 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     internal static string FormatHeadline(int eligibleGroups, long bytes, int skipped)
     {
         var skippedText = skipped > 0 ? $" · {skipped:N0} skipped" : string.Empty;
-        if (eligibleGroups == 0) return "No verified duplicate groups" + skippedText;
-        return $"{eligibleGroups:N0} verified duplicate group{(eligibleGroups == 1 ? "" : "s")} · "
-            + $"{FormatSize(bytes)} to reclaim{skippedText}";
+        if (eligibleGroups == 0) return "No extra copies found" + skippedText;
+        return $"{eligibleGroups:N0} file{(eligibleGroups == 1 ? "" : "s")} with extra copies · "
+            + $"{FormatSize(bytes)} can be freed{skippedText}";
     }
 
     private async void OnRefreshClicked(object sender, RoutedEventArgs e)
@@ -378,16 +378,16 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (ids.Count == 0)
         {
             await ShowAlertAsync(
-                "Nothing to trash",
-                "Every file in the active groups is marked as a keeper (skipped groups are excluded), so there are no non-keepers to move to the Recycle Bin.");
+                "Nothing chosen",
+                "Every copy in the groups shown is marked KEEP, so there is nothing to move to the Recycle Bin. Use Select all extra copies first.");
             return;
         }
         var sizeDisplay = FormatSize(bytes);
         var confirm = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = "Trash duplicates?",
-            Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({sizeDisplay}) will move to the Recycle Bin. They stay recoverable from there.",
+            Title = $"Move {ids.Count:N0} file{(ids.Count == 1 ? "" : "s")} to the Recycle Bin?",
+            Content = $"The extra copies ({sizeDisplay}) go to the Recycle Bin. The copy marked KEEP in each group stays. You can put files back from the Recycle Bin.",
             PrimaryButtonText = "Move to Recycle Bin",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
@@ -407,7 +407,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
         if (proof.Rejections.Count > 0 || proof.Identities.Count != ids.Count)
         {
-            await ShowAlertAsync("Duplicates changed", "One or more selected files no longer match their keeper. Refresh Cleanup and review the groups before trying again.");
+            await ShowAlertAsync("Files changed", "Some of the chosen files changed since the scan and no longer match the copy marked KEEP. Press Check again and look over the groups before trying again.");
             return;
         }
 
@@ -462,6 +462,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             return;
         }
 
+        ShowTrashResult(ids.Count, bytes);
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
@@ -601,8 +602,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         var confirm = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = "Trash this group?",
-            Content = $"{ids.Count} non-keeper file{(ids.Count == 1 ? "" : "s")} ({FormatSize(bytes)}) will move to the Recycle Bin.",
+            Title = $"Move {ids.Count:N0} file{(ids.Count == 1 ? "" : "s")} to the Recycle Bin?",
+            Content = $"The extra copies in this group ({FormatSize(bytes)}) go to the Recycle Bin. The copy marked KEEP stays.",
             PrimaryButtonText = "Move to Recycle Bin",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close,
@@ -620,7 +621,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         }
         if (proof.Rejections.Count > 0 || proof.Identities.Count != ids.Count)
         {
-            await ShowAlertAsync("Duplicates changed", "One or more selected files no longer match their keeper. Refresh Cleanup and review the group before trying again.");
+            await ShowAlertAsync("Files changed", "Some of the chosen files changed since the scan and no longer match the copy marked KEEP. Press Check again and look over the group before trying again.");
             return;
         }
         // Register undo capture with the waiter so its lifetime follows the
@@ -668,6 +669,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             await ShowAlertAsync("Trash failed", $"Couldn't trash the selected files: {ex.Message}");
             return;
         }
+        ShowTrashResult(ids.Count, bytes);
         await ViewModel.RefreshAsync(CancellationToken.None);
     }
 
@@ -706,6 +708,8 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (name == nameof(HeaderStats))
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeleteButtonText)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeleteButtonEnabled)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeleteButtonTip)));
         }
     }
 
@@ -731,5 +735,34 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     }
 
     internal static string FormatDeleteButton(int files, long bytes)
-        => files == 0 ? "Delete selected" : $"Delete {files:N0} selected · {FormatSize(bytes)}";
+        => files == 0 ? "Move to Recycle Bin" : $"Move {files:N0} to Recycle Bin · {FormatSize(bytes)}";
+
+    internal static string FormatTrashResult(int files, long bytes)
+        => $"Moved {files:N0} file{(files == 1 ? "" : "s")} to the Recycle Bin · freed {FormatSize(bytes)}";
+
+    public bool DeleteButtonEnabled => SelectedVictimCount() > 0;
+
+    public string DeleteButtonTip => SelectedVictimCount() > 0
+        ? "Move the chosen copies to the Recycle Bin. You can put them back from the Recycle Bin."
+        : ViewModel.Groups.Count == 0
+            ? "No extra copies to move yet"
+            : "Choose the copies to remove first: pick which copy to keep in each group, or use Select all extra copies.";
+
+    private int SelectedVictimCount()
+    {
+        int files = 0;
+        foreach (var g in ViewModel.Groups)
+        {
+            if (g.IsSkipped) continue;
+            files += CleanupSelectionPolicy.SelectedVictims(g).Length;
+        }
+        return files;
+    }
+
+    private void ShowTrashResult(int files, long bytes)
+    {
+        if (_unloaded) return;
+        TrashResultText.Text = FormatTrashResult(files, bytes);
+        TrashResultText.Visibility = Visibility.Visible;
+    }
 }

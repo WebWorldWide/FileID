@@ -137,7 +137,7 @@ pub fn compute(items: &[MapItem]) -> MapLayout {
     if !tail_dests.is_empty() {
         dests.push(Node {
             id: OTHER_DEST.into(),
-            label: format!("+ {} more", plural(tail_dests.len() as u64, "bucket")),
+            label: format!("+ {} more", plural(tail_dests.len() as u64, "folder")),
             key: OTHER_DEST.into(),
             count: tail_dests.iter().map(|d| d.1).sum(),
             tint: None,

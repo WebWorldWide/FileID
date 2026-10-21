@@ -107,13 +107,13 @@
             <Button Grid.Column="3"
                     x:Name="AnalyzeButton"
                     Click="OnAnalyzeClicked"
-                    ToolTipService.ToolTip="Run Deep Analyze (VLM) on this file"
-                    AutomationProperties.Name="Analyze this file"
-                    AutomationProperties.HelpText="Runs Deep Analyze with the vision-language model on this file"
+                    ToolTipService.ToolTip="Write a description and a suggested name for this file"
+                    AutomationProperties.Name="Describe this file"
+                    AutomationProperties.HelpText="Write a description and a suggested name for this file"
                     Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon Glyph="&#xE945;" FontSize="13" />
-                    <TextBlock Text="Analyze" />
+                    <TextBlock x:Name="AnalyzeButtonText" Text="Describe" />
                 </StackPanel>
             </Button>
 
@@ -317,7 +317,7 @@
                                 Padding="14"
                                 Visibility="Collapsed">
                             <StackPanel Spacing="8">
-                                <TextBlock Text="Proposed rename"
+                                <TextBlock Text="Suggested name"
                                            Style="{StaticResource BodyStrongTextBlockStyle}"
                                            Foreground="{ThemeResource GoldBrush}"
                                            AutomationProperties.HeadingLevel="Level2" />
@@ -327,13 +327,14 @@
                                            FontSize="12" />
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button x:Name="ApplyRenameButton"
-                                            Content="Apply rename"
+                                            Content="Rename"
                                             Click="OnApplyRenameClicked"
-                                            AutomationProperties.HelpText="Renames this file to the proposed name"
+                                            ToolTipService.ToolTip="Renames the file to the suggested name. Undo at the top of Library puts the old name back."
+                                            AutomationProperties.HelpText="Renames the file to the suggested name. Undo at the top of Library puts the old name back."
                                             Style="{StaticResource AccentButtonStyle}" />
                                     <Button Content="Dismiss"
                                             Click="OnDismissRenameClicked"
-                                            AutomationProperties.HelpText="Dismisses the proposed rename without applying it" />
+                                            AutomationProperties.HelpText="Hides the suggested name without renaming the file" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>

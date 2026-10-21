@@ -104,6 +104,11 @@ impl ChatUi {
         self.has_messages.set(!response.messages.is_empty());
         self.empty.set_visible(response.messages.is_empty());
         self.clear.set_sensitive(!response.messages.is_empty());
+        self.clear.set_tooltip_text(Some(if response.messages.is_empty() {
+            "Nothing to clear yet"
+        } else {
+            "Start a new conversation. This one is deleted."
+        }));
         let last_answer = response.messages.iter().rposition(|m| m.role != "user");
         for (index, message) in response.messages.iter().enumerate() {
             self.messages.append(&message_row(message));
@@ -302,14 +307,15 @@ fn send_request(
     status: &gtk::Label,
     request: ChatRequest,
 ) {
-    if let Err(error) = engine
+    if engine
         .borrow_mut()
         .send(CommandPayload::ChatRequest(ChatRequestPayload { request }))
+        .is_err()
     {
         state.borrow_mut().interrupted();
-        status.set_label(&format!(
-            "Chat transport failed: {error}. Saved answers are unconfirmed; they reload when the engine reconnects."
-        ));
+        status.set_label(
+            "FileID is still getting ready. Try again in a moment. Saved answers reload once it is ready.",
+        );
     }
 }
 
@@ -337,11 +343,11 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     looking.append(&v3::section("Looking in"));
     let chips = v3::hbox(6);
     let (names, spoken): (&[&str], &str) = if compact {
-        (&["Names", "Tags", "Captions"], "Looking in names, tags and captions")
+        (&["Names", "Tags", "Descriptions"], "Looking in names, tags and descriptions")
     } else {
         (
-            &["Names", "Tags", "Captions", "Chapters", "Text in files"],
-            "Looking in names, tags, captions, chapters and text in files",
+            &["Names", "Tags", "Descriptions", "Chapters", "Text in files"],
+            "Looking in names, tags, descriptions, chapters and text in files",
         )
     };
     for chip in names {
@@ -351,7 +357,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     looking.append(&chips);
     header.append(&looking);
     let clear = v3::ghost("Clear");
-    clear.set_tooltip_text(Some("Clear conversation"));
+    clear.set_tooltip_text(Some("Nothing to clear yet"));
     clear.set_sensitive(false);
     clear.set_valign(gtk::Align::Center);
     header.append(&clear);
@@ -426,7 +432,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     input_row.append(&composer_frame);
     let send = v3::primary("Send", false);
     send.set_valign(gtk::Align::End);
-    send.set_tooltip_text(Some("Send (Return)"));
+    send.set_tooltip_text(Some("Type a question first"));
     let stop = v3::secondary("Stop", true);
     stop.set_valign(gtk::Align::End);
     stop.set_tooltip_text(Some("Stop (Ctrl+.)"));
@@ -445,11 +451,12 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     ai_row.append(&ai);
     ai_row.append(&v3::label("Summarize with local AI", &["v3-meta"]));
     ai_row.set_tooltip_text(Some(
-        "Needs a local llama.cpp runtime, which Linux packages don't bundle yet. Answers come from your indexed files.",
+        "Needs a local llama.cpp runtime, which Linux packages don't include yet. Answers list matching files only.",
     ));
     options.append(&ai_row);
     let model_chip = v3::accent("Chat model: none", Tone::Ai, false);
     model_chip.set_sensitive(false);
+    model_chip.set_tooltip_text(Some("Turn on Summarize with local AI to choose a model"));
     model_chip.update_property(&[gtk::accessible::Property::Label("Chat model: none")]);
     options.append(&model_chip);
     composer_box.append(&options);
@@ -645,6 +652,15 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Box, inspector: Option<Rc<dyn Fn()>>) {
     ui.composer.buffer().connect_changed(move |buffer| {
         if let Some(ui) = weak.upgrade() {
             ui.placeholder.set_visible(buffer.char_count() == 0);
+            let (start, end) = buffer.bounds();
+            let text = buffer.text(&start, &end, false);
+            ui.send.set_tooltip_text(Some(if text.trim().is_empty() {
+                "Type a question first"
+            } else if text.chars().count() > 2000 {
+                "Shorten the question to 2,000 characters"
+            } else {
+                "Send (Return)"
+            }));
         }
     });
     let keys = gtk::EventControllerKey::new();
@@ -736,7 +752,7 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Box, inspector: Option<Rc<dyn Fn()>>) {
                     ui.state.borrow_mut().interrupted();
                     ui.set_busy(false);
                     ui.status
-                        .set_label("Engine exited; the answer was interrupted.");
+                        .set_label("FileID's background helper stopped, so the answer was interrupted. Try again in a moment.");
                 }
                 _ => {}
             }

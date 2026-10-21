@@ -56,8 +56,8 @@
                     Background="{StaticResource ShellControlFillBrush}"
                     BorderBrush="{ThemeResource ShellControlBorderBrush}"
                     BorderThickness="1"
-                    AutomationProperties.Name="Switch folder"
-                    ToolTipService.ToolTip="Switch folder">
+                    AutomationProperties.Name="Choose a folder"
+                    ToolTipService.ToolTip="Choose, rescan or close the folder FileID is working on">
                 <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
                     <TextBlock Text="FileID"
                                FontFamily="{StaticResource DisplayFontFamily}"
@@ -69,7 +69,7 @@
                             Background="{ThemeResource ControlBorderBrush}"
                             VerticalAlignment="Center" />
                     <TextBlock x:Name="FolderNameText"
-                               Text="No folder"
+                               Text="Choose a folder"
                                MaxWidth="180"
                                FontFamily="{StaticResource BodyFontFamily}"
                                FontSize="13.5"
@@ -106,7 +106,7 @@
                     BorderBrush="{ThemeResource ShellControlBorderBrush}"
                     BorderThickness="1"
                     AutomationProperties.Name="Activity"
-                    ToolTipService.ToolTip="Activity">
+                    ToolTipService.ToolTip="What FileID is working on right now">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <Ellipse x:Name="ActivityDot"
                              Width="6"
@@ -165,7 +165,7 @@
                             </Grid>
 
                             <TextBlock x:Name="ActivityEmpty"
-                                       Text="Scans, captions and face grouping appear here."
+                                       Text="Nothing is running. Scans, descriptions and video analysis show their progress here."
                                        Style="{StaticResource ShellMetaTextStyle}"
                                        TextWrapping="Wrap"
                                        Margin="14" />
@@ -234,7 +234,7 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Deep Analyze"
+                                    <TextBlock Text="Describing files"
                                                FontFamily="{StaticResource BodyFontFamily}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
@@ -269,7 +269,7 @@
                                             MinHeight="24"
                                             Padding="9,0,9,0"
                                             FontSize="12"
-                                            Content="Open Deep Analyze"
+                                            Content="Open Describe Files"
                                             Click="OnOpenDeepAnalyzeClicked" />
                                 </StackPanel>
                             </StackPanel>
@@ -286,13 +286,13 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Face grouping"
+                                    <TextBlock Text="Grouping faces"
                                                FontFamily="{StaticResource BodyFontFamily}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
                                                Foreground="{ThemeResource Text1Brush}" />
                                     <TextBlock Grid.Column="1"
-                                               Text="Comparing faces"
+                                               Text="Finding the same person across photos"
                                                Style="{StaticResource ShellMetaTextStyle}"
                                                VerticalAlignment="Bottom" />
                                     <TextBlock Grid.Column="2"

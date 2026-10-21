@@ -113,9 +113,13 @@ impl Catalog {
     fn refresh(&self) {
         let id = format!("models-{}", glib::monotonic_time());
         *self.request.borrow_mut() = id.clone();
-        if let Err(error) = self.engine.borrow_mut().list_models(&id, Some(self.role())) {
+        if self
+            .engine
+            .borrow_mut()
+            .list_models(&id, Some(self.role()))
+            .is_err() {
             self.status
-                .set_label(&format!("Engine unavailable: {error}"));
+                .set_label("FileID is still getting ready. Try again in a moment.");
         }
     }
 
@@ -169,7 +173,7 @@ impl Catalog {
                 .spacing(8)
                 .build();
             if model.runnable && !model.installed {
-                let install = gtk::Button::with_label("Install");
+                let install = gtk::Button::with_label("Download");
                 let (catalog, id) = (Rc::downgrade(self), model.id.clone());
                 install.connect_clicked(move |_| {
                     if let Some(catalog) = catalog.upgrade() {
@@ -223,7 +227,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             .build(),
     );
     root.append(&gtk::Label::builder()
-        .label("Permissively licensed local models pinned to exact Hugging Face revisions. Candidates have not been measured on this machine yet; Benchmark runs locally rendered probes (colour, counting, text) and records speed, memory and answer accuracy here only. Tuning keeps the fastest llama.cpp settings that give identical answers. Nothing downloads until you press Install.")
+        .label("Permissively licensed local models pinned to exact Hugging Face revisions. Candidates have not been measured on this machine yet; Benchmark runs locally rendered probes (colour, counting, text) and records speed, memory and answer accuracy here only. Tuning keeps the fastest llama.cpp settings that give identical answers. Nothing downloads until you press Download.")
         .xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let controls = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -276,10 +280,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     {
         let catalog = catalog.clone();
         cancel.connect_clicked(move |_| {
-            if let Err(error) = catalog.engine.borrow_mut().cancel_benchmark() {
+            if catalog.engine.borrow_mut().cancel_benchmark().is_err() {
                 catalog
                     .status
-                    .set_label(&format!("Engine unavailable: {error}"));
+                    .set_label("FileID is still getting ready. Try again in a moment.");
             }
         });
     }
