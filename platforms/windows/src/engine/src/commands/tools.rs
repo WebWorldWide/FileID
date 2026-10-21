@@ -104,8 +104,9 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
     }
     let result = tokio::task::spawn_blocking(move || {
         let db = database.context("The catalog database is unavailable")?;
-        let mut conn = db.lock();
-        execute(&mut conn, &request)
+        run_action(&mut Db::Shared(&db), &request, |source, target, published| {
+            crate::util::file_move::move_no_clobber(source, target, published)
+        })
     })
     .await;
     let response = match result {
@@ -186,6 +187,23 @@ fn load(conn: &Connection, id: &str) -> Result<(Plan, Vec<Receipt>, String)> {
     Ok((plan, serde_json::from_str(&inverse)?, state))
 }
 
+/// The catalog writer as the Tools actions see it. `Shared` locks for each
+/// short catalog step only, so hashing, probing, encoding and ffmpeg run with
+/// the writer free for scans and other commands.
+enum Db<'a> {
+    Held(&'a mut Connection),
+    Shared(&'a Arc<Mutex<Connection>>),
+}
+
+impl Db<'_> {
+    fn with<T>(&mut self, work: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        match self {
+            Db::Held(conn) => work(conn),
+            Db::Shared(shared) => work(&mut shared.lock()),
+        }
+    }
+}
+
 pub fn execute(conn: &mut Connection, request: &ToolRequest) -> Result<ToolResponse> {
     execute_with_move(conn, request, |source, target, published| {
         crate::util::file_move::move_no_clobber(source, target, published)
@@ -193,6 +211,33 @@ pub fn execute(conn: &mut Connection, request: &ToolRequest) -> Result<ToolRespo
 }
 fn execute_with_move(
     conn: &mut Connection,
+    request: &ToolRequest,
+    move_file: impl FnMut(&Path, &Path, &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>,
+) -> Result<ToolResponse> {
+    run_action(&mut Db::Held(conn), request, move_file)
+}
+
+/// The export's source still has its catalog row at the previewed path and
+/// the operation is still the one being run; the writer was free while the
+/// output was produced, so a rename, rescan or Undo may have intervened.
+fn require_unchanged(conn: &Connection, id: &str, item: &Item) -> Result<()> {
+    let state: Option<String> = conn
+        .query_row("SELECT state FROM catalog_operations WHERE id=?1", [id], |r| r.get(0))
+        .optional()?;
+    if state.as_deref() != Some("running") {
+        bail!("The export operation changed while it ran; its output was not catalogued")
+    }
+    let path: Option<String> = conn
+        .query_row("SELECT path_text FROM files WHERE id=?1", [item.output.file_id], |r| r.get(0))
+        .optional()?;
+    if path.as_deref() != Some(item.output.source_path.as_str()) {
+        bail!("A source moved in the catalog during export; its output was not catalogued")
+    }
+    Ok(())
+}
+
+fn run_action(
+    db: &mut Db,
     request: &ToolRequest,
     mut move_file: impl FnMut(&Path, &Path, &mut dyn FnMut() -> std::io::Result<()>) -> std::io::Result<()>,
 ) -> Result<ToolResponse> {
@@ -203,9 +248,11 @@ fn execute_with_move(
     match request.action.as_str() {
         "capabilities" => result.capabilities = capabilities(),
         "history" => {
-            let id:Option<String>=conn.query_row("SELECT id FROM catalog_operations WHERE json_extract(plan_json,'$.type')='export' AND state IN ('completed','failed','undone') ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).optional()?;
-            if let Some(id) = id {
-                let (_, receipts, _) = load(conn, &id)?;
+            let latest = db.with(|conn| {
+                let id: Option<String> = conn.query_row("SELECT id FROM catalog_operations WHERE json_extract(plan_json,'$.type')='export' AND state IN ('completed','failed','undone') ORDER BY rowid DESC LIMIT 1",[],|r|r.get(0)).optional()?;
+                id.map(|id| load(conn, &id).map(|loaded| (id, loaded))).transpose()
+            })?;
+            if let Some((id, (_, receipts, _))) = latest {
                 result.operation_id = Some(id);
                 result.outputs = receipts.into_iter().map(|r| r.output).collect();
                 result.message = "Last export operation.".into();
@@ -231,13 +278,16 @@ fn execute_with_move(
             let mut items = vec![];
             let mut reserved = HashSet::new();
             for &file_id in ids {
-                let source: String =
-                    conn.query_row("SELECT path_text FROM files WHERE id=?1", [file_id], |r| r.get(0))?;
+                let (source, chapters) = db.with(|conn| {
+                    let source: String =
+                        conn.query_row("SELECT path_text FROM files WHERE id=?1", [file_id], |r| r.get(0))?;
+                    let chapters = super::catalog::chapters(conn, file_id)?
+                        .into_iter()
+                        .filter(|c| !c.stale)
+                        .collect::<Vec<_>>();
+                    Ok((source, chapters))
+                })?;
                 let source_path = Path::new(&source);
-                let chapters = super::catalog::chapters(conn, file_id)?
-                    .into_iter()
-                    .filter(|c| !c.stale)
-                    .collect::<Vec<_>>();
                 if recipe.kind == "chapters" && chapters.is_empty() {
                     bail!("A selected file has no current chapter markers")
                 }
@@ -310,14 +360,15 @@ fn execute_with_move(
                 stage_paths: None,
             };
             let id = uuid::Uuid::new_v4().to_string();
-            conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,serde_json::to_string(&plan)?,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?;
+            let plan_json = serde_json::to_string(&plan)?;
+            db.with(|conn| Ok(conn.execute("INSERT INTO catalog_operations(id,plan_json,inverse_json,state,created_at) VALUES(?1,?2,'[]','preview',?3)",params![id,plan_json,chrono::Utc::now().timestamp_millis() as f64 / 1000.0])?))?;
             result.outputs = plan.items.into_iter().map(|i| i.output).collect();
             result.operation_id = Some(id);
             result.message="Creates new files. Originals are preserved; photo and video exports are 8-bit SDR and strip container metadata.".into();
         }
         "execute" => {
             let id = request.operation_id.as_deref().context("Preview an export first")?;
-            let (mut plan, previous, state) = load(conn, id)?;
+            let (mut plan, previous, state) = db.with(|conn| load(conn, id))?;
             if !supports(&plan.recipe) {
                 bail!("This export recipe is unavailable on this platform")
             }
@@ -334,7 +385,8 @@ fn execute_with_move(
                     bail!("Export cancelled before publication")
                 }
                 if plan.recipe.kind == "chapters" {
-                    let current = super::catalog::chapters(conn, item.output.file_id)?
+                    let current = db
+                        .with(|conn| super::catalog::chapters(conn, item.output.file_id))?
                         .into_iter()
                         .filter(|c| !c.stale)
                         .collect::<Vec<_>>();
@@ -357,7 +409,17 @@ fn execute_with_move(
             if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
                 bail!("Export cancelled before publication")
             }
-            conn.execute("UPDATE catalog_operations SET state='running' WHERE id=?1", [id])?;
+            // Atomic claim: the plan was validated with the writer free, so a
+            // second execute of the same plan may have got here first.
+            let claimed = db.with(|conn| {
+                Ok(conn.execute(
+                    "UPDATE catalog_operations SET state='running' WHERE id=?1 AND state='preview' AND inverse_json='[]'",
+                    [id],
+                )?)
+            })?;
+            if claimed != 1 {
+                bail!("This plan was already executed. Preview a fresh plan")
+            }
             let mut receipts = vec![];
             let run = (|| -> Result<()> {
                 for item in plan.items.clone() {
@@ -374,10 +436,10 @@ fn execute_with_move(
                     plan.stage_paths
                         .get_or_insert_with(Vec::new)
                         .push(stage.to_string_lossy().into_owned());
-                    conn.execute(
-                        "UPDATE catalog_operations SET plan_json=?1 WHERE id=?2",
-                        params![serde_json::to_string(&plan)?, id],
-                    )?;
+                    let plan_json = serde_json::to_string(&plan)?;
+                    db.with(|conn| {
+                        Ok(conn.execute("UPDATE catalog_operations SET plan_json=?1 WHERE id=?2", params![plan_json, id])?)
+                    })?;
                     let mut file = OpenOptions::new().write(true).create_new(true).open(&stage)?;
                     let prepared = (|| -> Result<()> {
                         if plan.recipe.kind == "photo" {
@@ -428,11 +490,12 @@ fn execute_with_move(
                         receipt.output.message =
                             "Prepared output; review this path after interrupted publication.".into();
                         receipts.push(receipt);
-                        persist(conn, id, &receipts, "running")?;
+                        db.with(|conn| persist(conn, id, &receipts, "running"))?;
                         read_only::require_writable(output)?;
                         if cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
                             bail!("Export cancelled before publication")
                         }
+                        db.with(|conn| require_unchanged(conn, id, &item))?;
                         fs::hard_link(&stage, output)?;
                         let last = receipts.last_mut().context("Missing export receipt")?;
                         last.output.state = "completed".into();
@@ -447,14 +510,20 @@ fn execute_with_move(
                             "video" => "video",
                             _ => "doc",
                         };
-                        let tx = conn.transaction()?;
-                        tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
-                        let derived = tx.last_insert_rowid();
-                        tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,'export',?3)",params![item.output.file_id,derived,serde_json::to_string(&plan.recipe)?])?;
-                        last.derived_id = Some(derived);
-                        persist(&tx, id, &receipts, "running")?;
-                        tx.commit()?;
-                        Ok(())
+                        let recipe_json = serde_json::to_string(&plan.recipe)?;
+                        db.with(|conn| {
+                            let tx = conn.transaction()?;
+                            require_unchanged(&tx, id, &item)?;
+                            tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
+                            let derived = tx.last_insert_rowid();
+                            tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,'export',?3)",params![item.output.file_id,derived,recipe_json])?;
+                            if let Some(last) = receipts.last_mut() {
+                                last.derived_id = Some(derived);
+                            }
+                            persist(&tx, id, &receipts, "running")?;
+                            tx.commit()?;
+                            Ok(())
+                        })
                     })();
                     let _ = fs::remove_file(&stage);
                     prepared?;
@@ -463,12 +532,12 @@ fn execute_with_move(
             })();
             match run {
                 Ok(()) => {
-                    persist(conn, id, &receipts, "completed")?;
+                    db.with(|conn| persist(conn, id, &receipts, "completed"))?;
                     result.message =
                         "Export complete. Undo moves unchanged exports into internal recovery storage.".into();
                 }
                 Err(error) => {
-                    persist(conn, id, &receipts, "failed")?;
+                    db.with(|conn| persist(conn, id, &receipts, "failed"))?;
                     result.status = "error".into();
                     result.message = error.to_string();
                 }
@@ -479,7 +548,7 @@ fn execute_with_move(
         "cancel" => return cancel_active(request),
         "undo" => {
             let id = request.operation_id.as_deref().context("Choose an export operation")?;
-            let (_, mut receipts, state) = load(conn, id)?;
+            let (_, mut receipts, state) = db.with(|conn| load(conn, id))?;
             for receipt in &receipts {
                 if receipt.output.state != "completed" {
                     continue;
@@ -507,10 +576,9 @@ fn execute_with_move(
             if !["completed", "failed"].contains(&state.as_str()) {
                 bail!("This operation cannot be undone")
             }
-            let db_path: String =
-                conn.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| {
-                    r.get(0)
-                })?;
+            let db_path: String = db.with(|conn| {
+                Ok(conn.query_row("SELECT file FROM pragma_database_list WHERE name='main'", [], |r| r.get(0))?)
+            })?;
             let directory = Path::new(&db_path)
                 .parent()
                 .context("Catalog has no recovery folder")?
@@ -538,11 +606,11 @@ fn execute_with_move(
                             fs::remove_file(&source)?;
                         }
                         if let Some(derived) = receipts[index].derived_id {
-                            conn.execute("DELETE FROM files WHERE id=?1", [derived])?;
+                            db.with(|conn| Ok(conn.execute("DELETE FROM files WHERE id=?1", [derived])?))?;
                         }
                         receipts[index].output.state = "undone".into();
                         receipts[index].output.message = format!("Recoverable at {path}");
-                        persist(conn, id, &receipts, &state)?;
+                        db.with(|conn| persist(conn, id, &receipts, &state))?;
                         continue;
                     }
                 }
@@ -556,12 +624,12 @@ fn execute_with_move(
                 read_only::require_writable(&target)?;
                 receipts[index].recovery_path = Some(target.to_string_lossy().into_owned());
                 receipts[index].recovery_published = Some(false);
-                persist(conn, id, &receipts, &state)?;
+                db.with(|conn| persist(conn, id, &receipts, &state))?;
                 let expected = receipts[index].hash.clone();
                 let mut published = || -> std::io::Result<()> {
                     receipts[index].recovery_published = Some(true);
                     receipts[index].output.message = "Undo recovery published; export removal is pending.".into();
-                    persist(conn, id, &receipts, &state).map_err(std::io::Error::other)?;
+                    db.with(|conn| persist(conn, id, &receipts, &state)).map_err(std::io::Error::other)?;
                     if hash(&source).map_err(std::io::Error::other)? != expected
                         || hash(&target).map_err(std::io::Error::other)? != expected
                     {
@@ -573,13 +641,13 @@ fn execute_with_move(
                 };
                 move_file(&source, &target, &mut published)?;
                 if let Some(derived) = receipts[index].derived_id {
-                    conn.execute("DELETE FROM files WHERE id=?1", [derived])?;
+                    db.with(|conn| Ok(conn.execute("DELETE FROM files WHERE id=?1", [derived])?))?;
                 }
                 receipts[index].output.state = "undone".into();
                 receipts[index].output.message = format!("Recoverable at {}", target.display());
-                persist(conn, id, &receipts, &state)?;
+                db.with(|conn| persist(conn, id, &receipts, &state))?;
             }
-            persist(conn, id, &receipts, "undone")?;
+            db.with(|conn| persist(conn, id, &receipts, "undone"))?;
             result.operation_id = Some(id.into());
             result.outputs = receipts.into_iter().map(|r| r.output).collect();
             result.message = "Exports moved to internal recovery storage. Originals are unchanged.".into();
@@ -784,6 +852,52 @@ mod tests {
         drop(active);
         assert!(cancel_active(&action(Some(id), "cancel")).is_err());
     }
+    #[test]
+    fn exports_and_undo_leave_the_writer_free_while_they_work() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        let conn = std::mem::replace(&mut fixture.conn, Connection::open_in_memory().unwrap());
+        let shared = Arc::new(Mutex::new(conn));
+        let move_file = |source: &Path, target: &Path, published: &mut dyn FnMut() -> std::io::Result<()>| {
+            crate::util::file_move::move_no_clobber(source, target, published)
+        };
+        let preview = run_action(&mut Db::Shared(&shared), &request, move_file).unwrap();
+        let id = preview.operation_id.clone();
+        let exported = run_action(&mut Db::Shared(&shared), &action(id.clone(), "execute"), move_file).unwrap();
+        assert_eq!(exported.status, "ok", "{}", exported.message);
+        let probe = shared.clone();
+        let undone = run_action(&mut Db::Shared(&shared), &action(id, "undo"), |source, target, published| {
+            assert!(probe.try_lock().is_some(), "the writer must be free during file work");
+            crate::util::file_move::move_no_clobber(source, target, published)
+        })
+        .unwrap();
+        assert_eq!(undone.outputs[0].state, "undone");
+    }
+
+    #[test]
+    fn a_plan_runs_once_and_never_publishes_for_a_moved_source() {
+        let mut fixture = Fixture::new();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let output = std::path::PathBuf::from(&preview.outputs[0].output_path);
+        fixture
+            .conn
+            .execute("UPDATE files SET path_text='/elsewhere/Portrait.png' WHERE id=1", [])
+            .unwrap();
+        let moved = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(moved.status, "error");
+        assert!(moved.message.contains("moved in the catalog"), "{}", moved.message);
+        assert!(!output.exists(), "nothing is published for a source that moved");
+
+        let source = fixture.source.to_str().unwrap().to_owned();
+        fixture.conn.execute("UPDATE files SET path_text=?1 WHERE id=1", [source]).unwrap();
+        let request = fixture.request("jpeg");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let first = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(first.status, "ok", "{}", first.message);
+        assert!(execute(&mut fixture.conn, &action(preview.operation_id, "execute")).is_err(), "a plan can't be executed twice");
+    }
+
     #[test]
     fn enlargement_is_opt_in_preserves_sources_and_undo() {
         let mut fixture = Fixture::new();
