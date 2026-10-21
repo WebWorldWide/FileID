@@ -19,12 +19,31 @@ enum NearDuplicateGrouping {
         let members: [Int64]
     }
 
-    static let maxGapSeconds = 2.0
-    static let maxSpanSeconds = 12.0
-    static let minCosine: Float = 0.97
-    static let minSeedCosine: Float = 0.955
-    static let maxHamming = 8
-    static let maxGroupSize = 24
+    /// How close two frames must be to join one group. `nearDuplicate` is
+    /// "the same picture" (Deep Analyze describes it once); `takes` is "another
+    /// try of the same shot" (Best Takes compares them).
+    struct Thresholds: Sendable, Equatable {
+        let maxGapSeconds: Double
+        let maxSpanSeconds: Double
+        let minCosine: Float
+        let minSeedCosine: Float
+        let maxHamming: Int
+        let maxGroupSize: Int
+
+        static let nearDuplicate = Thresholds(maxGapSeconds: 2, maxSpanSeconds: 12, minCosine: 0.97,
+                                              minSeedCosine: 0.955, maxHamming: 8, maxGroupSize: 24)
+        static let takes = Thresholds(maxGapSeconds: 4, maxSpanSeconds: 30, minCosine: 0.93,
+                                      minSeedCosine: 0.90, maxHamming: 12, maxGroupSize: 60)
+        static let clips = Thresholds(maxGapSeconds: 900, maxSpanSeconds: 3_600, minCosine: 0.90,
+                                      minSeedCosine: 0.86, maxHamming: 0, maxGroupSize: 24)
+    }
+
+    static let maxGapSeconds = Thresholds.nearDuplicate.maxGapSeconds
+    static let maxSpanSeconds = Thresholds.nearDuplicate.maxSpanSeconds
+    static let minCosine = Thresholds.nearDuplicate.minCosine
+    static let minSeedCosine = Thresholds.nearDuplicate.minSeedCosine
+    static let maxHamming = Thresholds.nearDuplicate.maxHamming
+    static let maxGroupSize = Thresholds.nearDuplicate.maxGroupSize
     /// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this similar
     /// counts as the same shot even when its file dates differ.
     static let sidecarCosine: Float = 0.90
@@ -73,7 +92,7 @@ enum NearDuplicateGrouping {
         return result
     }
 
-    static func groups(_ items: [Item]) -> [Group] {
+    static func groups(_ items: [Item], thresholds: Thresholds = .nearDuplicate) -> [Group] {
         let ordered = alignSidecarTimes(items).sorted { lhs, rhs in
             switch (lhs.time, rhs.time) {
             case let (l?, r?) where l != r: return l < r
@@ -89,7 +108,7 @@ enum NearDuplicateGrouping {
         var result: [Group] = []
         var current: [Item] = []
         for item in ordered {
-            if let last = current.last, joins(item, current: current, last: last) {
+            if let last = current.last, joins(item, current: current, last: last, thresholds) {
                 current.append(item)
             } else {
                 if !current.isEmpty { result.append(group(current)) }
@@ -100,19 +119,19 @@ enum NearDuplicateGrouping {
         return result
     }
 
-    private static func joins(_ item: Item, current: [Item], last: Item) -> Bool {
-        guard current.count < maxGroupSize,
+    private static func joins(_ item: Item, current: [Item], last: Item, _ limits: Thresholds) -> Bool {
+        guard current.count < limits.maxGroupSize,
               let time = item.time, let lastTime = last.time, let firstTime = current[0].time,
-              time - lastTime <= maxGapSeconds, time - firstTime <= maxSpanSeconds else { return false }
+              time - lastTime <= limits.maxGapSeconds, time - firstTime <= limits.maxSpanSeconds else { return false }
         let itemStem = stem(item.path)
         if current.contains(where: { stem($0.path) == itemStem && $0.path != item.path }) { return true }
         guard let embedding = item.embedding, let lastEmbedding = last.embedding,
               let seedEmbedding = current[0].embedding else { return false }
         let toLast = cosine(embedding, lastEmbedding)
-        guard cosine(embedding, seedEmbedding) >= minSeedCosine else { return false }
-        if toLast >= minCosine { return true }
-        if let p = item.phash, let q = last.phash, p != 0, q != 0, hamming(p, q) <= maxHamming {
-            return toLast >= minSeedCosine
+        guard cosine(embedding, seedEmbedding) >= limits.minSeedCosine else { return false }
+        if toLast >= limits.minCosine { return true }
+        if let p = item.phash, let q = last.phash, p != 0, q != 0, hamming(p, q) <= limits.maxHamming {
+            return toLast >= limits.minSeedCosine
         }
         return false
     }
