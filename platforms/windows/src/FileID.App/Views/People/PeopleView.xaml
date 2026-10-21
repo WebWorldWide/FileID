@@ -27,7 +27,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock Text="Faces clustered into named cards. Drag to merge."
+                <TextBlock Text="Faces grouped by person. Click a card to type a name; drag one card onto another to combine them."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
@@ -43,9 +43,9 @@
             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                 <Button x:Name="SelectButton"
                         Click="OnToggleSelectMode"
-                        ToolTipService.ToolTip="Multi-select clusters for bulk merge / mark-as-unknown."
+                        ToolTipService.ToolTip="Choose several cards, then combine them or hide them"
                         AutomationProperties.Name="Select"
-                        AutomationProperties.HelpText="Multi-select clusters for bulk merge or mark-as-unknown.">
+                        AutomationProperties.HelpText="Choose several cards, then combine them or hide them">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <FontIcon FontSize="13" Glyph="&#xE762;" />
                         <TextBlock x:Name="SelectButtonText" Text="Select" />
@@ -53,9 +53,9 @@
                 </Button>
                 <Button x:Name="SuggestedMergesButton"
                         Click="OnSuggestedMergesClicked"
-                        ToolTipService.ToolTip="Find pairs of clusters that might be the same person."
+                        ToolTipService.ToolTip="Find pairs of cards that might be the same person"
                         AutomationProperties.Name="Suggested merges"
-                        AutomationProperties.HelpText="Find pairs of clusters that might be the same person.">
+                        AutomationProperties.HelpText="Find pairs of cards that might be the same person">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <!-- sparkle glyph mirrors macOS sparkles SF Symbol;
                              previously a link icon (E8B6) which read as "merge",
@@ -66,12 +66,12 @@
                 </Button>
                 <Button x:Name="RefreshButton"
                         Click="OnRefreshClicked"
-                        ToolTipService.ToolTip="Re-cluster faces using current ArcFace embeddings."
+                        ToolTipService.ToolTip="Sort the faces into people again. Names you typed are kept."
                         AutomationProperties.Name="Re-cluster"
-                        AutomationProperties.HelpText="Re-cluster faces using current ArcFace embeddings.">
+                        AutomationProperties.HelpText="Sort the faces into people again. Names you typed are kept.">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                         <FontIcon FontSize="13" Glyph="&#xE72C;" />
-                        <TextBlock Text="Re-cluster" />
+                        <TextBlock Text="Group faces again" />
                     </StackPanel>
                 </Button>
             </StackPanel>
@@ -102,18 +102,18 @@
                     x:Name="BulkMergeButton"
                     Margin="0,0,8,0"
                     Click="OnBulkMergeClicked"
-                    ToolTipService.ToolTip="Merge every selected cluster into the first selected one."
+                    ToolTipService.ToolTip="Combine two or more cards that show the same person"
                     AutomationProperties.Name="Merge selected clusters into one">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="13" Glyph="&#xE8B6;" />
-                    <TextBlock Text="Merge into one" />
+                    <TextBlock Text="Combine into one" />
                 </StackPanel>
             </Button>
             <Button Grid.Column="2"
                     x:Name="BulkUnknownButton"
                     Margin="0,0,8,0"
                     Click="OnBulkMarkUnknownClicked"
-                    ToolTipService.ToolTip="Mark every selected cluster as Unknown (clears name + flags is_unknown)."
+                    ToolTipService.ToolTip="Hide people you don't need to name, like strangers in a crowd. Their photos stay in the library."
                     AutomationProperties.Name="Mark selected clusters as unknown">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon FontSize="13" Glyph="&#xE894;" />
@@ -122,7 +122,7 @@
             </Button>
             <Button Grid.Column="3"
                     Click="OnToggleSelectMode"
-                    ToolTipService.ToolTip="Exit select mode."
+                    ToolTipService.ToolTip="Stop choosing cards"
                     AutomationProperties.Name="Exit select mode">
                 <TextBlock Text="Done" />
             </Button>
@@ -150,7 +150,7 @@
                               Padding="12"
                               Tag="{x:Bind ClusterId}"
                               AutomationProperties.Name="{x:Bind Caption}"
-                              AutomationProperties.HelpText="Double-tap to edit name and faces; drag onto another person to merge."
+                              AutomationProperties.HelpText="Double-click to type a name or fix faces; drag onto another card to combine them."
                               CanDrag="True"
                               AllowDrop="True"
                               DragStarting="OnClusterDragStarting"
@@ -161,14 +161,14 @@
                               DoubleTapped="OnClusterDoubleTapped">
                             <Grid.ContextFlyout>
                                 <MenuFlyout>
-                                    <MenuFlyoutItem Text="Edit name + faces"
+                                    <MenuFlyoutItem Text="Name or fix faces"
                                                     Click="OnContextOpenDetails"
                                                     Tag="{x:Bind ClusterId}">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE70F;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Find merge candidates"
+                                    <MenuFlyoutItem Text="Find the same person"
                                                     Click="OnContextSuggestedMerges">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE945;" />
@@ -218,7 +218,7 @@
                                       IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
                                       Tag="select-cb"
                                       AutomationProperties.Name="{x:Bind Caption}"
-                                      AutomationProperties.HelpText="Select this cluster for a bulk merge or mark-as-unknown." />
+                                      AutomationProperties.HelpText="Choose this card to combine or hide it" />
                         </Grid>
                     </DataTemplate>
                 </ItemsRepeater.ItemTemplate>
@@ -254,16 +254,17 @@
                                VerticalAlignment="Center"
                                TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
-                               Text="Names set — keep going. Generate captions and smart filenames using the people you've named." />
+                               Text="Names saved. Next, FileID can describe your files using these names." />
                     <Button Grid.Column="2"
                             x:Name="ContinueToDeepAnalyzeButton"
                             Click="OnContinueToDeepAnalyzeClicked"
                             Style="{StaticResource AccentButtonStyle}"
                             VerticalAlignment="Center"
-                            AutomationProperties.Name="Continue to Deep Analyze"
-                            AutomationProperties.HelpText="Run Deep Analyze using the names you've set.">
+                            ToolTipService.ToolTip="Start writing a description and a suggested name for every file. Progress shows on the Describe Files page."
+                            AutomationProperties.Name="Describe files"
+                            AutomationProperties.HelpText="Start writing a description and a suggested name for every file. Progress shows on the Describe Files page.">
                         <StackPanel Orientation="Horizontal" Spacing="6">
-                            <TextBlock Text="Continue to Deep Analyze" />
+                            <TextBlock Text="Describe files" />
                             <FontIcon FontSize="12" Glyph="&#xE72A;" />
                         </StackPanel>
                     </Button>
@@ -292,9 +293,9 @@
                 <Button Grid.Column="1"
                         x:Name="HiddenUnknownsToggleButton"
                         Click="OnToggleHiddenUnknowns"
-                        ToolTipService.ToolTip="Show or hide clusters you've marked as unknown."
+                        ToolTipService.ToolTip="People you marked as unknown are hidden here. Show them to change your mind."
                         AutomationProperties.Name="Show hidden unknown people"
-                        AutomationProperties.HelpText="Reveal clusters you've marked as unknown.">
+                        AutomationProperties.HelpText="People you marked as unknown are hidden here. Show them to change your mind.">
                     <TextBlock x:Name="HiddenUnknownsButtonText" Text="Show" />
                 </Button>
             </Grid>

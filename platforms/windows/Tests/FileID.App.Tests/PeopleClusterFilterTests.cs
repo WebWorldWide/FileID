@@ -172,8 +172,8 @@ public class PeopleClusterFilterTests
     {
         Assert.Equal(string.Empty, PeopleViewModel.DeferredFaceStatus(null));
         Assert.Equal(string.Empty, PeopleViewModel.DeferredFaceStatus(0));
-        Assert.Equal("1 face awaits analysis; existing assignments were kept.", PeopleViewModel.DeferredFaceStatus(1));
-        Assert.Equal("3 faces await analysis; existing assignments were kept.", PeopleViewModel.DeferredFaceStatus(3));
+        Assert.Equal("1 more face is waiting to be grouped; existing groups were kept.", PeopleViewModel.DeferredFaceStatus(1));
+        Assert.Equal("3 more faces are waiting to be grouped; existing groups were kept.", PeopleViewModel.DeferredFaceStatus(3));
     }
 
     [Fact]
