@@ -83,6 +83,14 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [x] Restructure (shared Rust engine): `pipeline/restructure_respect.rs` ports the same rules and Keep accounting for Windows, Linux, CLI and TUI; 6 Rust tests mirror the Swift ones; strict Clippy clean.
 - [x] Restructure on a messy folder (42 Adlon photos from three events copied into one flat Downloads folder, CLIP present): before, 18 moves into date folders and tag-named groups ("Baseball_hat Hat") with 24 files left behind; now all 42 go to `Photos/2026/2026-09-19`, `…/2026-09-26`, `…/2026-10-04` — exactly the three source events. Loose photos are split into events by capture-time gaps (8 h, ≥5 files; smaller groups → `Photos/<year>/<Month>`), on macOS and in the shared Rust engine.
 
+## Best Takes follow-ups (from agent/best-takes, 2026-10-21)
+
+- [ ] WinUI and GTK Best Takes pages per the port spec in `DESIGN_V3_PORT.md` (engine side is done in the shared Rust engine).
+- [ ] On-screen check of the macOS page: keyboard (← → Space Z Return), VoiceOver labels, Undo after Trash, a populated video group.
+- [ ] Eye openness in the shared engine once the face-quality gate from the accuracy work lands (`TakeFaceAnalyzer`); swap the macOS Vision judgement for the same gate.
+- [ ] Capture time with sub-seconds (EXIF SubSecTimeOriginal) at scan time would let bursts split at the real 0.1 s gaps instead of 2 s file times.
+- [ ] Goal ranking on the shared engine (llama.cpp VLM, one contact-sheet pass).
+
 ## Owner focus (2026-10-20 evening): usable by anyone, 50–200× faster AI, hardened core
 
 - [x] Usability (macOS): first-time-user pass on every page. Pages renamed by what they do (Describe Files, Duplicates, Organize Folders); choosing a folder starts the scan; the scan card says what to do next ("Next: describe files →") instead of "Step 4 of 5 · captions not started"; Describe Files no longer locks its main button behind naming people; one primary action per page; every disabled control says why; jargon (CLIP, RAM++, SHA-256, perceptual hash, catalog, engine) moved to tooltips or Settings; two pixel fixes (sidebar card width, 20 → 26 pt page inset). Swift suite 607 tests pass. Welcome sheet changes checked in code only.
