@@ -54,14 +54,23 @@ pub(crate) fn is_safe_filename(name: &str) -> bool {
     // cryptic errors and on some shells "rename to NUL" silently
     // discards the file. COM0 + LPT0 are reserved per Microsoft Naming
     // Files docs even though the original COM/LPT numbering started at 1.
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    // Win32 also ignores spaces before the extension ("NUL .txt" is NUL), and
+    // reserves CONIN$/CONOUT$ and COM/LPT with superscript 1-3.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end_matches(' ')
+        .to_uppercase();
     !matches!(
         stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
             | "COM0" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
             | "COM6" | "COM7" | "COM8" | "COM9"
+            | "COM\u{b9}" | "COM\u{b2}" | "COM\u{b3}"
             | "LPT0" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
             | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+            | "LPT\u{b9}" | "LPT\u{b2}" | "LPT\u{b3}"
     )
 }
 
@@ -717,6 +726,12 @@ mod tests {
         assert!(!is_safe_filename("a?b"));
         assert!(!is_safe_filename("a*b"));
         assert!(!is_safe_filename("a\"b"));
+        // Device names Win32 resolves despite padding or superscripts.
+        for device in ["NUL .txt", "con  .jpg", "CONIN$", "conout$.log", "COM\u{b9}", "lpt\u{b3}.txt"] {
+            assert!(!is_safe_filename(device), "{device}");
+        }
+        assert!(is_safe_filename("console.txt"));
+        assert!(is_safe_filename("COM10.txt"));
     }
 
     // Property-based tests proving is_safe_filename and
@@ -901,6 +916,78 @@ mod tests {
         assert_eq!(to_extended_length(rel), rel.to_path_buf());
         let plain = Path::new(r"C:\a\b");
         assert_eq!(strip_extended_length(plain), plain.to_path_buf());
+    }
+
+    /// Deeper than MAX_PATH: the engine has no long-path manifest, so every
+    /// raw Win32 call must go through the verbatim form.
+    #[test]
+    #[cfg(windows)]
+    fn long_paths_rename_move_and_identify() {
+        let root = temp_root("long-path");
+        let mut deep = root.clone();
+        while deep.as_os_str().len() < 300 {
+            deep.push("a-directory-name-that-is-long");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let source = deep.join("source.jpg");
+        let renamed = deep.join("renamed.jpg");
+        std::fs::write(&source, b"pixels").unwrap();
+        assert!(source.as_os_str().len() > 260);
+        let identity = crate::platform::file_identity(&source).expect("long-path identity");
+        rename_no_replace(&source, &renamed).unwrap();
+        assert_eq!(crate::platform::file_identity(&renamed), Some(identity));
+        std::fs::write(&source, b"occupant").unwrap();
+        assert_eq!(
+            rename_no_replace(&renamed, &source).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        let moved = deep.join("moved.jpg");
+        crate::util::file_move::move_no_clobber(&renamed, &moved, || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&moved).unwrap(), b"pixels");
+        let _ = std::fs::remove_dir_all(to_extended_length(&root));
+    }
+
+    /// Case-insensitive collision, a read-only source and a file another
+    /// process holds open without sharing.
+    #[test]
+    #[cfg(windows)]
+    fn windows_collisions_attributes_and_locks() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = temp_root("win-attrs");
+        let source = root.join("a.txt");
+        let occupant = root.join("b.txt");
+        std::fs::write(&source, b"a").unwrap();
+        std::fs::write(&occupant, b"b").unwrap();
+        let error = rename_no_replace(&source, &root.join("B.TXT")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error:?}");
+        assert_eq!(std::fs::read(&occupant).unwrap(), b"b");
+
+        let mut permissions = std::fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&source, permissions).unwrap();
+        let read_only = root.join("read-only.txt");
+        rename_no_replace(&source, &read_only).unwrap();
+        assert!(std::fs::metadata(&read_only).unwrap().permissions().readonly());
+
+        let locked = root.join("locked.txt");
+        std::fs::write(&locked, b"locked").unwrap();
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+        let error = rename_no_replace(&locked, &root.join("unlocked.txt")).unwrap_err();
+        // ERROR_SHARING_VIOLATION: tagging treats 32/33 as transient.
+        assert_eq!(error.raw_os_error(), Some(32), "{error:?}");
+        drop(holder);
+        assert_eq!(std::fs::read(&locked).unwrap(), b"locked");
+
+        let mut permissions = std::fs::metadata(&read_only).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&read_only, permissions).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// IPC callers may hand us forward slashes; the verbatim form must use

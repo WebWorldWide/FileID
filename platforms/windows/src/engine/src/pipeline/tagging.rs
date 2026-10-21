@@ -1705,11 +1705,11 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
             }
         }
     }
-    // Linux: best-effort HEIC/HEIF via the libheif CLI tools (see
+    // Linux (libheif CLI tools) and macOS (sips): best-effort HEIC/HEIF (see
     // shell::heic::decode). On success use it; if the tools are absent or fail,
     // fall through to the original image-rs error so the file is just skipped —
     // no hard error and no install nag for this optional path.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     {
         let ext = path
             .extension()
