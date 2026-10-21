@@ -272,6 +272,9 @@ jobs:
       - name: Clippy (-D warnings)
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Test
+        run: cargo test --locked
+
       - name: Verify binary exists
         run: |
           set -euo pipefail

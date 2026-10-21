@@ -455,11 +455,34 @@ impl Discovery {
                 }
                 let entry = match entry {
                     Ok(e) => e,
-                    Err(_) => {
+                    Err(error) => {
                         error_count_inner.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            path = %error
+                                .path()
+                                .map(crate::platform::redact_path_for_log)
+                                .unwrap_or_default(),
+                            kind = ?error.io_error().map(std::io::Error::kind),
+                            "[DISCOVERY] could not read a directory entry (permission denied, \
+                             removed during the scan, or a stale network handle); skipping it"
+                        );
                         continue;
                     }
                 };
+                // jwalk stores a failed read_dir on the directory's own entry
+                // instead of yielding an Err item. Count it, or a directory that
+                // became unreadable passes as a clean walk and reconciliation
+                // soft-hides every catalogued file under it.
+                if let Some(error) = entry.read_children_error.as_ref() {
+                    error_count_inner.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        path = %crate::platform::redact_path_for_log(entry.path()),
+                        kind = ?error.io_error().map(std::io::Error::kind),
+                        "[DISCOVERY] could not list a directory (permission denied, \
+                         removed during the scan, or a stale network handle); its files \
+                         are left as they were in the catalog"
+                    );
+                }
                 // Payload was computed in parallel inside process_read_dir.
                 // Zero-byte observations use their own bounded path so they never
                 // enter decode/model work and never inflate content-work totals.
@@ -554,7 +577,12 @@ fn classify_entry(
     // own DirEntry::metadata for the non-followed case.
     let metadata = match std::fs::symlink_metadata(entry_path) {
         Ok(m) => m,
-        Err(_) => {
+        Err(error) => {
+            tracing::debug!(
+                path = %crate::platform::redact_path_for_log(&path),
+                kind = ?error.kind(),
+                "[DISCOVERY] file vanished or became unreadable during the scan; skipping"
+            );
             error_count.fetch_add(1, Ordering::Relaxed);
             return ClassifiedEntry {
                 discovered: None,
@@ -872,6 +900,106 @@ mod tests {
             let os = std::ffi::OsString::from_vec(b"/pics/img\xFF.jpg".to_vec());
             assert!(is_non_unicode_path(std::path::Path::new(&os)));
         }
+    }
+
+    #[cfg(unix)]
+    fn walk(root: &std::path::Path) -> (Vec<DiscoveredFile>, u64) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let coord = ScanCoordinator::new();
+            let disc = Discovery::new_with_skip_and_exclusions(
+                root,
+                coord,
+                Arc::new(HashMap::new()),
+                Arc::new(Vec::new()),
+            );
+            let handle = disc.spawn();
+            let errors = handle.error_count.clone();
+            let mut rx = handle.rx;
+            let mut got = Vec::new();
+            while let Some(file) = rx.recv().await {
+                got.push(file);
+            }
+            (got, errors.load(Ordering::Relaxed))
+        })
+    }
+
+    /// Symlink loops, unreadable directories, hard links and sparse files must
+    /// neither hang, panic nor vanish silently from the walk.
+    #[test]
+    #[cfg(unix)]
+    fn unix_edge_cases_walk_to_completion() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/photo.jpg"), b"jpeg").unwrap();
+        std::os::unix::fs::symlink(root.join("a"), root.join("a/b/loop")).unwrap();
+        std::os::unix::fs::symlink("missing.jpg", root.join("a/dangling.jpg")).unwrap();
+        std::fs::hard_link(root.join("a/b/photo.jpg"), root.join("a/twin.jpg")).unwrap();
+        let sparse = std::fs::File::create(root.join("a/huge.mp4")).unwrap();
+        sparse.set_len(6 * 1024 * 1024 * 1024).unwrap();
+        drop(sparse);
+        std::fs::create_dir(root.join("locked")).unwrap();
+        std::fs::write(root.join("locked/secret.jpg"), b"jpeg").unwrap();
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read_dir(root.join("locked")).is_err();
+
+        let (got, errors) = walk(root);
+        std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut names: Vec<String> = got
+            .iter()
+            .map(|file| file.path.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let expected_locked = if unreadable { vec![] } else { vec!["locked/secret.jpg".to_string()] };
+        let mut expected = vec![
+            "a/b/photo.jpg".to_string(),
+            "a/huge.mp4".to_string(),
+            "a/twin.jpg".to_string(),
+        ];
+        expected.extend(expected_locked);
+        expected.sort();
+        assert_eq!(names, expected);
+        if unreadable {
+            assert!(errors >= 1, "an unreadable directory must be counted as a walk error");
+        }
+        let huge = got.iter().find(|file| file.path.ends_with("huge.mp4")).unwrap();
+        assert_eq!(huge.size_bytes, 6 * 1024 * 1024 * 1024);
+        let photo = got.iter().find(|file| file.path.ends_with("photo.jpg")).unwrap();
+        let twin = got.iter().find(|file| file.path.ends_with("twin.jpg")).unwrap();
+        assert_eq!(photo.file_ref, twin.file_ref, "hard links share one file id");
+        assert_eq!(
+            photo.file_ref,
+            Some(std::fs::metadata(root.join("a/twin.jpg")).unwrap().ino())
+        );
+    }
+
+    /// Linux names are bytes. A non-UTF-8 name can't be addressed through the
+    /// text paths the DB stores, so it is skipped and counted, never panics.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn non_utf8_file_names_are_counted_not_catalogued() {
+        use std::os::unix::ffi::OsStrExt;
+        let tmp = tempdir_or_skip();
+        let root = tmp.path();
+        let bad = root.join(std::ffi::OsStr::from_bytes(b"caf\xe9.jpg"));
+        std::fs::write(&bad, b"jpeg").unwrap();
+        std::fs::create_dir(root.join(std::ffi::OsStr::from_bytes(b"dir\xff"))).unwrap();
+        std::fs::write(
+            root.join(std::ffi::OsStr::from_bytes(b"dir\xff")).join("inside.jpg"),
+            b"jpeg",
+        )
+        .unwrap();
+        std::fs::write(root.join("fine.jpg"), b"jpeg").unwrap();
+        let (got, errors) = walk(root);
+        let names: Vec<_> = got.iter().map(|file| file.path.clone()).collect();
+        assert_eq!(names, vec![root.join("fine.jpg")]);
+        assert_eq!(errors, 2);
     }
 
     #[test]

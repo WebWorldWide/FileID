@@ -33,11 +33,12 @@ struct SidecarTags {
 
 fn sidecar_path(file: &Path) -> PathBuf {
     let parent = file.parent().unwrap_or_else(|| Path::new("."));
-    let stem = file
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("untitled");
-    parent.join(format!(".{stem}.fileid-tags.json"))
+    // Built from the OS name: a lossy or placeholder stem would let two files
+    // with non-Unicode names share one sidecar.
+    let mut name = std::ffi::OsString::from(".");
+    name.push(file.file_name().unwrap_or_else(|| std::ffi::OsStr::new("untitled")));
+    name.push(".fileid-tags.json");
+    parent.join(name)
 }
 
 /// Replace the file's tag list in both tiers. Empty `tags` clears both. The
