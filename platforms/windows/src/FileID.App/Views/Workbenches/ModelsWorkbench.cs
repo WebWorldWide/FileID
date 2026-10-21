@@ -19,7 +19,7 @@ internal sealed class ModelsWorkbench : WorkbenchPanel
 
     public ModelsWorkbench() : base("Model catalog")
     {
-        Inputs.Children.Add(Text("Permissively licensed local models pinned to exact Hugging Face revisions. Candidates have not been measured on this PC yet. Benchmark runs locally rendered probes (colour, counting, text) and records speed, memory and answer accuracy on this PC only; tuning keeps the fastest llama.cpp settings that give identical answers. Nothing downloads until you choose Install."));
+        Inputs.Children.Add(Text("Permissively licensed local models pinned to exact Hugging Face revisions. Candidates have not been measured on this PC yet. Benchmark runs locally rendered probes (colour, counting, text) and records speed, memory and answer accuracy on this PC only; tuning keeps the fastest llama.cpp settings that give identical answers. Nothing downloads until you choose Download."));
         Inputs.Children.Add(Row(_role, _onlyFit, ActionButton("Refresh catalog", RefreshAsync), ActionButton("Stop benchmark", _ => Engine.CancelBenchmarkAsync())));
         Inputs.Children.Add(_hardware);
         Inputs.Children.Add(_list);
@@ -74,7 +74,7 @@ internal sealed class ModelsWorkbench : WorkbenchPanel
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             if (ModelCatalogPresentation.CanInstall(model))
             {
-                actions.Children.Add(ActionButton("Install", async ct =>
+                actions.Children.Add(ActionButton("Download", async ct =>
                 {
                     await Engine.PrewarmModelAsync(model.Id);
                     await UI(() => Status.Text = $"Downloading {model.Id} from its pinned Hugging Face revision. Refresh when it completes.", ct);
