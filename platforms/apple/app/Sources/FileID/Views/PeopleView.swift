@@ -197,7 +197,7 @@ struct PeopleView: View {
                 headerActions
             }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
-                Text("\(count) face\(count == 1 ? "" : "s") await processing. Unknown people are excluded.")
+                Text("\(count) more face\(count == 1 ? " is" : "s are") waiting to be grouped. People you marked as unknown are left out.")
                     .font(Theme.Font.body(13.5))
                     .foregroundStyle(Theme.text3)
             }
@@ -267,7 +267,7 @@ struct PeopleView: View {
                 Label("Merge people", systemImage: "arrow.triangle.merge")
             }
             .buttonStyle(.dsSecondary)
-            .help("Pick two or more people to combine into one. Use this when face clustering split the same person into multiple cards.")
+            .help("Combine two or more cards that show the same person")
 
             Button {
                 unknownMode = true; unknownChecked.removeAll()
@@ -275,7 +275,7 @@ struct PeopleView: View {
                 Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
             }
             .buttonStyle(.dsSecondary)
-            .help("Mark people you don't want to identify (strangers, crowd extras). They're hidden from the People tab and won't be merged into named clusters on the next run.")
+            .help("Hide people you don't need to name, like strangers in a crowd. Their photos stay in the library.")
         }
     }
 
@@ -368,7 +368,7 @@ struct PeopleView: View {
             Image(systemName: "forward.circle")
                 .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(13.5))
-            Text("Don't want to name anyone?")
+            Text("Don't want to name anyone? Descriptions will say \"a person\" instead of a name.")
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
@@ -376,7 +376,7 @@ struct PeopleView: View {
                 engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
                 onSwitchTab(.deep)
             } label: {
-                Label("Skip — run Deep Analyze with generic captions",
+                Label("Describe files without names",
                       systemImage: "forward.fill")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
@@ -385,7 +385,7 @@ struct PeopleView: View {
             }
             .buttonStyle(.plain)
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
-            .help("Run Deep Analyze without naming people. Captions will use generic descriptions like \"a person playing piano\" instead of real names.")
+            .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start describing every file now. You can name people later and describe again.")
             Spacer()
         }
         .padding(10)
@@ -403,7 +403,7 @@ struct PeopleView: View {
             Image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(Theme.gold)
                 .font(Theme.Font.body(13.5))
-            Text("Names set — keep going.")
+            Text("Names saved. Next, FileID can describe your files using these names.")
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
@@ -411,7 +411,7 @@ struct PeopleView: View {
                 engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
                 onSwitchTab(.deep)
             } label: {
-                Label("Continue to Deep Analyze", systemImage: "arrow.forward.circle.fill")
+                Label("Describe files", systemImage: "arrow.forward.circle.fill")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
@@ -419,7 +419,7 @@ struct PeopleView: View {
             }
             .buttonStyle(.plain)
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
-            .help("Generate captions and smart filenames using the names you've set.")
+            .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start writing a description and a suggested name for every file. Progress shows on the Describe Files page.")
             Spacer()
         }
         .padding(10)
@@ -522,7 +522,7 @@ struct PeopleView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(Theme.Font.body(12))
-                .help("People marked as unknown stay hidden so the grid only shows folks you might want to identify. They also don't get re-grouped when face clustering re-runs.")
+                .help("People you marked as unknown are hidden here. Show them to change your mind.")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -550,12 +550,12 @@ struct PeopleView: View {
         VStack(spacing: 14) {
             EmptyStateView(
                 icon: "person.crop.circle.badge.questionmark",
-                title: "\(totalFacePrints) faces detected — ready to group",
-                message: "Click Group photos by face. The app compares every face to every other and creates one card per person. Takes a few seconds.",
-                secondaryMessage: "Once grouped, click any card to add a name. Names get used by Deep Analyze in captions and smart filenames."
+                title: "\(totalFacePrints) faces found",
+                message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
+                secondaryMessage: "Then click a card to type that person's name."
             )
             if engine.faceClusteringInFlight {
-                ProgressView("Grouping…")
+                ProgressView("Grouping faces…")
                     .padding(.top, 4)
             }
         }
@@ -839,7 +839,7 @@ private struct PersonDetailSheet: View {
                         .font(Theme.Font.body(12))
                 }
                 .buttonStyle(.dsSecondary)
-                .help("Move individual photos to another person's group when face clustering put them in the wrong place.")
+                .help("Move photos that show someone else to the right person")
             } else {
                 Spacer()
             }
@@ -865,7 +865,7 @@ private struct PersonDetailSheet: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("I don't know who this is")
                             .font(Theme.Font.body(13.5))
-                        Text("Excludes this person from AI clustering and from Deep Analyze captions. Their photos stay in the library.")
+                        Text("Hides this person and leaves them out of descriptions. Their photos stay in the library.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.text3)
                     }
@@ -884,7 +884,7 @@ private struct PersonDetailSheet: View {
                             Color.clear   // grid alignment only
                         }
                     }
-                    Text("Deep Analyze captions will reference this person as **“\(deepAnalyzeRef)”**.")
+                    Text("Descriptions will call this person **“\(deepAnalyzeRef)”**.")
                         .font(Theme.Font.body(11))
                         .foregroundStyle(Theme.text3)
                 }
@@ -1253,7 +1253,7 @@ private struct SuggestedMergesSheet: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Suggested merges")
                         .font(Theme.Font.body(14, .semibold))
-                    Text("\(candidates.count) cluster pairs look like they might be the same person.")
+                    Text("\(candidates.count) pairs of cards might be the same person.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.text3)
                 }
@@ -1281,7 +1281,7 @@ private struct SuggestedMergesSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(veryLikely.isEmpty || inFlight)
-                .help("Bulk-merge every pair with cosine similarity ≥ 0.55 (the strongest 'same person' signal). The remaining pairs stay for manual review.")
+                .help("Combine only the pairs FileID is most sure about. The rest stay here for you to check.")
                 Button {
                     onAcceptMany(candidates)
                 } label: {
@@ -1306,7 +1306,7 @@ private struct SuggestedMergesSheet: View {
                         .foregroundStyle(Theme.delight)
                     Text("No borderline pairs found.")
                         .font(Theme.Font.body(13.5, .semibold))
-                    Text("Every cluster centroid is either reliably the same person (already merged) or reliably different. Re-run after adding more photos.")
+                    Text("Every card is clearly a different person. Check again after adding more photos.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.text3)
                         .multilineTextAlignment(.center)
@@ -1413,13 +1413,13 @@ private struct MergeTargetPickerSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Merge \(checked.count) clusters into one person")
+                Text("Combine \(checked.count) cards into one person")
                     .font(Theme.Font.body(14, .semibold))
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
             }
-            Text("Pick which one becomes the primary. The others will be absorbed — their photos move into the primary, and the source clusters disappear.")
+            Text("Choose the card to keep. Photos from the other cards move into it, and those cards go away.")
                 .font(Theme.Font.body(13.5))
                 .foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1483,14 +1483,14 @@ private struct FaceModelInstallPanel: View {
                 MetaText(detectedFaces > 0 ? "\(detectedFaces.formatted()) faces detected" : "No faces yet", size: 11)
             }
             VStack(alignment: .leading, spacing: 10) {
-                Text("Install the face model to group these faces into people").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
-                Text("\(kind.displayName) finds and groups faces on this Mac. Once people are grouped you can name them, merge them, mark unknowns and tag every photo they appear in.")
+                Text("Download the Faces model to sort photos by person").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
+                Text("It finds the same person across your photos. Then you can name people, combine duplicates and tag every photo they appear in.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
                 statusRow
             }
             .padding(14)
             PanelFooter {
-                MetaText("Downloads from Hugging Face only when you click. Runs on this Mac.", size: 11)
+                MetaText("Downloads once from Hugging Face. It runs on this Mac; your photos never leave it.", size: 11)
                 Spacer()
                 actions
             }
@@ -1509,7 +1509,7 @@ private struct FaceModelInstallPanel: View {
         case .installFailed(let reason):
             MetaText(reason, color: Theme.danger, size: 11)
         case .installed:
-            MetaText("Installed. Group faces to see people here.", color: Theme.delight, size: 11)
+            MetaText("Ready. Press Group faces to see people here.", color: Theme.delight, size: 11)
         default:
             MetaText("\(kind.displayName) · about \(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file))", size: 11)
         }
@@ -1527,7 +1527,7 @@ private struct FaceModelInstallPanel: View {
         case .installFailed:
             Button("Retry") { installer.install() }.buttonStyle(DSPrimaryButtonStyle(height: 28))
         default:
-            Button { installer.install() } label: { Label("Install face model", systemImage: "arrow.down") }
+            Button { installer.install() } label: { Label("Download Faces model", systemImage: "arrow.down") }
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
         }
     }

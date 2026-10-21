@@ -72,6 +72,11 @@ struct PipelineBlock: View {
 
     @State private var showDetails = false
 
+    private var showsNextStep: Bool {
+        !scanRunning && stage == .captions && !captionsRunning && !engine.faceClusteringInFlight
+            && (engine.deepAnalyzeComplete?.processed ?? 0) == 0 && store.totalFiles > 0
+    }
+
     var body: some View {
         let s = state
         VStack(alignment: .leading, spacing: 8) {
@@ -105,6 +110,20 @@ struct PipelineBlock: View {
                 }
             }
             Text(s.sub).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            if showsNextStep {
+                Button { openPage(.deep) } label: {
+                    HStack(spacing: 4) {
+                        Text("Next: describe files")
+                        Image(systemName: "arrow.right").font(.system(size: 10, weight: .semibold))
+                    }
+                    .font(Theme.Font.body(12, .medium))
+                    .foregroundStyle(Theme.gold)
+                    .frame(minHeight: 22)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Optional: write a description and a clearer name for each file")
+            }
             if showDetails, let p = progress, p.phase != .idle {
                 stats(p).transition(.opacity)
             }
@@ -150,16 +169,11 @@ struct PipelineBlock: View {
                 }
                 Button("Stop") { engine.cancel() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3)).help("Stop scanning. Scan again later to pick up where it left off.")
             } else if store.totalFiles > 0 || progress != nil {
-                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise") }
+                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(startRequested || captionsRunning || engine.faceClusteringInFlight)
                     .help(captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
-                if stage == .captions, !captionsRunning, (engine.deepAnalyzeComplete?.processed ?? 0) == 0 {
-                    Button { openPage(.deep) } label: { Text("Describe files…") }
-                        .buttonStyle(.dsGhost)
-                        .help("Optional next step: write a description and a better name for each file")
-                }
             } else {
                 Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
