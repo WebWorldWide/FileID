@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.16.0",
+  "version": "1.17.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1571,6 +1571,82 @@
           "type": "string",
           "maxLength": 300,
           "description": "Optional registered local model selection. Summarize only when this model is already loaded; never download from a chat send."
+        },
+        "context": {
+          "$ref": "#/$defs/ChatContext"
+        },
+        "queryVector": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 512,
+          "maxItems": 512,
+          "description": "Optional L2-normalized CLIP text embedding of text, computed by the client. Requires embeddingModel. Engines that embed queries themselves may omit it."
+        },
+        "embeddingModel": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    },
+    "ChatContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the user is looking at, so a send can resolve 'this person', 'these files' or 'this folder'. Context only scopes proposals; it never runs anything.",
+      "properties": {
+        "page": { "$ref": "#/$defs/ChatPage" },
+        "fileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000 },
+        "personIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 50 },
+        "folder": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "libraryRoot": { "type": "string", "minLength": 1, "maxLength": 32768 }
+      }
+    },
+    "ChatPage": {
+      "enum": ["library", "people", "cleanup", "deepAnalyze", "restructure", "settings", "search", "tools", "chat"]
+    },
+    "ChatAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A proposed FileID action. The client runs it only through the existing command it names. requiresConfirmation is true for every kind that changes, moves, renames, writes or deletes files or user identities; clients must show a confirmation card with the counts, examples and undo story before sending anything. Other kinds start read-only views or jobs and may run directly.",
+      "required": ["id", "kind", "title", "detail", "requiresConfirmation", "source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "kind": {
+          "enum": [
+            "scanFolder", "rescan", "describeFiles", "stopJob", "findDuplicates", "moveDuplicatesToTrash",
+            "suggestFolderLayout", "applyFolderLayout", "undoLastMove", "renameToSuggested", "namePerson",
+            "mergePeople", "findMoments", "exportFiles", "openPage", "search", "changeSetting"
+          ],
+          "description": "scanFolder/rescan → startScan; describeFiles → deepAnalyzeAll (fileIDs in batches of 100) or deepAnalyzeFolder; stopJob → cancelScan, deepAnalyzeCancel, cancelRestructure or catalog cancelJob; findDuplicates → the Cleanup page; moveDuplicatesToTrash → the platform's Cleanup trash path with byte verification against keeperFileIDs; suggestFolderLayout → planRestructure; applyFolderLayout → applyRestructure of the current plan; undoLastMove → undoRestructure; renameToSuggested → renameFiles or the platform's suggested-name apply path; namePerson → renamePerson; mergePeople → mergeClusters into personID; findMoments → Search & Moments; exportFiles → File Tools with the selection; openPage/search → navigation; changeSetting → a whitelisted client setting."
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Primary button label in plain language, e.g. Move 42 extra copies to Trash." },
+        "detail": { "type": "string", "maxLength": 2000, "description": "What will happen, with counts." },
+        "requiresConfirmation": { "type": "boolean" },
+        "source": { "enum": ["parser", "model"], "description": "parser: the deterministic phrase parser; model: a validated proposal from the loaded local model." },
+        "undo": { "type": "string", "maxLength": 500, "description": "How to reverse the action, or that it cannot be undone." },
+        "fileCount": { "type": "integer", "minimum": 0 },
+        "byteCount": { "type": "integer", "minimum": 0 },
+        "examples": { "type": "array", "items": { "type": "string" }, "maxItems": 5 },
+        "fileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000 },
+        "keeperFileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000, "description": "moveDuplicatesToTrash only: the copy kept for each fileIDs entry, at the same index." },
+        "path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "query": { "type": "string", "maxLength": 2000 },
+        "kinds": { "type": "array", "items": { "enum": ["image", "video", "pdf", "doc", "audio", "other", "model"] } },
+        "page": { "$ref": "#/$defs/ChatPage" },
+        "personID": { "type": "integer", "minimum": 1 },
+        "personIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 50 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "job": { "enum": ["scan", "describe", "organize", "moments", "all"] },
+        "setting": { "enum": ["cleanupAutoTag", "backgroundMotion", "chatSummaries"], "description": "Only these client preferences may change from Chat." },
+        "value": { "type": "boolean" },
+        "renames": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fileID", "newName"],
+            "properties": { "fileID": { "type": "integer", "minimum": 1 }, "newName": { "type": "string", "minLength": 1, "maxLength": 255 } }
+          }
         }
       }
     },
@@ -1616,6 +1692,14 @@
           "items": {
             "$ref": "#/$defs/CatalogHit"
           }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ChatAction"
+          },
+          "description": "Proposed actions, omitted when there are none. Parsed only from the user's own message (or a validated model proposal gated by it), never from retrieved file text."
         }
       }
     },
