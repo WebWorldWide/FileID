@@ -33,7 +33,7 @@ enum NearDuplicateGrouping {
         static let nearDuplicate = Thresholds(maxGapSeconds: 2, maxSpanSeconds: 12, minCosine: 0.97,
                                               minSeedCosine: 0.955, maxHamming: 8, maxGroupSize: 24)
         static let takes = Thresholds(maxGapSeconds: 4, maxSpanSeconds: 30, minCosine: 0.93,
-                                      minSeedCosine: 0.90, maxHamming: 12, maxGroupSize: 60)
+                                      minSeedCosine: 0.88, maxHamming: 12, maxGroupSize: 60)
         static let clips = Thresholds(maxGapSeconds: 900, maxSpanSeconds: 3_600, minCosine: 0.90,
                                       minSeedCosine: 0.86, maxHamming: 0, maxGroupSize: 24)
     }

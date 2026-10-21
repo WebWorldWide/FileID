@@ -534,6 +534,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v26_vlm_inherited_from") { db in
             try db.execute(sql: CatalogSchema.v26)
         }
+        m.registerMigration("v28_take_quality") { db in
+            try db.execute(sql: CatalogSchema.v28)
+        }
         return m
     }
 

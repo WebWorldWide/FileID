@@ -253,7 +253,7 @@ struct FileIDEngineMain {
                 await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
                 return
             }
-            if request.action == "search" {
+            if ["search", "autoTakeGroups", "scoreTakes", "rankTakesWithGoal"].contains(request.action) {
                 Task { await sink.emit(.catalogResponse(await CatalogStore.handle(request, database: database))) }
                 return
             }
@@ -975,6 +975,9 @@ struct FileIDEngineMain {
             }
             guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
             await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs)))
+        case .restoreFromTrash(let batchID):
+            guard let database else { await emitDbUnavailable(sink, action: "restoreFromTrash"); return }
+            await sink.emit(.bulkActionResult(await TrashJournal.restore(batchID: batchID, database: database)))
         case .mergeClusters(let sourcePersonID, let destinationPersonID):
             guard let database else { await emitDbUnavailable(sink, action: "mergeClusters"); return }
             await sink.emit(.bulkActionResult(await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID)))
@@ -1006,7 +1009,6 @@ struct FileIDEngineMain {
         case .findMergeSuggestions,
              .embedTextQuery,
              .embedImageQuery,
-             .restoreFromTrash,
              .revertMerge,
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
@@ -1171,6 +1173,7 @@ struct FileIDEngineMain {
         defer { SleepGuard.shared.end() }
         let uniqueIDs = orderedUniqueFileIDs(fileIDs)
         var messages: [BulkActionItem] = []
+        var journal: [TrashJournal.Item] = []
         let states: [Int64: BulkFileState]
         do {
             states = try await fetchBulkStates(database: database, fileIDs: uniqueIDs)
@@ -1192,7 +1195,12 @@ struct FileIDEngineMain {
             }
             do {
                 try ReadOnlyLocations.requireSourceMutation(url)
-                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
+                var landed: NSURL?
+                try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
+                if let landed = landed as URL? {
+                    journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: landed.path, rows: rows))
+                }
                 try await database.pool.write { db in
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
                     guard db.changesCount == 1 else {
@@ -1204,7 +1212,12 @@ struct FileIDEngineMain {
                 messages.append(item(id, ok: false, error.localizedDescription))
             }
         }
-        return BulkActionResult(action: "trashFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        var action = "trashFiles"
+        if !journal.isEmpty {
+            let batch = TrashJournal.Batch(id: UUID().uuidString.lowercased(), createdAt: Date().timeIntervalSince1970, items: journal)
+            if (try? TrashJournal.append(batch)) != nil { action += ":" + batch.id }
+        }
+        return BulkActionResult(action: action, succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
     }
 
     static func mergeClusters(database: Database, source: Int64, destination: Int64) async -> BulkActionResult {

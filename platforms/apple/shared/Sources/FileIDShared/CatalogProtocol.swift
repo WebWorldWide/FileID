@@ -163,6 +163,93 @@ public struct CatalogTakeGroupSuggestion: Codable, Sendable, Equatable {
     }
 }
 
+public struct CatalogTakeBox: Codable, Sendable, Equatable {
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x; self.y = y; self.width = width; self.height = height
+    }
+}
+
+public struct CatalogTakeShot: Codable, Sendable, Equatable, Hashable {
+    public var primaryFileID: Int64
+    public var fileIDs: [Int64]
+    public var path: String
+    public var capturedAt: Double?
+    public init(primaryFileID: Int64, fileIDs: [Int64], path: String, capturedAt: Double? = nil) {
+        self.primaryFileID = primaryFileID; self.fileIDs = fileIDs; self.path = path; self.capturedAt = capturedAt
+    }
+}
+
+public struct CatalogTakeAutoGroup: Codable, Sendable, Equatable, Identifiable {
+    public var groupKey: String
+    public var kind: String
+    public var status: String
+    public var capturedAt: Double
+    public var similarity: Double
+    public var shots: [CatalogTakeShot]
+    public var id: String { groupKey }
+    public var fileIDs: [Int64] { shots.flatMap(\.fileIDs) }
+    public init(groupKey: String, kind: String, status: String, capturedAt: Double, similarity: Double, shots: [CatalogTakeShot]) {
+        self.groupKey = groupKey; self.kind = kind; self.status = status
+        self.capturedAt = capturedAt; self.similarity = similarity; self.shots = shots
+    }
+    private enum CodingKeys: String, CodingKey { case groupKey, kind, status, capturedAt, similarity, shots }
+}
+
+public struct CatalogTakeQuality: Codable, Sendable, Equatable {
+    public var primaryFileID: Int64
+    public var fileIDs: [Int64]
+    public var path: String
+    public var score: Double
+    public var rank: Int
+    public var recommended: Bool
+    public var reasons: [String]
+    public var sharpness: Double?
+    public var exposure: Double?
+    public var motionBlur: Bool?
+    public var faceCount: Int?
+    public var eyesClosed: Bool?
+    public var faceCutOff: Bool?
+    public var stability: Double?
+    public var action: Double?
+    public var peakSeconds: Double?
+    public var subject: CatalogTakeBox?
+    public var faces: [CatalogTakeBox]
+    public init(primaryFileID: Int64, fileIDs: [Int64], path: String, score: Double, rank: Int, recommended: Bool, reasons: [String],
+                sharpness: Double? = nil, exposure: Double? = nil, motionBlur: Bool? = nil, faceCount: Int? = nil, eyesClosed: Bool? = nil,
+                faceCutOff: Bool? = nil, stability: Double? = nil, action: Double? = nil, peakSeconds: Double? = nil,
+                subject: CatalogTakeBox? = nil, faces: [CatalogTakeBox] = []) {
+        self.primaryFileID = primaryFileID; self.fileIDs = fileIDs; self.path = path; self.score = score; self.rank = rank
+        self.recommended = recommended; self.reasons = reasons; self.sharpness = sharpness; self.exposure = exposure
+        self.motionBlur = motionBlur; self.faceCount = faceCount; self.eyesClosed = eyesClosed; self.faceCutOff = faceCutOff
+        self.stability = stability; self.action = action; self.peakSeconds = peakSeconds; self.subject = subject; self.faces = faces
+    }
+}
+
+public struct CatalogTakeGoalRanking: Codable, Sendable, Equatable {
+    public var goal: String
+    public var status: String
+    public var order: [Int64]
+    public var metFileIDs: [Int64]
+    public var summary: String
+    public var model: String?
+    public init(goal: String, status: String, order: [Int64], metFileIDs: [Int64], summary: String, model: String? = nil) {
+        self.goal = goal; self.status = status; self.order = order; self.metFileIDs = metFileIDs; self.summary = summary; self.model = model
+    }
+}
+
+public struct CatalogTakeDecision: Codable, Sendable, Equatable {
+    public var groupKey: String
+    public var decision: String
+    public var fileIDs: [Int64]
+    public init(groupKey: String, decision: String, fileIDs: [Int64]) {
+        self.groupKey = groupKey; self.decision = decision; self.fileIDs = fileIDs
+    }
+}
+
 public struct CatalogRequest: Codable, Sendable, Equatable {
     public var requestID: String
     public var action: String
@@ -181,7 +268,8 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
     public var event: CatalogEvent?
     public var eventID: String?
     public var takeFeedback: CatalogTakeFeedback?
-    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil) {
+    public var takeDecision: CatalogTakeDecision?
+    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil) {
         self.requestID = requestID
         self.action = action
         self.query = query
@@ -199,6 +287,7 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
         self.event = event
         self.eventID = eventID
         self.takeFeedback = takeFeedback
+        self.takeDecision = takeDecision
     }
 }
 
@@ -213,7 +302,10 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
     public var takes: [CatalogTake]?
     public var recommendation: CatalogTakeRecommendation?
     public var suggestedTakeGroups: [CatalogTakeGroupSuggestion]?
-    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil, suggestedTakeGroups: [CatalogTakeGroupSuggestion]? = nil) {
+    public var takeGroups: [CatalogTakeAutoGroup]?
+    public var takeQualities: [CatalogTakeQuality]?
+    public var takeGoalRanking: CatalogTakeGoalRanking?
+    public init(requestID: String, status: String, message: String? = nil, hits: [CatalogHit] = [], chapters: [CatalogChapter] = [], jobs: [CatalogJob] = [], events: [CatalogEvent]? = nil, takes: [CatalogTake]? = nil, recommendation: CatalogTakeRecommendation? = nil, suggestedTakeGroups: [CatalogTakeGroupSuggestion]? = nil, takeGroups: [CatalogTakeAutoGroup]? = nil, takeQualities: [CatalogTakeQuality]? = nil, takeGoalRanking: CatalogTakeGoalRanking? = nil) {
         self.requestID = requestID
         self.status = status
         self.message = message
@@ -224,5 +316,8 @@ public struct CatalogResponse: Codable, Sendable, Equatable {
         self.takes = takes
         self.recommendation = recommendation
         self.suggestedTakeGroups = suggestedTakeGroups
+        self.takeGroups = takeGroups
+        self.takeQualities = takeQualities
+        self.takeGoalRanking = takeGoalRanking
     }
 }

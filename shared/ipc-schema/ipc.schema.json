@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.16.0",
+  "version": "1.17.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1383,6 +1383,87 @@
         "reason": {"type": "string"}
       }
     },
+    "CatalogTakeBox": {
+      "type": "object", "additionalProperties": false,
+      "description": "Normalized rectangle, top-left origin.",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "minimum": 0, "maximum": 1}, "height": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "CatalogTakeShot": {
+      "type": "object", "additionalProperties": false,
+      "description": "One try: every file of one shot (a RAW and its JPEG share a shot). primaryFileID is the file shown and scored.",
+      "required": ["primaryFileID", "fileIDs", "path"],
+      "properties": {
+        "primaryFileID": {"type": "integer"},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 8},
+        "path": {"type": "string"},
+        "capturedAt": {"type": "number"}
+      }
+    },
+    "CatalogTakeAutoGroup": {
+      "type": "object", "additionalProperties": false,
+      "description": "A suggested group of tries of the same shot, found from capture time and look. status skipped means the person chose Skip group.",
+      "required": ["groupKey", "kind", "status", "capturedAt", "similarity", "shots"],
+      "properties": {
+        "groupKey": {"type": "string", "minLength": 1, "maxLength": 200},
+        "kind": {"type": "string", "enum": ["photos", "videos"]},
+        "status": {"type": "string", "enum": ["open", "skipped"]},
+        "capturedAt": {"type": "number"},
+        "similarity": {"type": "number", "minimum": 0, "maximum": 1},
+        "shots": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeShot"}, "minItems": 2, "maxItems": 100}
+      }
+    },
+    "CatalogTakeQuality": {
+      "type": "object", "additionalProperties": false,
+      "description": "Model-free score of one shot within its group (relative to the other tries) with short plain reasons.",
+      "required": ["primaryFileID", "fileIDs", "path", "score", "rank", "recommended", "reasons", "faces"],
+      "properties": {
+        "primaryFileID": {"type": "integer"},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 8},
+        "path": {"type": "string"},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "rank": {"type": "integer", "minimum": 1},
+        "recommended": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        "sharpness": {"type": "number", "minimum": 0, "maximum": 1},
+        "exposure": {"type": "number", "minimum": 0, "maximum": 1},
+        "motionBlur": {"type": "boolean"},
+        "faceCount": {"type": "integer", "minimum": 0},
+        "eyesClosed": {"type": "boolean"},
+        "faceCutOff": {"type": "boolean"},
+        "stability": {"type": "number", "minimum": 0, "maximum": 1},
+        "action": {"type": "number", "minimum": 0, "maximum": 1},
+        "peakSeconds": {"type": "number", "minimum": 0},
+        "subject": {"$ref": "#/$defs/CatalogTakeBox"},
+        "faces": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeBox"}, "maxItems": 16}
+      }
+    },
+    "CatalogTakeGoalRanking": {
+      "type": "object", "additionalProperties": false,
+      "description": "One local-model pass over a whole group against a goal. order is best first (primaryFileIDs); metFileIDs visibly meet the goal. unavailable means no description model is loaded.",
+      "required": ["goal", "status", "order", "metFileIDs", "summary"],
+      "properties": {
+        "goal": {"type": "string", "maxLength": 500},
+        "status": {"type": "string", "enum": ["ranked", "unclear", "unavailable"]},
+        "order": {"type": "array", "items": {"type": "integer"}, "maxItems": 100},
+        "metFileIDs": {"type": "array", "items": {"type": "integer"}, "maxItems": 100},
+        "summary": {"type": "string"},
+        "model": {"type": "string"}
+      }
+    },
+    "CatalogTakeDecision": {
+      "type": "object", "additionalProperties": false,
+      "description": "keepAll hides a suggested group for good, skip moves it to Skipped, reopen forgets either choice. fileIDs are every file of the group.",
+      "required": ["groupKey", "decision", "fileIDs"],
+      "properties": {
+        "groupKey": {"type": "string", "minLength": 1, "maxLength": 200},
+        "decision": {"type": "string", "enum": ["keepAll", "skip", "reopen"]},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 800}
+      }
+    },
     "CatalogRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -1419,7 +1500,11 @@
             "undoEventEdit",
             "takeGroup",
             "setTakeFeedback",
-            "undoTakeFeedback"
+            "undoTakeFeedback",
+            "autoTakeGroups",
+            "scoreTakes",
+            "rankTakesWithGoal",
+            "decideTakeGroup"
           ]
         },
         "query": {
@@ -1448,6 +1533,7 @@
         "event": {"$ref": "#/$defs/CatalogEvent"},
         "eventID": {"type": "string", "maxLength": 200},
         "takeFeedback": {"$ref": "#/$defs/CatalogTakeFeedback"},
+        "takeDecision": {"$ref": "#/$defs/CatalogTakeDecision"},
         "timelineMode": {
           "type": "string",
           "enum": [
@@ -1498,6 +1584,9 @@
         "takes": {"type": "array", "items": {"$ref": "#/$defs/CatalogTake"}},
         "recommendation": {"$ref": "#/$defs/CatalogTakeRecommendation"},
         "suggestedTakeGroups": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeGroupSuggestion"}, "maxItems": 100},
+        "takeGroups": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeAutoGroup"}, "maxItems": 100},
+        "takeQualities": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeQuality"}, "maxItems": 100},
+        "takeGoalRanking": {"$ref": "#/$defs/CatalogTakeGoalRanking"},
         "jobs": {
           "type": "array",
           "items": {

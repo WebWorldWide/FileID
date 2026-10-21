@@ -357,7 +357,6 @@ enum TakeScoring {
         let medianAnisotropy = anisotropies.isEmpty ? 0 : anisotropies[anisotropies.count / 2]
         let maxAction = readable.compactMap { $0.video?.action }.max() ?? 0
 
-        struct Draft { var shot: Shot; var score: Double; var sharpRel: Double; var quality: Quality? }
         var drafts: [(Shot, Double, Double, Quality)] = []
         for shot in shots {
             guard let s = shot.signals else {
@@ -425,12 +424,16 @@ enum TakeScoring {
         var rank = [Int](repeating: 0, count: drafts.count)
         for (position, index) in order.enumerated() { rank[index] = position + 1 }
         let winner = order.first.flatMap { drafts[$0].1 >= 0 ? $0 : nil }
+        let readableDrafts = drafts.filter { $0.1 >= 0 }
+        let shared = Set(readableDrafts.first?.3.reasons ?? []).filter { reason in
+            readableDrafts.count > 1 && readableDrafts.allSatisfy { $0.3.reasons.contains(reason) }
+        }
         let anyEyesClosed = drafts.contains { $0.3.eyesClosed }
         let maxExposure = drafts.compactMap { $0.3.exposure }.max() ?? 0
         let secondExposure = drafts.compactMap { $0.3.exposure }.sorted(by: >).dropFirst().first ?? maxExposure
         return drafts.indices.map { index in
             let q = drafts[index].3
-            var reasons = q.reasons
+            var reasons = q.reasons.filter { !shared.contains($0) }
             if index == winner, shots.count > 1 {
                 var positives: [String] = []
                 if isVideo {
