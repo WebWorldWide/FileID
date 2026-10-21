@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub mod sink;
 pub(crate) mod bounded_read;
 #[cfg(test)]
-mod conformance;
+pub(crate) mod conformance;
 
 // ─── Envelopes ──────────────────────────────────────────────────────────────
 

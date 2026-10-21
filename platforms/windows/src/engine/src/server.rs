@@ -1693,6 +1693,10 @@ async fn emit_db_unavailable(sink: &Sink, command: &str) {
 }
 
 #[cfg(test)]
+#[path = "server_fuzz_tests.rs"]
+pub(crate) mod fuzz_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
