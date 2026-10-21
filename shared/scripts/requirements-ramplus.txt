@@ -13,7 +13,7 @@
 torch==2.13.0
 torchvision==0.28.0
 numpy==1.26.4
-pillow==12.3.0
+pillow==13.0.0
 
 # RAM++ model deps (the ones `recognize-anything` forgets to pull):
 timm==0.9.16            # keeps the `timm.models.layers` shim ram imports (gone in 1.0)
