@@ -1,5 +1,5 @@
 ﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the
-// "FileID" title and routes the "Pick a folder" CTA to the same
+// "FileID" title and routes the "Choose a folder to scan" button to the same
 // FolderPickerService the sidebar uses.
 //
 // Animation is a 1:1 port of macOS Detail.swift:171-177 — `shimmer` driven
