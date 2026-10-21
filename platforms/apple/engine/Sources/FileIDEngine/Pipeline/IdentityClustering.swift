@@ -128,6 +128,7 @@ public enum IdentityClustering {
         embeddings: [[Float]],
         searcher: (Int) -> [(neighbor: Int, similarity: Float)],
         params: Hyperparameters = Hyperparameters(),
+        cannotLinks: [(Int, Int)] = [],
         shouldCancel: () -> Bool = { false }
     ) -> Result {
         let started = Date()
@@ -155,41 +156,43 @@ public enum IdentityClustering {
         }
 
         // ─── Pass 1: connected components above pass1Cosine ───────
+        // Cannot-links (two faces in one photo are two people) are enforced on
+        // whole components: edges are unioned strongest-first and a union that
+        // would put a forbidden pair in one component is skipped, so no bridge
+        // can chain them together either. Mirrors the Rust
+        // cluster_with_cannot_links.
+        var cannotNeighbors = Array(repeating: Set<Int>(), count: n)
+        for (a, b) in cannotLinks where a != b && a >= 0 && b >= 0 && a < n && b < n {
+            cannotNeighbors[a].insert(b)
+            cannotNeighbors[b].insert(a)
+        }
+        let constrained = cannotNeighbors.contains { !$0.isEmpty }
+        var componentForbidden = cannotNeighbors
         var uf = UnionFind(n: n)
-        if params.mutualKNN {
-            // Mutual-kNN: union i—j only when EACH face lists the OTHER in its
-            // above-threshold neighbourhood, breaking the single "bridge" face
-            // that would otherwise chain two identities into one mega-cluster.
-            // Mirror of the Rust mutual_knn block (FILEID_FACE_MUTUAL_KNN): build
-            // a directed set of above-threshold ordered pairs, then union only
-            // the pairs whose reverse (j,i) is also present. Determinism
-            // preserved: candidates are gathered in ascending-i / searcher order
-            // and unioned in that same order. Pairs keyed as i*n+j (unique since
-            // both < n).
-            var directed = Set<Int>()
-            var candidates: [(Int, Int)] = []
-            for i in 0..<n {
-                if shouldCancel() { return cancelledResult() }
-                for hit in searcher(i) {
-                    let j = hit.neighbor
-                    guard j != i, j >= 0, j < n else { continue }
-                    guard hit.similarity >= params.pass1Cosine else { continue }
-                    directed.insert(i * n + j)
-                    candidates.append((i, j))
-                }
+        var directed = Set<Int>()
+        var candidates: [(sim: Float, i: Int, j: Int)] = []
+        for i in 0..<n {
+            if shouldCancel() { return cancelledResult() }
+            for hit in searcher(i) {
+                let j = hit.neighbor
+                guard j != i, j >= 0, j < n, hit.similarity >= params.pass1Cosine else { continue }
+                if params.mutualKNN { directed.insert(i * n + j) }
+                candidates.append((hit.similarity, i, j))
             }
-            for (i, j) in candidates where directed.contains(j * n + i) {
-                uf.union(i, j)
+        }
+        if constrained {
+            candidates.sort {
+                if $0.sim != $1.sim { return $0.sim > $1.sim }
+                if min($0.i, $0.j) != min($1.i, $1.j) { return min($0.i, $0.j) < min($1.i, $1.j) }
+                return max($0.i, $0.j) < max($1.i, $1.j)
             }
-        } else {
-            for i in 0..<n {
-                if shouldCancel() { return cancelledResult() }
-                for hit in searcher(i) {
-                    let j = hit.neighbor
-                    guard j != i, j >= 0, j < n else { continue }
-                    guard hit.similarity >= params.pass1Cosine else { continue }
-                    uf.union(i, j)
-                }
+        }
+        for edge in candidates {
+            if params.mutualKNN && !directed.contains(edge.j * n + edge.i) { continue }
+            if constrained {
+                uf.constrainedUnion(edge.i, edge.j, forbidden: &componentForbidden)
+            } else {
+                uf.union(edge.i, edge.j)
             }
         }
         var rootMembers: [Int: [Int]] = [:]
@@ -226,12 +229,18 @@ public enum IdentityClustering {
         // outliers update a core in place at index < coreN, so real cores keep
         // being re-scanned with fresh values; only the singletons are excluded.
         let coreN = coreCentroids.count
+        var coreOfFace = [Int?](repeating: nil, count: n)
+        for (index, members) in cores.enumerated() {
+            for member in members { coreOfFace[member] = index }
+        }
         for outlier in outliers {
             if shouldCancel() { return cancelledResult() }
             let v = embeddings[outlier]
             var c1Idx = -1, c2Idx = -1
             var c1Sim: Float = -2, c2Sim: Float = -2
+            let blockedCores = Set(cannotNeighbors[outlier].compactMap { coreOfFace[$0] })
             for (idx, centroid) in coreCentroids.prefix(coreN).enumerated() {
+                if blockedCores.contains(idx) { continue }
                 let s = dot(v, centroid)
                 if s > c1Sim {
                     c2Sim = c1Sim; c2Idx = c1Idx
@@ -247,8 +256,10 @@ public enum IdentityClustering {
                 let m = min(dim, v.count)
                 for d in 0..<m { coreSums[c1Idx][d] += v[d] }
                 coreCentroids[c1Idx] = normalizeSum(coreSums[c1Idx], dim: dim)
+                coreOfFace[outlier] = c1Idx
                 outliersAssigned += 1
             } else {
+                coreOfFace[outlier] = cores.count
                 cores.append([outlier])
                 // A singleton's unnormalized sum is the embedding itself; its
                 // normalized centroid is the (already L2-normalized) embedding.
@@ -432,6 +443,31 @@ private struct UnionFind {
         }
         return r
     }
+    @discardableResult
+    mutating func constrainedUnion(_ a: Int, _ b: Int, forbidden: inout [Set<Int>]) -> Bool {
+        let ra = find(a), rb = find(b)
+        if ra == rb || forbidden[ra].contains(rb) || forbidden[rb].contains(ra) { return false }
+        let keep: Int, drop: Int
+        if forbidden[ra].count != forbidden[rb].count {
+            (keep, drop) = forbidden[ra].count > forbidden[rb].count ? (ra, rb) : (rb, ra)
+        } else {
+            (keep, drop) = ra <= rb ? (ra, rb) : (rb, ra)
+        }
+        parent[drop] = keep
+        let moved = forbidden[drop]
+        forbidden[drop] = []
+        for neighbor in moved {
+            let neighborRoot = find(neighbor)
+            if neighborRoot == keep { continue }
+            forbidden[neighborRoot].remove(drop)
+            forbidden[neighborRoot].insert(keep)
+            forbidden[keep].insert(neighborRoot)
+        }
+        forbidden[keep].remove(drop)
+        forbidden[keep].remove(keep)
+        return true
+    }
+
     mutating func union(_ a: Int, _ b: Int) {
         let ra = find(a), rb = find(b)
         guard ra != rb else { return }

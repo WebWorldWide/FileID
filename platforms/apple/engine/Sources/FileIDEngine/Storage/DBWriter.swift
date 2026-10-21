@@ -995,7 +995,7 @@ public actor DBWriter {
     /// (extremely blurry frames, occluded eyes). 0.02 is the bottom of
     /// the "still has a face" range; below this it's typically a false
     /// positive from the detector.
-    static let qualityFloor: Double = 0.02
+    static let qualityFloor: Double = FaceQualityGate.qualityFloor
 
     /// Minimum bbox area (fraction of image) for clustering — a backstop
     /// against degenerate detections only (near-zero-area boxes), not the
@@ -1005,7 +1005,7 @@ public actor DBWriter {
     /// well-resolved face in a high-megapixel photo. `minBBoxMinDimPx`
     /// below is the real gate; this was lowered from 0.002 to 0.0002
     /// alongside it (Windows FACE_MIN_BBOX_AREA_FRACTION, same change).
-    static let minBBoxAreaFraction: Double = 0.0002
+    static let minBBoxAreaFraction: Double = FaceQualityGate.minBBoxAreaFraction
 
     /// Minimum bbox size in absolute pixels of the DECODED image handed to
     /// Vision (not the source file's native resolution). Mirrors the Windows
@@ -1036,14 +1036,14 @@ public actor DBWriter {
     /// env. Re-measure on real Mac hardware before treating 40.0 as final
     /// here; raising FILEID_SCAN_MAX_PIXELS is the cleaner lever if macOS
     /// under-detects.
-    static let minBBoxMinDimPx: Double = 40.0
+    static let minBBoxMinDimPx: Double = FaceQualityGate.minBBoxMinDimPx
 
     /// |yaw| beyond this is "heavy profile" — same identity at frontal vs
     /// 60° profile lands far apart in embedding space, polluting clusters.
-    static let maxYawRadians: Double = 50.0 * .pi / 180.0
+    static let maxYawRadians: Double = FaceQualityGate.maxYawRadians
 
     /// |pitch| beyond this is "looking up/down hard" — similarly noisy.
-    static let maxPitchRadians: Double = 30.0 * .pi / 180.0
+    static let maxPitchRadians: Double = FaceQualityGate.maxPitchRadians
 
     /// Parse the "x,y,w,h" normalized bbox string and return w*h.
     static func bboxArea(_ s: String) -> Double {
@@ -1058,13 +1058,8 @@ public actor DBWriter {
     /// so we exclude (admitting them lets noise into clusters).
     static func isExcluded(quality: Double?, yaw: Double?, pitch: Double?,
                            bboxArea: Double, bboxMinDimPx: Double) -> Bool {
-        guard let q = quality else { return true }
-        if q < qualityFloor { return true }
-        if bboxArea < minBBoxAreaFraction { return true }
-        if bboxMinDimPx < minBBoxMinDimPx { return true }
-        if let y = yaw, abs(y) > maxYawRadians { return true }
-        if let p = pitch, abs(p) > maxPitchRadians { return true }
-        return false
+        FaceQualityGate.holdReason(quality: quality, yaw: yaw, pitch: pitch,
+                                   bboxArea: bboxArea, minDimPx: bboxMinDimPx) != nil
     }
 }
 

@@ -62,9 +62,7 @@ struct FaceAnalysisCacheTests {
             var invalid = vector
             invalid.replaceSubrange(0..<4, with: [0,0,128,127])
             #expect(try !FaceAnalysisCache.persist(db, input: input, embedding: invalid, modelVersion: "weights-a"))
-            try db.execute(sql: "UPDATE face_prints SET excluded=1 WHERE id=4")
-            #expect(try !FaceAnalysisCache.persist(db, input: input, embedding: vector, modelVersion: "weights-a"))
-            try db.execute(sql: "UPDATE face_prints SET excluded=0,bbox='0.2,0.2,0.2,0.2' WHERE id=4")
+            try db.execute(sql: "UPDATE face_prints SET bbox='0.2,0.2,0.2,0.2' WHERE id=4")
             #expect(try !FaceAnalysisCache.persist(db, input: input, embedding: vector, modelVersion: "weights-a"))
             #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM catalog_revisions") == 0)
             try db.execute(sql: "UPDATE files SET size_bytes=101 WHERE id=1")
@@ -79,7 +77,7 @@ struct FaceAnalysisCacheTests {
             #expect(try FaceAnalysisCache.persist(db, input: input, embedding: vector, modelVersion: "weights-a"))
             try db.execute(sql: "UPDATE face_prints SET excluded=1 WHERE id=4")
             #expect(try Int.fetchOne(db, sql: "SELECT stale FROM catalog_observations") == 1)
-            #expect(try FaceAnalysisCache.pending(db, modelVersion: "weights-b", limit: 10).isEmpty)
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "weights-b", limit: 10).map(\.id) == [4])
             try db.execute(sql: "UPDATE files SET modified_at=11 WHERE id=1")
             try db.execute(sql: "UPDATE face_prints SET excluded=0 WHERE id=4")
             #expect(try Int.fetchOne(db, sql: "SELECT stale FROM catalog_observations") == 1)
@@ -112,7 +110,7 @@ struct FaceAnalysisCacheTests {
         }
     }
 
-    @Test func failureSnapshotCannotSuppressEditedOrExcludedFaces() throws {
+    @Test func failureSnapshotCannotSuppressEditedOrHeldFaces() throws {
         let queue = try database()
         try queue.write { db in
             let input = try #require(FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1).first)
@@ -123,7 +121,7 @@ struct FaceAnalysisCacheTests {
             try FaceAnalysisCache.recordFailure(db, input: input, modelVersion: "model-a", reason: "no_embedding", now: 101)
             #expect(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM face_refresh_failures") == 0)
             try db.execute(sql: "UPDATE face_prints SET excluded=1 WHERE id=4")
-            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 1000).isEmpty)
+            #expect(try FaceAnalysisCache.pending(db, modelVersion: "model-a", limit: 1, now: 1000).map(\.id) == [4])
         }
     }
 

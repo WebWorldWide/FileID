@@ -32,11 +32,11 @@ enum FaceClusterPersistence {
         let protected = try json(preserved)
         let outputFaces = try json(seen)
         guard try Int.fetchOne(db, sql: """
-            SELECT COUNT(*) FROM face_prints WHERE id IN (SELECT value FROM json_each(?)) AND excluded=0
+            SELECT COUNT(*) FROM face_prints WHERE id IN (SELECT value FROM json_each(?))
               AND (person_id IS NULL OR person_id NOT IN (SELECT value FROM json_each(?)))
             """, arguments: [outputFaces,protected]) == seen.count else { throw Failure.invalidPlan }
         try db.execute(sql: """
-            UPDATE face_prints SET person_id=NULL WHERE excluded=0 AND id IN (SELECT value FROM json_each(?))
+            UPDATE face_prints SET person_id=NULL WHERE id IN (SELECT value FROM json_each(?))
               AND (person_id IS NULL OR person_id NOT IN (SELECT value FROM json_each(?)))
             """, arguments: [selected,protected])
         for cluster in clusters {
