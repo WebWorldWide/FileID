@@ -133,7 +133,7 @@ public sealed partial class DrillDownSheet : UserControl
     /// <summary>Filter to the moves whose proposed destination starts with the given path.</summary>
     public void SetTreeFilter(RestructurePlan plan, string proposedPath)
     {
-        HeaderText.Text = $"Proposed: {proposedPath}";
+        HeaderText.Text = $"Going to: {proposedPath}";
         var moves = new List<RestructureMove>();
         var libRoot = plan.LibraryRoot ?? "";
         foreach (var m in plan.Moves)

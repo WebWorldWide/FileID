@@ -393,7 +393,7 @@ internal sealed class ChangeLog : INotifyPropertyChanged
     private static void MarkRestructureSuperseded(ChangeLogEntry entry)
     {
         entry.DropReverse();
-        entry.StatusDetail = "Superseded — only the most recent restructure can be undone.";
+        entry.StatusDetail = "Replaced by a newer move. Only the most recent folder move can be undone.";
         entry.Status = ChangeStatus.NotUndoable;
     }
 

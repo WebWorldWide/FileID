@@ -19,7 +19,7 @@
         <StackPanel Grid.Row="0" Spacing="4">
             <TextBlock x:Name="HeaderText"
                        Style="{StaticResource SubtitleTextBlockStyle}"
-                       Text="Rename selected files"
+                       Text="Rename the chosen files"
                        AutomationProperties.HeadingLevel="Level1" />
             <TextBlock x:Name="SelectionText"
                        Style="{StaticResource CaptionTextBlockStyle}"
@@ -56,7 +56,7 @@
                             <TextBox Grid.Column="2"
                                      Text="{x:Bind ProposedName, Mode=TwoWay}"
                                      VerticalAlignment="Center"
-                                     PlaceholderText="new filename" />
+                                     PlaceholderText="New name" />
                         </Grid>
                     </DataTemplate>
                 </ItemsRepeater.ItemTemplate>

@@ -93,6 +93,9 @@ impl YuNet {
         if rgb.len() != (width as usize) * (height as usize) * 3 {
             anyhow::bail!("YuNet detect: rgb buffer/size mismatch");
         }
+        if width == 0 || height == 0 {
+            return Ok(Vec::new());
+        }
         // Letterbox to a fixed 640x640 (top-left, zero-pad remainder) — the
         // export's only input shape, and a fixed shape keeps DirectML happy.
         let scale = (INPUT as f32 / width as f32).min(INPUT as f32 / height as f32);
@@ -199,7 +202,8 @@ fn decode_stride(
         for c in 0..grid {
             let i = r * grid + c;
             let score = (cls[i].clamp(0.0, 1.0) * obj[i].clamp(0.0, 1.0)).sqrt();
-            if score < SCORE_THRESHOLD {
+            // NaN (fp16 overflow, a broken export) fails `<` too; reject it explicitly.
+            if score.is_nan() || score < SCORE_THRESHOLD {
                 continue;
             }
             let (cf, rf) = (c as f32, r as f32);
@@ -215,6 +219,9 @@ fn decode_stride(
             }
             // Remap to FileID order [left_eye, right_eye, nose, mouth_left, mouth_right].
             let landmarks = [native[1], native[0], native[2], native[4], native[3]];
+            if ![cx, cy, w, h].iter().chain(native.iter().flatten()).all(|v| v.is_finite()) {
+                continue;
+            }
             out.push(Detection {
                 bbox: [cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5],
                 landmarks,

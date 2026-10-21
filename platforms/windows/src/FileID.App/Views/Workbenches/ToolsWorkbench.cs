@@ -10,20 +10,21 @@ namespace FileID.Views.Workbenches;
 internal sealed class ToolsWorkbench : WorkbenchPanel
 {
     private readonly IntPtr _hwnd;
-    private readonly TextBox _query = new() { PlaceholderText = "Find catalog files by name or description", MaxLength = 2000, MinWidth = 360 };
+    private readonly TextBox _query = new() { PlaceholderText = "Search for files by name or by what's in them", MaxLength = 2000, MinWidth = 360 };
     private readonly ListView _files = new() { Height = 200, SelectionMode = ListViewSelectionMode.Multiple };
     private readonly ComboBox _kind = new() { MinWidth = 160 };
     private readonly ComboBox _format = new() { MinWidth = 120 };
     private readonly NumberBox _dimension = new() { Header = "Maximum pixels (1–8192)", Minimum = 1, Maximum = 8192, Value = 4096, Width = 220 };
-    private readonly TextBlock _destination = Text("No output folder selected.");
-    private readonly TextBlock _detail = Text("Loading local tool capabilities…");
+    private readonly TextBlock _destination = Text("No folder chosen yet.");
+    private readonly TextBlock _detail = Text("Checking what this PC can export…");
     private readonly ListView _outputs = new() { Height = 180, SelectionMode = ListViewSelectionMode.None };
-    private readonly TextBlock _executionStatus = Text("No export awaiting confirmation.");
+    private readonly TextBlock _executionStatus = Text("Nothing exported yet.");
     private readonly ToolPreviewState _plan = new();
     private readonly Button _preview;
     private readonly Button _execute;
     private readonly Button _undo;
     private readonly Button _cancel;
+    private readonly Button _find;
     private readonly ToolExecutionState _execution;
     private string? _appliedExecutionRequestID;
     private string? _destinationPath;
@@ -36,10 +37,13 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         _execution = Engine.ToolExecution;
         _query.MinWidth = 280;
         _files.Height = 260;
-        Inputs.Children.Add(V3Panel("01 · Recipe", _kind,
-            Row(_query, Secondary(ActionButton("Find", SearchAsync))),
+        _find = Secondary(ActionButton("Find", SearchAsync));
+        _query.TextChanged += (_, _) => SyncFind();
+        SyncFind();
+        Inputs.Children.Add(V3Panel("01 · Pick files", _kind,
+            Row(_query, _find),
             _files,
-            Meta("Select up to 100 catalog files. Preview first; exports create new versions and preserve originals.")));
+            Meta("Search for files by name or by what's in them, then tick the ones to export (up to 100). Exports are new files; your originals stay as they are.")));
 
         var output = new Grid { ColumnSpacing = 12, RowSpacing = 10 };
         output.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
@@ -49,14 +53,15 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         _dimension.Width = 120;
         AddOutputRow(output, 1, "Longest side", Row(_dimension, Meta("px, up to 8192")));
         var chooseFolder = Secondary(ActionButton("Choose…", ChooseDestinationAsync));
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chooseFolder, "Choose output folder");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chooseFolder, "Choose a folder to save to");
+        ToolTipService.SetToolTip(chooseFolder, "Choose a folder to save to");
         AddOutputRow(output, 2, "Save to", Row(_destination, chooseFolder));
         Inputs.Children.Add(V3Panel("02 · Output", null, output, _detail));
 
         _preview = Secondary(ActionButton("Preview", PreviewAsync));
         _execute = Primary(ActionButton("Export…", ExecuteAsync));
         _undo = Secondary(ActionButton("Undo last export…", UndoAsync));
-        ToolTipService.SetToolTip(_execute, "Export new versions; originals are preserved");
+
         var previewPane = new StackPanel { Spacing = 10, Padding = new Thickness(14, 12, 14, 14) };
         previewPane.Children.Add(SectionLabel("03 · Preview"));
         _outputs.Height = 300;
@@ -67,7 +72,7 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
             Ghost(ActionButton("Show last export", ct => SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "history"), ct))),
             Ghost(ActionButton("Refresh tools", CapabilitiesAsync))));
         previewPane.Children.Add(Meta(ToolUndoIntegration.Detail));
-        previewPane.Children.Add(Meta("Only recipes reported as available by the engine can run. Photo exports may strip metadata and normalize to SDR; review the capability details. Chapter VTT is markers, not speech subtitles. Video conversion does not imply stabilization, AI upscaling or tracked reframing. Cancel requests target the current export; wait for its final response. A timeout does not mean an export stopped: check Last export before retrying."));
+        previewPane.Children.Add(Meta("Only tools this PC can run are offered. Photo exports remove location and camera details. Chapter files list chapters, not speech subtitles. Video exports don't stabilize, upscale or track subjects. Check reframed videos before sharing them. If an export seems stuck, press Show last export before trying again."));
         UseSidePane(new ScrollViewer { Content = previewPane, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, 380, paneOnLeft: false);
         _cancel = ControlButton("Cancel current export", CancelAsync);
         _files.SelectionChanged += (_, _) => Invalidate();
@@ -75,7 +80,8 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         {
             _format.ItemsSource = Capability?.OutputFormats;
             _format.SelectedIndex = Capability?.OutputFormats.Count > 0 ? 0 : -1;
-            _detail.Text = Capability?.Detail ?? "Select a tool.";
+            _detail.Text = PlainDetail(Capability);
+            ToolTipService.SetToolTip(_detail, Capability?.Detail);
             Invalidate();
         };
         _format.SelectionChanged += (_, _) => Invalidate();
@@ -95,6 +101,23 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         Grid.SetColumn(value, 1);
         grid.Children.Add(key);
         grid.Children.Add(value);
+    }
+
+    private static string PlainDetail(ToolCapability? capability) => capability switch
+    {
+        null => "Choose what to export.",
+        { Available: false } => "Not available on this PC yet. " + capability.Detail,
+        { Id: "video" } => "Makes a new MP4 at the size and shape you choose. Your original video stays as it is.",
+        { Id: "chapters" } => "Saves a video's chapters as a file other apps can read.",
+        { Id: "photo" } => "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is.",
+        _ => capability.Detail,
+    };
+
+    private void SyncFind()
+    {
+        var empty = string.IsNullOrWhiteSpace(_query.Text);
+        _find.IsEnabled = !empty;
+        ToolTipService.SetToolTip(_find, empty ? "Type part of a file name or what's in it first" : "Search the library");
     }
 
     private ToolCapability? Capability => (_kind.SelectedItem as CapabilityItem)?.Capability;
@@ -150,23 +173,36 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         _cancel.IsEnabled = _cancelAvailable && _capabilitiesGeneration == Engine.SpawnGeneration
             && _execution.IsActive && !_execution.IsStopping && _execution.Generation == Engine.SpawnGeneration;
         _executionStatus.Text = _execution.Label;
+        ToolTipService.SetToolTip(_preview, _preview.IsEnabled
+            ? "Show the files this export will create, before writing anything"
+            : _execution.IsActive ? "Wait for the current export to finish"
+            : _files.SelectedItems.Count == 0 ? "Tick at least one file first"
+            : _destinationPath is null ? "Choose a folder to save to first"
+            : "Choose a format and a size this tool supports");
+        ToolTipService.SetToolTip(_execute, _execute.IsEnabled
+            ? "Create the new files in the chosen folder"
+            : _execution.IsActive ? "Wait for the current export to finish"
+            : "Press Preview first to check what will be created");
+        ToolTipService.SetToolTip(_undo, _undo.IsEnabled ? "Remove the files the last export created" : "Nothing exported yet");
     }
     private void Invalidate()
     {
-        if (_plan.PreviewID is not null) Status.Text = "Export inputs changed. Preview again before exporting.";
+        if (_plan.PreviewID is not null) Status.Text = "Something changed. Press Preview again before exporting.";
         _plan.Invalidate();
         UpdateControls();
     }
     private async Task SearchAsync(CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(_query.Text)) throw new InvalidOperationException("Enter a catalog query.");
+        if (string.IsNullOrWhiteSpace(_query.Text)) throw new InvalidOperationException("Type part of a file name or what's in it first.");
         var response = await Engine.CatalogAsync(CatalogRequest("search", _query.Text, mode: "keyword"), ct);
         await UI(() =>
         {
             _files.ItemsSource = response.Status == "ok" ? response.Hits.DistinctBy(hit => hit.FileID).Select(hit => new HitItem(hit)).ToArray() : Array.Empty<HitItem>();
             _files.SelectedItems.Clear();
             Invalidate();
-            Status.Text = response.Message ?? $"{response.Hits.Count} evidence matches; select catalog files for export.";
+            Status.Text = response.Message ?? (response.Hits.Count == 0
+                ? "No matches. Try another word."
+                : $"{response.Hits.Count:N0} match{(response.Hits.Count == 1 ? "" : "es")}. Tick the files to export.");
         }, ct);
     }
     private async Task ChooseDestinationAsync(CancellationToken ct)
@@ -174,10 +210,10 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         var chosen = await FolderPickerService.PickFolderAsync(_hwnd);
         await UI(() =>
         {
-            if (chosen.Path is { } path) { _destinationPath = path; _destination.Text = path; Invalidate(); Status.Text = "Output folder selected. Preview before exporting."; }
+            if (chosen.Path is { } path) { _destinationPath = path; _destination.Text = path; Invalidate(); Status.Text = "Folder chosen. Press Preview to check what will be created."; }
             else
             {
-                Status.Text = chosen.FailureReason ?? "Folder selection cancelled.";
+                Status.Text = chosen.FailureReason ?? "No folder chosen.";
             }
         }, ct);
     }
@@ -190,15 +226,15 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     {
         UpdateControls();
         if (_execution.IsActive || _execution.NeedsRecovery || !CanPreview || Capability is not { } capability || _format.SelectedItem is not string format)
-            throw new InvalidOperationException("Choose an available tool, valid dimension, files and an existing output folder.");
+            throw new InvalidOperationException("Tick at least one file, choose a folder to save to, and pick a format and size this tool supports.");
         var ids = _files.SelectedItems.Cast<HitItem>().Select(item => item.Hit.FileID).Distinct().Order().ToArray();
         return SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "preview", ids, _destinationPath,
             new ToolRecipe(capability.Id, format, (uint)_dimension.Value)), ct);
     }
     private async Task ExecuteAsync(CancellationToken ct)
     {
-        if (_execution.IsActive || _execution.NeedsRecovery || !_plan.CanExecute) throw new InvalidOperationException("Preview a fresh export first; any prior export must be confirmed.");
-        if (!await ConfirmAsync("Export new versions?", "Create the previewed files? Originals are preserved. Photo metadata may be stripped and output normalized to SDR. " + ToolUndoIntegration.Detail)) return;
+        if (_execution.IsActive || _execution.NeedsRecovery || !_plan.CanExecute) throw new InvalidOperationException("Press Preview first. If an export is still running, wait for it to finish.");
+        if (!await ConfirmAsync("Export new files?", "FileID creates the files shown in the preview. Your originals stay as they are. Photo exports remove location and camera details. " + ToolUndoIntegration.Detail)) return;
         ct.ThrowIfCancellationRequested();
         var id = _plan.PreviewID!;
         var generation = Engine.SpawnGeneration;
@@ -210,7 +246,7 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     {
         if (!ToolUndoIntegration.CanUndo(_plan.UndoID)) throw new InvalidOperationException(ToolUndoIntegration.Detail);
         if (_plan.UndoID is not { } id) return;
-        if (!await ConfirmAsync("Undo export?", "Move unchanged exported files into internal recovery storage? Edited exports are preserved. Originals are unchanged.")) return;
+        if (!await ConfirmAsync("Undo export?", "FileID moves the exported files it created, if you haven't changed them, into its own recovery folder. Files you edited are kept. Your originals are not changed.")) return;
         ct.ThrowIfCancellationRequested();
         await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "undo", OperationID: id), ct);
     }
@@ -218,11 +254,11 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     {
         var generation = Engine.SpawnGeneration;
         if (!_cancelAvailable || _capabilitiesGeneration != generation)
-            throw new InvalidOperationException("The current adapter does not report interruptible export support.");
+            throw new InvalidOperationException("This export can't be stopped. Wait for it to finish.");
         var id = _execution.RequireCancellationOwner(generation);
         _execution.BeginCancellation(generation);
         UpdateControls();
-        Status.Text = "Stopping · waiting for the engine to acknowledge the request…";
+        Status.Text = "Stopping…";
         try
         {
             var response = await Engine.ToolAsync(new ToolRequest(Guid.NewGuid().ToString(), "cancel", OperationID: id), generation, ct);
@@ -274,6 +310,15 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     }
     private sealed record CapabilityItem(ToolCapability Capability)
     {
-        public override string ToString() => $"{Capability.Id}{(Capability.Available ? "" : " · unavailable")}";
+        public override string ToString() => Name + (Capability.Available ? "" : " · not available");
+
+        private string Name => Capability.Id switch
+        {
+            "photo" => "Photo",
+            "video" => "Video",
+            "chapters" => "Chapters",
+            "videoEnhancement" => "Video enhancement",
+            _ => Capability.Id,
+        };
     }
 }

@@ -677,10 +677,11 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
             string? camera = null;
             double? captured = null;
             string? caption = null;
+            var captionInherited = false;
             using (var cmd = _connection.CreateCommand())
             {
                 cmd.CommandText = """
-                    SELECT camera_model, COALESCE(created_at, modified_at), vlm_description
+                    SELECT camera_model, COALESCE(created_at, modified_at), vlm_description, vlm_inherited_from IS NOT NULL
                     FROM files WHERE id = $id
                     """;
                 cmd.Parameters.AddWithValue("$id", fileId);
@@ -689,6 +690,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                 camera = reader.IsDBNull(0) ? null : reader.GetString(0);
                 captured = reader.IsDBNull(1) ? null : reader.GetDouble(1);
                 caption = reader.IsDBNull(2) ? null : reader.GetString(2);
+                captionInherited = !reader.IsDBNull(3) && reader.GetInt64(3) != 0;
             }
 
             var people = new List<string>();
@@ -710,7 +712,7 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
                     if (!string.IsNullOrEmpty(name) && seen.Add(name)) people.Add(name);
                 }
             }
-            return new FileDetails(camera, captured, caption, people);
+            return new FileDetails(camera, captured, caption, people, captionInherited);
         }
         finally { _gate.Release(); }
     }
@@ -901,7 +903,8 @@ internal sealed record FileDetails(
     string? CameraModel,
     double? CapturedAt,
     string? Caption,
-    System.Collections.Generic.IReadOnlyList<string> People);
+    System.Collections.Generic.IReadOnlyList<string> People,
+    bool CaptionInherited = false);
 
 /// <summary>one row of pending VLM-proposed rename, used to seed
 /// the Deep Analyze "Pending renames" bulk-apply sheet.</summary>

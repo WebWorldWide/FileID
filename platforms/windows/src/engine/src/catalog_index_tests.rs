@@ -45,7 +45,8 @@ fn control(action: &str) -> CatalogRequest {
     request(serde_json::json!({"requestID":"control","action":action,"jobID":CatalogIndex::job_id()}))
 }
 fn wait(index: &CatalogIndex) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // The Intel macOS runner needed more than 20 s under the full parallel suite.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut state = index.state.lock();
     while state.worker.is_some() {
         assert!(std::time::Instant::now() < deadline, "catalog worker timed out");

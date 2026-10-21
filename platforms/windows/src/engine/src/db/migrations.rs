@@ -53,6 +53,8 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v22_face_cache_provenance", include_str!("../../../../../../shared/catalog/v22.sql")),
         ("v23_vector_change_tracking", include_str!("../../../../../../shared/catalog/v23.sql")),
         ("v24_face_refresh_failures", include_str!("../../../../../../shared/catalog/v24.sql")),
+        ("v25_ocr_text_source", include_str!("../../../../../../shared/catalog/v25.sql")),
+        ("v26_vlm_inherited_from", include_str!("../../../../../../shared/catalog/v26.sql")),
     ]
 }
 
@@ -204,6 +206,26 @@ const V20_VLM_FULL_MODEL: &str = "
 ALTER TABLE files ADD COLUMN vlm_full_model TEXT;
 ";
 
+/// The database carries migration identifiers this engine does not know: a
+/// newer FileID wrote it. Opening refuses before any migration runs.
+#[derive(Debug)]
+pub struct NewerThanEngine {
+    pub unknown: Vec<String>,
+}
+
+impl std::fmt::Display for NewerThanEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "db_newer_than_engine: database was migrated by a newer FileID \
+             version (unknown migrations: {}) — refusing to open for writing",
+            self.unknown.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for NewerThanEngine {}
+
 /// Apply every registered migration that hasn't been applied yet, in
 /// registration order, each in its own transaction.
 pub fn apply(conn: &Connection) -> Result<()> {
@@ -219,17 +241,13 @@ pub fn apply(conn: &Connection) -> Result<()> {
         .query_map([], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()
         .context("listing applied migrations")?;
-    let unknown: Vec<&str> = applied
+    let unknown: Vec<String> = applied
         .iter()
-        .map(String::as_str)
-        .filter(|id| !known.contains(id))
+        .filter(|id| !known.contains(&id.as_str()))
+        .cloned()
         .collect();
     if !unknown.is_empty() {
-        anyhow::bail!(
-            "db_newer_than_engine: database was migrated by a newer FileID \
-             version (unknown migrations: {}) — refusing to open for writing",
-            unknown.join(", ")
-        );
+        return Err(NewerThanEngine { unknown }.into());
     }
 
     for (id, sql) in registry() {
@@ -480,7 +498,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 24, "expected 24 applied migrations");
+        assert_eq!(n, 26, "expected 26 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -559,7 +577,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 24);
+        assert_eq!(n, 26);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -641,6 +659,7 @@ mod tests {
         let err = apply(&conn).unwrap_err();
         assert!(err.to_string().contains("db_newer_than_engine"));
         assert!(err.to_string().contains("v99_from_the_future"));
+        assert!(err.downcast_ref::<NewerThanEngine>().is_some());
     }
 
     /// The migration chains forked at v14 (macOS registered
@@ -652,7 +671,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 24] = [
+        const CANONICAL: [&str; 26] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -677,6 +696,8 @@ mod tests {
             "v22_face_cache_provenance",
             "v23_vector_change_tracking",
             "v24_face_refresh_failures",
+            "v25_ocr_text_source",
+            "v26_vlm_inherited_from",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");

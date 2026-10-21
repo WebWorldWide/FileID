@@ -162,6 +162,28 @@ internal sealed class AppViewModel : INotifyPropertyChanged
 
     public bool HasFolder => !string.IsNullOrEmpty(_folderPath);
 
+    public async Task ChooseFolderAsync(string path)
+    {
+        FolderPath = path;
+        var engine = EngineClient.Instance;
+        var phase = engine.Phase ?? engine.LastProgress?.Phase;
+        if (phase is ScanPhase.Discovering or ScanPhase.Tagging or ScanPhase.PostScan) return;
+        if (engine.GpuDeviceRemoved || engine.State == EngineClient.LifecycleState.Crashed) return;
+        try
+        {
+            if (engine.State != EngineClient.LifecycleState.Ready)
+            {
+                await engine.WaitForReadyAsync(TimeSpan.FromSeconds(30));
+            }
+            if (!string.Equals(FolderPath, path, StringComparison.Ordinal)) return;
+            await engine.StartScanAsync(path, FolderDisplay);
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("Scan after choosing a folder failed: " + ex.Message);
+        }
+    }
+
     /// <summary>Toggles the sidebar visible/hidden state. Invoked by Ctrl+Shift+S.</summary>
     public void ToggleSidebar() => SidebarVisible = !SidebarVisible;
 

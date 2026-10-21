@@ -42,7 +42,7 @@ impl ReviewFilter {
             ReviewFilter::Drill(Drill::Source(folder)) => format!("From {}", v3::file_name(folder)),
             ReviewFilter::Drill(Drill::Bucket(bucket)) => format!("To {bucket}"),
             ReviewFilter::Drill(Drill::Sources(_)) => "Other folders".into(),
-            ReviewFilter::Drill(Drill::Buckets(_)) => "Other destinations".into(),
+            ReviewFilter::Drill(Drill::Buckets(_)) => "Other new folders".into(),
         }
     }
 
@@ -102,6 +102,7 @@ struct Ui {
     metric_values: [gtk::Label; 3],
     metric_hints: [gtk::Label; 3],
     clip_notice: gtk::Box,
+    clip_title: gtk::Label,
     clip_body: gtk::Label,
     clip_button: gtk::Button,
     recommendations: v3::Panel,
@@ -166,8 +167,10 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     ];
     let preview_actions = v3::hbox(8);
     preview_actions.add_css_class("v3-toggle-row");
-    let plan_button = v3::primary("Plan", true);
-    let plan_again = v3::ghost("Plan again");
+    let plan_button = v3::primary("Suggest a layout", true);
+    plan_button.set_tooltip_text(Some("Work out a new plan from the files as they are now"));
+    let plan_again = v3::ghost("Suggest again");
+    plan_again.set_tooltip_text(Some("Work out a new plan from the files as they are now"));
     let planning_bar = v3::busy_bar(160);
     preview_actions.append(&plan_button);
     preview_actions.append(&plan_again);
@@ -204,11 +207,11 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content.add_css_class("v3-page-pad");
     let intro = v3::vbox(4);
     intro.append(&v3::wrapped(
-        "Preview the proposed moves: FileID keeps your well-named folders and proposes a tidier home for the rest. Nothing moves until you choose Move.",
+        "FileID keeps your well-named folders and suggests a tidier home for everything else. Nothing moves until you press Move.",
         &["v3-body", "tone-text2"],
     ));
     let folder_row = v3::hbox(8);
-    let folder = v3::mono("Choose a library folder to build a plan.", "s11");
+    let folder = v3::mono("Choose and scan a folder first.", "s11");
     folder.set_ellipsize(gtk::pango::EllipsizeMode::Start);
     folder.add_css_class("tone-muted");
     folder.set_hexpand(true);
@@ -253,7 +256,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     content.append(&metrics);
 
     let (clip_notice, clip_title, clip_body) = notice(Tone::Warning);
-    clip_title.set_text("Photos were scanned without CLIP");
+    clip_title.set_text("Sorting by date only");
     let clip_button = v3::accent("Rescan", Tone::Warning, false);
     clip_button.set_halign(gtk::Align::Start);
     clip_notice.append(&clip_button);
@@ -276,7 +279,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     map.root.set_visible(false);
     content.append(&map.root);
 
-    let recommendations = v3::panel("Recommendations");
+    let recommendations = v3::panel("Suggestions");
     recommendations
         .trailing
         .append(&v3::meta("Skip a group to leave it out of the move"));
@@ -349,6 +352,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         metric_values: [keep_value, tidy_value, reorg_value],
         metric_hints: [keep_hint, tidy_hint, reorg_hint],
         clip_notice,
+        clip_title,
         clip_body,
         clip_button,
         recommendations,
@@ -439,27 +443,29 @@ impl Ui {
         let details = [
             if progress.has_plan {
                 format!(
-                    "{} planned · {} → {}",
-                    plural(moves.len(), "move"),
-                    plural(sources.len(), "source"),
-                    plural(buckets.len(), "destination")
+                    "{} to move · {} → {}",
+                    plural(moves.len(), "file"),
+                    plural(sources.len(), "folder"),
+                    plural(buckets.len(), "folder")
                 )
+            } else if progress.planning {
+                "Reading every folder and choosing a home for each file…".to_owned()
             } else {
-                "Build a plan from the library folder. Nothing moves.".to_owned()
+                "FileID suggests a tidier layout for this folder. Nothing moves yet.".to_owned()
             },
             if progress.has_plan {
                 format!(
-                    "{} of {} selected",
-                    plural(progress.selected, "move"),
+                    "{} of {} chosen",
+                    plural(progress.selected, "file"),
                     crate::shell::grouped(moves.len() as u64)
                 )
             } else {
                 "Check where each file would go.".to_owned()
             },
             if self.moved.get() {
-                "Files moved. Undo puts every file back.".to_owned()
+                "Files were moved. Undo move puts them back.".to_owned()
             } else {
-                "Move the selected files. One undoable run.".to_owned()
+                "Moves the chosen files into their new folders.".to_owned()
             },
         ];
         for ((cell, state), detail) in self.cells.iter().zip(states).zip(details) {
@@ -502,6 +508,15 @@ impl Ui {
         self.plan_button.set_sensitive(has_root && !busy);
         self.plan_again.set_visible(progress.has_plan);
         self.plan_again.set_sensitive(has_root && !busy);
+        let plan_tip = if !has_root {
+            "Choose a folder first"
+        } else if progress.moving {
+            "Wait for the move to finish"
+        } else {
+            "Work out a new plan from the files as they are now"
+        };
+        self.plan_button.set_tooltip_text(Some(plan_tip));
+        self.plan_again.set_tooltip_text(Some(plan_tip));
         self.planning_bar.set_visible(progress.planning);
         self.review_button.set_sensitive(progress.has_plan && !busy);
         let count = progress.selected;
@@ -510,6 +525,11 @@ impl Ui {
         self.move_button
             .set_visible(!progress.moving && !self.moved.get());
         self.move_button.set_sensitive(count > 0 && !busy);
+        self.move_button.set_tooltip_text(Some(if count == 0 {
+            "Choose at least one file to move first"
+        } else {
+            "Move the chosen files into their new folders. You confirm first, and you can undo."
+        }));
         self.moving_bar.set_visible(progress.moving);
         self.cancel_button.set_visible(progress.moving);
         self.cancel_button.set_label(if self.stopping.get() {
@@ -986,14 +1006,19 @@ impl Ui {
             if without_clip > 0 {
                 let installed = clip_model_installed();
                 ui.clip_body.set_text(&format!(
-                    "{} group by date only. {}",
+                    "{} go into year and month folders. {}",
                     plural(without_clip as usize, "photo"),
                     if installed {
-                        "Rescan to sort them by what they show."
+                        "This folder was scanned before the Search by description model was downloaded. A rescan looks at the photos again; files already up to date are skipped."
                     } else {
-                        "Install CLIP in Settings, then rescan."
+                        "Without the Search by description model, FileID can't see what photos show. Download it in Settings, then rescan."
                     }
                 ));
+                ui.clip_title.set_text(if installed {
+                    "Rescan so FileID can see what's in your photos"
+                } else {
+                    "Sorting by date only"
+                });
                 ui.clip_button
                     .set_label(if installed { "Rescan" } else { "Open Settings" });
                 ui.clip_notice.set_visible(true);
@@ -1108,7 +1133,7 @@ impl Ui {
         }
         let dialog = adw::AlertDialog::new(
             Some(&format!("Move {}?", plural(moves.len(), "file"))),
-            Some("They move inside the library folder as one undoable run. Nothing is deleted."),
+            Some("The files move into the new folders. Nothing is deleted, and Undo move puts every file back where it was."),
         );
         dialog.add_responses(&[("cancel", "Cancel"), ("move", "Move files")]);
         dialog.set_response_appearance("move", adw::ResponseAppearance::Destructive);
@@ -1231,7 +1256,7 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                     Ok(()) => ui.set_notice(
                         Tone::Gold,
                         "Rescanning",
-                        "Plan again when the scan finishes.",
+                        "Press Suggest again when the scan finishes.",
                     ),
                     Err(error) => {
                         ui.set_notice(Tone::Warning, "Something went wrong", &error.to_string())
@@ -1277,8 +1302,8 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
                     ui.stopping.set(false);
                     ui.set_notice(
                         Tone::Warning,
-                        "Engine stopped",
-                        "The FileID engine is restarting. Plan again when it's back.",
+                        "FileID restarted",
+                        "FileID restarted in the middle of the work. Files already moved can be put back with Undo move; press Suggest again for the rest.",
                     );
                     ui.refresh();
                 }

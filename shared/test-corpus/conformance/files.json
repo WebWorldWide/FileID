@@ -43,7 +43,8 @@
     "description": "trashFiles moves the file to the platform Trash, drops its row and returns the undo batch id; restoreFromTrash with that id puts the file back byte for byte and re-catalogs it.",
     "knownDivergences": [
       {"engine": "swift", "run": false, "reason": "restoreFromTrash is not implemented (not_implemented_yet), and trashFiles would write to the real user Trash"},
-      {"engine": "rust", "os": ["darwin"], "reason": "shell::trash::trash_path_as is not implemented on macOS, so trashFiles fails"}
+      {"engine": "rust", "os": ["darwin"], "reason": "the Rust engine has no macOS Trash backend, so trashFiles refuses and moves nothing"},
+      {"engine": "rust", "os": ["windows"], "run": false, "reason": "trashFiles uses the per-volume Recycle Bin, which the fixture cannot confine to its state directory (the self-hosted runner's bin is a real user's)"}
     ],
     "tree": [
       {"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}},

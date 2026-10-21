@@ -34,13 +34,22 @@ public sealed partial class BulkRenameSheet : UserControl
         InitializeComponent();
     }
 
-    public void SetPlan(IReadOnlyList<RenamePlan> plan)
+    public void SetPlan(IReadOnlyList<RenamePlan> plan, bool suggested = false)
     {
         _items.Clear();
         foreach (var p in plan) _items.Add(p);
-        SelectionText.Text = plan.Count == 1
-            ? "1 rename pending. Toggle off any row you don't want."
-            : $"{plan.Count} renames pending. Toggle off any row you don't want.";
+        if (suggested)
+        {
+            HeaderText.Text = "Suggested names";
+            SelectionText.Text = "FileID suggested a clearer name for each file based on what it shows. Tick the ones you want, then press Rename.";
+        }
+        else
+        {
+            HeaderText.Text = "Rename the chosen files";
+            SelectionText.Text = plan.Count == 1
+                ? "1 file to rename. Untick any row you don't want."
+                : $"{plan.Count:N0} files to rename. Untick any row you don't want.";
+        }
 
         RenameRepeater.ItemsSource = _items;
     }

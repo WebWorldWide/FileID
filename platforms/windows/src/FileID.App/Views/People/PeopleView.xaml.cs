@@ -337,14 +337,14 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             }
             if (ViewModel.IsLoading)
             {
-                return "Loading clusters…";
+                return "Loading people…";
             }
             string coverage = ViewModels.PeopleViewModel.DeferredFaceStatus(ViewModels.EngineClient.Instance.LastFaceClustering?.DeferredFaces);
             if (ViewModel.Clusters.Count == 0)
             {
-                return string.IsNullOrEmpty(coverage) ? "No people yet — run face clustering after a scan." : coverage;
+                return string.IsNullOrEmpty(coverage) ? "No people yet. Scan a folder with photos; faces are grouped into one card per person." : coverage;
             }
-            return $"{ViewModel.Clusters.Count} clusters" + (string.IsNullOrEmpty(coverage) ? string.Empty : $" · {coverage}");
+            return $"{ViewModel.Clusters.Count:N0} {(ViewModel.Clusters.Count == 1 ? "person" : "people")}" + (string.IsNullOrEmpty(coverage) ? string.Empty : $" · {coverage}");
         }
     }
 
@@ -635,7 +635,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             var confirm = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = "Merge clusters?",
+                Title = "Combine these cards?",
                 Content = $"Merge \"{srcName}\" ({srcCluster?.MemberCount ?? 0} faces) into \"{dstName}\" ({dstCluster?.MemberCount ?? 0} faces)?\n\nAll faces from {srcName} will be reassigned to {dstName}.",
                 PrimaryButtonText = "Merge",
                 CloseButtonText = "Cancel",
@@ -804,7 +804,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
         var n = ViewModel.SelectedCount;
         BulkSelectionText.Text = n switch
         {
-            0 => "Pick clusters to merge or mark as unknown",
+            0 => "Choose cards to combine or hide",
             1 => "1 selected",
             _ => $"{n} selected",
         };
@@ -872,12 +872,12 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             var stack = new StackPanel { Spacing = 6 };
             stack.Children.Add(new TextBlock
             {
-                Text = "Who is this merging into?",
+                Text = "Which card should stay?",
                 Style = Application.Current.Resources["BodyStrongTextBlockStyle"] as Style,
             });
             stack.Children.Add(new TextBlock
             {
-                Text = $"Combine {selectedClusters.Count} selected people into one person. Choose the destination person below:",
+                Text = $"Combine {selectedClusters.Count} cards into one person. Choose the card to keep; photos from the other cards move into it, and those cards go away.",
                 Style = Application.Current.Resources["CaptionTextBlockStyle"] as Style,
                 Foreground = FileID.Services.ThemeHelper.GetBrushSafe("TextFillColorSecondaryBrush"),
                 TextWrapping = TextWrapping.Wrap,
@@ -887,7 +887,7 @@ public sealed partial class PeopleView : UserControl, INotifyPropertyChanged
             var dialog = new ContentDialog
             {
                 XamlRoot = XamlRoot,
-                Title = "Merge People",
+                Title = $"Combine {selectedClusters.Count} cards into one person",
                 Content = stack,
                 PrimaryButtonText = "Merge",
                 CloseButtonText = "Cancel",

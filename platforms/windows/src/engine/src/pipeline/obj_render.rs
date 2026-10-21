@@ -28,6 +28,9 @@ const MAX_FACE_VERTICES: usize = 4_096;
 const MAX_MTL_FILES: usize = 32;
 const MAX_MTL_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MATERIALS: usize = 50_000;
+/// Total bounding-box pixels the rasterizer may visit (~1,900 full frames);
+/// a million full-frame triangles would otherwise take minutes per file.
+const MAX_RASTER_PIXELS: u64 = 500_000_000;
 
 /// A triangle ready to rasterize: the three positions and its flat surface colour.
 struct Tri {
@@ -76,7 +79,7 @@ fn parse_obj(obj_path: &Path) -> Result<(Vec<[f32; 3]>, Vec<Tri>)> {
         let mut it = line.split_whitespace();
         match it.next() {
             Some("v") => {
-                let c: Vec<f32> = it.take(3).filter_map(|s| s.parse().ok()).collect();
+                let c: Vec<f32> = it.take(3).filter_map(|s| s.parse().ok()).filter(|v: &f32| v.is_finite()).collect();
                 if c.len() == 3 {
                     if verts.len() >= MAX_OBJ_VERTICES {
                         bail!("obj vertex count exceeds safety cap");
@@ -267,6 +270,7 @@ fn rasterize(verts: &[[f32; 3]], tris: &[Tri]) -> Vec<u8> {
         color[i * 3 + 2] = BG[2];
     }
     let mut depth = vec![f32::MIN; (SIZE * SIZE) as usize];
+    let mut budget = MAX_RASTER_PIXELS;
 
     for t in tris {
         let r0 = rotate(t.p[0]);
@@ -285,21 +289,38 @@ fn rasterize(verts: &[[f32; 3]], tris: &[Tri]) -> Vec<u8> {
             (t.kd[1] * shade * 255.0).clamp(0.0, 255.0) as u8,
             (t.kd[2] * shade * 255.0).clamp(0.0, 255.0) as u8,
         ];
-        fill_triangle(a, b, c, px, &mut color, &mut depth);
+        if !fill_triangle(a, b, c, px, &mut color, &mut depth, &mut budget) {
+            break;
+        }
     }
     color
 }
 
 /// Barycentric triangle fill with a depth test (nearer view-space z wins).
-fn fill_triangle(a: [f32; 3], b: [f32; 3], c: [f32; 3], px: [u8; 3], color: &mut [u8], depth: &mut [f32]) {
+/// Returns false once `budget` pixels have been visited across all triangles.
+fn fill_triangle(
+    a: [f32; 3],
+    b: [f32; 3],
+    c: [f32; 3],
+    px: [u8; 3],
+    color: &mut [u8],
+    depth: &mut [f32],
+    budget: &mut u64,
+) -> bool {
     let min_x = a[0].min(b[0]).min(c[0]).floor().max(0.0) as i32;
     let max_x = a[0].max(b[0]).max(c[0]).ceil().min(SIZE as f32 - 1.0) as i32;
     let min_y = a[1].min(b[1]).min(c[1]).floor().max(0.0) as i32;
     let max_y = a[1].max(b[1]).max(c[1]).ceil().min(SIZE as f32 - 1.0) as i32;
     let area = edge(a, b, c);
-    if area.abs() < 1e-6 {
-        return; // degenerate
+    // A NaN area (overflowed coordinates) would pass every inside test.
+    if area.is_nan() || area.abs() < 1e-6 || max_x < min_x || max_y < min_y {
+        return true;
     }
+    let pixels = u64::from((max_x - min_x + 1) as u32) * u64::from((max_y - min_y + 1) as u32);
+    let Some(left) = budget.checked_sub(pixels) else {
+        return false;
+    };
+    *budget = left;
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let p = [x as f32 + 0.5, y as f32 + 0.5, 0.0];
@@ -319,6 +340,7 @@ fn fill_triangle(a: [f32; 3], b: [f32; 3], c: [f32; 3], px: [u8; 3], color: &mut
             }
         }
     }
+    true
 }
 
 /// Signed area of the triangle (a, b, p) in screen space (the edge function).

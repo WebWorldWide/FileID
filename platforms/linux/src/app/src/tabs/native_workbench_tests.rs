@@ -147,7 +147,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| engine.borrow().is_ready());
     wait(|| !tools_ui.state.borrow().capabilities.is_empty());
 
-    let query = entry(&catalog, "Search names, captions, chapters");
+    let query = entry(&catalog, "Search files and videos");
     query.set_text("photo-fixture");
     query.emit_activate();
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
@@ -283,9 +283,9 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| text(&chat).contains("No model response is running"));
 
     stack.set_visible_child_name("deep");
-    assert!(text(&deep).contains("Deep Analyze"));
+    assert!(text(&deep).contains("This library"));
     stack.set_visible_child_name("restructure");
-    assert!(text(&restructure).contains("Preview the proposed moves"));
+    assert!(text(&restructure).contains("suggests a tidier home"));
     assert!(source.is_file());
     assert_eq!(count(&read, "files"), preserved_files);
     engine

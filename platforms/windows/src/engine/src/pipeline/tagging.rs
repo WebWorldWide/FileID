@@ -897,6 +897,24 @@ pub struct Tagger {
     models: Arc<ModelStack>,
     scan_root: Option<std::path::PathBuf>,
     legacy_hashes: bool,
+    scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
+}
+
+/// How long one scan file may wait for CPU/memory admission before it is
+/// recorded as failed. Searches, residents and low free memory are transient;
+/// the wait ends at once when the scan is cancelled.
+const SCAN_ADMISSION_PATIENCE: Duration = Duration::from_secs(600);
+
+/// Working-set estimate for one file's analysis: four copies of the decoded
+/// frame plus a fixed floor.
+fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
+    predecoded
+        .decoded
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|(rgb, _, _)| (rgb.len() as u64).saturating_mul(4).div_ceil(1_048_576))
+        .unwrap_or(0)
+        + 32
 }
 
 impl Tagger {
@@ -907,7 +925,14 @@ impl Tagger {
             models,
             scan_root: None,
             legacy_hashes: false,
+            scheduler: crate::resource_scheduler::ResourceScheduler::shared(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_scheduler(mut self, scheduler: Arc<crate::resource_scheduler::ResourceScheduler>) -> Self {
+        self.scheduler = scheduler;
+        self
     }
 
     /// Have the decoders also compute the legacy BLAKE3 digests the
@@ -1127,6 +1152,7 @@ impl Tagger {
             let vision_sem = vision_sem.clone();
             let clip_sem = clip_sem.clone();
             let models = self.models.clone();
+            let scheduler = self.scheduler.clone();
 
             tokio::spawn(async move {
                 // Drop per-worker thread priority to LOWEST so foreground
@@ -1154,21 +1180,57 @@ impl Tagger {
                     let timeout_size = predecoded.file.size_bytes;
                     let timeout_modified = predecoded.file.modified_unix;
                     let timeout_created = predecoded.file.created_unix;
+                    // Admission waits outside the per-file timeout: a busy
+                    // machine (a search, a resident model, low free memory)
+                    // delays a file but never fails it.
+                    let demand = crate::resource_scheduler::Demand { memory_mb: scan_working_mb(&predecoded), cpu: 1, io: 0 };
+                    let (admission_scheduler, admission_coord) = (scheduler.clone(), coord.clone());
+                    let admission = tokio::task::spawn_blocking(move || {
+                        admission_scheduler.reserve_patient(
+                            demand,
+                            crate::resource_scheduler::Priority::Background,
+                            || admission_coord.is_cancelled(),
+                            SCAN_ADMISSION_PATIENCE,
+                        )
+                    })
+                    .await;
+                    let (_lease, refused) = match admission {
+                        Ok(Ok(lease)) => (Some(lease), None),
+                        _ if coord.is_cancelled() => break,
+                        Ok(Err(error)) => (None, Some(error.to_string())),
+                        Err(error) => (None, Some(error.to_string())),
+                    };
                     // Bounds async inference after decoding; platform decoder
-                    // calls enforce their own limits where the OS permits.
-                    let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord);
-                    let tagged = match tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        fut,
-                    )
-                    .await
-                    {
+                    // calls enforce their own limits where the OS permits. A
+                    // panic on one file becomes that file's failure so the
+                    // worker keeps draining the queue.
+                    let outcome = if let Some(message) = refused {
+                        Err((message, 0.0))
+                    } else {
+                        let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
+                        ));
+                        match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+                            Ok(Ok(t)) => Ok(t),
+                            Ok(Err(_panic)) => {
+                                tracing::error!(
+                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    "per-file processing panicked; marking failed and continuing"
+                                );
+                                Err(("the file could not be analyzed (internal error)".to_string(), 0.0))
+                            }
+                            Err(_elapsed) => {
+                                tracing::warn!(
+                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    "per-file timeout after 60s; marking failed and continuing"
+                                );
+                                Err(("per-file timeout after 60s".to_string(), 60000.0))
+                            }
+                        }
+                    };
+                    let tagged = match outcome {
                         Ok(t) => t,
-                        Err(_elapsed) => {
-                            tracing::warn!(
-                                path = %crate::platform::redact_path_for_log(&path_for_timeout),
-                                "per-file timeout after 60s; marking failed and continuing"
-                            );
+                        Err((message, total_ms)) => {
                             TaggedFile {
                                 path: path_for_timeout,
                                 kind: timeout_kind,
@@ -1193,9 +1255,9 @@ impl Tagger {
                                 location_lon: None,
                                 vision_ms: 0.0,
                                 clip_ms: 0.0,
-                                total_ms: 60000.0,
+                                total_ms,
                                 failed: true,
-                                error_message: Some("per-file timeout after 60s".into()),
+                                error_message: Some(message),
                                 file_ref: None,
                                 content_hash: None,
                                 legacy_hashes: None,
@@ -1247,6 +1309,21 @@ pub struct PreDecoded {
     /// Reservation of this frame's decoded bytes in the predecode budget;
     /// released when the worker drops the frame.
     budget: Option<PredecodeBudgetGuard>,
+}
+
+impl PreDecoded {
+    fn failed(file: DiscoveredFile, message: &str) -> Self {
+        Self {
+            file,
+            decoded: Some(Err(anyhow::anyhow!(message.to_string()))),
+            doc_text: None,
+            audio_tags: Vec::new(),
+            content_hash: None,
+            legacy_hashes: None,
+            exif: None,
+            budget: None,
+        }
+    }
 }
 
 /// Byte-weighted read-ahead budget for decoded frames. Decoders reserve their
@@ -1383,6 +1460,51 @@ fn run_decoder_thread(
             size = file.size_bytes,
             "decode start"
         );
+        let fallback = file.clone();
+        let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            predecode_one(file, &coord, &budget, legacy)
+        })) {
+            Ok(Some(item)) => item,
+            Ok(None) => return,
+            Err(_) => {
+                tracing::error!(
+                    path = %crate::platform::redact_path_for_log(&fallback.path),
+                    "decoder panicked on a file; recording it as failed and continuing"
+                );
+                PreDecoded::failed(fallback, "the file could not be read (decoder error)")
+            }
+        };
+        let mut item = item;
+        loop {
+            if coord.is_cancelled() {
+                return;
+            }
+            match tx.try_send(item) {
+                Ok(()) => break,
+                Err(async_channel::TrySendError::Closed(_)) => return,
+                Err(async_channel::TrySendError::Full(returned)) => {
+                    item = returned;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+
+/// Reads, hashes and decodes one file for `run_decoder_thread`. `None` means
+/// the scan was cancelled while waiting for decode budget.
+fn predecode_one(
+    file: DiscoveredFile,
+    coord: &ScanCoordinator,
+    budget: &Arc<PredecodeBudget>,
+    legacy: bool,
+) -> Option<PreDecoded> {
+    #[cfg(test)]
+    assert!(
+        file.path.file_name().is_none_or(|name| name != "fileid-test-decoder-panic"),
+        "injected decoder panic"
+    );
+    {
         let decode_started = Instant::now();
 
         let mut file_bytes = None;
@@ -1484,14 +1606,12 @@ fn run_decoder_thread(
                         .as_deref()
                         .and_then(probe_image_decode_reservation_bytes)
                         .unwrap_or_else(|| budget.capacity());
-                    let Some((result, guard)) = decode_reserved(
-                        &budget,
+                    let (result, guard) = decode_reserved(
+                        budget,
                         reservation,
-                        &coord,
+                        coord,
                         || decode_image_sync(&file.path, file_bytes.as_deref()),
-                    ) else {
-                        return;
-                    };
+                    )?;
                     budget_guard = Some(guard);
                     Some(result)
                 }
@@ -1499,14 +1619,12 @@ fn run_decoder_thread(
                     // Media Foundation negotiates a <=1280px RGB32 working frame;
                     // its bounded fallback rejects native BGRA + RGB peaks above
                     // this shared reservation before allocating the retained RGB.
-                    let Some((result, guard)) = decode_reserved(
-                        &budget,
+                    let (result, guard) = decode_reserved(
+                        budget,
                         crate::shell::video::VIDEO_DECODE_RESERVATION_BYTES,
-                        &coord,
+                        coord,
                         || decode_video_keyframe_sync(&file.path),
-                    ) else {
-                        return;
-                    };
+                    )?;
                     budget_guard = Some(guard);
                     Some(result)
                 }
@@ -1521,14 +1639,12 @@ fn run_decoder_thread(
                         .and_then(|s| s.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
                     if is_obj {
-                        let Some((result, guard)) = decode_reserved(
-                            &budget,
+                        let (result, guard) = decode_reserved(
+                            budget,
                             budget.capacity(),
-                            &coord,
+                            coord,
                             || crate::pipeline::obj_render::render_obj_to_rgb(&file.path),
-                        ) else {
-                            return;
-                        };
+                        )?;
                         match result {
                             Ok(frame) => {
                                 budget_guard = Some(guard);
@@ -1577,6 +1693,14 @@ fn run_decoder_thread(
                 _ => Vec::new(),
             }
         };
+        // Video, WIC and OBJ frames come from decoders without a pixel check of
+        // their own; every consumer downstream indexes by w*h*3.
+        if let Some(Ok((rgb, w, h))) = &decoded {
+            let expected = (*w as usize).checked_mul(*h as usize).and_then(|p| p.checked_mul(3));
+            if *w == 0 || *h == 0 || expected != Some(rgb.len()) {
+                decoded = Some(Err(anyhow::anyhow!("decoder returned a {w}x{h} frame of {} bytes", rgb.len())));
+            }
+        }
         let frame_bytes = match &decoded {
             Some(Ok((rgb, _, _))) => rgb.len(),
             _ => 0,
@@ -1596,7 +1720,7 @@ fn run_decoder_thread(
             // reservation immediately instead of riding the channel.
             budget_guard = None;
         }
-        let mut item = PreDecoded {
+        Some(PreDecoded {
             file,
             decoded,
             doc_text,
@@ -1605,20 +1729,7 @@ fn run_decoder_thread(
             legacy_hashes,
             exif: exif_data,
             budget: budget_guard,
-        };
-        loop {
-            if coord.is_cancelled() {
-                return;
-            }
-            match tx.try_send(item) {
-                Ok(()) => break,
-                Err(async_channel::TrySendError::Closed(_)) => return,
-                Err(async_channel::TrySendError::Full(returned)) => {
-                    item = returned;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
+        })
     }
 }
 
@@ -1679,7 +1790,7 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
 /// This covers installed HEIF and camera-RAW codecs as well as the standard
 /// Windows bitmap codecs. The fallback is still per-file and bounded, so a
 /// missing codec only marks that file as undecodable.
-fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let is_raw = path
         .extension()
         .and_then(|s| s.to_str())
@@ -1705,11 +1816,11 @@ fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Re
             }
         }
     }
-    // Linux: best-effort HEIC/HEIF via the libheif CLI tools (see
+    // Linux (libheif CLI tools) and macOS (sips): best-effort HEIC/HEIF (see
     // shell::heic::decode). On success use it; if the tools are absent or fail,
     // fall through to the original image-rs error so the file is just skipped —
     // no hard error and no install nag for this optional path.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     {
         let ext = path
             .extension()
@@ -1772,7 +1883,7 @@ pub(crate) fn decode_raw_preview_at_least(
 /// bytes: decoder output plus a possible RGB8 conversion. Decoder setup reads
 /// headers only; admission occurs before `decode()` allocates either full
 /// frame. Path-backed images use an exclusive reservation instead.
-fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
     use image::ImageDecoder;
     use std::io::Cursor;
 
@@ -1823,6 +1934,11 @@ pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>
     dec.read_info().ok()?;
     let info = dec.info()?;
     let (pw, ph) = (u32::from(info.width), u32::from(info.height));
+    // Progressive JPEGs keep full-resolution coefficients whatever the DCT
+    // scale, so the header size, not the output size, bounds the allocation.
+    if u64::from(pw) * u64::from(ph) > MAX_DECODED_PIXELS {
+        return None;
+    }
     let long = pw.max(ph);
     // DCT scales are powers of two; below 2× the floor even 1/2 would land
     // under it, so only genuinely oversized frames take this path.
@@ -1991,20 +2107,6 @@ async fn process_file_predecoded(
         tags_evaluated: false,
     };
 
-    let working_mb = decoded.as_ref().and_then(|result| result.as_ref().ok()).map(|(rgb, _, _)| (rgb.len() as u64).saturating_mul(4).div_ceil(1_048_576)).unwrap_or(0) + 32;
-    let admission_coord = coord.clone();
-    let admission = tokio::task::spawn_blocking(move || crate::resource_scheduler::ResourceScheduler::shared().reserve(
-        crate::resource_scheduler::Demand { memory_mb: working_mb, cpu: 1, io: 0 },
-        crate::resource_scheduler::Priority::Background, || admission_coord.is_cancelled())).await;
-    let _lease = match admission {
-        Ok(Ok(lease)) => lease,
-        result => {
-            tagged.failed = true;
-            tagged.error_message = Some(match result { Ok(Err(error)) => error.to_string(), Err(error) => error.to_string(), _ => unreachable!() });
-            return tagged;
-        }
-    };
-
     // Content identity for rename/move heal. The decoder thread already
     // computed `content_hash` for every non-online kind (image/doc/pdf/audio
     // via the single read; video/over-cap/other via the bounded composite),
@@ -2039,14 +2141,20 @@ async fn process_file_predecoded(
             for (label, score) in crate::util::keywords::extract(&text) {
                 tagged.tags.push((label, Some(score)));
             }
-            // BGE-small semantic embedding for the doc text. Runs on
-            // the calling worker thread under a single-Session Mutex (sync
-            // inference). Skipped when BGE isn't installed — FTS5 still
+            // BGE-small semantic embedding for the doc text. Sync inference
+            // under a single-Session Mutex, so it runs on the blocking pool:
+            // on an async worker every waiting doc would pin a runtime thread
+            // and starve IPC. Skipped when BGE isn't installed — FTS5 still
             // serves keyword search.
-            if !coord.is_gpu_dead() {
-                if let Some(bge_mu) = &models.bge_text {
-                    let mut bge = bge_mu.lock();
-                    match bge.embed(&text) {
+            if !coord.is_gpu_dead() && models.bge_text.is_some() {
+                let (embed_models, embed_text) = (models.clone(), text.clone());
+                let embedded = tokio::task::spawn_blocking(move || {
+                    embed_models.bge_text.as_ref().map(|bge| bge.lock().embed(&embed_text))
+                })
+                .await
+                .unwrap_or_else(|join| Some(Err(anyhow::anyhow!("BGE embedding task failed: {join}"))));
+                if let Some(result) = embedded {
+                    match result {
                         Ok(emb) => tagged.text_embedding = Some(emb),
                         Err(err) => {
                             if error_has_device_removed_marker(&err) {
@@ -2599,6 +2707,15 @@ async fn process_file_predecoded(
 /// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
 /// is wasted CPU; skip in that case but keep running for documents/screenshots.
 fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64) -> bool {
+    // Paper, whiteboard and handwriting tags read even on camera photos; the
+    // OCR has no handwriting tier, so Deep Analyze's transcription picks up what
+    // it mangles (text_reading::needs_transcription).
+    let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
+    if super::text_reading::is_text_bearing(&tag_names)
+        || super::text_reading::is_document_shape(tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
+    {
+        return true;
+    }
     if tagged.camera_model.is_some() {
         return false;
     }
@@ -2795,7 +2912,7 @@ fn apply_exif_orientation(
     Ok((rgb.into_raw(), ow, oh))
 }
 
-fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
         .ok()?;
@@ -2803,8 +2920,11 @@ fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Optio
         .get_field(exif::Tag::Model, exif::In::PRIMARY)
         .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
         .filter(|s| !s.is_empty());
-    let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
-    let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
+    // A zero denominator or a junk value would store NaN/inf or an impossible place.
+    let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef)
+        .filter(|v| v.is_finite() && v.abs() <= 90.0);
+    let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef)
+        .filter(|v| v.is_finite() && v.abs() <= 180.0);
     Some((camera_model, lat, lon))
 }
 
@@ -3046,6 +3166,67 @@ mod tests {
         assert!(face_is_excluded(0.0, 40.0_f32.to_radians(), 1.0, 200.0));
     }
 
+    /// A catalog search holds an interactive lease for the whole scan and free
+    /// memory dips at the start: every file must still be catalogued, not
+    /// marked failed as "deferred" or "memory too low".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scan_files_wait_for_admission_instead_of_failing() {
+        use crate::resource_scheduler::{Demand, Priority, ResourceScheduler};
+        use std::sync::atomic::AtomicU64;
+        let dir = std::env::temp_dir().join(format!("fileid-scan-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let free = Arc::new(AtomicU64::new(12_000));
+        let reading = free.clone();
+        let scheduler = ResourceScheduler::new(move || (16_384, reading.load(Ordering::Relaxed)), 2, 2);
+        let search = scheduler
+            .reserve(Demand { memory_mb: 32, cpu: 1, io: 1 }, Priority::Interactive, || false)
+            .unwrap();
+        free.store(600, Ordering::Relaxed);
+        let restore = free.clone();
+        let recovery = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            restore.store(12_000, Ordering::Relaxed);
+        });
+
+        let coord = ScanCoordinator::new();
+        let (tx, rx) = mpsc::channel(32);
+        let tagger = Tagger::new(coord, 4, Arc::new(ModelStack::empty())).with_scheduler(scheduler.clone());
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        let total = 12;
+        for i in 0..total {
+            let path = dir.join(format!("note{i}.txt"));
+            std::fs::write(&path, format!("garden notes number {i}")).unwrap();
+            tx.send(DiscoveredFile {
+                path,
+                kind: FileKind::Doc,
+                size_bytes: 20,
+                modified_unix: 1.0,
+                created_unix: None,
+                online_only: false,
+                file_ref: None,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        let mut failed = Vec::new();
+        for _ in 0..total {
+            let file = tokio::time::timeout(Duration::from_secs(30), out.recv())
+                .await
+                .expect("every file is emitted")
+                .expect("channel open");
+            if file.failed {
+                failed.push(file.error_message);
+            }
+        }
+        drop(out);
+        decoder_join.await.unwrap();
+        recovery.join().unwrap();
+        drop(search);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failed.is_empty(), "files failed during a search: {failed:?}");
+    }
+
     #[tokio::test]
     async fn tagger_passes_discovered_through_to_tagged() {
         let coord = ScanCoordinator::new();
@@ -3246,6 +3427,39 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("full decoder output queue must remain cancellation-aware");
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn decoder_panic_on_one_file_fails_that_file_and_keeps_decoding() {
+        let dir = std::env::temp_dir().join(format!("fileid-decoder-panic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = ["fileid-test-decoder-panic", "after.txt"];
+        for name in names {
+            std::fs::write(dir.join(name), b"text").unwrap();
+        }
+        let (raw_tx, raw_rx) = async_channel::bounded(names.len());
+        let (predecoded_tx, predecoded_rx) = async_channel::bounded(names.len());
+        for name in names {
+            raw_tx
+                .send_blocking(DiscoveredFile {
+                    path: dir.join(name),
+                    kind: FileKind::Doc,
+                    size_bytes: 4,
+                    modified_unix: 0.0,
+                    created_unix: None,
+                    online_only: false,
+                    file_ref: None,
+                })
+                .unwrap();
+        }
+        drop(raw_tx);
+        run_decoder_thread(raw_rx, predecoded_tx, ScanCoordinator::new(), PredecodeBudget::new(1 << 20), false);
+        let failed = predecoded_rx.try_recv().expect("panicking file still reported");
+        assert!(matches!(failed.decoded, Some(Err(_))));
+        let next = predecoded_rx.try_recv().expect("decoder kept running");
+        assert_eq!(next.file.path, dir.join("after.txt"));
+        assert!(next.content_hash.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

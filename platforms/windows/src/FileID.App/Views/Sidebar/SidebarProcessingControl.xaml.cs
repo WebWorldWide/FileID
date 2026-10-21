@@ -150,8 +150,8 @@ public sealed partial class SidebarProcessingControl : UserControl
             var vm = AppViewModel.Instance;
             if (!vm.HasFolder)
             {
-                await ShowAlertAsync("Pick a folder first",
-                    "FileID needs a folder to scan. Use the folder switcher in the title bar.");
+                await ShowAlertAsync("Choose a folder first",
+                    "Choose a folder to scan from the folder button in the title bar.");
                 return;
             }
 
@@ -161,7 +161,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             // can land at 20-25 s, while still failing fast on a dead engine.
             if (EngineClient.Instance.State != EngineClient.LifecycleState.Ready)
             {
-                IdleStatusText.Text = $"Waiting for engine ({EngineClient.Instance.State})…";
+                IdleStatusText.Text = "Getting ready…";
                 StartScanButton.IsEnabled = false;
                 try
                 {
@@ -170,9 +170,9 @@ public sealed partial class SidebarProcessingControl : UserControl
                 catch (System.Exception ex)
                 {
                     DebugLog.Warn("StartScan: WaitForReadyAsync threw: " + ex.Message);
-                    await ShowAlertAsync("Engine isn't ready",
-                        $"FileID's engine hasn't reported ready after 30 seconds (status: {EngineClient.Instance.State}).\n\n" +
-                        "Try restarting the app. If this keeps happening, check the engine log at " +
+                    await ShowAlertAsync("FileID isn't ready yet",
+                        "FileID is still getting ready. Try again in a moment.\n\n" +
+                        "If this keeps happening, quit and reopen FileID. Details are in the engine log at " +
                         "%LOCALAPPDATA%\\FileID\\logs\\engine.jsonl.");
                     DispatcherQueue.TryEnqueue(Sync);
                     return;
@@ -219,8 +219,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             {
                 DebugLog.Error("StartScan IPC failed: " + ex.Message);
                 await ShowAlertAsync("Scan didn't start",
-                    "FileID couldn't tell the engine to start. Engine status: "
-                    + EngineClient.Instance.State);
+                    "FileID is still getting ready. Try again in a moment.");
             }
         }
         catch (Exception ex)
@@ -365,6 +364,9 @@ public sealed partial class SidebarProcessingControl : UserControl
         WarningBanner.Visibility = Visibility.Visible;
     }
 
+    private void OnNextStepClicked(object sender, RoutedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnNextStepClicked), () => AppViewModel.Instance.ActiveTab = SidebarTab.DeepAnalyze);
+
     private void OnDismissWarningClicked(object sender, RoutedEventArgs e)
     {
         EngineClient.Instance.LastWarning = null;
@@ -424,12 +426,15 @@ public sealed partial class SidebarProcessingControl : UserControl
         Brush accent = _text2;
         bool danger = false;
         bool showLog = false;
+        bool retry = false;
+        bool nextStep = false;
+        bool celebrate = false;
         var controls = CardControls.Start;
 
         if (!vm.HasFolder)
         {
-            title = "Pick a folder to start";
-            sub = "Or drop a folder on the window.";
+            title = "Start with a folder";
+            sub = "Or drag a folder onto this window.";
             controls = CardControls.Pick;
         }
         else if (EngineClient.Instance.GpuDeviceRemoved)
@@ -469,12 +474,16 @@ public sealed partial class SidebarProcessingControl : UserControl
                 title = phase switch
                 {
                     ScanPhase.Discovering => "Counting files",
-                    ScanPhase.PostScan => "Finishing up",
+                    ScanPhase.PostScan => "Grouping faces",
                     _ => "Scanning",
                 };
-                sub = phase == ScanPhase.Discovering
-                    ? $"{(prog?.Discovered ?? 0):N0} found"
-                    : prog is { FilesPerSecond: > 0 } rate ? $"{counted} · {rate.FilesPerSecond:F0}/s" : counted;
+                var left = prog is { EtaSeconds: { } eta } && eta > 0 ? $" · about {FormatDuration(eta)} left" : string.Empty;
+                sub = phase switch
+                {
+                    ScanPhase.Discovering => $"{(prog?.Discovered ?? 0):N0} files found so far",
+                    ScanPhase.PostScan => "Finding the same person across photos",
+                    _ => counted + left,
+                };
                 accent = _gold;
             }
             controls = CardControls.Scanning;
@@ -482,10 +491,10 @@ public sealed partial class SidebarProcessingControl : UserControl
         else if (captionsRunning)
         {
             var d = engine.DeepAnalyzeProgress;
-            title = "Writing captions";
+            title = "Describing files";
             fraction = d is { Total: > 0UL } ? Math.Clamp((double)d.Processed / d.Total, 0, 1) : null;
             sub = d is not null
-                ? $"{d.Processed:N0} of {d.Total:N0} captioned"
+                ? $"{d.Processed:N0} of {d.Total:N0} files described"
                 : engine.DeepAnalyzeStarting?.Message ?? "Loading the model";
             bar = _aiBar;
             accent = _ai;
@@ -494,7 +503,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         else if (facesRunning)
         {
             title = "Grouping faces";
-            sub = "Comparing face prints";
+            sub = "Finding the same person across photos";
             fraction = null;
             bar = _aiBar;
             accent = _ai;
@@ -503,15 +512,16 @@ public sealed partial class SidebarProcessingControl : UserControl
         else if (isFailed)
         {
             title = "Scan failed";
-            sub = engine.LastError?.Message ?? "Scan failed.";
+            sub = "Try Scan again. Details are in the engine log.";
             bar = _pausedBar;
             danger = true;
             showLog = true;
+            retry = true;
         }
         else if (captionsDone is { Processed: > 0UL, Cancelled: false })
         {
-            title = "Everything analyzed";
-            sub = $"{captionsDone.Processed:N0} files captioned";
+            title = "All done";
+            sub = $"{captionsDone.Processed:N0} files described";
             fraction = 1;
             bar = _doneBar;
             accent = _delight;
@@ -519,33 +529,37 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
         else if (isCancelled && prog is not null)
         {
-            title = "Scan cancelled";
-            sub = $"{prog.Processed:N0} of {prog.Total:N0} tagged";
+            title = "Scan stopped";
+            sub = $"{prog.Processed:N0} of {prog.Total:N0} files read. Scan again to finish; finished files are skipped.";
             fraction = prog.Total > 0 ? Math.Clamp((double)prog.Processed / prog.Total, 0, 1) : 0;
             bar = _pausedBar;
             accent = _idleStatusDefaultBrush;
+            controls = CardControls.Rescan;
+            retry = true;
         }
         else if (isCompleted)
         {
             // FEAT-2: real duration from EngineClient.LastScanDuration and the
             // engine's authoritative ScanComplete count (LastProgress can be
             // throttle-stale by up to one batch on a fast scan).
-            var elapsed = engine.LastScanDuration.TotalSeconds;
             var done = Math.Max(engine.LastScanProcessedFiles, prog?.Processed ?? 0);
             title = "Scan complete";
-            sub = elapsed > 0 ? $"{done:N0} files in {FormatDuration(elapsed)}" : $"{done:N0} files";
+            sub = $"{done:N0} files ready to browse";
             fraction = 1;
-            accent = _gold;
+            bar = _doneBar;
+            accent = _delight;
+            celebrate = true;
             controls = CardControls.Rescan;
+            nextStep = !captionsRunning && !facesRunning && (captionsDone?.Processed ?? 0) == 0 && done > 0;
         }
         else
         {
             var state = engine.State;
-            title = _startInFlight ? "Starting…" : "Not scanned yet";
+            title = _startInFlight ? "Starting…" : "Ready to scan";
             sub = state switch
             {
-                EngineClient.LifecycleState.Ready => $"{vm.FolderDisplay} is ready to scan.",
-                EngineClient.LifecycleState.Starting => "Engine starting…",
+                EngineClient.LifecycleState.Ready => $"FileID reads every file in {vm.FolderDisplay}. Nothing is moved or changed.",
+                EngineClient.LifecycleState.Starting => "Getting ready…",
                 EngineClient.LifecycleState.Crashed => engine.CrashReason is string r && r.Length > 0
                     ? $"Engine crashed: {r}"
                     : "Engine crashed — try restarting the app.",
@@ -559,7 +573,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         }
 
         CardTitleText.Text = title;
-        CardTitleText.Foreground = danger ? FailedTextBrush : _text1;
+        CardTitleText.Foreground = danger ? FailedTextBrush : celebrate ? _delight : _text1;
         IdleStatusText.Text = sub;
         IdleStatusText.Foreground = danger ? FailedTextBrush : _idleStatusDefaultBrush;
 
@@ -574,6 +588,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             ScanProgressBar.Maximum = 1000;
             ScanProgressBar.Value = f * 1000;
             CardPercentText.Text = $"{(int)Math.Round(f * 100)}%";
+            if (f <= 0) CardPercentText.Visibility = Visibility.Collapsed;
         }
         else
         {
@@ -589,7 +604,13 @@ public sealed partial class SidebarProcessingControl : UserControl
         CompletedPanel.Visibility = controls == CardControls.Rescan ? Visibility.Visible : Visibility.Collapsed;
         RescanButton.IsEnabled = !captionsRunning && !facesRunning && !_startInFlight && !EngineClient.Instance.GpuDeviceRemoved;
         OpenLogButton.Visibility = showLog ? Visibility.Visible : Visibility.Collapsed;
-        StartScanText.Text = string.IsNullOrEmpty(vm.FolderDisplay) ? "Start Scan" : $"Scan {vm.FolderDisplay}";
+        NextStepButton.Visibility = nextStep ? Visibility.Visible : Visibility.Collapsed;
+        StartScanText.Text = retry ? "Scan again" : string.IsNullOrEmpty(vm.FolderDisplay) ? "Scan" : $"Scan {vm.FolderDisplay}";
+        RescanText.Text = retry ? "Scan again" : "Rescan";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(RescanButton, RescanText.Text);
+        ToolTipService.SetToolTip(RescanButton, captionsRunning || facesRunning
+            ? "Wait for the current work to finish, then rescan."
+            : $"Look for new or changed files in {vm.FolderDisplay}. Files already read are skipped. (Ctrl+R)");
 
         // FEAT-1: Pause/Resume label always reflects engine truth.
         PauseResumeText.Text = engine.IsPaused ? "Resume" : "Pause";
@@ -613,7 +634,7 @@ public sealed partial class SidebarProcessingControl : UserControl
 
         StatDiscovered.Text = prog.Discovered.ToString("N0");
         StatTagged.Text = prog.Processed.ToString("N0");
-        StatRate.Text = prog.FilesPerSecond > 0 ? $"{prog.FilesPerSecond:F1}/s" : string.Empty;
+        StatRate.Text = prog.FilesPerSecond > 0 ? $"{prog.FilesPerSecond:F0} files a second" : string.Empty;
         StatMemory.Text = prog.ResidentMb + " MB";
         StatMemory.Foreground = prog.ResidentMb > 1200 ? _memoryWarnBrush : _statDefaultBrush;
         StatAvailable.Text = prog.AvailableMb > 0 ? $"{prog.AvailableMb:N0} MB free" : string.Empty;
@@ -632,7 +653,7 @@ public sealed partial class SidebarProcessingControl : UserControl
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             DiscoveredStatBorder, $"Discovered: {StatDiscovered.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
-            TaggedStatBorder, $"Tagged: {StatTagged.Text}");
+            TaggedStatBorder, $"Read: {StatTagged.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
             MemoryStatBorder, $"Memory: {StatMemory.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
@@ -649,7 +670,7 @@ public sealed partial class SidebarProcessingControl : UserControl
             var hwnd = App.HostWindow is { } window
                 ? WinRT.Interop.WindowNative.GetWindowHandle(window)
                 : IntPtr.Zero;
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
             if (result.FailureReason is not null)
             {
                 await ShowAlertAsync("Couldn't open folder", result.FailureReason);
@@ -657,8 +678,8 @@ public sealed partial class SidebarProcessingControl : UserControl
             }
             if (result.Path is not null)
             {
-                AppViewModel.Instance.FolderPath = result.Path;
                 DebugLog.Info($"FolderPicker: chose {PathRedactor.Redact(result.Path)}");
+                await AppViewModel.Instance.ChooseFolderAsync(result.Path);
             }
         }
         catch (Exception ex)

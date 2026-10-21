@@ -26,16 +26,9 @@ pub(crate) async fn handle_embed_image_query(
                 |r| r.get::<_, Vec<u8>>(0),
             )
             .ok();
-        Ok(blob.and_then(|b| {
-            if b.is_empty() || b.len() % 4 != 0 {
-                return None;
-            }
-            Some(
-                b.as_chunks::<4>().0.iter()
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect(),
-            )
-        }))
+        // A row from another model or engine (wrong width, NaN) would make a
+        // meaningless search seed; treat it as missing.
+        Ok(blob.and_then(|b| crate::models::clip_space::decode(&b)))
     })
     .await;
 

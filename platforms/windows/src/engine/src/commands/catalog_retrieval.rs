@@ -103,9 +103,12 @@ pub(super) fn search(
     if !quoted.is_empty() && time.is_none() {
         let seen: std::collections::HashSet<i64> = hits.iter().map(|h| h.file_id).collect();
         hits.extend(tag_hits(conn, query, filters, (&kinds, &people, &events))?.into_iter().filter(|h| !seen.contains(&h.file_id)));
-        for (table, kind) in [("doc_fts", "documentText"), ("ocr_fts", "ocrText")] {
+        // Handwriting (Vision's accurate tier or a VLM transcription) is its own
+        // hit kind so results can say "Handwritten text". Mirrors CatalogStore.ocrHitKindSQL.
+        const OCR_KIND: &str = "(SELECT CASE WHEN o.handwritten=1 THEN 'handwrittenText' ELSE 'ocrText' END FROM ocr_text o WHERE o.file_id=f.id)";
+        for (table, kind) in [("doc_fts", "'documentText'"), ("ocr_fts", OCR_KIND)] {
             let sql = format!(
-                "SELECT f.id,f.path_text,'{kind}',snippet({table},0,'','','…',16),'{kind}:' || f.id,NULL,NULL FROM {table} JOIN files f ON f.id={table}.rowid WHERE {filters} AND {table} MATCH ?1 ORDER BY bm25({table}) LIMIT 100"
+                "SELECT f.id,f.path_text,{kind},snippet({table},0,'','','…',16),{kind} || ':' || f.id,NULL,NULL FROM {table} JOIN files f ON f.id={table}.rowid WHERE {filters} AND {table} MATCH ?1 ORDER BY bm25({table}) LIMIT 100"
             );
             hits.extend(
                 conn.prepare(&sql)?

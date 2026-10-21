@@ -20,6 +20,12 @@ use crate::pipeline::deep_analyze::{analyze_file, analyze_file_scoped, analyze_f
 /// single-space separators. The CLI emits one stdout line per `on_token`
 /// call with variable whitespace; trim + join with one space produces
 /// clean English-prose output regardless of the model's whitespace habit.
+fn same_people(lhs: &[String], rhs: &[String]) -> bool {
+    let a: std::collections::BTreeSet<&String> = lhs.iter().collect();
+    let b: std::collections::BTreeSet<&String> = rhs.iter().collect();
+    a == b
+}
+
 pub(crate) fn append_caption_chunk(buf: &Arc<Mutex<String>>, chunk: &str) {
     let trimmed = chunk.trim();
     if trimmed.is_empty() {
@@ -201,8 +207,10 @@ pub(crate) async fn handle_deep_analyze_file(
     let caption_buf_cb = caption_buf.clone();
     let last_emit_cb = last_emit.clone();
     let face_names = {
-        let conn = db.lock();
-        fetch_face_names(&conn, file_id)
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || fetch_face_names(&db.lock(), file_id))
+            .await
+            .unwrap_or_default()
     };
     let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
@@ -259,6 +267,7 @@ pub(crate) async fn handle_deep_analyze_file(
                     description: out.description.clone().unwrap_or_default(),
                     proposed_name: out.proposed_name.clone(),
                     model_kind: model_kind.clone(),
+                    inherited_from_file_id: None,
                 },
             ))))
             .await;
@@ -308,14 +317,17 @@ pub(crate) async fn handle_deep_analyze_folder(
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
     let filter = deep_analyze_target_filter();
-    let ids_result = match crate::scan_session::prefix_upper_bound(&lo) {
+    let query_db = db.clone();
+    let ids_result = tokio::task::spawn_blocking(move || match crate::scan_session::prefix_upper_bound(&lo) {
         Some(hi) => collect_file_ids(
-            &db,
+            &query_db,
             &format!("WHERE path_text >= ?1 AND path_text < ?2 AND {filter}"),
             &[&lo, &hi],
         ),
-        None => collect_file_ids(&db, &format!("WHERE {filter}"), &[]),
-    };
+        None => collect_file_ids(&query_db, &format!("WHERE {filter}"), &[]),
+    })
+    .await
+    .unwrap_or_else(|join| Err(rusqlite::Error::ToSqlConversionFailure(Box::new(join))));
     let ids = match ids_result {
         Ok(v) => v,
         Err(err) => {
@@ -716,6 +728,12 @@ async fn run_deep_analyze_batch(
     };
 
     let total = file_ids.len() as u64;
+    let grouping = {
+        let conn = db.lock();
+        crate::pipeline::near_duplicate_grouping::plan(&conn, &file_ids)
+    };
+    let file_ids = grouping.ordered.clone();
+    let mut shared: std::collections::HashMap<usize, (i64, Vec<String>, Option<String>)> = std::collections::HashMap::new();
     let mut processed = 0u64;
     let mut failed = 0u64;
     // Use the persistent server until it errors; if it dies mid-batch and a CLI
@@ -821,6 +839,37 @@ async fn run_deep_analyze_batch(
                     .await;
                 }
                 continue;
+            }
+        }
+
+        let group_index = grouping.group_of.get(&file_id).copied();
+        let suffix = grouping.suffixes.get(&file_id).cloned().unwrap_or_default();
+        if let Some((from_id, from_faces, base_name)) = group_index.and_then(|g| shared.get(&g)).cloned() {
+            let inherited = {
+                let conn = db.lock();
+                let faces = fetch_face_names(&conn, file_id);
+                if from_id != file_id && same_people(&faces, &from_faces) {
+                    let name = base_name.as_deref().map(|n| crate::pipeline::near_duplicate_grouping::appending_sequence(n, &suffix));
+                    Some(crate::pipeline::deep_analyze::inherit_vlm_results(&conn, file_id, from_id, model_kind, mode, name.as_deref()))
+                } else {
+                    None
+                }
+            };
+            match inherited {
+                Some(Ok(out)) => {
+                    processed += 1;
+                    sink.send(IpcEvent::now(EventPayload::DeepAnalyzeFileDone(Wrap::new(DeepAnalyzeFileDone {
+                        file_id: out.file_id,
+                        description: out.description.clone().unwrap_or_default(),
+                        proposed_name: out.proposed_name.clone(),
+                        model_kind: model_kind.to_string(),
+                        inherited_from_file_id: Some(from_id),
+                    }))))
+                    .await;
+                    continue;
+                }
+                Some(Err(error)) => tracing::warn!(?error, file_id, "inherit near-duplicate caption failed"),
+                None => {}
             }
         }
 
@@ -941,6 +990,24 @@ async fn run_deep_analyze_batch(
             };
         }
 
+        let outcome = match (outcome, group_index) {
+            (Ok(mut out), Some(g)) if !shared.contains_key(&g) => {
+                let base_name = out.proposed_name.clone();
+                if let Some(name) = base_name.as_deref().filter(|_| !suffix.is_empty()) {
+                    let named = crate::pipeline::near_duplicate_grouping::appending_sequence(name, &suffix);
+                    let conn = db.lock();
+                    if conn
+                        .execute("UPDATE files SET vlm_proposed_name=?1 WHERE id=?2", rusqlite::params![named, file_id])
+                        .is_ok()
+                    {
+                        out.proposed_name = Some(named);
+                    }
+                }
+                shared.insert(g, (file_id, face_names.clone(), base_name));
+                Ok(out)
+            }
+            (other, _) => other,
+        };
         match outcome {
             Ok(out) => {
                 processed += 1;
@@ -950,6 +1017,7 @@ async fn run_deep_analyze_batch(
                         description: out.description.clone().unwrap_or_default(),
                         proposed_name: out.proposed_name.clone(),
                         model_kind: model_kind.to_string(),
+                        inherited_from_file_id: None,
                     },
                 ))))
                 .await;

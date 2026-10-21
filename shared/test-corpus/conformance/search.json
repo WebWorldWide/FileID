@@ -46,5 +46,23 @@
     "steps": [
       {"label": "person photos", "chat": {"action": "send", "text": "photos of Grandma", "useModel": false}, "expect": {"status": "completed", "hits": [{"fileID": 1}], "message": "Found 1 match in the library (photos) (people: Grandma)."}}
     ]
+  },
+  {
+    "name": "catalog-search-labels-handwritten-text",
+    "description": "Text read from images is found by Search & Moments and Chat. Text read as handwriting (the scan's careful read or a Deep Analyze transcription) comes back as handwrittenText, printed text as ocrText, and changing a file drops its transcription.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,modified_at) VALUES(1,'{root}/receipt.png',1,10,0,'image','png',5),(2,'{root}/IMG_4101.jpg',2,10,0,'image','jpg',5),(3,'{root}/IMG_4102.jpg',3,10,0,'image','jpg',5)",
+      "INSERT INTO ocr_text(file_id,text) VALUES(1,'Corner Market coffee beans total 13.28')",
+      "INSERT INTO ocr_text(file_id,text,handwritten) VALUES(2,'Groceries for Sunday zucchini and basil call Aunt Rosalind',1)",
+      "INSERT INTO ocr_text(file_id,text,source,handwritten) VALUES(3,'Quarterly roadmap ship pelican beta','vlm',1)",
+      "UPDATE files SET modified_at=6 WHERE id=3"
+    ],
+    "steps": [
+      {"label": "handwriting", "catalog": {"action": "search", "query": "zucchini"}, "expect": {"status": "ok", "hits": [{"fileID": 2, "path": "{root}/IMG_4101.jpg", "kind": "handwrittenText", "text": "Groceries for Sunday zucchini and basil call Aunt Rosalind", "evidenceID": "handwrittenText:2"}]}},
+      {"label": "printed", "catalog": {"action": "search", "query": "coffee beans"}, "expect": {"status": "ok", "hits": [{"fileID": 1, "kind": "ocrText", "evidenceID": "ocrText:1"}]}},
+      {"label": "changed file drops transcription", "catalog": {"action": "search", "query": "pelican"}, "expect": {"status": "ok", "hits": []}},
+      {"label": "chat", "chat": {"action": "send", "text": "zucchini", "useModel": false}, "expect": {"status": "completed", "message": "Found 1 match for “zucchini”.", "hits": [{"fileID": 2, "kind": "handwrittenText"}]}},
+      {"label": "rows", "db": "SELECT file_id,source,handwritten FROM ocr_text ORDER BY file_id", "expect": [[1, "ocr", 0], [2, "ocr", 1]]}
+    ]
   }
 ]

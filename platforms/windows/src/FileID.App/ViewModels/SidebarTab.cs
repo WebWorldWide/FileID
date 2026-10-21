@@ -8,9 +8,9 @@ internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
 {
     public static SidebarTab Library => new("library", "Library", ""); // Photo
     public static SidebarTab People => new("people", "People", ""); // People
-    public static SidebarTab Cleanup => new("cleanup", "Cleanup", ""); // Delete
-    public static SidebarTab DeepAnalyze => new("deepanalyze", "Deep Analyze", ""); // FontAwesome equivalent of sparkles
-    public static SidebarTab Restructure => new("restructure", "Restructure", ""); // FolderHorizontal
+    public static SidebarTab Cleanup => new("cleanup", "Duplicates", ""); // Delete
+    public static SidebarTab DeepAnalyze => new("deepanalyze", "Describe Files", ""); // FontAwesome equivalent of sparkles
+    public static SidebarTab Restructure => new("restructure", "Organize Folders", ""); // FolderHorizontal
     public static SidebarTab Settings => new("settings", "Settings", ""); // Setting
 
     public static SidebarTab Moments => new("moments", "Search & Moments", "\uE721");
@@ -36,6 +36,21 @@ internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
         "deepanalyze" or "chat" or "models" => "Analyze",
         "cleanup" or "restructure" or "tools" => "Act",
         _ => null,
+    };
+
+    public string Summary => Id switch
+    {
+        "library" => "Every scanned file, with search and preview",
+        "people" => "Faces grouped by person; name them here",
+        "moments" => "Search inside videos and documents",
+        "deepanalyze" => "Write a description and a better file name for each file",
+        "chat" => "Ask questions about your files",
+        "models" => "Download and manage the local AI models",
+        "cleanup" => "Find extra copies and move them to Trash",
+        "restructure" => "Suggest a tidier folder layout, then move files",
+        "tools" => "Convert, resize or reframe photos and videos",
+        "settings" => "Appearance, AI models and storage",
+        _ => Label,
     };
 
     public bool RequiresFolder => Id is "library" or "people" or "cleanup" or "deepanalyze" or "restructure";

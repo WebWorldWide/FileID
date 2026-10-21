@@ -213,7 +213,7 @@ public enum CatalogStore {
             results.append(contentsOf: try tagHits(db, words: meaningful, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter)
                 .filter { !seen.contains($0.fileID) })
             results.append(contentsOf: try textEvidenceHits(db, table: "doc_fts", kind: "documentText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
-            results.append(contentsOf: try textEvidenceHits(db, table: "ocr_fts", kind: "ocrText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
+            results.append(contentsOf: try textEvidenceHits(db, table: "ocr_fts", kind: "ocrText", kindSQL: Self.ocrHitKindSQL, match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
         }
 
         let evidence = try Row.fetchAll(db, sql: """
@@ -255,17 +255,22 @@ public enum CatalogStore {
         return results
     }
 
+    /// Handwriting read by Vision's accurate tier or a VLM transcription is its
+    /// own hit kind so results can say "Handwritten text". Mirrors catalog_retrieval.rs.
+    static let ocrHitKindSQL = "(SELECT CASE WHEN o.handwritten=1 THEN 'handwrittenText' ELSE 'ocrText' END FROM ocr_text o WHERE o.file_id=f.id)"
+
     private static func textEvidenceHits(
         _ db: GRDB.Database,
         table: String,
         kind: String,
+        kindSQL: String? = nil,
         match: String,
         filter: String?,
         peopleFilter: String?,
         eventFilter: String?
     ) throws -> [CatalogHit] {
         let rows = try Row.fetchAll(db, sql: """
-            SELECT f.id,f.path_text,snippet(\(table),0,'','','…',16) AS excerpt
+            SELECT f.id,f.path_text,snippet(\(table),0,'','','…',16) AS excerpt,\(kindSQL ?? "'\(kind)'") AS hit_kind
             FROM \(table) JOIN files f ON f.id=\(table).rowid
             WHERE f.failed=0 AND \(table) MATCH ? AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
               AND (? IS NULL OR f.id IN (
@@ -280,8 +285,9 @@ public enum CatalogStore {
             """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter])
         return rows.map { row in
             let fileID: Int64 = row["id"]
-            return CatalogHit(fileID: fileID, path: row["path_text"], kind: kind,
-                              text: row["excerpt"], evidenceID: "\(kind):\(fileID)")
+            let hitKind: String = row["hit_kind"]
+            return CatalogHit(fileID: fileID, path: row["path_text"], kind: hitKind,
+                              text: row["excerpt"], evidenceID: "\(hitKind):\(fileID)")
         }
     }
 
