@@ -200,7 +200,7 @@
                             AutomationProperties.HelpText="Select this model. Approximately 15.2 GB disk and 16 GB RAM.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Mistral-Small 3.2" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈15.2 GB disk · 16 GB RAM"
+                            <TextBlock Text="≈15.2 GB download · needs 16 GB memory"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="MistralStatus"
@@ -211,12 +211,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Mistral-Small 3.2 download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="MistralInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="mistral_small_3_2"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Mistral-Small 3.2" />
+                                    AutomationProperties.Name="Download Mistral-Small 3.2" />
                         </StackPanel>
                     </Border>
 
@@ -250,7 +250,7 @@
                                                FontWeight="SemiBold" />
                                 </Border>
                             </Grid>
-                            <TextBlock Text="≈6.1 GB disk · 7 GB RAM · default"
+                            <TextBlock Text="≈6.1 GB download · needs 7 GB memory"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="QwenLargeStatus"
@@ -261,12 +261,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Qwen 2.5-VL 7B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="QwenLargeInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="qwen2_5_vl_7b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Qwen 2.5-VL 7B" />
+                                    AutomationProperties.Name="Download Qwen 2.5-VL 7B" />
                         </StackPanel>
                     </Border>
 
@@ -283,7 +283,7 @@
                             AutomationProperties.HelpText="Select this model. Approximately 3.4 GB disk and 4.5 GB RAM.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Gemma 3 4B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈3.4 GB disk · 4.5 GB RAM"
+                            <TextBlock Text="≈3.4 GB download · needs 4.5 GB memory"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="GemmaStatus"
@@ -294,12 +294,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Gemma 3 4B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="GemmaInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="gemma_3_4b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Gemma 3 4B" />
+                                    AutomationProperties.Name="Download Gemma 3 4B" />
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -322,7 +322,7 @@
                             AutomationProperties.HelpText="Select the optional Qwen3-VL 4B model. Approximately 3.3 GB disk.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Qwen3-VL 4B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈3.3 GB disk · optional"
+                            <TextBlock Text="≈3.3 GB download · optional"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="Qwen3FourStatus"
@@ -333,12 +333,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Qwen3-VL 4B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="Qwen3FourInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="qwen3_vl_4b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Qwen3-VL 4B" />
+                                    AutomationProperties.Name="Download Qwen3-VL 4B" />
                         </StackPanel>
                     </Border>
                     <Border Grid.Column="1"
@@ -354,7 +354,7 @@
                             AutomationProperties.HelpText="Select the optional Qwen3-VL 8B model. Approximately 6.2 GB disk.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Qwen3-VL 8B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈6.2 GB disk · optional"
+                            <TextBlock Text="≈6.2 GB download · optional"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="Qwen3EightStatus"
@@ -365,12 +365,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Qwen3-VL 8B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="Qwen3EightInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="qwen3_vl_8b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Qwen3-VL 8B" />
+                                    AutomationProperties.Name="Download Qwen3-VL 8B" />
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -448,7 +448,7 @@
                     <TextBlock TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                               Text="To describe one photo, open it in Library and press Describe." />
+                               Text="To describe one file, open it in Library and press Describe." />
                 </StackPanel>
             </Border>
 
