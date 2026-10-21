@@ -1206,10 +1206,94 @@ pub mod trash {
             )
         };
         if result == 0 {
-            Ok(())
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // NFS and some FUSE filesystems reject the flag (EINVAL); kernels
+        // before 3.15 have no renameat2 (ENOSYS).
+        if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
+            return renameat_no_replace_emulated(source_dir, source, destination_dir, destination);
+        }
+        Err(error)
+    }
+
+    fn stat_at(parent: i32, leaf: &CString) -> std::io::Result<libc::stat> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let result =
+            unsafe { libc::fstatat(parent, leaf.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+        if result == 0 {
+            Ok(stat)
         } else {
             Err(std::io::Error::last_os_error())
         }
+    }
+
+    /// Directory-relative twin of `util::path_safety::rename_no_replace_emulated`:
+    /// claim the destination with an exclusive create, then rename over that
+    /// empty placeholder only.
+    fn renameat_no_replace_emulated(
+        source_dir: i32,
+        source: &CString,
+        destination_dir: i32,
+        destination: &CString,
+    ) -> std::io::Result<()> {
+        let occupied = || std::io::Error::from_raw_os_error(libc::EEXIST);
+        let source_stat = stat_at(source_dir, source)?;
+        match stat_at(destination_dir, destination) {
+            Ok(existing) => {
+                let same_entry = existing.st_dev == source_stat.st_dev
+                    && existing.st_ino == source_stat.st_ino
+                    && source_stat.st_nlink == 1;
+                if !same_entry {
+                    return Err(occupied());
+                }
+                let result = unsafe {
+                    libc::renameat(source_dir, source.as_ptr(), destination_dir, destination.as_ptr())
+                };
+                return if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(error) => return Err(error),
+        }
+        let fd = unsafe {
+            libc::openat(
+                destination_dir,
+                destination.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600_u32,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let placeholder = unsafe { std::fs::File::from_raw_fd(fd) };
+        let claimed = placeholder.metadata()?;
+        drop(placeholder);
+        let still_claimed = || {
+            use std::os::unix::fs::MetadataExt;
+            stat_at(destination_dir, destination).is_ok_and(|current| {
+                current.st_mode & libc::S_IFMT == libc::S_IFREG
+                    && current.st_size == 0
+                    && current.st_dev == claimed.dev()
+                    && current.st_ino == claimed.ino()
+            })
+        };
+        if !still_claimed() {
+            return Err(occupied());
+        }
+        let result = unsafe {
+            libc::renameat(source_dir, source.as_ptr(), destination_dir, destination.as_ptr())
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if still_claimed() {
+                unsafe {
+                    libc::unlinkat(destination_dir, destination.as_ptr(), 0);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn identity_at(parent: i32, leaf: &CString) -> Result<crate::platform::FileIdentity> {
@@ -1530,6 +1614,28 @@ pub mod trash {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn emulated_directory_relative_rename_never_clobbers() {
+            let base = std::env::temp_dir()
+                .join(format!("fileid-renameat-emulated-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&base).unwrap();
+            let dir = std::fs::File::open(&base).unwrap();
+            let fd = dir.as_raw_fd();
+            let name = |text: &str| CString::new(text).unwrap();
+            std::fs::write(base.join("source"), b"source").unwrap();
+            std::fs::write(base.join("occupant"), b"occupant").unwrap();
+            let error =
+                renameat_no_replace_emulated(fd, &name("source"), fd, &name("occupant")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+            assert_eq!(std::fs::read(base.join("occupant")).unwrap(), b"occupant");
+            renameat_no_replace_emulated(fd, &name("source"), fd, &name("moved")).unwrap();
+            assert_eq!(std::fs::read(base.join("moved")).unwrap(), b"source");
+            assert!(!base.join("source").exists());
+            assert!(renameat_no_replace_emulated(fd, &name("missing"), fd, &name("target")).is_err());
+            assert!(!base.join("target").exists());
+            let _ = std::fs::remove_dir_all(&base);
+        }
 
         #[test]
         fn trashes_file_and_writes_info() {
