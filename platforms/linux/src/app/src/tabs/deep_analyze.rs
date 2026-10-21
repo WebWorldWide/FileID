@@ -324,7 +324,9 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .xalign(0.0)
         .css_classes(["gold-accent"])
         .build();
-    let last_card = build_last_card(&last_desc, &last_name);
+    let last_inherited = super::library::inherited_caption_note();
+    last_inherited.set_visible(false);
+    let last_card = build_last_card(&last_desc, &last_inherited, &last_name);
     last_card.set_visible(false);
     content.append(&last_card);
 
@@ -384,6 +386,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         completion_icon,
         last_card,
         last_desc,
+        last_inherited,
         last_name,
     });
 
@@ -479,6 +482,7 @@ struct DeepUi {
     completion_icon: gtk::Label,
     last_card: gtk::Box,
     last_desc: gtk::Label,
+    last_inherited: gtk::Label,
     last_name: gtk::Label,
 
     apply_status: gtk::Label,
@@ -966,6 +970,8 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
         }
         EngineEvent::DeepAnalyzeFileDone(d) => {
             ui.last_desc.set_text(&d.description);
+            ui.last_inherited
+                .set_visible(d.inherited_from_file_id.is_some());
             match d.proposed_name.as_deref().filter(|s| !s.is_empty()) {
                 Some(name) => {
                     ui.last_name.set_text(&format!("Suggested name: {name}"));
@@ -1730,10 +1736,11 @@ fn build_completion_card(icon: &gtk::Label, title: &gtk::Label, label: &gtk::Lab
     card
 }
 
-fn build_last_card(desc: &gtk::Label, name: &gtk::Label) -> gtk::Box {
+fn build_last_card(desc: &gtk::Label, inherited: &gtk::Label, name: &gtk::Label) -> gtk::Box {
     let card = glass_card();
     card.append(&heading("Latest description"));
     card.append(desc);
+    card.append(inherited);
     card.append(name);
     card
 }

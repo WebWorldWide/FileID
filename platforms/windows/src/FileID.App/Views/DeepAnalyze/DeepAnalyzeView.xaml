@@ -480,6 +480,11 @@
                                        TextWrapping="Wrap"
                                        Style="{StaticResource BodyTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="StreamInheritedText"
+                                       Text="Same as a similar photo"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Visibility="Collapsed" />
                             <TextBlock x:Name="StreamProposedNameText"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource AiBrush}" />

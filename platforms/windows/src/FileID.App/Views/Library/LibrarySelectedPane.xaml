@@ -80,6 +80,13 @@
                            TextWrapping="Wrap"
                            IsTextSelectionEnabled="True" />
 
+                <TextBlock x:Name="CaptionInheritedText"
+                           Visibility="Collapsed"
+                           Text="Same as a similar photo"
+                           FontFamily="{StaticResource BodyFontFamily}"
+                           FontSize="11"
+                           Foreground="{ThemeResource Text3Brush}" />
+
                 <controls:FlowPanel x:Name="TagsHost" Spacing="6" Visibility="Collapsed" />
 
                 <StackPanel Spacing="6">

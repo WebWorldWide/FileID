@@ -283,6 +283,9 @@ impl SelectedPane {
             .filter(|caption| !caption.is_empty())
         {
             self.facts.append(&kv_row("Description", caption));
+            if row.caption_inherited {
+                self.facts.append(&super::library::inherited_caption_note());
+            }
         }
         append_details(&self.facts, row.id);
         self.load_picture(&row);

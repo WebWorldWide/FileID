@@ -508,6 +508,7 @@ public sealed partial class DeepAnalyzeView : UserControl
             StreamCaptionText.Text = string.IsNullOrEmpty(starting.Message)
                 ? "Loading the model on this PC. The first description usually appears within 30 seconds."
                 : starting.Message;
+            StreamInheritedText.Visibility = Visibility.Collapsed;
             StreamProposedNameText.Text = string.Empty;
             // Reset the smart-rename tally at the start of each run so the pill
             // reflects only THIS run, not a cumulative count across runs.
@@ -546,6 +547,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                 _ = LoadStreamThumbAsync(prog.CurrentPath);
                 _captionAccumulator = string.Empty;
                 StreamCaptionText.Text = string.Empty;
+                StreamInheritedText.Visibility = Visibility.Collapsed;
             }
             // live caption stream. Engine emits the partial
             // accumulated text at 4 Hz; show it directly in the caption
@@ -566,6 +568,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         {
             _lastConsumedFileDone = last;
             StreamCaptionText.Text = last.Description ?? string.Empty;
+            StreamInheritedText.Visibility = last.InheritedFromFileId is null ? Visibility.Collapsed : Visibility.Visible;
             if (!string.IsNullOrEmpty(last.ProposedName))
             {
                 StreamProposedNameText.Text = $"Suggested name: {last.ProposedName}";

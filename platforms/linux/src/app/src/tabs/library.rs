@@ -1074,12 +1074,25 @@ fn build_meta(row: &FileRow) -> gtk::Box {
     }
     if let Some(desc) = row.description.as_ref().filter(|s| !s.is_empty()) {
         meta.append(&meta_row("Description", desc));
+        if row.caption_inherited {
+            meta.append(&inherited_caption_note());
+        }
     }
     if let Some(p) = row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
         meta.append(&meta_row("Suggested name", &format!("{}.{}", p, row.extension)));
     }
     super::library_pane::append_details(&meta, row.id);
     meta
+}
+
+pub(super) const INHERITED_CAPTION: &str = "Same as a similar photo";
+
+pub(super) fn inherited_caption_note() -> gtk::Label {
+    gtk::Label::builder()
+        .label(INHERITED_CAPTION)
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .build()
 }
 
 /// Load one row's image (or a kind icon) into the preview `Picture`, off-thread.

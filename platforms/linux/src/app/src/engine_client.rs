@@ -138,6 +138,7 @@ pub struct FileRow {
     pub content_hash: Option<Vec<u8>>,
     pub description: Option<String>,
     pub proposed_name: Option<String>,
+    pub caption_inherited: bool,
 }
 
 pub type DecodedImage = fileid_engine::shell::thumbnail::Thumbnail;
@@ -826,7 +827,8 @@ const QUERY_FILTER: &str = "f.failed = 0 \
     AND (:kind IS NULL OR f.kind = :kind)";
 
 const FILE_COLUMNS: &str = "f.id, f.path_text, f.kind, f.extension, f.size_bytes, f.created_at, \
-     f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, f.vlm_description, f.vlm_proposed_name";
+     f.modified_at, f.has_faces, f.has_text, f.file_ref, f.content_hash, f.vlm_description, f.vlm_proposed_name, \
+     f.vlm_inherited_from IS NOT NULL";
 
 fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     let path: String = row.get(1)?;
@@ -849,6 +851,7 @@ fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         content_hash: row.get(10)?,
         description: row.get(11)?,
         proposed_name: row.get(12)?,
+        caption_inherited: row.get(13)?,
     })
 }
 
@@ -1620,6 +1623,7 @@ mod tests {
             .unwrap();
             conn.execute("INSERT INTO tags (file_id,tag,source) VALUES (1,'urgent','manual')", []).unwrap();
             conn.execute("INSERT INTO ocr_text (file_id,text) VALUES (3,'needle in OCR')", []).unwrap();
+            conn.execute("UPDATE files SET vlm_inherited_from = 3 WHERE id = 2", []).unwrap();
         }
         let query = |search: &str, kind: Option<&str>, limit: i64| {
             query_files_at_path(
@@ -1639,7 +1643,10 @@ mod tests {
         assert_eq!(query("", Some("image"), 10).1, 1);
         assert!(query_files_at_path(&fixture.join("missing.sqlite"), &QuerySpec { limit: 10, ..QuerySpec::default() }).is_err());
         let conn = fileid_engine::db::open_read(&db_path).unwrap();
-        assert_eq!(file_row_on(&conn, 2).unwrap().unwrap().name, "image.png");
+        let image = file_row_on(&conn, 2).unwrap().unwrap();
+        assert_eq!(image.name, "image.png");
+        assert!(image.caption_inherited);
+        assert!(!file_row_on(&conn, 3).unwrap().unwrap().caption_inherited);
         assert!(file_row_on(&conn, 4).unwrap().is_none());
         assert!(file_row_on(&conn, 99).unwrap().is_none());
         drop(conn);
