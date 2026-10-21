@@ -315,6 +315,7 @@ public actor DeepAnalyze {
         }
         if container != nil {
             container = nil
+            prefixCache.reset()
             loadedKind = nil
             MLX.GPU.clearCache()
             if let modelMemoryLease {
@@ -434,6 +435,7 @@ public actor DeepAnalyze {
         idleUnloadTask = nil
         parkedKind = nil
         container = nil
+        prefixCache.reset()
         loadedKind = nil
         loadState = .notLoaded
         MLX.GPU.clearCache()
@@ -476,6 +478,7 @@ public actor DeepAnalyze {
         defer { Task { await residencyGate.release(lease) } }
         guard generation == useGeneration, container != nil else { return }
         container = nil
+        prefixCache.reset()
         parkedKind = kind
         MLX.GPU.clearCache()
         if let modelMemoryLease {
@@ -713,8 +716,12 @@ public actor DeepAnalyze {
         let stats = VLMPassStats()
         defer { VLMTiming.log("deep_analyze_timing", stats: stats, totalMs: VLMTiming.milliseconds(since: started)) }
         let boundedText = Self.boundedDocumentText(documentText)
-        let box = await Self.decodeImageOffActor(url: imageURL, maxPixelSize: 768)
-        let cg = box.get()
+        let cg: CGImage?
+        if case .some(let prefetched) = await DecodePrefetch.shared.take(imageURL, maxPixelSize: 768) {
+            cg = prefetched
+        } else {
+            cg = await Self.decodeImageOffActor(url: imageURL, maxPixelSize: 768).get()
+        }
         stats.set("decodeMs", VLMTiming.milliseconds(since: started))
         if let cg { stats.set("decodedLongSide", Double(max(cg.width, cg.height))) }
         guard cg != nil || boundedText != nil else {

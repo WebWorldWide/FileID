@@ -333,6 +333,10 @@ public enum DeepAnalyzeRunner {
             }
 
             let url = URL(fileURLWithPath: target.path)
+            if let next = orderedTargets.dropFirst(i + 1).first(where: { grouping.groupOf[$0.id] == nil || grouping.groupOf[$0.id] != grouping.groupOf[target.id] }),
+               FileTypes.kind(forExtension: (next.path as NSString).pathExtension) == .image {
+                DecodePrefetch.shared.start(URL(fileURLWithPath: next.path), maxPixelSize: 768)
+            }
             // Audio uses on-device metadata/speech/sound analysis. Other supported files
             // use a bounded raster and, for documents, bounded extracted text.
             let kind = FileTypes.kind(forExtension: (target.path as NSString).pathExtension)
