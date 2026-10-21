@@ -1876,6 +1876,11 @@ pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>
     dec.read_info().ok()?;
     let info = dec.info()?;
     let (pw, ph) = (u32::from(info.width), u32::from(info.height));
+    // Progressive JPEGs keep full-resolution coefficients whatever the DCT
+    // scale, so the header size, not the output size, bounds the allocation.
+    if u64::from(pw) * u64::from(ph) > MAX_DECODED_PIXELS {
+        return None;
+    }
     let long = pw.max(ph);
     // DCT scales are powers of two; below 2× the floor even 1/2 would land
     // under it, so only genuinely oversized frames take this path.
@@ -2856,8 +2861,11 @@ fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Optio
         .get_field(exif::Tag::Model, exif::In::PRIMARY)
         .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
         .filter(|s| !s.is_empty());
-    let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef);
-    let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef);
+    // A zero denominator or a junk value would store NaN/inf or an impossible place.
+    let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef)
+        .filter(|v| v.is_finite() && v.abs() <= 90.0);
+    let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef)
+        .filter(|v| v.is_finite() && v.abs() <= 180.0);
     Some((camera_model, lat, lon))
 }
 

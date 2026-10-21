@@ -21,6 +21,7 @@ pub mod restructure_respect;
 pub mod raw_preview;
 pub mod restructure_semantic;
 pub mod audio_meta;
+pub(crate) mod container_guard;
 pub mod obj_render;
 pub mod doc_extract;
 pub(crate) mod timeline_analysis;
