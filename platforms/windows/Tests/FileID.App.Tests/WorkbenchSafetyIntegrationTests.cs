@@ -54,6 +54,16 @@ public sealed class WorkbenchSafetyIntegrationTests
     }
 
     [Fact]
+    public void EvidenceNamesReadTextLikeMacOS()
+    {
+        var evidence = ReadSource("Views", "Workbenches", "EvidencePanel.cs");
+        Assert.Contains("\"ocrText\" => \"Text in image\"", evidence, StringComparison.Ordinal);
+        Assert.Contains("\"handwrittenText\" => \"Handwritten text\"", evidence, StringComparison.Ordinal);
+        Assert.Contains("\"documentText\" => \"Text in document\"", evidence, StringComparison.Ordinal);
+        Assert.Contains("\"sampledFrame\" => \"Video frame, not checked\"", evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AcceptedRecoveryGateEnablesUndoOnlyWithCompletedReceipts()
     {
         var plan = new ToolPreviewState();

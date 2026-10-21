@@ -54,6 +54,8 @@ internal sealed class EvidencePanel : StackPanel
         "passage" => "Speech or text",
         "person" => "Person",
         "documentText" => "Text in document",
+        "ocrText" => "Text in image",
+        "handwrittenText" => "Handwritten text",
         _ => kind,
     };
 

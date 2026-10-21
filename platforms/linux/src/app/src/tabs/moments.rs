@@ -709,6 +709,9 @@ pub(super) fn hit_kind(hit: &CatalogHit) -> (&'static str, bool) {
         "passage" if hit.page.is_some() => ("Text in document", false),
         "passage" if hit.start_seconds.is_some() => ("Speech or text", false),
         "passage" => ("Text in image", false),
+        "ocrText" => ("Text in image", false),
+        "handwrittenText" => ("Handwritten text", false),
+        "documentText" => ("Text in document", false),
         _ => ("Match", false),
     }
 }
@@ -1326,6 +1329,18 @@ mod tests {
         );
         assert_eq!(hit_kind(&hit("passage", Some(30.0), None)).0, "Speech or text");
         assert_eq!(hit_kind(&hit("passage", None, None)).0, "Text in image");
+        assert_eq!(
+            hit_kind(&hit("ocrText", None, None)),
+            ("Text in image", false)
+        );
+        assert_eq!(
+            hit_kind(&hit("handwrittenText", None, None)),
+            ("Handwritten text", false)
+        );
+        assert_eq!(
+            hit_kind(&hit("documentText", None, None)),
+            ("Text in document", false)
+        );
     }
 
     #[test]
