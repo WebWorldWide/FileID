@@ -1341,6 +1341,12 @@ pub struct DeepAnalyzeFileDone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed_name: Option<String>,
     pub model_kind: String,
+    #[serde(
+        rename = "inheritedFromFileID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub inherited_from_file_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

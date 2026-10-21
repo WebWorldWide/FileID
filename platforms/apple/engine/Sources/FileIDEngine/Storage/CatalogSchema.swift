@@ -296,4 +296,7 @@ CREATE TABLE face_refresh_failures (
 );
 CREATE INDEX face_refresh_retry ON face_refresh_failures(retry_after);
 """#
+    static let v25 = #"""
+ALTER TABLE files ADD COLUMN vlm_inherited_from INTEGER;
+"""#
 }
