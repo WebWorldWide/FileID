@@ -656,7 +656,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                     dialog.close();
                                 }
                                 ui.suggestions.borrow_mut().clear();
-                                set_status(&ui, "Merge complete.".to_string());
+                                set_status(&ui, "Cards combined.".to_string());
                             } else {
                                 if let Some(button) = pending.button.upgrade() {
                                     button.set_sensitive(true);
@@ -668,8 +668,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                     .find_map(|item| {
                                         (!item.ok).then_some(item.message.as_deref()).flatten()
                                     })
-                                    .unwrap_or("the engine rejected the merge");
-                                set_status(&ui, format!("Merge failed: {detail}"));
+                                    .unwrap_or("FileID couldn't combine these cards");
+                                set_status(&ui, format!("Couldn't combine: {detail}"));
                             }
                         } else if result.failed > 0 {
                             let detail = result
@@ -678,12 +678,12 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                 .find_map(|item| {
                                     (!item.ok).then_some(item.message.as_deref()).flatten()
                                 })
-                                .unwrap_or("the engine rejected a merge");
-                            set_status(&ui, format!("Merge failed: {detail}"));
+                                .unwrap_or("FileID couldn't combine these cards");
+                            set_status(&ui, format!("Couldn't combine: {detail}"));
                         }
                         if ui.merge_results_pending.get() == 0 {
                             if !ui.merge_failed.get() {
-                                set_status(&ui, "Merge complete.".to_string());
+                                set_status(&ui, "Cards combined.".to_string());
                             }
                             schedule_reload_burst(&ui);
                         }
@@ -945,7 +945,7 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                                     .iter()
                                     .find(|item| !item.ok)
                                     .and_then(|item| item.message.as_deref())
-                                    .unwrap_or("the engine rejected the change");
+                                    .unwrap_or("FileID couldn't save the change");
                                 set_status(&ui, format!("Couldn't mark as unknown: {detail}"));
                                 update_bulk_strip(&ui);
                             }
@@ -1534,7 +1534,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                         .iter()
                                         .find(|item| !item.ok)
                                         .and_then(|item| item.message.as_deref())
-                                        .unwrap_or("the engine rejected the change");
+                                        .unwrap_or("FileID couldn't save the change");
                                     show_person_dialog_error(
                                         &ui,
                                         &error_label,
@@ -1700,7 +1700,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                                         .find_map(|item| {
                                             (!item.ok).then_some(item.message.as_deref()).flatten()
                                         })
-                                        .unwrap_or("The engine did not confirm the change.");
+                                        .unwrap_or("FileID didn't confirm the change. Try again.");
                                     show_person_dialog_error(
                                         &ui,
                                         &error_label,
