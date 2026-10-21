@@ -11,13 +11,13 @@ const MAX_TRANSCRIPTION_CHARACTERS: usize = 4_000;
 
 const HANDWRITING_HINTS: &[&str] = &[
     "handwriting", "whiteboard", "blackboard", "chalkboard", "chalk", "sticky note", "notebook", "notepad", "note",
-    "manuscript", "calligraphy", "signature", "writing", "write", "journal", "diary", "letter", "envelope", "postcard",
-    "greeting card",
+    "manuscript", "calligraphy", "signature", "journal", "diary", "letter", "envelope", "postcard", "greeting card",
 ];
 
 const PAPER_HINTS: &[&str] = &[
     "document", "printed page", "paper", "receipt", "bill", "form", "contract", "certificate", "recipe", "list", "menu",
-    "newspaper", "poster", "screenshot", "sign", "diagram", "calendar", "checkbook", "text", "presentation",
+    "newspaper", "poster", "screenshot", "sign", "diagram", "calendar", "checkbook", "text", "presentation", "writing",
+    "write",
 ];
 
 pub(crate) const TRANSCRIPTION_PROMPT: &str = "Transcribe every word of handwritten or printed text visible in this image, exactly as written, one line per line of text. Do not describe the image and do not guess at illegible words. If there is no readable text, reply NONE. End with one final line: HANDWRITTEN: yes if most of the text is handwritten, otherwise HANDWRITTEN: no.";

@@ -616,17 +616,18 @@ public enum Tagging {
                         ctx.scaleBy(x: scale, y: scale)
                         ctx.drawPDFPage(page)
                         if let cg = ctx.makeImage() {
+                            // An image-only page is a scan, and at most three are read:
+                            // always take the accurate read too. Handwriting a fast read
+                            // only half-mangles ("Meeting noteg") would slip the
+                            // garbled-word gate.
                             let fast = worker.ocrFast(cg)
-                            var text = fast
-                            if TextReading.needsCarefulRead(fastText: fast, tags: [], textBearing: true) {
-                                let carefulStart = CFAbsoluteTimeGetCurrent()
-                                let careful = worker.ocrAccurate(cg)
-                                carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
-                                if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: []) {
-                                    handwritten = true
-                                }
-                                text = TextReading.preferred(fast: fast, careful: careful)
+                            let carefulStart = CFAbsoluteTimeGetCurrent()
+                            let careful = worker.ocrAccurate(cg)
+                            carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
+                            if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: []) {
+                                handwritten = true
                             }
+                            let text = TextReading.preferred(fast: fast, careful: careful)
                             if !text.isEmpty { fullText.append(text) }
                         }
                     }

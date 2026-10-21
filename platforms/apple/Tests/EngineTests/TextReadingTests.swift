@@ -34,6 +34,24 @@ struct TextReadingTests {
         #expect(TextReading.isHandwritten(fastText: "", carefulText: "Margaret Hollis", tags: ["Sticky_Note"]))
         #expect(!TextReading.isHandwritten(fastText: "EXIT", carefulText: "EXIT ONLY", tags: ["sign"]))
         #expect(!TextReading.isHandwritten(fastText: Self.fastGroceries, carefulText: " ", tags: ["handwriting"]))
+        // Real accurate-tier output on the same samples.
+        #expect(!TextReading.isHandwritten(
+            fastText: Self.fastReceipt,
+            carefulText: "CORNER MARKET\nBananas 1.29\nCoffee beans\nTOTAL 13.28\nThank you\n11.99",
+            tags: ["sky", "text", "writing"]))
+        #expect(TextReading.isHandwritten(
+            fastText: "wifi paoword\neobalt-otter-77\ndenti&t Tue& 3pm",
+            carefulText: "wifi password\ncobalt-otter-77\ndentist Tues 3pm",
+            tags: ["writing", "yellow"]))
+        #expect(TextReading.isHandwritten(fastText: "", carefulText: "Dearest Theodore,\nWith love, Beatrice", tags: []))
+    }
+
+    @Test func disagreementSeparatesPrintFromHandwriting() {
+        #expect(TextReading.disagreement(fast: Self.fastReceipt,
+                                         careful: "CORNER MARKET Bananas 1.29 Coffee beans TOTAL 13.28 Thank you 11.99") < 0.3)
+        #expect(TextReading.disagreement(fast: "wifi paoword eobalt-otter-77 denti&t Tue& 3pm",
+                                         careful: "wifi password cobalt-otter-77 dentist Tues 3pm") > 0.6)
+        #expect(TextReading.disagreement(fast: "anything", careful: "  ") == 0)
     }
 
     @Test func accurateTierPausesAfterThreeFailuresInARow() {

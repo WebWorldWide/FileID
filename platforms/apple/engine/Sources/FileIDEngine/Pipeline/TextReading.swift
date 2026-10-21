@@ -13,15 +13,16 @@ enum TextReading {
     /// `_` read as a space) that suggest handwriting.
     static let handwritingHints: Set<String> = [
         "handwriting", "whiteboard", "blackboard", "chalkboard", "chalk", "sticky note",
-        "notebook", "notepad", "note", "manuscript", "calligraphy", "signature", "writing",
-        "write", "journal", "diary", "letter", "envelope", "postcard", "greeting card",
+        "notebook", "notepad", "note", "manuscript", "calligraphy", "signature",
+        "journal", "diary", "letter", "envelope", "postcard", "greeting card",
     ]
 
-    /// Tags that suggest printed or mixed text worth reading.
+    /// Tags that suggest printed or mixed text worth reading. RAM++ puts "writing"
+    /// on printed receipts and forms too, so it only gates the read.
     static let paperHints: Set<String> = [
         "document", "printed page", "paper", "receipt", "bill", "form", "contract",
         "certificate", "recipe", "list", "menu", "newspaper", "poster", "screenshot",
-        "sign", "diagram", "calendar", "checkbook", "text", "presentation",
+        "sign", "diagram", "calendar", "checkbook", "text", "presentation", "writing", "write",
     ]
 
     static func normalized(_ tag: String) -> String {
@@ -106,6 +107,25 @@ enum TextReading {
     static func isHandwritten(fastText: String, carefulText: String, tags: [String]) -> Bool {
         guard !carefulText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         return hasHandwritingHint(tags) || garbled(fastText).share >= garbledShareThreshold
+            || disagreement(fast: fastText, careful: carefulText) >= garbledShareThreshold
+    }
+
+    /// Share of the careful read's words the fast read didn't produce (case and
+    /// edge punctuation ignored). The fast tier reads print almost as well as the
+    /// accurate one (a receipt: 0.22) but loses most handwritten words (a sticky
+    /// note: 0.67; script the fast tier can't see at all: 1.0).
+    static func disagreement(fast: String, careful: String) -> Double {
+        let edge = CharacterSet.punctuationCharacters.union(.symbols)
+        func words(_ text: String) -> [String] {
+            text.lowercased().split(whereSeparator: \.isWhitespace)
+                .map { $0.trimmingCharacters(in: edge) }
+                .filter { $0.contains(where: \.isLetter) }
+        }
+        let carefulWords = words(careful)
+        // On a sign or label one missed word is half the text; too few to judge.
+        guard carefulWords.count >= 4 else { return 0 }
+        let fastWords = Set(words(fast))
+        return Double(carefulWords.filter { !fastWords.contains($0) }.count) / Double(carefulWords.count)
     }
 
     /// The careful read when it found text, else the fast read.
