@@ -27,6 +27,15 @@ struct NearDuplicateGroupingTests {
         #expect(groups[0].representative == 1 || groups[0].representative == 3)
     }
 
+    @Test func aLaterExportOfTheRawJoinsItsShot() {
+        let groups = NearDuplicateGrouping.groups([
+            item(1, "/c/RAWs/DSC9.ARW", 100, 0),
+            item(2, "/c/JPEGs/DSC9.JPG", 15_000, 0.3),
+            item(3, "/c/JPEGs/DSC8.JPG", 15_000, 0),
+        ])
+        #expect(groups.map(\.members) == [[2, 1], [3]])
+    }
+
     @Test func timeGapsAndMissingTimesNeverJoin() {
         let groups = NearDuplicateGrouping.groups([
             item(1, "/a/1.jpg", 10, 0), item(2, "/a/2.jpg", 13, 0),

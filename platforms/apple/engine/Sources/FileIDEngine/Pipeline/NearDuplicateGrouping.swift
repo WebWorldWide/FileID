@@ -21,10 +21,13 @@ enum NearDuplicateGrouping {
 
     static let maxGapSeconds = 2.0
     static let maxSpanSeconds = 12.0
-    static let minCosine: Float = 0.94
-    static let minSeedCosine: Float = 0.90
+    static let minCosine: Float = 0.97
+    static let minSeedCosine: Float = 0.955
     static let maxHamming = 8
     static let maxGroupSize = 24
+    /// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this similar
+    /// counts as the same shot even when its file dates differ.
+    static let sidecarCosine: Float = 0.90
 
     static let rawExtensions: Set<String> = [
         "3fr", "arw", "cr2", "cr3", "dng", "iiq", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "srw", "x3f",
@@ -52,8 +55,26 @@ enum NearDuplicateGrouping {
 
     static func hamming(_ a: UInt64, _ b: UInt64) -> Int { (a ^ b).nonzeroBitCount }
 
+    /// Same-stem twins that look alike share the earlier capture time, so a JPEG
+    /// exported hours after the RAW still sorts beside it.
+    static func alignSidecarTimes(_ items: [Item]) -> [Item] {
+        var byStem: [String: [Int]] = [:]
+        for (i, item) in items.enumerated() { byStem[stem(item.path), default: []].append(i) }
+        var result = items
+        for indices in byStem.values where indices.count > 1 {
+            for a in indices {
+                for b in indices where b != a {
+                    guard let ea = items[a].embedding, let eb = items[b].embedding,
+                          cosine(ea, eb) >= sidecarCosine, let ta = result[a].time, let tb = items[b].time, tb < ta else { continue }
+                    result[a] = Item(id: items[a].id, path: items[a].path, time: tb, phash: items[a].phash, embedding: items[a].embedding)
+                }
+            }
+        }
+        return result
+    }
+
     static func groups(_ items: [Item]) -> [Group] {
-        let ordered = items.sorted { lhs, rhs in
+        let ordered = alignSidecarTimes(items).sorted { lhs, rhs in
             switch (lhs.time, rhs.time) {
             case let (l?, r?) where l != r: return l < r
             case (nil, _?): return false
@@ -145,6 +166,9 @@ enum NearDuplicateGrouping {
         }
         let timed = meta.compactMap { item in item.time.map { (item.id, $0) } }.sorted { $0.1 < $1.1 }
         var burst = Set<Int64>()
+        var stems: [String: [Int64]] = [:]
+        for item in meta { stems[stem(item.path), default: []].append(item.id) }
+        for ids in stems.values where ids.count > 1 { burst.formUnion(ids) }
         for (a, b) in zip(timed, timed.dropFirst()) where b.1 - a.1 <= maxGapSeconds {
             burst.insert(a.0)
             burst.insert(b.0)

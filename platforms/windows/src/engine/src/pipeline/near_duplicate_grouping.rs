@@ -7,10 +7,13 @@ use std::path::Path;
 
 pub const MAX_GAP_SECONDS: f64 = 2.0;
 pub const MAX_SPAN_SECONDS: f64 = 12.0;
-pub const MIN_COSINE: f32 = 0.94;
-pub const MIN_SEED_COSINE: f32 = 0.90;
+pub const MIN_COSINE: f32 = 0.97;
+pub const MIN_SEED_COSINE: f32 = 0.955;
 pub const MAX_HAMMING: u32 = 8;
 pub const MAX_GROUP_SIZE: usize = 24;
+/// A same-named file (RAW+JPEG, or a later edited JPEG export of the RAW) this
+/// similar counts as the same shot even when its file dates differ.
+pub const SIDECAR_COSINE: f32 = 0.90;
 
 const RAW_EXTENSIONS: &[&str] = &[
     "3fr", "arw", "cr2", "cr3", "dng", "iiq", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "srw", "x3f",
@@ -62,8 +65,31 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
+/// Same-stem twins that look alike share the earlier capture time, so a JPEG
+/// exported hours after the RAW still sorts beside it.
+pub fn align_sidecar_times(items: &[Item]) -> Vec<Item> {
+    let mut by_stem: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        by_stem.entry(stem(&item.path)).or_default().push(i);
+    }
+    let mut result = items.to_vec();
+    for indices in by_stem.values().filter(|v| v.len() > 1) {
+        for &a in indices {
+            for &b in indices.iter().filter(|&&b| b != a) {
+                let (Some(ea), Some(eb)) = (items[a].embedding.as_deref(), items[b].embedding.as_deref()) else { continue };
+                let (Some(ta), Some(tb)) = (result[a].time, items[b].time) else { continue };
+                if tb < ta && cosine(ea, eb) >= SIDECAR_COSINE {
+                    result[a].time = Some(tb);
+                }
+            }
+        }
+    }
+    result
+}
+
 pub fn groups(items: &[Item]) -> Vec<Group> {
-    let mut ordered: Vec<&Item> = items.iter().collect();
+    let aligned = align_sidecar_times(items);
+    let mut ordered: Vec<&Item> = aligned.iter().collect();
     ordered.sort_by(|l, r| {
         let by_time = match (l.time, r.time) {
             (Some(a), Some(b)) => a.total_cmp(&b),
@@ -195,6 +221,13 @@ pub fn load_items(conn: &rusqlite::Connection, ids: &[i64]) -> rusqlite::Result<
     let mut timed: Vec<(i64, f64)> = meta.iter().filter_map(|m| m.2.map(|t| (m.0, t))).collect();
     timed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let mut burst = HashSet::new();
+    let mut stems: HashMap<String, Vec<i64>> = HashMap::new();
+    for m in &meta {
+        stems.entry(stem(&m.1)).or_default().push(m.0);
+    }
+    for ids in stems.values().filter(|v| v.len() > 1) {
+        burst.extend(ids.iter().copied());
+    }
     for pair in timed.windows(2) {
         if pair[1].1 - pair[0].1 <= MAX_GAP_SECONDS {
             burst.insert(pair[0].0);
@@ -300,6 +333,16 @@ mod tests {
         let found = groups(&items);
         assert_eq!(found.iter().map(|g| g.members.clone()).collect::<Vec<_>>(), vec![vec![1, 2, 3, 4], vec![5]]);
         assert_eq!(found[0].representative, 1);
+    }
+
+    #[test]
+    fn a_later_export_of_the_raw_joins_its_shot() {
+        let found = groups(&[
+            item(1, "/c/RAWs/DSC9.ARW", Some(100.0), Some(0.0)),
+            item(2, "/c/JPEGs/DSC9.JPG", Some(15_000.0), Some(0.3)),
+            item(3, "/c/JPEGs/DSC8.JPG", Some(15_000.0), Some(0.0)),
+        ]);
+        assert_eq!(found.iter().map(|g| g.members.clone()).collect::<Vec<_>>(), vec![vec![2, 1], vec![3]]);
     }
 
     #[test]

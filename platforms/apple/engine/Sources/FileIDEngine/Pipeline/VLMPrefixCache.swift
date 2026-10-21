@@ -8,7 +8,7 @@ import MLXVLM
 /// and request. Used only inside `ModelContainer.perform`, which serializes access.
 final class VLMPrefixCache: @unchecked Sendable {
     /// Models whose `prepare` continues a warm text cache with new image tokens.
-    static func supports(_ model: any LanguageModel) -> Bool { model is Qwen3VL || model is Qwen35 }
+    static func supports(_ model: any LanguageModel) -> Bool { model is Qwen3VLWeightAdapter || model is Qwen3VL || model is Qwen35 }
     static let minimumPrefixTokens = 48
 
     private var modelName: String?
