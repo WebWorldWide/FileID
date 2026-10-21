@@ -124,7 +124,7 @@ struct VideoSceneSelectionTests {
         let frames = (0..<40).map { frame(Double($0) * 0.5, 0, change: 0.1) }
         let windows = VideoSceneSelection.activityWindows(frames, duration: 20)
         #expect(windows.count >= 5)
-        #expect(windows.allSatisfy { $0.end - $0.start <= VideoSceneSelection.maxWindowSeconds + 1.01 && $0.times.count <= 8 })
+        #expect(windows.allSatisfy { $0.end - $0.start <= VideoSceneSelection.maxWindowSeconds + 1.01 && $0.times.count <= VideoSceneSelection.maxWindowFrames })
         #expect(windows.allSatisfy { zip($0.times, $0.times.dropFirst()).allSatisfy { $0 < $1 } })
     }
 

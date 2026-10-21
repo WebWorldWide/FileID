@@ -5,14 +5,20 @@
 use super::near_duplicate_grouping::cosine;
 
 pub const POOL_INTERVAL: f64 = 0.5;
-pub const CUT_COSINE: f32 = 0.86;
-pub const DRIFT_COSINE: f32 = 0.78;
-pub const MIN_SCENE_SECONDS: f64 = 1.0;
+/// A frame starts a new scene when it and the next frame are both less similar
+/// than this to the running mean of the current scene.
+pub const CUT_COSINE: f32 = 0.80;
+/// A slow pan or walk that drifts this far from the scene's first frame also cuts.
+pub const DRIFT_COSINE: f32 = 0.70;
+pub const CONFIRM_FRAMES: usize = 2;
+pub const MIN_SCENE_SECONDS: f64 = 2.0;
+/// Long static shots still get a fresh caption this often, for search coverage.
+pub const MAX_SCENE_SECONDS: f64 = 20.0;
 pub const ACTIVITY_CHANGE: f64 = 0.02;
 pub const ACTIVITY_PAD_SECONDS: f64 = 0.5;
 pub const MERGE_GAP_SECONDS: f64 = 1.0;
 pub const MAX_WINDOW_SECONDS: f64 = 4.0;
-pub const MAX_WINDOW_FRAMES: usize = 8;
+pub const MAX_WINDOW_FRAMES: usize = 6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
@@ -50,13 +56,36 @@ pub fn scenes(frames: &[Frame], duration: f64) -> Vec<Scene> {
         return Vec::new();
     }
     let mut bounds = vec![0usize];
+    let mut sum = frames[0].embedding.clone();
+    let mut pending = 0usize;
     for i in 1..frames.len() {
         let start = *bounds.last().unwrap_or(&0);
-        let to_previous = cosine(&frames[i].embedding, &frames[i - 1].embedding);
-        let to_start = cosine(&frames[i].embedding, &frames[start].embedding);
-        if (to_previous < CUT_COSINE || to_start < DRIFT_COSINE) && frames[i].seconds - frames[start].seconds >= MIN_SCENE_SECONDS {
+        let similar = frames[i].embedding.len() == sum.len()
+            && cosine(&frames[i].embedding, &sum) >= CUT_COSINE
+            && cosine(&frames[i].embedding, &frames[start].embedding) >= DRIFT_COSINE;
+        let length = frames[i].seconds - frames[start].seconds;
+        if length >= MAX_SCENE_SECONDS {
             bounds.push(i);
+            sum.clone_from(&frames[i].embedding);
+            pending = 0;
+            continue;
         }
+        if !similar && length >= MIN_SCENE_SECONDS {
+            pending += 1;
+            if pending >= CONFIRM_FRAMES {
+                let first = i + 1 - CONFIRM_FRAMES;
+                bounds.push(first);
+                sum.clone_from(&frames[first].embedding);
+                for frame in &frames[first + 1..=i] {
+                    add(&frame.embedding, &mut sum);
+                }
+                pending = 0;
+                continue;
+            }
+        } else {
+            pending = 0;
+        }
+        add(&frames[i].embedding, &mut sum);
     }
     bounds.push(frames.len());
     bounds
@@ -136,6 +165,14 @@ pub fn activity_windows(frames: &[Frame], duration: f64) -> Vec<Window> {
     windows
 }
 
+fn add(value: &[f32], sum: &mut [f32]) {
+    if value.len() == sum.len() {
+        for (s, v) in sum.iter_mut().zip(value) {
+            *s += v;
+        }
+    }
+}
+
 pub fn luma_change(lhs: &[u8], rhs: &[u8]) -> f64 {
     if lhs.len() != rhs.len() || lhs.is_empty() {
         return 0.0;
@@ -185,7 +222,7 @@ mod tests {
         let frames: Vec<Frame> = (0..40).map(|i| frame(i as f64 * 0.5, 0.0, 0.1)).collect();
         let windows = activity_windows(&frames, 20.0);
         assert!(windows.len() >= 5);
-        assert!(windows.iter().all(|w| w.end - w.start <= MAX_WINDOW_SECONDS + 1.01 && w.times.len() <= 8));
+        assert!(windows.iter().all(|w| w.end - w.start <= MAX_WINDOW_SECONDS + 1.01 && w.times.len() <= MAX_WINDOW_FRAMES));
         assert!(windows.iter().all(|w| w.times.windows(2).all(|p| p[0] < p[1])));
     }
 

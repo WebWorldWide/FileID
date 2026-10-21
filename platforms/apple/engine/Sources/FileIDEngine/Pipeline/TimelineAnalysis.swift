@@ -14,6 +14,7 @@ actor TimelineAnalysis {
     private var signalTask: Task<[TimelineSignalAnalysis.Signal], Error>?
     private var speechTask: Task<[TimelineSpeechTranscription.Passage]?, Never>?
     private var poolTask: Task<VideoFramePool.Pool, Error>?
+    private var nextPool: (fileID: Int64, task: Task<VideoFramePool.Pool, Error>)?
     private struct Recipe: Codable, Sendable {
         let modelKind: String
         let modelVersion: String
@@ -72,6 +73,7 @@ actor TimelineAnalysis {
             sequenceTask?.cancel()
             prefetchTask?.cancel()
             poolTask?.cancel()
+            nextPool?.task.cancel()
                 signalTask?.cancel()
                 speechTask?.cancel()
                 await DeepAnalyze.shared.requestCancel()
@@ -119,7 +121,8 @@ actor TimelineAnalysis {
                     try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,0,?,'incomplete',?,?)", arguments: [id+"-"+String(fileID)+"-coverage",fileID,duration,source.1,job.version])
                 }
                 if job.version.hasPrefix(Self.scenePrefix) {
-                    try await analyzeScenes(fileID: fileID, sourceURL: url, sourceRevision: source.1, duration: duration,
+                    let nextFileID = index + 1 < job.ids.count ? job.ids[index + 1] : nil
+                    try await analyzeScenes(fileID: fileID, nextFileID: nextFileID, sourceURL: url, sourceRevision: source.1, duration: duration,
                                             model: job.model, modelVersion: job.version, timelineMode: job.timelineMode,
                                             fileIndex: index, totalFiles: job.ids.count, jobID: id, database: database, sink: sink)
                     try await finishFile(fileID: fileID, sourceURL: url, sourceRevision: source.1, duration: duration,
@@ -242,6 +245,11 @@ actor TimelineAnalysis {
             try? await database.pool.write { db in
                 try db.execute(sql: "UPDATE catalog_jobs SET state='failed',error=?,updated_at=? WHERE id=? AND state='running'", arguments: [message,Date().timeIntervalSince1970,id])
             }
+        }
+        if let pending = nextPool {
+            nextPool = nil
+            pending.task.cancel()
+            Task { VideoFramePool.remove(try? await pending.task.value) }
         }
         await DeepAnalyze.shared.clearCancel()
         await publish(id, database: database, sink: sink)
@@ -441,15 +449,30 @@ actor TimelineAnalysis {
 
     /// One frame-pool decode per video; the VLM captions one representative per CLIP scene
     /// (the caption covers the whole scene) and, for moments, only windows with motion.
-    private func analyzeScenes(fileID: Int64, sourceURL: URL, sourceRevision: String, duration: Double,
+    private func analyzeScenes(fileID: Int64, nextFileID: Int64?, sourceURL: URL, sourceRevision: String, duration: Double,
                                model: String, modelVersion: String, timelineMode: String?,
                                fileIndex: Int, totalFiles: Int, jobID: String, database: Database, sink: IPCSink) async throws {
         let started = ContinuousClock.now
         let pool: VideoFramePool.Pool
         do {
-            pool = try await samplePool(source: sourceURL, duration: duration)
+            if let pending = nextPool, pending.fileID == fileID {
+                nextPool = nil
+                poolTask = pending.task
+                pool = try await pending.task.value
+                poolTask = nil
+            } else {
+                if let stale = nextPool { stale.task.cancel(); nextPool = nil }
+                pool = try await samplePool(source: sourceURL, duration: duration)
+            }
         } catch is VideoFrameWorker.SourceRevisionChanged {
             throw SourceChanged()
+        }
+        if let nextFileID, let nextPath = try? await database.pool.read({ db in
+            try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id=? AND kind='video'", arguments: [nextFileID])
+        }) {
+            let nextURL = URL(fileURLWithPath: nextPath)
+            // Decoding is hardware/CPU work; it overlaps this video's VLM captions.
+            nextPool = (nextFileID, Task { try await VideoFrameWorker.samplePool(source: nextURL, durationHint: 3_600) })
         }
         defer { VideoFramePool.remove(pool) }
         guard pool.manifest.revision == sourceRevision else { throw SourceChanged() }
@@ -546,7 +569,15 @@ actor TimelineAnalysis {
                 }
                 try await requireRunning(jobID, database: database)
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
-                let moments = try TimelineMomentAnalysis.parse(result.description, frameCount: times.count)
+                // One malformed reply leaves only its window marked incomplete.
+                guard let moments = try? TimelineMomentAnalysis.parse(result.description, frameCount: times.count) else {
+                    try await database.pool.write { db in
+                        try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,'incomplete',?,?)",
+                                       arguments: [coverageID, fileID, window.start, window.end, sourceRevision, version])
+                    }
+                    JSONLog.shared.warn(ev: "timeline_moment_window_invalid", error: "unparseable reply")
+                    continue
+                }
                 let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: times, window: momentWindow,
                                                                fileID: fileID, sourceRevision: sourceRevision, modelVersion: version)
                 try await Self.persistMomentWindow(chapters: chapters, coverageID: coverageID, window: momentWindow,
@@ -597,7 +628,8 @@ actor TimelineAnalysis {
         database: Database,
         sink: IPCSink
     ) async throws {
-        guard duration.isFinite, duration > 0,
+        guard ProcessInfo.processInfo.environment["FILEID_TIMELINE_SPEECH"] != "0",
+              duration.isFinite, duration > 0,
               await TimelineSpeechTranscription.hasAudioTrack(url: sourceURL) else { return }
 
         let modelVersion = TimelineSpeechTranscription.modelVersion

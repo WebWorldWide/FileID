@@ -27,14 +27,21 @@ enum VideoSceneSelection {
     }
 
     static let poolInterval = 0.5
-    static let cutCosine: Float = 0.86
-    static let driftCosine: Float = 0.78
-    static let minSceneSeconds = 1.0
+    /// A frame starts a new scene when it and the next frame are both less similar
+    /// than this to the running mean of the current scene, so camera motion and a
+    /// single blurred frame do not split a shot.
+    static let cutCosine: Float = 0.80
+    /// A slow pan or walk that drifts this far from the scene's first frame also cuts.
+    static let driftCosine: Float = 0.70
+    static let confirmFrames = 2
+    static let minSceneSeconds = 2.0
+    /// Long static shots still get a fresh caption this often, for search coverage.
+    static let maxSceneSeconds = 20.0
     static let activityChange = 0.02
     static let activityPadSeconds = 0.5
     static let mergeGapSeconds = 1.0
     static let maxWindowSeconds = 4.0
-    static let maxWindowFrames = 8
+    static let maxWindowFrames = 6
 
     static func poolTimes(duration: Double, interval: Double = poolInterval) -> [Double] {
         guard duration.isFinite, duration > 0, interval > 0 else { return [] }
@@ -45,11 +52,34 @@ enum VideoSceneSelection {
     static func scenes(_ frames: [Frame], duration: Double) -> [Scene] {
         guard !frames.isEmpty, duration.isFinite, duration > 0 else { return [] }
         var bounds: [Int] = [0]
+        var sum = frames[0].embedding
+        var pending = 0
         for i in frames.indices.dropFirst() {
             let start = bounds.last!
-            let toPrevious = NearDuplicateGrouping.cosine(frames[i].embedding, frames[i - 1].embedding)
-            let toStart = NearDuplicateGrouping.cosine(frames[i].embedding, frames[start].embedding)
-            if toPrevious < cutCosine || toStart < driftCosine, frames[i].seconds - frames[start].seconds >= minSceneSeconds { bounds.append(i) }
+            let similar = frames[i].embedding.count == sum.count
+                && NearDuplicateGrouping.cosine(frames[i].embedding, sum) >= cutCosine
+                && NearDuplicateGrouping.cosine(frames[i].embedding, frames[start].embedding) >= driftCosine
+            let length = frames[i].seconds - frames[start].seconds
+            if length >= maxSceneSeconds {
+                bounds.append(i)
+                sum = frames[i].embedding
+                pending = 0
+                continue
+            }
+            if !similar, length >= minSceneSeconds {
+                pending += 1
+                if pending >= confirmFrames {
+                    let first = i - confirmFrames + 1
+                    bounds.append(first)
+                    sum = frames[first].embedding
+                    for j in (first + 1)...i { add(frames[j].embedding, to: &sum) }
+                    pending = 0
+                    continue
+                }
+            } else {
+                pending = 0
+            }
+            add(frames[i].embedding, to: &sum)
         }
         bounds.append(frames.count)
         return zip(bounds, bounds.dropFirst()).map { lower, upper in
@@ -103,6 +133,11 @@ enum VideoSceneSelection {
             }
         }
         return windows
+    }
+
+    private static func add(_ value: [Float], to sum: inout [Float]) {
+        guard value.count == sum.count else { return }
+        for d in sum.indices { sum[d] += value[d] }
     }
 
     static func lumaChange(_ lhs: [UInt8], _ rhs: [UInt8]) -> Double {

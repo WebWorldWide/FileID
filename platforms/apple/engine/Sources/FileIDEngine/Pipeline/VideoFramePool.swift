@@ -3,6 +3,7 @@ import Darwin
 import ImageIO
 import AVFoundation
 import CoreGraphics
+import CoreImage
 import UniformTypeIdentifiers
 import FileIDShared
 
@@ -68,21 +69,9 @@ enum VideoFramePool {
             let asset = AVURLAsset(url: source, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
             guard let duration = await DeepAnalyze.loadVideoDurationSeconds(asset, timeoutSeconds: 8),
                   duration.isFinite, duration > 0 else { return 3 }
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
-            let tolerance = CMTime(seconds: interval / 4, preferredTimescale: 600)
-            generator.requestedTimeToleranceBefore = tolerance
-            generator.requestedTimeToleranceAfter = tolerance
-            let ref = GeneratorRef(generator)
-            var frames: [Frame] = []
-            for (index, seconds) in VideoSceneSelection.poolTimes(duration: duration, interval: interval).enumerated() {
-                guard !Task.isCancelled else { return 3 }
-                guard let (image, actual) = await generate(ref, seconds: seconds) else { continue }
-                if let last = frames.last, abs(last.seconds - actual) < 0.001 { continue }
-                let name = String(format: "frame-%05d.jpg", index)
-                try writeJPEG(image, to: output.appendingPathComponent(name))
-                frames.append(Frame(seconds: actual, file: name, signature: try signature(image)))
+            var frames = (try? await readSequentially(asset: asset, interval: interval, maxPixel: maxPixel, output: output)) ?? []
+            if frames.isEmpty {
+                frames = try await seekEach(asset: asset, duration: duration, interval: interval, maxPixel: maxPixel, output: output)
             }
             guard frames.count >= 1 else { return 3 }
             guard try attributes(source) == before else { return 4 }
@@ -117,6 +106,71 @@ enum VideoFramePool {
     static func remove(_ pool: Pool?) {
         guard let pool else { return }
         try? FileManager.default.removeItem(at: pool.directory)
+    }
+
+    /// Decodes the track once, front to back, on the hardware decoder with VideoToolbox
+    /// scaling, and keeps the first frame at or after each `interval` step. Long-GOP
+    /// 4K files cost one decode per frame instead of one GOP decode per seek.
+    private static func readSequentially(asset: AVURLAsset, interval: Double, maxPixel: Int, output: URL) async throws -> [Frame] {
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else { return [] }
+        let natural = try await track.load(.naturalSize)
+        let transform = try await track.load(.preferredTransform)
+        guard natural.width > 0, natural.height > 0 else { return [] }
+        let scale = min(1, Double(maxPixel) / Double(max(natural.width, natural.height)))
+        let width = max(2, Int((Double(natural.width) * scale / 2).rounded()) * 2)
+        let height = max(2, Int((Double(natural.height) * scale / 2).rounded()) * 2)
+        let reader = try AVAssetReader(asset: asset)
+        let trackOutput = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
+        ])
+        trackOutput.alwaysCopiesSampleData = false
+        guard reader.canAdd(trackOutput) else { return [] }
+        reader.add(trackOutput)
+        guard reader.startReading() else { return [] }
+        defer { reader.cancelReading() }
+        let context = CIContext(options: [.useSoftwareRenderer: false])
+        let toScaled = CGAffineTransform(scaleX: CGFloat(width) / natural.width, y: CGFloat(height) / natural.height)
+        let flip = CGAffineTransform(scaleX: 1, y: -1)
+        let oriented = flip.concatenating(toScaled.inverted()).concatenating(transform).concatenating(toScaled).concatenating(flip)
+        var frames: [Frame] = []
+        var next = 0.0
+        var index = 0
+        while let sample = trackOutput.copyNextSampleBuffer() {
+            if Task.isCancelled { return [] }
+            let seconds = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            guard seconds.isFinite, seconds + 0.001 >= next, let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            var image = CIImage(cvPixelBuffer: buffer).transformed(by: oriented)
+            image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+            guard let cg = context.createCGImage(image, from: image.extent) else { continue }
+            let name = String(format: "frame-%05d.jpg", index)
+            try writeJPEG(cg, to: output.appendingPathComponent(name))
+            frames.append(Frame(seconds: seconds, file: name, signature: try signature(cg)))
+            index += 1
+            next = (floor(seconds / interval) + 1) * interval
+        }
+        return reader.status == .completed ? frames : []
+    }
+
+    private static func seekEach(asset: AVURLAsset, duration: Double, interval: Double, maxPixel: Int, output: URL) async throws -> [Frame] {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        let tolerance = CMTime(seconds: interval / 4, preferredTimescale: 600)
+        generator.requestedTimeToleranceBefore = tolerance
+        generator.requestedTimeToleranceAfter = tolerance
+        let ref = GeneratorRef(generator)
+        var frames: [Frame] = []
+        for (index, seconds) in VideoSceneSelection.poolTimes(duration: duration, interval: interval).enumerated() {
+            guard !Task.isCancelled else { return [] }
+            guard let (image, actual) = await generate(ref, seconds: seconds) else { continue }
+            if let last = frames.last, abs(last.seconds - actual) < 0.001 { continue }
+            let name = String(format: "frame-%05d.jpg", index)
+            try writeJPEG(image, to: output.appendingPathComponent(name))
+            frames.append(Frame(seconds: actual, file: name, signature: try signature(image)))
+        }
+        return frames
     }
 
     private struct GeneratorRef: @unchecked Sendable {
