@@ -346,7 +346,21 @@ pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<(
             PCWSTR(destination_wide.as_ptr()),
             MOVE_FILE_FLAGS(0),
         )
-        .map_err(std::io::Error::other)
+        .map_err(windows_io_error)
+    }
+}
+
+/// `io::Error` carrying the Win32 code of a windows-rs error, so `kind()` and
+/// `raw_os_error()` work (AlreadyExists, CrossesDevices, NotFound, ...).
+/// `io::Error::other` would hide both, and windows-rs's own conversion keeps
+/// the HRESULT, which std does not decode.
+#[cfg(windows)]
+pub(crate) fn windows_io_error(error: windows::core::Error) -> std::io::Error {
+    let code = error.code().0 as u32;
+    if code & 0xffff_0000 == 0x8007_0000 {
+        std::io::Error::from_raw_os_error((code & 0xffff) as i32)
+    } else {
+        std::io::Error::other(error)
     }
 }
 
@@ -364,34 +378,111 @@ fn c_path(path: &Path, label: &str) -> std::io::Result<std::ffi::CString> {
 
 #[cfg(target_os = "linux")]
 pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = c_path(source, "source")?;
-    let destination = c_path(destination, "destination")?;
+    let source_c = c_path(source, "source")?;
+    let destination_c = c_path(destination, "destination")?;
     let result = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
-            source.as_ptr(),
+            source_c.as_ptr(),
             libc::AT_FDCWD,
-            destination.as_ptr(),
+            destination_c.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
     };
     if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+        return Ok(());
     }
+    let error = std::io::Error::last_os_error();
+    if no_replace_flag_unsupported(&error) {
+        return rename_no_replace_emulated(source, destination);
+    }
+    Err(error)
 }
 
 #[cfg(target_os = "macos")]
 pub fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = c_path(source, "source")?;
-    let destination = c_path(destination, "destination")?;
-    let result = unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+    let source_c = c_path(source, "source")?;
+    let destination_c = c_path(destination, "destination")?;
+    let result =
+        unsafe { libc::renamex_np(source_c.as_ptr(), destination_c.as_ptr(), libc::RENAME_EXCL) };
     if result == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
+        return Ok(());
     }
+    let error = std::io::Error::last_os_error();
+    if no_replace_flag_unsupported(&error) {
+        return rename_no_replace_emulated(source, destination);
+    }
+    Err(error)
+}
+
+/// The volume rejects the no-replace flag itself: exFAT and SMB on macOS
+/// return ENOTSUP for RENAME_EXCL, NFS and some FUSE filesystems return EINVAL
+/// for RENAME_NOREPLACE, and kernels before 3.15 lack renameat2 (ENOSYS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn no_replace_flag_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == libc::EINVAL
+            || code == libc::ENOTSUP
+            || code == libc::EOPNOTSUPP
+            || code == libc::ENOSYS
+    )
+}
+
+/// No-clobber rename for volumes without a kernel no-replace flag (and, like
+/// exFAT and FAT, often without hard links). The destination name is claimed
+/// with an exclusive create, so a file that is already there, or that appears
+/// before the claim, is never replaced; the plain rename then replaces only the
+/// empty placeholder this call created. A crash between the two steps can leave
+/// that empty placeholder behind, which later no-clobber moves treat as
+/// occupied rather than overwrite.
+#[cfg(unix)]
+pub(crate) fn rename_no_replace_emulated(
+    source: &Path,
+    destination: &Path,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let occupied = || std::io::Error::from_raw_os_error(libc::EEXIST);
+    let source_metadata = std::fs::symlink_metadata(source)?;
+    if let Ok(existing) = std::fs::symlink_metadata(destination) {
+        // A case- or normalization-only rename on an insensitive volume names
+        // the source itself; a second hard link to it is a distinct name.
+        let same_entry = existing.dev() == source_metadata.dev()
+            && existing.ino() == source_metadata.ino()
+            && source_metadata.nlink() == 1;
+        return if same_entry {
+            std::fs::rename(source, destination)
+        } else {
+            Err(occupied())
+        };
+    }
+    let placeholder = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(destination)?;
+    let claimed = placeholder.metadata()?;
+    drop(placeholder);
+    let still_claimed = || {
+        std::fs::symlink_metadata(destination).is_ok_and(|current| {
+            current.is_file()
+                && current.len() == 0
+                && current.dev() == claimed.dev()
+                && current.ino() == claimed.ino()
+        })
+    };
+    if !still_claimed() {
+        return Err(occupied());
+    }
+    if let Err(error) = std::fs::rename(source, destination) {
+        if still_claimed() {
+            let _ = std::fs::remove_file(destination);
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -480,13 +571,117 @@ mod tests {
         let destination = root.join("destination");
         std::fs::write(&source, b"source").unwrap();
         std::fs::write(&destination, b"destination").unwrap();
-        assert!(rename_no_replace(&source, &destination).is_err());
+        let occupied = rename_no_replace(&source, &destination).unwrap_err();
+        // Callers retry or report a conflict on this kind; Windows once wrapped
+        // the MoveFileExW error as `Other` and lost it.
+        assert_eq!(occupied.kind(), std::io::ErrorKind::AlreadyExists, "{occupied:?}");
         assert_eq!(std::fs::read(&source).unwrap(), b"source");
         assert_eq!(std::fs::read(&destination).unwrap(), b"destination");
         std::fs::remove_file(&destination).unwrap();
         rename_no_replace(&source, &destination).unwrap();
         assert!(!source.exists());
         assert_eq!(std::fs::read(&destination).unwrap(), b"source");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fileid-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    fn case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("CaseProbe");
+        std::fs::write(&probe, b"").unwrap();
+        let insensitive = dir.join("caseprobe").exists();
+        std::fs::remove_file(probe).unwrap();
+        insensitive
+    }
+
+    #[test]
+    fn case_only_rename_keeps_the_file_on_every_volume() {
+        let root = temp_root("case-rename");
+        let source = root.join("Photo.JPG");
+        let destination = root.join("Photo.jpg");
+        std::fs::write(&source, b"pixels").unwrap();
+        rename_no_replace(&source, &destination).unwrap();
+        let names: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("Photo.jpg")]);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"pixels");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn emulated_no_replace_rename_never_clobbers() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = temp_root("emulated-rename");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&destination, b"occupant").unwrap();
+        let error = rename_no_replace_emulated(&source, &destination).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+        assert_eq!(std::fs::read(&source).unwrap(), b"source");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"occupant");
+
+        // A second hard link is a distinct name, never "the same file".
+        std::fs::remove_file(&destination).unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        assert!(rename_no_replace_emulated(&source, &destination).is_err());
+        assert!(source.exists() && destination.exists());
+        assert_eq!(std::fs::metadata(&source).unwrap().nlink(), 2);
+        std::fs::remove_file(&destination).unwrap();
+
+        let source_identity = std::fs::metadata(&source).unwrap().ino();
+        rename_no_replace_emulated(&source, &destination).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::metadata(&destination).unwrap().ino(), source_identity);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"source");
+
+        // A failed rename removes only the placeholder it created.
+        let missing = root.join("missing");
+        let target = root.join("target");
+        assert!(rename_no_replace_emulated(&missing, &target).is_err());
+        assert!(!target.exists());
+
+        if case_insensitive(&root) {
+            let upper = root.join("DESTINATION");
+            rename_no_replace_emulated(&destination, &upper).unwrap();
+            assert_eq!(std::fs::read(&upper).unwrap(), b"source");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Point FILEID_TEST_NO_EXCL_DIR at a directory on a volume without a
+    /// no-replace rename flag (an exFAT image on macOS, NFS on Linux) to check
+    /// the fallback end to end. Skipped when unset.
+    #[test]
+    #[cfg(unix)]
+    fn no_replace_rename_on_a_volume_without_the_flag() {
+        let Some(parent) = std::env::var_os("FILEID_TEST_NO_EXCL_DIR") else {
+            return;
+        };
+        let root = Path::new(&parent).join(format!("fileid-no-excl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let source = root.join("a.txt");
+        let occupant = root.join("b.txt");
+        std::fs::write(&source, b"a").unwrap();
+        std::fs::write(&occupant, b"b").unwrap();
+        assert_eq!(
+            rename_no_replace(&source, &occupant).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        rename_no_replace(&source, &root.join("sub/a.txt")).unwrap();
+        assert_eq!(std::fs::read(root.join("sub/a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(&occupant).unwrap(), b"b");
+        rename_no_replace(&root.join("sub/a.txt"), &root.join("sub/A.txt")).unwrap();
+        assert_eq!(std::fs::read(root.join("sub/A.txt")).unwrap(), b"a");
         let _ = std::fs::remove_dir_all(root);
     }
 
