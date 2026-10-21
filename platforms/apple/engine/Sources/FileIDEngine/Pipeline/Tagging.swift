@@ -290,7 +290,9 @@ public enum Tagging {
                             let carefulStart = CFAbsoluteTimeGetCurrent()
                             let careful = worker.ocrAccurate(cgImage)
                             ocrCarefulMs = (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
-                            ocrHandwritten = TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: textTags)
+                            ocrHandwritten = TextReading.isHandwritten(
+                                fastText: fast, carefulText: careful, tags: textTags,
+                                paperLike: TextReading.isPaperLike(tags: textTags, hasCamera: exif.cameraModel != nil))
                             text = TextReading.preferred(fast: fast, careful: careful)
                         }
                         ocr = text.isEmpty ? nil : text
@@ -624,7 +626,7 @@ public enum Tagging {
                             let carefulStart = CFAbsoluteTimeGetCurrent()
                             let careful = worker.ocrAccurate(cg)
                             carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
-                            if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: []) {
+                            if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: [], paperLike: true) {
                                 handwritten = true
                             }
                             let text = TextReading.preferred(fast: fast, careful: careful)

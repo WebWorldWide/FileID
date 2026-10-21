@@ -30,20 +30,28 @@ struct TextReadingTests {
     }
 
     @Test func handwritingLabelNeedsATagOrAMangledFastRead() {
-        #expect(TextReading.isHandwritten(fastText: Self.fastGroceries, carefulText: "Groceries for Sunday", tags: []))
-        #expect(TextReading.isHandwritten(fastText: "", carefulText: "Margaret Hollis", tags: ["Sticky_Note"]))
-        #expect(!TextReading.isHandwritten(fastText: "EXIT", carefulText: "EXIT ONLY", tags: ["sign"]))
-        #expect(!TextReading.isHandwritten(fastText: Self.fastGroceries, carefulText: " ", tags: ["handwriting"]))
+        #expect(TextReading.isHandwritten(fastText: Self.fastGroceries, carefulText: "Groceries for Sunday", tags: [], paperLike: true))
+        #expect(TextReading.isHandwritten(fastText: "", carefulText: "Margaret Hollis", tags: ["Sticky_Note"], paperLike: true))
+        #expect(!TextReading.isHandwritten(fastText: "EXIT", carefulText: "EXIT ONLY", tags: ["sign"], paperLike: true))
+        #expect(!TextReading.isHandwritten(fastText: Self.fastGroceries, carefulText: " ", tags: ["handwriting"], paperLike: true))
         // Real accurate-tier output on the same samples.
         #expect(!TextReading.isHandwritten(
             fastText: Self.fastReceipt,
             carefulText: "CORNER MARKET\nBananas 1.29\nCoffee beans\nTOTAL 13.28\nThank you\n11.99",
-            tags: ["sky", "text", "writing"]))
+            tags: ["sky", "text", "writing"], paperLike: true))
         #expect(TextReading.isHandwritten(
             fastText: "wifi paoword\neobalt-otter-77\ndenti&t Tue& 3pm",
             carefulText: "wifi password\ncobalt-otter-77\ndentist Tues 3pm",
-            tags: ["writing", "yellow"]))
-        #expect(TextReading.isHandwritten(fastText: "", carefulText: "Dearest Theodore,\nWith love, Beatrice", tags: []))
+            tags: ["writing", "yellow"], paperLike: true))
+        #expect(TextReading.isHandwritten(fastText: "", carefulText: "Dearest Theodore,\nWith love, Beatrice", tags: [], paperLike: true))
+        // Real reads of an outfield banner in a camera photo: distant print, not handwriting.
+        let bannerFast = "FTER SEASON\nLiberty\nBank"
+        let bannerCareful = "SEASON AFTER SEASON\nLiberty\nBank\nA UNITED COMMUNITY BANK\nBankLiberty.com"
+        #expect(!TextReading.isPaperLike(tags: ["fence", "sign", "baseball game"], hasCamera: true))
+        #expect(!TextReading.isHandwritten(fastText: bannerFast, carefulText: bannerCareful, tags: ["fence", "sign"], paperLike: false))
+        #expect(TextReading.isPaperLike(tags: ["sign"], hasCamera: false))
+        #expect(TextReading.isPaperLike(tags: ["Notebook", "pen"], hasCamera: true))
+        #expect(TextReading.isHandwritten(fastText: bannerFast, carefulText: bannerCareful, tags: ["whiteboard"], paperLike: false))
     }
 
     @Test func disagreementSeparatesPrintFromHandwriting() {

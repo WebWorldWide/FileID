@@ -101,13 +101,28 @@ enum TextReading {
         return quality.share >= garbledShareThreshold || ((textBearing || isTextBearing(tags)) && quality.count > 0)
     }
 
-    /// Label the careful read as handwriting only on a handwriting tag or a fast read
-    /// that mangled most words; a clean printed page that the accurate tier merely
-    /// polished stays "Text in image".
-    static func isHandwritten(fastText: String, carefulText: String, tags: [String]) -> Bool {
+    /// Label the careful read as handwriting on a handwriting tag, or on a
+    /// paper-like image whose fast read mangled or missed much of the text; a clean
+    /// printed page that the accurate tier merely polished stays "Text in image".
+    static func isHandwritten(fastText: String, carefulText: String, tags: [String], paperLike: Bool) -> Bool {
         guard !carefulText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        return hasHandwritingHint(tags) || garbled(fastText).share >= garbledShareThreshold
+        if hasHandwritingHint(tags) { return true }
+        guard paperLike else { return false }
+        return garbled(fastText).share >= garbledShareThreshold
             || disagreement(fast: fastText, careful: carefulText) >= garbledShareThreshold
+    }
+
+    /// Tags that mean text in a scene rather than on paper.
+    static let sceneTextHints: Set<String> = ["sign", "street sign", "banner", "poster", "text"]
+
+    /// A scan, screenshot or paper-tagged photo. On a camera photo of a sign or an
+    /// outfield banner the fast tier also misses distant print, which would read as
+    /// handwriting (21 of 300 photos in a sports corpus before this gate).
+    static func isPaperLike(tags: [String], hasCamera: Bool) -> Bool {
+        !hasCamera || tags.contains {
+            let tag = normalized($0)
+            return (handwritingHints.contains(tag) || paperHints.contains(tag)) && !sceneTextHints.contains(tag)
+        }
     }
 
     /// Share of the careful read's words the fast read didn't produce (case and
