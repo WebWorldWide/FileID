@@ -1155,20 +1155,32 @@ impl Tagger {
                     let timeout_modified = predecoded.file.modified_unix;
                     let timeout_created = predecoded.file.created_unix;
                     // Bounds async inference after decoding; platform decoder
-                    // calls enforce their own limits where the OS permits.
-                    let fut = process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord);
-                    let tagged = match tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        fut,
-                    )
-                    .await
-                    {
-                        Ok(t) => t,
+                    // calls enforce their own limits where the OS permits. A
+                    // panic on one file becomes that file's failure so the
+                    // worker keeps draining the queue.
+                    let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                        process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
+                    ));
+                    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+                        Ok(Ok(t)) => Ok(t),
+                        Ok(Err(_panic)) => {
+                            tracing::error!(
+                                path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                "per-file processing panicked; marking failed and continuing"
+                            );
+                            Err(("the file could not be analyzed (internal error)", 0.0))
+                        }
                         Err(_elapsed) => {
                             tracing::warn!(
                                 path = %crate::platform::redact_path_for_log(&path_for_timeout),
                                 "per-file timeout after 60s; marking failed and continuing"
                             );
+                            Err(("per-file timeout after 60s", 60000.0))
+                        }
+                    };
+                    let tagged = match outcome {
+                        Ok(t) => t,
+                        Err((message, total_ms)) => {
                             TaggedFile {
                                 path: path_for_timeout,
                                 kind: timeout_kind,
@@ -1193,9 +1205,9 @@ impl Tagger {
                                 location_lon: None,
                                 vision_ms: 0.0,
                                 clip_ms: 0.0,
-                                total_ms: 60000.0,
+                                total_ms,
                                 failed: true,
-                                error_message: Some("per-file timeout after 60s".into()),
+                                error_message: Some(message.into()),
                                 file_ref: None,
                                 content_hash: None,
                                 legacy_hashes: None,
@@ -1247,6 +1259,21 @@ pub struct PreDecoded {
     /// Reservation of this frame's decoded bytes in the predecode budget;
     /// released when the worker drops the frame.
     budget: Option<PredecodeBudgetGuard>,
+}
+
+impl PreDecoded {
+    fn failed(file: DiscoveredFile, message: &str) -> Self {
+        Self {
+            file,
+            decoded: Some(Err(anyhow::anyhow!(message.to_string()))),
+            doc_text: None,
+            audio_tags: Vec::new(),
+            content_hash: None,
+            legacy_hashes: None,
+            exif: None,
+            budget: None,
+        }
+    }
 }
 
 /// Byte-weighted read-ahead budget for decoded frames. Decoders reserve their
@@ -1383,6 +1410,46 @@ fn run_decoder_thread(
             size = file.size_bytes,
             "decode start"
         );
+        let fallback = file.clone();
+        let item = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            predecode_one(file, &coord, &budget, legacy)
+        })) {
+            Ok(Some(item)) => item,
+            Ok(None) => return,
+            Err(_) => {
+                tracing::error!(
+                    path = %crate::platform::redact_path_for_log(&fallback.path),
+                    "decoder panicked on a file; recording it as failed and continuing"
+                );
+                PreDecoded::failed(fallback, "the file could not be read (decoder error)")
+            }
+        };
+        let mut item = item;
+        loop {
+            if coord.is_cancelled() {
+                return;
+            }
+            match tx.try_send(item) {
+                Ok(()) => break,
+                Err(async_channel::TrySendError::Closed(_)) => return,
+                Err(async_channel::TrySendError::Full(returned)) => {
+                    item = returned;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
+}
+
+/// Reads, hashes and decodes one file for `run_decoder_thread`. `None` means
+/// the scan was cancelled while waiting for decode budget.
+fn predecode_one(
+    file: DiscoveredFile,
+    coord: &ScanCoordinator,
+    budget: &Arc<PredecodeBudget>,
+    legacy: bool,
+) -> Option<PreDecoded> {
+    {
         let decode_started = Instant::now();
 
         let mut file_bytes = None;
@@ -1485,12 +1552,12 @@ fn run_decoder_thread(
                         .and_then(probe_image_decode_reservation_bytes)
                         .unwrap_or_else(|| budget.capacity());
                     let Some((result, guard)) = decode_reserved(
-                        &budget,
+                        budget,
                         reservation,
-                        &coord,
+                        coord,
                         || decode_image_sync(&file.path, file_bytes.as_deref()),
                     ) else {
-                        return;
+                        return None;
                     };
                     budget_guard = Some(guard);
                     Some(result)
@@ -1500,12 +1567,12 @@ fn run_decoder_thread(
                     // its bounded fallback rejects native BGRA + RGB peaks above
                     // this shared reservation before allocating the retained RGB.
                     let Some((result, guard)) = decode_reserved(
-                        &budget,
+                        budget,
                         crate::shell::video::VIDEO_DECODE_RESERVATION_BYTES,
-                        &coord,
+                        coord,
                         || decode_video_keyframe_sync(&file.path),
                     ) else {
-                        return;
+                        return None;
                     };
                     budget_guard = Some(guard);
                     Some(result)
@@ -1522,12 +1589,12 @@ fn run_decoder_thread(
                         .is_some_and(|e| e.eq_ignore_ascii_case("obj"));
                     if is_obj {
                         let Some((result, guard)) = decode_reserved(
-                            &budget,
+                            budget,
                             budget.capacity(),
-                            &coord,
+                            coord,
                             || crate::pipeline::obj_render::render_obj_to_rgb(&file.path),
                         ) else {
-                            return;
+                            return None;
                         };
                         match result {
                             Ok(frame) => {
@@ -1596,7 +1663,7 @@ fn run_decoder_thread(
             // reservation immediately instead of riding the channel.
             budget_guard = None;
         }
-        let mut item = PreDecoded {
+        Some(PreDecoded {
             file,
             decoded,
             doc_text,
@@ -1605,20 +1672,7 @@ fn run_decoder_thread(
             legacy_hashes,
             exif: exif_data,
             budget: budget_guard,
-        };
-        loop {
-            if coord.is_cancelled() {
-                return;
-            }
-            match tx.try_send(item) {
-                Ok(()) => break,
-                Err(async_channel::TrySendError::Closed(_)) => return,
-                Err(async_channel::TrySendError::Full(returned)) => {
-                    item = returned;
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
+        })
     }
 }
 
@@ -2000,7 +2054,7 @@ async fn process_file_predecoded(
         Ok(Ok(lease)) => lease,
         result => {
             tagged.failed = true;
-            tagged.error_message = Some(match result { Ok(Err(error)) => error.to_string(), Err(error) => error.to_string(), _ => unreachable!() });
+            tagged.error_message = Some(match result { Ok(Err(error)) => error.to_string(), Err(error) => error.to_string(), Ok(Ok(_)) => String::new() });
             return tagged;
         }
     };
