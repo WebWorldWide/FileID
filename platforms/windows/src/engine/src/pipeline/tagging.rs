@@ -2141,14 +2141,20 @@ async fn process_file_predecoded(
             for (label, score) in crate::util::keywords::extract(&text) {
                 tagged.tags.push((label, Some(score)));
             }
-            // BGE-small semantic embedding for the doc text. Runs on
-            // the calling worker thread under a single-Session Mutex (sync
-            // inference). Skipped when BGE isn't installed — FTS5 still
+            // BGE-small semantic embedding for the doc text. Sync inference
+            // under a single-Session Mutex, so it runs on the blocking pool:
+            // on an async worker every waiting doc would pin a runtime thread
+            // and starve IPC. Skipped when BGE isn't installed — FTS5 still
             // serves keyword search.
-            if !coord.is_gpu_dead() {
-                if let Some(bge_mu) = &models.bge_text {
-                    let mut bge = bge_mu.lock();
-                    match bge.embed(&text) {
+            if !coord.is_gpu_dead() && models.bge_text.is_some() {
+                let (embed_models, embed_text) = (models.clone(), text.clone());
+                let embedded = tokio::task::spawn_blocking(move || {
+                    embed_models.bge_text.as_ref().map(|bge| bge.lock().embed(&embed_text))
+                })
+                .await
+                .unwrap_or_else(|join| Some(Err(anyhow::anyhow!("BGE embedding task failed: {join}"))));
+                if let Some(result) = embedded {
+                    match result {
                         Ok(emb) => tagged.text_embedding = Some(emb),
                         Err(err) => {
                             if error_has_device_removed_marker(&err) {
