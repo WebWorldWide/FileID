@@ -687,6 +687,7 @@ public actor DeepAnalyze {
         documentText: String? = nil,
         faceNames: [String] = [],
         proposeFilename: Bool = true,
+        tagsOnly: Bool = false,
         onToken: (@Sendable (String) async -> Void)? = nil
     ) async -> AnalysisResult {
         try? await ensureResident()
@@ -721,6 +722,13 @@ public actor DeepAnalyze {
         }
         let boxCI = cg.map { UncheckedSendableBox(CIImage(cgImage: $0)) }
         let isTextOnly = boxCI == nil
+        if tagsOnly, boxCI != nil {
+            let tags = await tagPass(container: container, image: boxCI, mediaKind: mediaKind,
+                                     fileExtension: imageURL.pathExtension, documentText: boundedText, stats: stats)
+            MLX.GPU.clearCache()
+            guard let tags else { return AnalysisResult(description: "Inference failed: tag pass", proposedName: nil) }
+            return AnalysisResult(description: "", proposedName: nil, tags: tags)
+        }
 
         let mergedTags = Self.mergedTagsEnabled() && boxCI != nil
         let systemPrompt = Self.analysisSystemPrompt(
@@ -859,38 +867,8 @@ public actor DeepAnalyze {
             vlmTags = parsed.tags
         } else {
             vlmTags = []
-            let tagCollector = TokenCollector()
-            let tagParams = tagGenerateParams
-            do {
-                try await container.perform { (context: ModelContext) -> Void in
-                    try Task.checkCancellation()
-                    let tagRequest: Chat.Message
-                    let prompt = Self.taggingPrompt(
-                        mediaKind: mediaKind,
-                        fileExtension: imageURL.pathExtension,
-                        documentText: boundedText
-                    )
-                    if let boxCI {
-                        tagRequest = .user(prompt, images: [.ciImage(boxCI.value)], videos: [])
-                    } else {
-                        tagRequest = .user(prompt, images: [], videos: [])
-                    }
-                    var tagInput = UserInput(chat: [tagRequest], additionalContext: Self.templateContext)
-                    if Self.acceptsResize(context) { tagInput.processing.resize = .init(width: Self.analysisImageSide(), height: Self.analysisImageSide()) }
-                    let lmInput = try await context.processor.prepare(input: tagInput)
-                    let stream = try MLXLMCommon.generate(
-                        input: lmInput, parameters: tagParams, context: context
-                    )
-                    for await item in stream {
-                        try Task.checkCancellation()
-                        if let chunk = item.chunk { tagCollector.append(chunk) }
-                        if let info = item.info { stats.record("tags", info) }
-                    }
-                }
-                vlmTags = Self.parseVLMTags(tagCollector.snapshot())
-            } catch {
-                JSONLog.shared.warn(ev: "deep_analyze_tags_failed", error: "\(error)")
-            }
+            vlmTags = await tagPass(container: container, image: boxCI, mediaKind: mediaKind,
+                                    fileExtension: imageURL.pathExtension, documentText: boundedText, stats: stats) ?? []
         }
 
         // Drain MLX scratch after all caption, optional filename-retry, and tag passes.
@@ -898,6 +876,42 @@ public actor DeepAnalyze {
         return AnalysisResult(description: description,
                               proposedName: Self.applyPersonPrefix(proposedName, faceNames: faceNames),
                               tags: vlmTags)
+    }
+
+    private func tagPass(
+        container: ModelContainer,
+        image boxCI: UncheckedSendableBox<CIImage>?,
+        mediaKind: DiscoveredFile.Kind,
+        fileExtension: String,
+        documentText boundedText: String?,
+        stats: VLMPassStats
+    ) async -> [String]? {
+        let tagCollector = TokenCollector()
+        let tagParams = tagGenerateParams
+        do {
+            try await container.perform { (context: ModelContext) -> Void in
+                try Task.checkCancellation()
+                let prompt = Self.taggingPrompt(mediaKind: mediaKind, fileExtension: fileExtension, documentText: boundedText)
+                let tagRequest: Chat.Message = if let boxCI {
+                    .user(prompt, images: [.ciImage(boxCI.value)], videos: [])
+                } else {
+                    .user(prompt, images: [], videos: [])
+                }
+                var tagInput = UserInput(chat: [tagRequest], additionalContext: Self.templateContext)
+                if Self.acceptsResize(context) { tagInput.processing.resize = .init(width: Self.analysisImageSide(), height: Self.analysisImageSide()) }
+                let lmInput = try await context.processor.prepare(input: tagInput)
+                let stream = try MLXLMCommon.generate(input: lmInput, parameters: tagParams, context: context)
+                for await item in stream {
+                    try Task.checkCancellation()
+                    if let chunk = item.chunk { tagCollector.append(chunk) }
+                    if let info = item.info { stats.record("tags", info) }
+                }
+            }
+            return Self.parseVLMTags(tagCollector.snapshot())
+        } catch {
+            JSONLog.shared.warn(ev: "deep_analyze_tags_failed", error: "\(error)")
+            return nil
+        }
     }
 
     static func analysisSystemPrompt(faceNames: [String]) -> String {

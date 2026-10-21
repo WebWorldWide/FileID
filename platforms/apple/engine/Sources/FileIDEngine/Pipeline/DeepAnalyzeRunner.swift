@@ -384,7 +384,8 @@ public enum DeepAnalyzeRunner {
                         mediaKind: kind,
                         documentText: documentText,
                         faceNames: modelFaceNames,
-                        proposeFilename: !contextNameAvailable,
+                        proposeFilename: !contextNameAvailable && proposeRenames && !tagsOnly,
+                        tagsOnly: tagsOnly,
                         onToken: onToken
                     )
                 }
@@ -401,7 +402,7 @@ public enum DeepAnalyzeRunner {
                 cancelled = true
                 break
             }
-            let isFailure = Self.isAnalysisFailure(result)
+            let isFailure = tagsOnly ? Self.isAnalysisFailure(result.description) : Self.isAnalysisFailure(result)
             if isFailure {
                 failed += 1
             } else {
