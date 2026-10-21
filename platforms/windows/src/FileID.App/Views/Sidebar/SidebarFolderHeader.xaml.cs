@@ -60,6 +60,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             FolderDisplayPanel.Visibility = Visibility.Visible;
             ActionsPanel.Visibility = Visibility.Visible;
             RescanButton.Visibility = Visibility.Visible;
+            PickButton.Content = "Choose another folder…";
 
             var path = vm.FolderPath ?? "";
             var leaf = vm.FolderDisplay ?? path;
@@ -78,6 +79,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             FolderDisplayPanel.Visibility = Visibility.Collapsed;
             ActionsPanel.Visibility = Visibility.Collapsed;
             RescanButton.Visibility = Visibility.Collapsed;
+            PickButton.Content = "Choose folder…";
         }
     }
 
@@ -178,9 +180,9 @@ public sealed partial class SidebarFolderHeader : UserControl
             var dialog = new ContentDialog
             {
                 XamlRoot = DialogRoot,
-                Title = "Wipe everything?",
-                Content = "This deletes everything FileID has learned — tags, face clusters, captions, smart names — and returns the app to a clean slate. Your actual files are never touched, and your downloaded AI models are kept.\n\nThis can't be undone.",
-                PrimaryButtonText = "Wipe",
+                Title = "Start over?",
+                Content = "Forgets everything FileID learned (tags, descriptions, people and search data) and returns to a clean slate. Your files are not changed, and downloaded AI models are kept.\n\nThis can't be undone.",
+                PrimaryButtonText = "Start over",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
@@ -355,8 +357,8 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DebugLog.Info("[WIPE] complete — reset to clean state");
             await ShowAlertAsync(
-                "Library wiped",
-                "FileID is back to a clean slate. Your files and downloaded models are untouched — pick a folder whenever you want to start a fresh scan.");
+                "Starting over",
+                "FileID is back to a clean slate. Your files and downloaded models are not changed. Choose a folder to scan it again.");
         }
         else
         {

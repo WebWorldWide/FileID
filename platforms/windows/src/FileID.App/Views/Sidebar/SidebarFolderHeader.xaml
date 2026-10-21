@@ -2,7 +2,7 @@
 <!--
     SidebarFolderHeader: the title-bar folder switcher popover (Prototype v3).
     Hosted in TitleBar.FolderFlyout. Current folder with path and file count,
-    Add folder (Ctrl+O), Rescan, Clear folder and Wipe library (destructive,
+    Choose folder (Ctrl+O), Rescan, Close folder and Start over (destructive,
     confirmed). Layout matches the macOS TitleBar folderPopover.
 -->
 <UserControl
@@ -52,7 +52,7 @@
         </Grid>
 
         <TextBlock x:Name="EmptyFolderText"
-                   Text="No folder picked yet."
+                   Text="No folder chosen yet."
                    Style="{StaticResource ShellMetaTextStyle}"
                    Margin="12,0,12,10" />
 
@@ -62,17 +62,18 @@
                     Background="{StaticResource PanelHeaderBrush}"
                     BorderBrush="{ThemeResource HairlineStrongBrush}"
                     BorderThickness="0,1,0,0">
-            <Button Style="{StaticResource ShellSecondaryButtonStyle}"
-                    Content="Add folder…"
+            <Button x:Name="PickButton"
+                    Style="{StaticResource ShellSecondaryButtonStyle}"
+                    Content="Choose folder…"
                     Click="OnPickClicked"
-                    ToolTipService.ToolTip="Pick a library folder (Ctrl+O)"
-                    AutomationProperties.Name="Add folder"
-                    AutomationProperties.HelpText="Pick a library folder (Ctrl+O)" />
+                    ToolTipService.ToolTip="Choose a folder for FileID to scan (Ctrl+O)"
+                    AutomationProperties.Name="Choose folder"
+                    AutomationProperties.HelpText="Choose a folder for FileID to scan (Ctrl+O)" />
             <Button x:Name="RescanButton"
                     Style="{StaticResource ShellSecondaryButtonStyle}"
                     Click="OnRescanClicked"
                     Visibility="Collapsed"
-                    ToolTipService.ToolTip="Rescan this folder (Ctrl+R)">
+                    ToolTipService.ToolTip="Look for new or changed files in this folder (Ctrl+R). Files already read are skipped.">
                 <TextBlock x:Name="RescanText"
                            Text="Rescan"
                            MaxWidth="200"
@@ -86,19 +87,19 @@
               BorderBrush="{ThemeResource HairlineSoftBrush}"
               BorderThickness="0,1,0,0">
             <Button Style="{StaticResource ShellGhostButtonStyle}"
-                    Content="Clear folder"
+                    Content="Close folder"
                     Click="OnClearClicked"
                     HorizontalAlignment="Left"
-                    ToolTipService.ToolTip="Drop the current folder selection. Doesn't touch the library."
-                    AutomationProperties.Name="Clear folder" />
+                    ToolTipService.ToolTip="Stop working on this folder. What FileID learned is kept, and your files are not changed."
+                    AutomationProperties.Name="Close folder" />
             <Button Style="{StaticResource ShellGhostButtonStyle}"
-                    Content="Wipe library…"
+                    Content="Start over…"
                     Foreground="{StaticResource DangerBrush}"
                     Click="OnWipeClicked"
                     HorizontalAlignment="Right"
-                    ToolTipService.ToolTip="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept."
-                    AutomationProperties.Name="Wipe library"
-                    AutomationProperties.HelpText="Delete everything FileID has learned and reset to a clean slate. Your files and downloaded models are kept." />
+                    ToolTipService.ToolTip="Forget everything FileID learned and start from a clean slate. Your files and downloaded models are not changed."
+                    AutomationProperties.Name="Start over"
+                    AutomationProperties.HelpText="Forget everything FileID learned and start from a clean slate. Your files and downloaded models are not changed." />
         </Grid>
     </StackPanel>
 </UserControl>
