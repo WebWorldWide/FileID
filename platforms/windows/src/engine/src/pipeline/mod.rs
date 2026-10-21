@@ -23,4 +23,5 @@ pub mod restructure_semantic;
 pub mod audio_meta;
 pub mod obj_render;
 pub mod doc_extract;
+pub(crate) mod text_reading;
 pub(crate) mod timeline_analysis;

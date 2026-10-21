@@ -2599,6 +2599,15 @@ async fn process_file_predecoded(
 /// Heuristic OCR gate. Photo libraries are 99% camera snapshots where OCR
 /// is wasted CPU; skip in that case but keep running for documents/screenshots.
 fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64) -> bool {
+    // Paper, whiteboard and handwriting tags read even on camera photos; the
+    // OCR has no handwriting tier, so Deep Analyze's transcription picks up what
+    // it mangles (text_reading::needs_transcription).
+    let tag_names: Vec<&str> = tagged.tags.iter().map(|(tag, _)| tag.as_str()).collect();
+    if super::text_reading::is_text_bearing(&tag_names)
+        || super::text_reading::is_document_shape(tagged.image_width, tagged.image_height, tagged.camera_model.is_some())
+    {
+        return true;
+    }
     if tagged.camera_model.is_some() {
         return false;
     }

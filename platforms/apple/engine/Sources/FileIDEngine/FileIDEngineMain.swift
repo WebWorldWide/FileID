@@ -128,6 +128,7 @@ struct FileIDEngineMain {
         JSONLog.shared.info(ev: "engine_ready",
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),
                                     "workers": AnyCodable(Hardware.workerCap)])
+        AccurateOCRWarmup.shared.start()
 
         // Capability check: Deep Analyze needs mlx.metallib next to the
         // engine binary (run.sh copies it in from .build/cache). Without

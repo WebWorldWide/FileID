@@ -11,6 +11,7 @@
 use anyhow::Context;
 
 use super::deep_analyze_naming as naming;
+use super::text_reading;
 
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
@@ -171,9 +172,9 @@ pub(crate) async fn analyze_file_scoped(
             anyhow::bail!("cancelled");
         }
         let req = CaptionRequest {
-            gguf_path: gguf,
-            mmproj_path: mmproj,
-            image_path: rasterized,
+            gguf_path: gguf.clone(),
+            mmproj_path: mmproj.clone(),
+            image_path: rasterized.clone(),
             prompt: vlm::rename_prompt_with_faces(face_names),
             max_tokens: 30,
             greedy: true,
@@ -195,6 +196,20 @@ pub(crate) async fn analyze_file_scoped(
             proposed_name.as_deref(),
             &tags,
         )?;
+    }
+    if mode.requests_caption() && transcription_wanted(&db, file_id) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        let req = CaptionRequest {
+            gguf_path: gguf,
+            mmproj_path: mmproj,
+            image_path: rasterized,
+            prompt: text_reading::TRANSCRIPTION_PROMPT.to_string(),
+            max_tokens: TRANSCRIPTION_MAX_TOKENS,
+            greedy: true,
+        };
+        match vlm::caption(runner, &req, cancel.clone(), |_| {}).await {
+            Ok(result) => store_transcription_output(&db, file_id, &result.text),
+            Err(error) => tracing::warn!(?error, "[DEEP] transcription failed"),
+        }
     }
 
     // (temp frame removed by `_temp_guard` on drop — #24)
@@ -476,6 +491,24 @@ pub(crate) async fn vlm_server_payload_ok(
     result.map(|_| ())
 }
 
+const TRANSCRIPTION_MAX_TOKENS: u32 = 320;
+
+/// Text-bearing image (or image-only PDF) whose OCR is missing or mangled — see
+/// `text_reading::needs_transcription`. Mirrors macOS `DeepAnalyzeRunner.transcriptionCandidate`.
+fn transcription_wanted(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>, file_id: i64) -> bool {
+    text_reading::transcription_candidate(&db.lock(), file_id).unwrap_or(false)
+}
+
+/// The caption already persisted, so a failed transcription only logs; the next
+/// Deep Analyze run retries it.
+fn store_transcription_output(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>, file_id: i64, raw: &str) {
+    if let Some((text, handwritten)) = text_reading::parse_transcription(raw) {
+        if let Err(error) = text_reading::store_transcription(&db.lock(), file_id, &text, handwritten) {
+            tracing::warn!(?error, "[DEEP] transcription persist failed");
+        }
+    }
+}
+
 async fn complete_cancellable(
     server: &crate::models::vlm_server::VlmServer,
     image: &std::path::Path, prompt: &str, max_tokens: u32,
@@ -591,6 +624,14 @@ pub(crate) async fn analyze_file_via_server(
         let conn = db.lock();
         proposed_name = naming::vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
         persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+    }
+    if mode.requests_caption() && transcription_wanted(&db, file_id) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        match complete_cancellable(server, &rasterized, text_reading::TRANSCRIPTION_PROMPT, TRANSCRIPTION_MAX_TOKENS, &cancel)
+            .await
+        {
+            Ok(raw) => store_transcription_output(&db, file_id, &raw),
+            Err(error) => tracing::warn!(?error, "[DEEP] transcription failed"),
+        }
     }
     // (temp frame removed by `_temp_guard` on drop — #24)
 
