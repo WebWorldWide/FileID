@@ -81,7 +81,7 @@ enum TrashJournal {
     }
 
     static func load(at url: URL = defaultURL) -> [Batch] {
-        guard let data = try? Data(contentsOf: url) else { return [] }
+        guard let data = FileManager.default.contents(atPath: url.path) else { return [] }
         return (try? JSONDecoder().decode([Batch].self, from: data)) ?? []
     }
 
