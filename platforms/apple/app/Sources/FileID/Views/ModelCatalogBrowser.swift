@@ -126,7 +126,7 @@ struct ModelCatalogBrowser: View {
                 Spacer()
                 Button(selected.map { ModelInstallStatus.isInstalled(kind: $0) ? "Load model" : "Download & load" } ?? "Download & load") {
                     if let selected {
-                        statusMessage = engine.prewarmModel(selected.rawValue) ? "Requested \(selected.displayName). Progress appears here when processing starts." : (ModelLicenseAcceptance.isAccepted(for: selected) ? "The engine is unavailable. Relaunch FileID and try again." : "This model requires accepted source terms before downloading.")
+                        statusMessage = engine.prewarmModel(selected.rawValue) ? "Requested \(selected.displayName). Progress appears here when processing starts." : (ModelLicenseAcceptance.isAccepted(for: selected) ? "FileID isn't responding. Quit and reopen FileID, then try again." : "This model requires accepted source terms before downloading.")
                     }
                 }.disabled(selected == nil || selected?.fits(ramGB: ramGB) != true || engine.modelDownloadProgress != nil)
                 Button("Use selection") {
