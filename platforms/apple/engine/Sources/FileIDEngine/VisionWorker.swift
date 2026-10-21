@@ -236,10 +236,19 @@ public final class VisionWorker: @unchecked Sendable {
     /// language detection. Reads handwriting the fast tier can't; several times
     /// slower, so the tagging stage runs it only when `TextReading` asks.
     public func ocrAccurate(_ cgImage: CGImage) -> String {
-        recognizeText(cgImage, level: .accurate)
+        guard AccurateOCRBreaker.shared.allowed else { return "" }
+        var completed = false
+        let text = recognizeText(cgImage, level: .accurate, completed: &completed)
+        AccurateOCRBreaker.shared.record(success: completed)
+        return text
     }
 
     private func recognizeText(_ cgImage: CGImage, level: VNRequestTextRecognitionLevel) -> String {
+        var completed = false
+        return recognizeText(cgImage, level: level, completed: &completed)
+    }
+
+    private func recognizeText(_ cgImage: CGImage, level: VNRequestTextRecognitionLevel, completed: inout Bool) -> String {
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = level
         if level == .accurate {
@@ -259,9 +268,44 @@ public final class VisionWorker: @unchecked Sendable {
             do { try handler.perform([req]) } catch { /* swallow */ }
         }
         guard didReturn, let results = req.results else { return "" }
+        completed = true
         return results
             .compactMap { $0.topCandidates(1).first?.string }
             .joined(separator: "\n")
+    }
+}
+
+/// Pauses the accurate tier for ten minutes after three failures in a row. Seen
+/// on macOS 27 while the Neural Engine reported no resources (e5rt error 13):
+/// every candidate image would otherwise pay a failed model load or a 10 s
+/// timeout. The fast read still stands, and Describe Files can transcribe what
+/// it missed. After the pause one more attempt runs; another failure re-trips.
+final class AccurateOCRBreaker: @unchecked Sendable {
+    static let shared = AccurateOCRBreaker()
+    static let failureLimit = 3
+    static let pauseSeconds: CFAbsoluteTime = 600
+    private let lock = NSLock()
+    private var consecutiveFailures = 0
+    private var trippedAt: CFAbsoluteTime = 0
+
+    var allowed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        if consecutiveFailures < Self.failureLimit { return true }
+        guard CFAbsoluteTimeGetCurrent() - trippedAt >= Self.pauseSeconds else { return false }
+        consecutiveFailures = Self.failureLimit - 1
+        return true
+    }
+
+    func record(success: Bool) {
+        lock.lock()
+        consecutiveFailures = success ? 0 : consecutiveFailures + 1
+        let tripped = consecutiveFailures == Self.failureLimit
+        if tripped { trippedAt = CFAbsoluteTimeGetCurrent() }
+        lock.unlock()
+        if tripped {
+            JSONLog.shared.warn(ev: "ocr_accurate_disabled",
+                                error: "accurate text recognition failed \(Self.failureLimit) times in a row")
+        }
     }
 }
 

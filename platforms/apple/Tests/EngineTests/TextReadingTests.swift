@@ -36,6 +36,16 @@ struct TextReadingTests {
         #expect(!TextReading.isHandwritten(fastText: Self.fastGroceries, carefulText: " ", tags: ["handwriting"]))
     }
 
+    @Test func accurateTierPausesAfterThreeFailuresInARow() {
+        let breaker = AccurateOCRBreaker()
+        breaker.record(success: false)
+        breaker.record(success: false)
+        breaker.record(success: true)
+        #expect(breaker.allowed)
+        for _ in 0..<AccurateOCRBreaker.failureLimit { breaker.record(success: false) }
+        #expect(!breaker.allowed)
+    }
+
     @Test func documentShapeMatchesLetterAndA4ButNotPhotos() {
         #expect(TextReading.isDocumentShape(width: 1700, height: 2200, hasCamera: false))
         #expect(TextReading.isDocumentShape(width: 2480, height: 3508, hasCamera: false))
