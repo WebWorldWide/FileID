@@ -262,7 +262,7 @@ fn model_note(no_hits: bool) -> &'static str {
     if no_hits {
         " Nothing was downloaded."
     } else {
-        " Load a model in Deep Analyze for a written answer; these are the matching files. Nothing was downloaded."
+        " Load a local AI model for a written answer; these are the matching files. Nothing was downloaded."
     }
 }
 
