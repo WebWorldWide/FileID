@@ -37,10 +37,19 @@ public final class RamPlusService: @unchecked Sendable {
     private static let mean: [Float] = [0.485, 0.456, 0.406]
     private static let std: [Float] = [0.229, 0.224, 0.225]
     // Built-in suppress list — byte-identical to ram_plus.rs SUPPRESSED_TAGS.
-    private static let suppressedBuiltin: Set<String> = [
+    // The second group was measured on 100 photos from the owner's camera
+    // library (2026-10-21): colours, body parts and "person/play/game" were
+    // 93 of 790 tags and never helped search.
+    static let suppressedBuiltin: Set<String> = [
         "image", "photo", "photograph", "photography", "picture", "face", "catch",
         "stand", "sit", "lay", "pose", "wear",
+        "person", "people", "hair", "head", "hand", "play", "game", "make", "fill", "dark",
+        "blue", "red", "white", "black", "green", "brown", "yellow", "pink", "gray", "grey", "purple",
     ]
+    /// Generic people words; at most one survives per image (the most likely).
+    static let peopleWords: Set<String> = ["man", "woman", "boy", "girl", "child", "couple"]
+    /// A broader tag dropped when its more specific partner is also present.
+    static let redundantWith: [String: String] = ["goggles": "sunglasses"]
 
     private let lock = NSLock()
     private let loadLock = NSLock()
@@ -362,8 +371,33 @@ public final class RamPlusService: @unchecked Sendable {
         }
         // Sort by probability descending (total order, matches Rust total_cmp).
         hits.sort { $0.1 > $1.1 }
-        if hits.count > cap { hits.removeLast(hits.count - cap) }
-        return hits.map { (tagList[$0.0], $0.1) }
+        var refined = Self.refine(hits.map { (tagList[$0.0], $0.1) })
+        if refined.count > cap { refined.removeLast(refined.count - cap) }
+        return refined
+    }
+
+    /// Collapse redundancy before the cap so freed slots go to useful tags:
+    /// "bat" goes when "baseball bat" is present (a tag whose last word is
+    /// another tag), `redundantWith` pairs collapse, and only the strongest
+    /// people word survives. Input is sorted by score. Mirrors ram_plus.rs
+    /// `refine_tags`.
+    static func refine(_ hits: [(tag: String, score: Float)]) -> [(tag: String, score: Float)] {
+        let names = Set(hits.map { $0.tag.lowercased() })
+        let heads = Set(names.compactMap { name -> String? in
+            guard let space = name.lastIndex(of: " ") else { return nil }
+            return String(name[name.index(after: space)...])
+        })
+        var keptPeopleWord = false
+        return hits.filter { hit in
+            let name = hit.tag.lowercased()
+            if !name.contains(" "), heads.contains(name) { return false }
+            if let partner = redundantWith[name], names.contains(partner) { return false }
+            if peopleWords.contains(name) {
+                if keptPeopleWord { return false }
+                keptPeopleWord = true
+            }
+            return true
+        }
     }
 
     private static func isSuppressed(_ tag: String, extra: Set<String>) -> Bool {

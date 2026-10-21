@@ -99,6 +99,8 @@ public final class VisionWorker: @unchecked Sendable {
     // Result of the bundled primary pass.
     public struct PrimaryPass: Sendable {
         public var classifyTags: [String]      // labels with confidence >= 0.30, top-8 by confidence
+        /// Every classifier label at >= 0.01, for agreement with RAM++.
+        public var classifyConfidences: [String: Float] = [:]
         public var faceCount: Int
         public var faceBBoxes: [String]        // "x,y,w,h" normalized
         public var faceQualities: [Double]     // 0..1, parallel to faceBBoxes; -1 if not measured
@@ -166,6 +168,9 @@ public final class VisionWorker: @unchecked Sendable {
                     .prefix(8)
                     .map { $0.identifier }
             )
+            for observation in results where observation.confidence >= 0.01 {
+                pass.classifyConfidences[observation.identifier] = observation.confidence
+            }
         }
         // Index quality observations by bbox so we can align them with the
         // face-rects observations after sorting (the two requests detect
