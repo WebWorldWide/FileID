@@ -1211,11 +1211,11 @@ fn run_search(ui: &Rc<CatalogUi>) {
         .engine
         .borrow_mut()
         .send(CommandPayload::EmbedTextQuery(request));
-    if let Err(e) = sent {
+    if sent.is_err() {
         let fallback = ui.hybrid.borrow_mut().timeout(&id);
         if let Some(r) = fallback {
             ui.search_notice
-                .set_label(&format!("Hybrid unavailable: {e}. Using keyword search."));
+                .set_label("FileID is still getting ready, so this uses keyword search.");
             ui.send("search", r);
         }
         return;
@@ -1225,7 +1225,7 @@ fn run_search(ui: &Rc<CatalogUi>) {
         let fallback = ui.hybrid.borrow_mut().timeout(&id);
         if let Some(r) = fallback {
             ui.search_notice
-                .set_label("Hybrid embedding timed out. Using keyword search; no inference result is fabricated.");
+                .set_label("Hybrid search took too long, so this uses keyword search.");
             ui.send("search", r);
         }
     });

@@ -661,13 +661,15 @@ impl Shell {
                     note = match model_kind {
                         Some(_) if kind == "prewarm_cancelled" => None,
                         Some(model) => Some(Some(format!("Model {model}: {message}"))),
-                        None => Some(Some(format!("Engine: {message}"))),
+                        None => Some(Some(message)),
                     };
                 }
                 EngineState::Failed(message) => {
                     status.engine_ready = false;
                     clear_running(&mut status);
-                    note = Some(Some(format!("Engine: {message}")));
+                    note = Some(Some(format!(
+                        "FileID's background helper couldn't start: {message}"
+                    )));
                 }
                 EngineState::Exited => {
                     status.engine_ready = false;
