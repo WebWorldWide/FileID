@@ -22,6 +22,8 @@ pub mod raw_preview;
 pub mod restructure_semantic;
 pub mod audio_meta;
 pub(crate) mod container_guard;
+#[cfg(test)]
+mod decoder_fuzz_tests;
 pub mod obj_render;
 pub mod doc_extract;
 pub(crate) mod timeline_analysis;

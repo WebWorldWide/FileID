@@ -1740,7 +1740,7 @@ pub(crate) fn open_image_file(path: &std::path::Path) -> std::io::Result<std::fs
 /// This covers installed HEIF and camera-RAW codecs as well as the standard
 /// Windows bitmap codecs. The fallback is still per-file and bounded, so a
 /// missing codec only marks that file as undecodable.
-fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let is_raw = path
         .extension()
         .and_then(|s| s.to_str())
@@ -1833,7 +1833,7 @@ pub(crate) fn decode_raw_preview_at_least(
 /// bytes: decoder output plus a possible RGB8 conversion. Decoder setup reads
 /// headers only; admission occurs before `decode()` allocates either full
 /// frame. Path-backed images use an exclusive reservation instead.
-fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize> {
     use image::ImageDecoder;
     use std::io::Cursor;
 
@@ -2861,7 +2861,7 @@ fn apply_exif_orientation(
     Ok((rgb.into_raw(), ow, oh))
 }
 
-fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
         .ok()?;
