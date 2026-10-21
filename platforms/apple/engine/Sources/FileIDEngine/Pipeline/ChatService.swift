@@ -65,7 +65,7 @@ actor ChatService {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
                 } else {
-                    let modelNote = hits.isEmpty ? "" : " Load a model in Deep Analyze for a written answer; these are the matching files."
+                    let modelNote = hits.isEmpty ? "" : " Load a local AI model for a written answer; these are the matching files."
                     let message = explanation + (request.useModel == true ? modelNote + " Nothing was downloaded." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }

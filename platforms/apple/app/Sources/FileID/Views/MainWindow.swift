@@ -32,6 +32,30 @@ struct MainWindow: View {
         case settings    = "Settings"
         var id: String { rawValue }
 
+        var title: String {
+            switch self {
+            case .deep:        return "Describe Files"
+            case .cleanup:     return "Duplicates"
+            case .restructure: return "Organize Folders"
+            default:           return rawValue
+            }
+        }
+
+        var summary: String {
+            switch self {
+            case .library:     return "Every scanned file, with search and preview"
+            case .people:      return "Faces grouped by person; name them here"
+            case .moments:     return "Search inside videos and documents"
+            case .deep:        return "Write a description and a better file name for each file"
+            case .chat:        return "Ask questions about your files"
+            case .takes:       return "Compare several tries of the same shot and pick the best"
+            case .cleanup:     return "Find extra copies and move them to Trash"
+            case .restructure: return "Suggest a tidier folder layout, then move files"
+            case .tools:       return "Convert, resize or reframe photos and videos"
+            case .settings:    return "Appearance, AI models and storage"
+            }
+        }
+
         static let order: [Tab] = [.library, .people, .moments, .deep, .chat, .takes, .cleanup, .restructure, .tools]
 
         var area: Area? { Area.allCases.first { $0.tabs.contains(self) } }
@@ -144,7 +168,7 @@ struct MainWindow: View {
             }
             .task(id: engine.deepAnalyzeComplete?.processed ?? -1) {
                 guard let done = engine.deepAnalyzeComplete, done.processed > 0, activeTab == .deep else { return }
-                toasts.show("Deep Analyze finished · \(done.processed.formatted()) files", actionLabel: "Open Library", duration: 7) {
+                toasts.show("Descriptions ready for \(done.processed.formatted()) files", actionLabel: "Open Library", duration: 7) {
                     activeTabBinding.wrappedValue = .library
                 }
             }
@@ -188,10 +212,7 @@ struct MainWindow: View {
                     }
                     return
                 }
-                DispatchQueue.main.async {
-                    if pickedURL != url { engine.clearProgress() }
-                    pickedURL = url
-                }
+                DispatchQueue.main.async { choose(url) }
             }
             return true
         }
@@ -218,19 +239,27 @@ struct MainWindow: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Pick a folder to scan"
+        panel.message = "Choose a folder for FileID to scan. Nothing in it is moved or changed."
+        panel.prompt = "Scan This Folder"
         if panel.runModal() == .OK, let url = panel.url {
             guard FileManager.default.isReadableFile(atPath: url.path) else {
                 let alert = NSAlert()
                 alert.messageText = "Can't read \(url.lastPathComponent)"
-                alert.informativeText = "FileID doesn't have permission to read this folder. Pick a different folder or grant Full Disk Access in System Settings → Privacy & Security."
+                alert.informativeText = "FileID doesn't have permission to read this folder. Choose a different folder, or turn on Full Disk Access for FileID in System Settings → Privacy & Security."
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
                 return
             }
-            if pickedURL != url { engine.clearProgress() }
-            pickedURL = url
+            choose(url)
+        }
+    }
+
+    private func choose(_ url: URL) {
+        if pickedURL != url { engine.clearProgress() }
+        pickedURL = url
+        if !(engine.lastProgress.map { [.discovering, .tagging, .postScan].contains($0.phase) } ?? false) {
+            engine.startScan(rootURL: url)
         }
     }
 

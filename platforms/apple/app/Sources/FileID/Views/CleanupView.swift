@@ -125,8 +125,8 @@ struct CleanupView: View {
             MetaText(headerSubtitle, color: Theme.text2)
                 .lineLimit(2)
                 .layoutPriority(-1)
-            SegmentedBar(selection: $mode, options: [("exact", "Exact"), ("similar", "Similar")])
-            .help("Exact: byte-for-byte identical copies. Similar: visually near-identical images (resizes, re-encodes, crops, light edits) found by perceptual hash — review each before deleting, they are NOT byte-identical.")
+            SegmentedBar(selection: $mode, options: [("exact", "Exact copies"), ("similar", "Look-alikes")])
+            .help("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
             Spacer()
             if !visibleGroups.isEmpty {
                 HStack(spacing: 6) {
@@ -134,21 +134,22 @@ struct CleanupView: View {
                     // copies are NOT byte-identical, so one-click mass selection would
                     // be unsafe — the user must pick copies deliberately per group.
                     if !isSimilar {
-                        Button("Select extra copies") { selectAllNonKeepers() }
+                        Button("Select all extra copies") { selectAllNonKeepers() }
                             .buttonStyle(.dsSecondary)
                             .fixedSize()
-                            .help("Select every duplicate except the keeper in each group.")
+                            .help("Choose every copy except the one marked KEEP in each group")
                     }
                     Button("Clear selection") { selection.removeAll() }
                         .buttonStyle(.dsSecondary)
                         .fixedSize()
                         .disabled(totalSelected == 0)
+                        .help(totalSelected == 0 ? "Nothing is chosen" : "Unchoose every file")
                 }
                 Button {
                     confirmDeleteSelected()
                 } label: {
                     Label(
-                        totalSelected == 0 ? "Delete selected" : "Delete \(totalSelected) selected · \(totalSelectedSize)",
+                        totalSelected == 0 ? "Move to Trash" : "Move \(totalSelected) to Trash · \(totalSelectedSize)",
                         systemImage: "trash"
                     )
                     .fontWeight(.semibold)
@@ -165,7 +166,7 @@ struct CleanupView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
-                .help("Move every selected copy to Trash. The keeper of each group is preserved unless you explicitly checked it.")
+                .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back from Trash.")
                 .confirmationDialog(
                     "Move \(totalSelected) file\(totalSelected == 1 ? "" : "s") to Trash?",
                     isPresented: $confirmDelete,
@@ -180,7 +181,7 @@ struct CleanupView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
     }
 
     private var headerSubtitle: String {
@@ -189,19 +190,18 @@ struct CleanupView: View {
         let base: String
         if isSimilar {
             base = g == 0
-                ? "Visually similar images — resizes, re-encodes, crops, and light edits that byte-exact matching misses"
-                : "\(g) similar group\(g == 1 ? "" : "s") · review each before deleting — these are NOT byte-identical"
+                ? "Photos that look nearly the same but aren't identical"
+                : "\(g) group\(g == 1 ? "" : "s") of look-alikes · check each before removing"
         } else {
             let bytes = visibleGroups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
             base = g == 0
-                ? "No verified duplicate groups"
-                : "\(g.formatted()) verified duplicate group\(g == 1 ? "" : "s") · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) to reclaim"
+                ? "No extra copies found"
+                : "\(g.formatted()) file\(g == 1 ? "" : "s") with extra copies · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) can be freed"
         }
         var result = skipped > 0 ? "\(base) · \(skipped) skipped" : base
         if !isSimilar && exactPreviewPartial {
-            result += " · verified preview is partial (\(exactCandidateCount) candidates"
-            if exactSkipped > 0 { result += ", \(exactSkipped) unreadable or changed" }
-            result += ")"
+            result += " · more may exist"
+            if exactSkipped > 0 { result += " · \(exactSkipped) couldn't be checked" }
         }
         return result
     }
@@ -213,15 +213,15 @@ struct CleanupView: View {
         if store.totalFiles == 0 {
             EmptyStateView(
                 icon: "trash.slash",
-                title: "Nothing to clean up yet",
-                message: "Pick a folder in the sidebar and click Start Scan. Once files are indexed, duplicate copies show up here grouped together — pick which copy to keep."
+                title: "No files yet",
+                message: "Scan a folder first. Extra copies of the same file then show up here in groups, and you choose which copy to keep."
             )
         } else if !skippedGroups.isEmpty {
             VStack(spacing: 14) {
                 EmptyStateView(
                     icon: "checkmark.seal.fill",
-                    title: "All duplicate groups skipped",
-                    message: "You've hidden every group from this view. Want to revisit them?"
+                    title: "Every group is hidden",
+                    message: "You skipped all the groups. Show them again to keep going."
                 )
                 Button("Show skipped groups again") { skippedGroups.removeAll() }
                     .buttonStyle(.dsSecondary)
@@ -229,20 +229,20 @@ struct CleanupView: View {
         } else if !isSimilar && exactPreviewPartial {
             EmptyStateView(
                 icon: "exclamationmark.magnifyingglass",
-                title: "No duplicates in the verified preview",
-                message: "FileID bounded this full-byte verification pass to protect memory and disk throughput. The library has \(exactCandidateCount) same-size candidates; additional duplicates may exist outside this preview."
+                title: "No extra copies found so far",
+                message: "FileID checked part of this library (\(exactCandidateCount) files of the same size) and found no exact copies. Rescan later to check the rest."
             )
         } else if isSimilar {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
-                title: "No visually similar images found",
-                message: "All \(store.totalImages) images compared — none are near-identical within the similarity threshold. Byte-for-byte duplicates appear under \"Exact\"."
+                title: "No look-alikes",
+                message: "None of the \(store.totalImages.formatted()) photos look nearly the same as another. Exact copies are under Exact copies."
             )
         } else {
             EmptyStateView(
                 icon: "checkmark.seal.fill",
-                title: "No duplicates found",
-                message: "All \(store.totalFiles.formatted()) indexed files considered — none in this verified preview are byte-for-byte identical."
+                title: "No extra copies",
+                message: "None of the \(store.totalFiles.formatted()) files is an exact copy of another. Try Look-alikes for photos that are nearly the same."
             )
         }
     }
@@ -258,7 +258,7 @@ struct CleanupView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(Theme.warning)
-                        Text("**Visually similar — review before deleting (not identical).** These images match by perceptual hash (resizes, re-encodes, crops, light edits), not byte-for-byte. Nothing is pre-selected: open each, confirm it's a true duplicate, then choose which copies to Trash.")
+                        Text("**Look-alikes are not identical.** They may be resized, cropped or edited versions. Nothing is chosen for you: check each group, then click the copies you want to remove.")
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                     }
@@ -272,8 +272,8 @@ struct CleanupView: View {
                               ? "exclamationmark.triangle.fill" : "info.circle")
                             .foregroundStyle(exactPreviewPartial ? Theme.warning : Theme.delight)
                         Text(exactPreviewPartial
-                             ? "**Verified preview is partial.** Every group shown passed a live full-file SHA-256 check, but candidate/read limits may leave additional duplicates undisplayed. Selected copies are re-read again immediately before Trash."
-                             : "Each group was verified with a live full-file SHA-256. The **KEEPER** is the copy we recommend you keep. Selected copies are re-read again immediately before Trash; you can restore them if you change your mind.")
+                             ? "**Some files weren't checked yet.** Every group below is an exact copy, checked byte by byte, but more copies may exist. Rescan later to check the rest."
+                             : "Each group is the same file saved more than once, checked byte by byte. FileID marks one copy **KEEP**; click any other copy to choose it, then press Move to Trash. You can put files back from Trash.")
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                     }
@@ -324,10 +324,10 @@ struct CleanupView: View {
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
                         (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
                         lineWidth: 1))
-                    .help("Files moved to Trash can be restored in Finder: open Trash, right-click a file, and choose Put Back.")
+                    .help("To undo, open Trash in Finder, right-click a file and choose Put Back.")
                 }
             }
-            .padding(20)
+            .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
         }
     }
 
@@ -501,16 +501,16 @@ struct CleanupView: View {
         // appended only when the auto-tag toggle did something.
         var tagSummary = ""
         if taggedAdded > 0 {
-            tagSummary = " · tagged \(taggedAdded) keeper\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
+            tagSummary = " · tagged \(taggedAdded) kept file\(taggedAdded == 1 ? "" : "s") with \"\(AppSettings.cleanupAutoTagName)\""
         }
-        var summary = "Trashed \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
-            + " · freed \(freed)"
+        var summary = "Moved \(trashedIDs.count) file\(trashedIDs.count == 1 ? "" : "s")"
+            + " to Trash · freed \(freed)"
             + tagSummary
         if verificationRejected > 0 {
-            summary += " · \(verificationRejected) skipped because full-byte verification changed or failed"
+            summary += " · \(verificationRejected) skipped because the file changed since the scan"
         }
         if trashFailures > 0 {
-            summary += " · \(trashFailures) Trash operation\(trashFailures == 1 ? "" : "s") failed"
+            summary += " · \(trashFailures) couldn't be moved to Trash"
         }
         statusWarning = verificationRejected > 0 || trashFailures > 0
         status = summary
@@ -609,12 +609,12 @@ private struct GroupCard: View {
         Panel {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    SectionLabel(group.isSimilar ? "Look-alike · \(group.totalFileCount) images" : "Exact copies · \(group.totalFileCount)")
+                    SectionLabel(group.isSimilar ? "Look-alikes · \(group.totalFileCount) photos" : "Same file · \(group.totalFileCount) copies")
                     if group.isSimilar {
                         BadgePill(label: "perceptual match", color: Theme.warning)
-                            .help("Matched by perceptual hash (dHash), NOT byte-for-byte. Resizes, re-encodes, crops, and light edits land here — review each before deleting.")
+                            .help("These look nearly the same but are not identical. Check each before removing.")
                     }
-                    Text("\(ByteCountFormatter.string(fromByteCount: group.totalBytes, countStyle: .file)) total · \(ByteCountFormatter.string(fromByteCount: group.reclaimableBytes, countStyle: .file)) if you keep 1")
+                    Text("\(ByteCountFormatter.string(fromByteCount: group.totalBytes, countStyle: .file)) total · \(ByteCountFormatter.string(fromByteCount: group.reclaimableBytes, countStyle: .file)) freed if you keep one")
                         .font(Theme.Font.body(13)).foregroundStyle(Theme.text2)
                     if group.isTruncated { MetaText("showing \(group.files.count)", size: 11) }
                     Spacer()
@@ -626,26 +626,27 @@ private struct GroupCard: View {
 
                 HStack(spacing: 6) {
                     Menu {
-                        Button(group.isTruncated ? "All shown except keeper" : "All except keeper") {
+                        Button(group.isTruncated ? "All shown except KEEP" : "All except KEEP") {
                             onSelectAllExceptKeeper()
                         }
                         Button(group.isTruncated ? "All shown" : "All") { onSelectAll() }
                         Button("None") { onSelectNone() }
                         Button("Invert") { onInvert() }
                     } label: {
-                        Label("Select…", systemImage: "checkmark.circle")
+                        Label("Choose…", systemImage: "checkmark.circle")
                             .font(Theme.Font.body(12))
                     }
                     .menuStyle(.borderlessButton)
                     .frame(width: 100)
 
-                    Button { onDeleteGroup() } label: { Label("Trash \(selectedInGroup)", systemImage: "trash") }
+                    Button { onDeleteGroup() } label: { Label(selectedInGroup == 0 ? "Move to Trash" : "Move \(selectedInGroup) to Trash", systemImage: "trash") }
                     .buttonStyle(selectedInGroup > 0 ? AnyButtonStyle(.dsDanger) : AnyButtonStyle(DSSecondaryButtonStyle(height: 26)))
                     .disabled(selectedInGroup == 0)
+                    .help(selectedInGroup == 0 ? "Click the copies you want to remove first" : "Move the chosen copies in this group to Trash")
 
                     Button { onSkip() } label: { Label("Skip group", systemImage: "eye.slash") }
                     .buttonStyle(DSSecondaryButtonStyle(height: 26))
-                    .help("Hide this group — useful for false positives.")
+                    .help("Hide this group if these aren't really copies. Nothing is deleted.")
 
                     Spacer()
                 }
@@ -738,10 +739,10 @@ private struct CopyTile: View {
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits([.isButton, isSelected ? .isSelected : []])
         .accessibilityHint(isSelected
-            ? "Selected. Will be moved to Trash on Delete. Tap to deselect."
+            ? "Chosen. It goes to Trash when you press Move to Trash. Click to unchoose."
             : isKeeper
-                ? "Recommended copy to keep. Tap to override and select for deletion instead."
-                : "Tap to select for moving to Trash.")
+                ? "FileID suggests keeping this copy. Click to choose it for Trash instead."
+                : "Click to choose this copy for Trash.")
     }
 
     private var accessibilityDescription: String {
@@ -758,9 +759,9 @@ private struct CopyTile: View {
     private var badgeOverlay: some View {
         ZStack(alignment: .topLeading) {
             if isKeeper {
-                BadgePill(label: "KEEPER", color: Theme.delight, onImage: true)
+                BadgePill(label: "KEEP", color: Theme.delight, onImage: true)
                     .padding(6)
-                    .help("This is the copy we recommend you keep — usually the largest / highest-resolution one. The other copies in this group are duplicates of it. You can override by clicking another tile to make it the keeper instead.")
+                    .help("FileID suggests keeping this copy, usually the largest or sharpest one. The others are copies of it.")
             }
             // Top-right checkbox.
             Button(action: onToggle) {

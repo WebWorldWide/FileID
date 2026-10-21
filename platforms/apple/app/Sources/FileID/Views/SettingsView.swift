@@ -24,20 +24,20 @@ struct SettingsTab: View {
 
                 Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Cleanup").font(Theme.Font.body(14, .semibold))
-                        SettingToggleRow("Tag kept files after Cleanup",
-                                         subtitle: "After you trash duplicates, the copies you keep get the Finder tag “\(AppSettings.cleanupAutoTagName)”, so a Smart Folder can find them.",
+                        Text("Duplicates").font(Theme.Font.body(14, .semibold))
+                        SettingToggleRow("Tag kept files after removing duplicates",
+                                         subtitle: "After you move extra copies to Trash, the copies you keep get the Finder tag “\(AppSettings.cleanupAutoTagName)”, so a Smart Folder can find them.",
                                          isOn: $cleanupAutoTag)
                     }
                 }
 
                 Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Restructure").font(Theme.Font.body(14, .semibold))
+                        Text("Organize Folders").font(Theme.Font.body(14, .semibold))
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        Text("How finely Restructure splits your files into folders — Looser groups broadly into fewer folders, Tighter makes more, smaller ones. Takes effect the next time the engine starts (relaunch FileID, or Settings ▸ Advanced ▸ Restart Engine).")
+                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after you quit and reopen FileID.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.text3)
                     }
@@ -77,11 +77,11 @@ struct SettingsTab: View {
                                 HStack(spacing: 8) {
                                     Button("Restart Engine") { engine.start() }
                                         .buttonStyle(.dsSecondary)
-                                        .help("Spawn a fresh engine process. Cancels any in-flight scan.")
+                                        .help("Restart FileID's background helper. Stops any scan in progress.")
                                     if case .ready = engine.state {
                                         Button("Stop Engine") { engine.shutdown() }
                                             .buttonStyle(.dsSecondary)
-                                            .help("Cleanly shut down the engine process.")
+                                            .help("Stop FileID's background helper.")
                                     }
                                 }
                             }
@@ -164,7 +164,7 @@ struct SettingsTab: View {
                                     }
                                     Button("Cancel", role: .cancel) { }
                                 } message: {
-                                    Text("This will permanently delete the database, all tags, faces, settings, FileID-managed models, and caches. Shared Deep Analyze model downloads are kept. This action cannot be undone.")
+                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, downloaded models and caches. The large description models are kept. Your own files are not touched. This can't be undone.")
                                 }
                             }
                         }
@@ -174,7 +174,7 @@ struct SettingsTab: View {
                             Image(systemName: "wrench.and.screwdriver")
                                 .foregroundStyle(Theme.text3)
                             Text("Advanced").font(Theme.Font.body(14, .semibold))
-                            Text("(engine status, database, scan history, logs)")
+                            Text("(troubleshooting: background helper, storage, scan history, logs)")
                                 .font(Theme.Font.body(12))
                                 .foregroundStyle(Theme.text3)
                         }
@@ -255,8 +255,8 @@ struct DeepAnalyzeExclusionsCard: View {
     var body: some View {
         Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Deep Analyze exclusions").font(Theme.Font.body(14, .semibold))
-                Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
+                Text("Folders not to describe").font(Theme.Font.body(14, .semibold))
+                Text("Describe Files skips these folders when it describes the whole library. Their files still show up and can be searched. Describing a single file ignores this list.")
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -274,7 +274,7 @@ struct DeepAnalyzeExclusionsCard: View {
                 }
 
                 if settings.excludedFolders.isEmpty {
-                    Text("No folders are excluded from Deep Analyze.")
+                    Text("No folders are skipped.")
                         .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 } else {
                     ForEach(settings.excludedFolders, id: \.self) { folder in
@@ -284,7 +284,7 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            DSIconButton("Stop excluding \(folder) from Deep Analyze", systemImage: "xmark", tint: Theme.text3) {
+                            DSIconButton("Describe \(folder) again", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
                             }
                         }
@@ -302,16 +302,16 @@ struct DeepAnalyzeExclusionsCard: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a folder to exclude from Deep Analyze"
+        panel.message = "Choose a folder for Describe Files to skip"
         panel.prompt = "Exclude"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         switch settings.addExcludedFolder(url.path) {
         case .added:
-            message = ("Excluded. Deep Analyze will skip this folder starting with the next whole-library run.", false)
+            message = ("Done. Describe Files will skip this folder from the next run.", false)
         case .alreadyExcluded:
-            message = ("That folder is already excluded from Deep Analyze.", false)
+            message = ("That folder is already skipped.", false)
         case .invalid:
-            message = ("Couldn't exclude that folder — pick a folder on this Mac.", true)
+            message = ("Couldn't skip that folder. Choose a folder on this Mac.", true)
         }
     }
 }
@@ -400,7 +400,7 @@ struct ModelInstallCard: View {
             MetaText("\(reason) About \(sizeLabel) from huggingface.co.", size: 11)
             HStack(spacing: 8) {
                 Button { installer.install() } label: {
-                    Label("Install (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
+                    Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
                 localZipButton
@@ -430,7 +430,7 @@ struct ModelInstallCard: View {
             }
         case .installed(let bytes):
             HStack(spacing: 8) {
-                MetaText("Installed · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on disk", size: 11)
+                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on disk", size: 11)
                 Spacer()
                 openFolderButton
                 Button("Remove") { confirmRemove = true }
@@ -480,16 +480,16 @@ extension ModelInstallCard {
         let installer = CLIPModelInstaller.shared
         return ModelInstallCard(
             installer: installer,
-            title: "AI Models — semantic search (CLIP)",
-            blurb: "Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.",
+            title: "Search by description",
+            blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Model: OpenCLIP ViT-B/32 (MIT), runs on this Mac.",
             rows: [
                 Row(name: "CLIP ViT-B/32 (image)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
                 Row(name: "CLIP ViT-B/32 (text)", path: CLIPTextEncoder.defaultModelURL),
                 Row(name: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPTextEncoder.defaultDirectory.appendingPathComponent("vocab.json")),
             ],
             approxBytes: CLIPModelInstaller.approxDownloadBytes,
-            removeTitle: "Remove CLIP models?",
-            fallback: "Semantic search will revert to keyword search until you reinstall.",
+            removeTitle: "Remove the Search by description model?",
+            fallback: "Search goes back to matching names and tags until you download it again.",
             onRemoved: { CLIPTextEncoder.shared.unload() },
             localZip: { installer.installFromLocalZip($0) })
     }
@@ -498,24 +498,24 @@ extension ModelInstallCard {
         let installer = ModelInstaller.ramPlus
         return ModelInstallCard(
             installer: installer,
-            title: "AI Models — image tagging",
-            blurb: "RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.",
+            title: "Photo tags",
+            blurb: "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Model: RAM++ (Apache-2.0). Without it, FileID uses a simpler built-in tagger.",
             rows: [Row(name: "RAM++ (Recognize Anything Plus)", detail: "Swin-Large @384 · 4585-tag English vocabulary", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
-            removeTitle: "Remove RAM++ tagger?",
-            fallback: "Tagging falls back to the lighter built-in classifier.")
+            removeTitle: "Remove the Photo tags model?",
+            fallback: "Tagging falls back to the simpler built-in tagger.")
     }
 
     static var bge: ModelInstallCard {
         let installer = ModelInstaller.bge
         return ModelInstallCard(
             installer: installer,
-            title: "AI Models — document understanding",
-            blurb: "BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.",
+            title: "Documents",
+            blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Model: BGE-small (MIT). Without it, documents are grouped by file name.",
             rows: [Row(name: "BGE-small-en-v1.5", detail: "384-d BERT text embedder · runs on the Neural Engine", path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
-            removeTitle: "Remove document understanding?",
-            fallback: "Documents fall back to filename-based grouping in Restructure.")
+            removeTitle: "Remove the Documents model?",
+            fallback: "Organize Folders groups documents by file name instead.")
     }
 
     static var face: ModelInstallCard {
@@ -523,12 +523,12 @@ extension ModelInstallCard {
         let kind = FaceEmbedderKind.sface
         return ModelInstallCard(
             installer: installer,
-            title: "AI Models — face recognition",
-            blurb: "SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.",
+            title: "Faces",
+            blurb: "Recognizes the same person across your photos so People can group them. Model: SFace (Apache-2.0), runs on this Mac.",
             rows: [Row(name: kind.displayName, detail: kind.subtitle, path: installer.spec.primaryFile)],
             approxBytes: installer.spec.approxBytes,
             removeTitle: "Remove face model?",
-            fallback: "Face clustering pauses until the model is installed again.")
+            fallback: "Grouping faces stops until you download it again.")
     }
 }
 

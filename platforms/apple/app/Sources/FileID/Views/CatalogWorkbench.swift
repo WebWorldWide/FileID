@@ -56,7 +56,7 @@ struct CatalogWorkbench: View {
                             chaptersPanel(selected)
                             if !cast.isEmpty { peoplePanel }
                         } else {
-                            DashedNotice(title: "Find a moment", subtitle: "Search on the left, then pick a result to play it, see what was examined and edit its chapters.")
+                            DashedNotice(title: "Find a moment", subtitle: "Type a word on the left and press Return. Pick a result to play it, see which parts FileID has looked at, and add or fix chapters.")
                         }
                         queuePanel
                     }
@@ -97,7 +97,7 @@ struct CatalogWorkbench: View {
     private var resultsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Search names, captions, chapters", text: $query, icon: "magnifyingglass", onSubmit: search)
+                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
                 HStack(spacing: 8) {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)
@@ -108,7 +108,7 @@ struct CatalogWorkbench: View {
                     Button("Best takes") { showingTakes = true }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .disabled(Set(hits.map(\.fileID)).count < 2)
-                        .help("Group these results as attempts and pick the best take")
+                        .help(hits.count < 2 ? "Find at least two clips first" : "Compare these clips as tries of the same shot and pick the best one")
                 }
             }
             .padding(14)
@@ -136,7 +136,7 @@ struct CatalogWorkbench: View {
             }
             .overlay {
                 if hits.isEmpty && pendingAction != "search" {
-                    MetaText(message.isEmpty ? "Results show here: file names, captions, chapters and sampled video frames." : message)
+                    MetaText(message.isEmpty ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : message)
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }
             }
@@ -154,9 +154,9 @@ struct CatalogWorkbench: View {
         if let time = hit.startSeconds { parts.append(DurationText.clock(time)) }
         if let page = hit.page { parts.append("Page \(page)") }
         switch hit.kind {
-        case "sampledFrame": parts.append("Sampled frame, unverified")
+        case "sampledFrame": parts.append("Video frame, not checked")
         case "chapter": parts.append("Chapter")
-        case "passage": parts.append("Passage")
+        case "passage": parts.append("Speech or text")
         case "person": parts.append("Person")
         case "documentText": parts.append("Text in document")
         case "ocrText": parts.append("Text in image")
@@ -210,13 +210,13 @@ struct CatalogWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 12)
             PanelFooter {
                 if video {
-                    SegmentedBar(selection: $timelineMode, options: [("sampled", "Quick samples"), ("moments", "Full moments")])
-                        .help("Quick samples looks at a frame every few seconds. Full moments reads frame sequences and speech, and takes longer.")
-                    Button("Analyze") {
+                    SegmentedBar(selection: $timelineMode, options: [("sampled", "Quick"), ("moments", "Detailed")])
+                        .help("Quick looks at one frame every few seconds. Detailed watches short sequences and listens for speech, and takes longer.")
+                    Button("Find moments") {
                         send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [hit.fileID], timelineMode: timelineMode))
                     }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
-                    .help("Queue this video for timeline analysis. Load a model in Deep Analyze first.")
+                    .help("Watch this video and suggest chapters. Uses the description model; if it isn't ready, describe one file on the Describe Files page first.")
                 }
                 Spacer(minLength: 8)
                 if video && player != nil {
@@ -256,7 +256,7 @@ struct CatalogWorkbench: View {
                     .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             }
             if chapters.isEmpty && !editorOpen {
-                MetaText("No chapters yet. Analyze the video for drafts, or add one at the playhead.")
+                MetaText("No chapters yet. Press Find moments for suggestions, or add your own at the current time.")
                     .padding(.horizontal, 14).padding(.vertical, 12)
             }
             ForEach(chapters, id: \.id) { chapter in
@@ -264,7 +264,7 @@ struct CatalogWorkbench: View {
             }
             if editorOpen { chapterEditor(fileID: hit.fileID) }
             PanelFooter {
-                MetaText("Chapters live in FileID's catalog. The video file is never changed.", size: 11.5)
+                MetaText("Chapters are saved in FileID. The video file itself is never changed.", size: 11.5)
                 Spacer(minLength: 0)
             }
         }
@@ -273,10 +273,10 @@ struct CatalogWorkbench: View {
     private var draftNote: String? {
         let drafts = chapters.filter { !$0.userEdited && !$0.stale }
         if drafts.contains(where: { $0.modelVersion.hasPrefix("timeline-moment-sequence-v1/") }) {
-            return "Drafts describe sampled frame sequences. Check the action, outcome and timing before accepting."
+            return "Suggested chapters are drafts. Check what happens and when before you accept them."
         }
         if drafts.contains(where: { $0.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") }) {
-            return "Drafts come from sparse frame samples, so brief events can be missed. Review before relying on them."
+            return "Suggested chapters come from a few frames, so short moments can be missed. Check them before relying on them."
         }
         return nil
     }
@@ -386,14 +386,14 @@ struct CatalogWorkbench: View {
                             .disabled(player == nil)
                             .accessibilityLabel("Play from \(DurationText.spoken(time))")
                     } else {
-                        MetaText("Sampled image", size: 11.5)
+                        MetaText("Still frame", size: 11.5)
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 6)
                 .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             }
             PanelFooter {
-                MetaText("Detected names need review in People. Untimed appearances come from sampled images.", size: 11.5)
+                MetaText("Confirm names on the People page. Appearances without a time come from still frames.", size: 11.5)
                 Spacer(minLength: 0)
             }
         }
@@ -403,11 +403,11 @@ struct CatalogWorkbench: View {
 
     private var queuePanel: some View {
         Panel {
-            PanelHeader("Analysis queue") {
+            PanelHeader("Video analysis") {
                 MetaText(engine.catalogJobs.isEmpty ? "Idle" : "\(engine.catalogJobs.count) job\(engine.catalogJobs.count == 1 ? "" : "s")", size: 12)
             }
             if engine.catalogJobs.isEmpty {
-                MetaText("Nothing queued. Pick a video and choose Analyze to sample its frames.")
+                MetaText("Nothing waiting. Pick a video and press Find moments.")
                     .padding(.horizontal, 14).padding(.vertical, 12)
             }
             ForEach(engine.catalogJobs, id: \.id) { job in
@@ -419,7 +419,7 @@ struct CatalogWorkbench: View {
                 }
             }
             PanelFooter {
-                MetaText("Visual sampling can miss events between frames. Load a model in Deep Analyze before starting.", size: 11.5)
+                MetaText("FileID looks at frames, so very short moments can be missed. It uses the description model from Describe Files.", size: 11.5)
                 Spacer(minLength: 0)
             }
         }
@@ -516,7 +516,7 @@ struct CatalogWorkbench: View {
         if !engine.send(.catalogRequest(request: request)) {
             pendingID = ""
             pendingAction = ""
-            message = "The engine is unavailable."
+            message = "FileID is still getting ready. Try again in a moment."
         }
     }
 
@@ -528,7 +528,7 @@ struct CatalogWorkbench: View {
         message = response.message ?? (response.status == "ok" ? "" : "The request failed.")
         if !message.isEmpty, action != "search" {
             if action == "enqueueTimeline", response.status != "ok", message.localizedCaseInsensitiveContains("model"), let onSwitchTab {
-                ToastCenter.shared.show(message, actionLabel: "Open Deep Analyze", duration: 8) { onSwitchTab(.deep) }
+                ToastCenter.shared.show(message, actionLabel: "Open Describe Files", duration: 8) { onSwitchTab(.deep) }
             } else {
                 ToastCenter.shared.show(message)
             }
@@ -538,7 +538,7 @@ struct CatalogWorkbench: View {
         case "search":
             hits = response.hits
             selectedIndex = nil
-            if hits.isEmpty { message = "No matches in names, captions, chapters or sampled frames." }
+            if hits.isEmpty { message = "No matches. Try another word, or describe more files so there is more to search." }
         case "jobs":
             engine.applyCatalogJobsSnapshot(response.jobs)
         case "detail", "saveChapter", "undoChapterEdit":
@@ -698,7 +698,7 @@ struct CatalogJobRow: View {
     private var title: String {
         if job.kind == "catalogIndex" { return "Search index" }
         let count = job.fileIDs.count
-        return "\(count) video\(count == 1 ? "" : "s") · timeline"
+        return "\(count) video\(count == 1 ? "" : "s") · finding moments"
     }
 
     private var tone: (Color, ProgressTone) {
