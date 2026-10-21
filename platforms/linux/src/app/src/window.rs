@@ -22,7 +22,7 @@ use crate::shell::title_bar::TitleBar;
 use crate::shell::{self, Action};
 use fileid_engine::ipc::{CommandPayload, Empty, ScanPhase};
 
-const LIBRARY_SEARCH_HINT: &str = "Search filenames, tags, text in images…";
+const LIBRARY_SEARCH_HINT: &str = "Search by name, tag or text in files";
 
 #[derive(Clone)]
 struct ActiveWindow {
