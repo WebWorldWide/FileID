@@ -431,7 +431,10 @@ public sealed partial class TitleBar : UserControl
             if (query.Length > 0
                 && !page.Label.Contains(query, StringComparison.OrdinalIgnoreCase)
                 && !page.Id.Contains(query, StringComparison.OrdinalIgnoreCase)
-                && !page.Summary.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+                && !page.Summary.Contains(query, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
             var target = page;
             _suggestions.Add(new SearchItem(page.Label, PageHint(page), _text1,
                 () => AppViewModel.Instance.ActiveTab = target));
