@@ -123,8 +123,9 @@ pub(super) fn search(
 /// Files whose scan tags match the query words, best first. Each word matches
 /// the start of a tag word ("grass" hits "grassland", "sky" hits "blue_sky"),
 /// and only files matching the most words are kept so a filler word in the
-/// question can't hide a real match. Reads the v27 tag index, one prefix query
-/// per word. Mirrors macOS `CatalogStore.tagHits`.
+/// question can't hide a real match. Words are matched against the v27 tag
+/// vocabulary, then files come from the tag index. Mirrors macOS
+/// `CatalogStore.tagHits`.
 fn tag_hits(
     conn: &Connection,
     query: &str,
@@ -143,12 +144,15 @@ fn tag_hits(
     if words.is_empty() {
         return Ok(vec![]);
     }
-    let sql = format!("SELECT f.id FROM catalog_tag_fts JOIN files f ON f.id=catalog_tag_fts.rowid WHERE {filters} AND catalog_tag_fts MATCH ?1");
-    let mut statement = conn.prepare(&sql)?;
     let mut scores: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
     for word in &words {
-        let pattern = word_forms(word).iter().map(|form| format!("\"{form}\"*")).collect::<Vec<_>>().join(" OR ");
-        for id in statement.query_map(params![pattern, kinds, people, events], |row| row.get::<_, i64>(0))? {
+        let forms = word_forms(word);
+        let likes = (0..forms.len()).map(|index| format!("(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?{}", index + 5)).collect::<Vec<_>>().join(" OR ");
+        let sql = format!("SELECT DISTINCT f.id FROM tags t JOIN files f ON f.id=t.file_id WHERE {filters} AND ?1 IS NOT NULL AND t.source IN ('auto','user','vlm') AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes})");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];
+        args.extend(forms.iter().map(|form| Box::new(format!("% {form}%")) as Box<dyn rusqlite::ToSql>));
+        let mut statement = conn.prepare(&sql)?;
+        for id in statement.query_map(rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())), |row| row.get::<_, i64>(0))? {
             *scores.entry(id?).or_default() += 1;
         }
     }

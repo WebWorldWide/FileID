@@ -90,8 +90,9 @@ public enum CatalogStore {
     /// Files whose scan tags match the query words, best first. Each word is
     /// matched against the start of a tag word ("grass" hits "grass" and
     /// "grassland"; "sky" hits "blue_sky"). Files matching the most words win,
-    /// so a filler word in the question can't hide a real match. Reads the v27
-    /// tag index, one prefix query per word (Rust `tag_hits`).
+    /// so a filler word in the question can't hide a real match. Words are
+    /// matched against the v27 tag vocabulary, then files come from the tag
+    /// index (Rust `tag_hits`).
     static func tagHits(
         _ db: GRDB.Database, words query: String, filter: String?, peopleFilter: String?, eventFilter: String?
     ) throws -> [CatalogHit] {
@@ -100,8 +101,8 @@ public enum CatalogStore {
             .map(String.init)
             .filter { $0.count >= 3 })).sorted().prefix(6)
         guard !words.isEmpty else { return [] }
-        let sql = """
-            SELECT f.id FROM catalog_tag_fts JOIN files f ON f.id=catalog_tag_fts.rowid
+        let base = """
+            SELECT DISTINCT f.id FROM tags t JOIN files f ON f.id=t.file_id
             WHERE f.failed = 0 AND (? IS NULL OR f.kind IN (SELECT value FROM json_each(?)))
               AND (? IS NULL OR f.id IN (
                 SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?))
@@ -111,12 +112,15 @@ public enum CatalogStore {
               AND (? IS NULL OR f.id IN (
                 SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
               ))
-              AND catalog_tag_fts MATCH ?
+              AND t.source IN ('auto','user','vlm')
             """
         var scores: [Int64: Int] = [:]
         for word in words {
-            let pattern = wordForms(word).map { "\"\($0)\"*" }.joined(separator: " OR ")
-            for id in try Int64.fetchAll(db, sql: sql, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter, pattern]) {
+            let forms = wordForms(word)
+            let likes = forms.map { _ in "(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?" }.joined(separator: " OR ")
+            let sql = base + " AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE \(likes))"
+            let arguments: [DatabaseValueConvertible?] = [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter] + forms.map { "% \($0)%" }
+            for id in try Int64.fetchAll(db, sql: sql, arguments: StatementArguments(arguments)) {
                 scores[id, default: 0] += 1
             }
         }

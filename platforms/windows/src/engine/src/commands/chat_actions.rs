@@ -9,6 +9,7 @@ use super::chat_search::SearchPlan;
 use crate::ipc::{CatalogHit, ChatAction, ChatContext, ChatRename, CHAT_ACTION_KINDS, CHAT_JOBS, CHAT_PAGES, CHAT_SETTINGS};
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::fmt::Write;
 use std::path::Path;
 
 pub(crate) const MAX_IDS: usize = 10_000;
@@ -349,7 +350,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 bytes_label(listed_bytes)
             );
             if found.count > count {
-                detail += &format!(" This covers the largest {}; ask again for the rest.", count_label(count));
+                let _ = write!(detail, " This covers the largest {}; ask again for the rest.", count_label(count));
             }
             let mut proposed = action(context, "moveDuplicatesToTrash", format!("Move {} to Trash", plural(count, "extra copy", "extra copies")), detail);
             proposed.undo = Some("You can restore them from the Trash.".into());
@@ -399,7 +400,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             let mut proposed = if describe {
                 let mut detail = format!("Describes {things}{qualifiers} with the local AI model: a description and a suggested name for each. Files on disk are not changed.");
                 if count > taken {
-                    detail += &format!(" This run covers the newest {} of {}; ask again afterwards for the rest.", count_label(taken), count_label(count));
+                    let _ = write!(detail, " This run covers the newest {} of {}; ask again afterwards for the rest.", count_label(taken), count_label(count));
                 }
                 action(context, "describeFiles", format!("Describe {things}"), detail)
             } else {

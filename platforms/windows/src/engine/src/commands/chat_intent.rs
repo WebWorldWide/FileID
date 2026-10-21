@@ -145,8 +145,7 @@ fn imperative_words(text: &str) -> (Vec<String>, Vec<String>) {
         &["i'd", "like", "to"], &["i", "would", "like", "to"], &["help", "me"], &["let's"], &["lets"], &["go", "ahead", "and"],
         &["now"], &["ok"], &["okay"], &["hey"], &["fileid"], &["just"],
     ];
-    loop {
-        let Some(lead) = LEADS.iter().find(|lead| starts(&lower, lead)) else { break };
+    while let Some(lead) = LEADS.iter().find(|lead| starts(&lower, lead)) {
         lower.drain(..lead.len());
         cased.drain(..lead.len());
     }
@@ -241,14 +240,14 @@ fn page_for(words: &[String]) -> Option<&'static str> {
     let filler = ["to", "me", "the", "my", "page", "tab", "view", "screen", "section", "window", "up"];
     let rest: Vec<&str> = words.iter().map(String::as_str).filter(|word| !filler.contains(word)).collect();
     Some(match rest.as_slice() {
-        ["library"] | ["files"] | ["all", "files"] => "library",
-        ["people"] | ["faces"] | ["persons"] => "people",
-        ["duplicates"] | ["cleanup"] | ["clean"] | ["dupes"] => "cleanup",
-        ["deep", "analyze"] | ["describe", "files"] | ["descriptions"] | ["describe"] => "deepAnalyze",
-        ["restructure"] | ["organize", "folders"] | ["organize"] | ["organizer"] | ["folders"] => "restructure",
-        ["settings"] | ["preferences"] | ["options"] => "settings",
-        ["search"] | ["moments"] | ["search", "and", "moments"] | ["search", "&", "moments"] => "search",
-        ["tools"] | ["file", "tools"] | ["export"] => "tools",
+        ["library" | "files"] | ["all", "files"] => "library",
+        ["people" | "faces" | "persons"] => "people",
+        ["duplicates" | "cleanup" | "clean" | "dupes"] => "cleanup",
+        ["deep", "analyze"] | ["describe", "files"] | ["descriptions" | "describe"] => "deepAnalyze",
+        ["restructure" | "organize" | "organizer" | "folders"] | ["organize", "folders"] => "restructure",
+        ["settings" | "preferences" | "options"] => "settings",
+        ["search" | "moments"] | ["search", "and" | "&", "moments"] => "search",
+        ["tools" | "export"] | ["file", "tools"] => "tools",
         ["chat"] => "chat",
         _ => return None,
     })
@@ -533,7 +532,7 @@ pub fn parse_question(text: &str) -> Question {
         }
         question.reduced = raw.iter().enumerate().filter(|(index, _)| !used.contains(index)).map(|(_, word)| *word).collect::<Vec<_>>().join(" ");
     } else {
-        question.reduced = text.to_owned();
+        text.clone_into(&mut question.reduced);
     }
     question
 }
@@ -718,7 +717,7 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
     for index in 0..words.len() {
         let Some(span) = date_at(words, index) else { continue };
         let previous = index.checked_sub(1).map(|at| words[at].as_str()).unwrap_or_default();
-        let bare = month(&words[index]).is_some() && span.length == 1 || year(&words[index]).is_some() && span.length == 1;
+        let bare = span.length == 1 && (month(&words[index]).is_some() || year(&words[index]).is_some());
         if bare && !prepositions.contains(&previous) {
             continue;
         }

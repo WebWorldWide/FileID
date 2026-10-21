@@ -107,15 +107,16 @@ impl Filter {
 
     /// " of Kyle in Downloads from 2023 not described yet".
     pub fn qualifiers(&self) -> String {
+        use std::fmt::Write;
         let mut text = String::new();
         if !self.person_names.is_empty() {
-            text += &format!(" of {}", self.person_names.join(" and "));
+            let _ = write!(text, " of {}", self.person_names.join(" and "));
         }
         if let Some(folder) = &self.folder {
-            text += &format!(" in {}", folder.strip_prefix("named:").unwrap_or(folder));
+            let _ = write!(text, " in {}", folder.strip_prefix("named:").unwrap_or(folder));
         }
         if let Some(date) = &self.date {
-            text += &format!(" {}", date.phrase);
+            let _ = write!(text, " {}", date.phrase);
         }
         if self.undescribed {
             text += " not described yet";

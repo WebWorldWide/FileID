@@ -2,7 +2,7 @@
 
 ## Chat control and scalable retrieval (IPC v1.17 / catalog v27)
 
-`ChatRequest` gains optional `context` (page, selection, open person, folder) and a client CLIP `queryVector`; `ChatResponse` gains optional `actions`. Both engines parse imperatives deterministically, answer structured questions from fixed SQL templates, and fuse lexical, CLIP (HNSW) and BGE evidence with the same reciprocal-rank weights. Actions map onto existing commands and pages; destructive kinds carry a fixed `requiresConfirmation`. Retrieved file text never reaches the parser, and model proposals must be backed by the user's own words. Catalog v27 adds a trigger-maintained tag FTS index and covering indexes for totals, ordering and duplicate twins. Details, the action table and the WinUI/GTK port note are in CHAT.md.
+`ChatRequest` gains optional `context` (page, selection, open person, folder) and a client CLIP `queryVector`; `ChatResponse` gains optional `actions`. Both engines parse imperatives deterministically, answer structured questions from fixed SQL templates, and fuse lexical, CLIP (HNSW) and BGE evidence with the same reciprocal-rank weights. Actions map onto existing commands and pages; destructive kinds carry a fixed `requiresConfirmation`. Retrieved file text never reaches the parser, and model proposals must be backed by the user's own words. Catalog v27 adds a trigger-maintained tag vocabulary and covering indexes for totals, ordering and duplicate twins. Details, the action table and the WinUI/GTK port note are in CHAT.md.
 
 ## Related-take proposals (IPC v1.11)
 
