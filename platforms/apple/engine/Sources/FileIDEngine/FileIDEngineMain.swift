@@ -35,6 +35,9 @@ struct FileIDEngineMain {
         if CommandLine.arguments.dropFirst().first == "--sample-video-sequence" {
             exit(await VideoFrameWorker.runSequence(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
+        if CommandLine.arguments.dropFirst().first == "--sample-video-pool" {
+            exit(await VideoFramePool.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         if CommandLine.arguments.dropFirst().first == "--scan-video-signals" {
             exit(await VideoFrameWorker.runSignals(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }

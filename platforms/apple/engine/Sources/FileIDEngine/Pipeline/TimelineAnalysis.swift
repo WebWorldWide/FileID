@@ -13,6 +13,7 @@ actor TimelineAnalysis {
     private var prefetchTask: Task<[VideoFrameWorker.Sample], Error>?
     private var signalTask: Task<[TimelineSignalAnalysis.Signal], Error>?
     private var speechTask: Task<[TimelineSpeechTranscription.Passage]?, Never>?
+    private var poolTask: Task<VideoFramePool.Pool, Error>?
     private struct Recipe: Codable, Sendable {
         let modelKind: String
         let modelVersion: String
@@ -30,7 +31,8 @@ actor TimelineAnalysis {
             let unique = Array(Set(ids)).sorted()
             let id = UUID().uuidString
             let encodedIDs = String(decoding: try JSONEncoder().encode(unique), as: UTF8.self)
-            let recipe = String(decoding: try JSONEncoder().encode(Recipe(modelKind: model.rawValue, modelVersion: "timeline-frame-v2/" + model.rawValue + "@" + (ModelManifest.vlmPin(forRepo: model.sourceRepo)?.revision ?? "unversioned"), intervalSeconds: 10, timelineMode: request.timelineMode)), as: UTF8.self)
+            let framePrefix = VideoFramePool.enabled() ? Self.scenePrefix : "timeline-frame-v2/"
+            let recipe = String(decoding: try JSONEncoder().encode(Recipe(modelKind: model.rawValue, modelVersion: framePrefix + model.rawValue + "@" + (ModelManifest.vlmPin(forRepo: model.sourceRepo)?.revision ?? "unversioned"), intervalSeconds: 10, timelineMode: request.timelineMode)), as: UTF8.self)
             let now = Date().timeIntervalSince1970
             try await database.pool.write { db in
                 for fileID in unique {
@@ -69,6 +71,7 @@ actor TimelineAnalysis {
             samplerTask?.cancel()
             sequenceTask?.cancel()
             prefetchTask?.cancel()
+            poolTask?.cancel()
                 signalTask?.cancel()
                 speechTask?.cancel()
                 await DeepAnalyze.shared.requestCancel()
@@ -114,6 +117,15 @@ actor TimelineAnalysis {
                 guard first.metadata.revision == source.1 else { throw SourceChanged() }
                 try await database.pool.write { db in
                     try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,0,?,'incomplete',?,?)", arguments: [id+"-"+String(fileID)+"-coverage",fileID,duration,source.1,job.version])
+                }
+                if job.version.hasPrefix(Self.scenePrefix) {
+                    try await analyzeScenes(fileID: fileID, sourceURL: url, sourceRevision: source.1, duration: duration,
+                                            model: job.model, modelVersion: job.version, timelineMode: job.timelineMode,
+                                            fileIndex: index, totalFiles: job.ids.count, jobID: id, database: database, sink: sink)
+                    try await finishFile(fileID: fileID, sourceURL: url, sourceRevision: source.1, duration: duration,
+                                         frameModelVersion: job.version, index: index, total: job.ids.count,
+                                         jobID: id, database: database, sink: sink)
+                    continue
                 }
                 var signals: [TimelineSignalAnalysis.Signal] = []
                 var signalStart = 0.0
@@ -380,6 +392,175 @@ actor TimelineAnalysis {
             }
             await publish(jobID, database: database, sink: sink)
         }
+    }
+
+    static let scenePrefix = "timeline-scene-v1/"
+
+    private func finishFile(fileID: Int64, sourceURL: URL, sourceRevision: String, duration: Double,
+                            frameModelVersion: String, index: Int, total: Int,
+                            jobID: String, database: Database, sink: IPCSink) async throws {
+        try await transcribeSpeech(fileID: fileID, sourceURL: sourceURL, sourceRevision: sourceRevision, duration: duration,
+                                   fileIndex: index, totalFiles: total, jobID: jobID, database: database, sink: sink)
+        try await requireRunning(jobID, database: database)
+        try await persistChapterSuggestions(fileID: fileID, sourceRevision: sourceRevision,
+                                            frameModelVersion: frameModelVersion, duration: duration, database: database)
+        let progress = Double(index + 1) / Double(total)
+        try await database.pool.write { db in
+            try db.execute(sql: "UPDATE catalog_jobs SET checkpoint_json=?,progress=?,updated_at=? WHERE id=? AND state='running'",
+                           arguments: [String(index + 1), progress, Date().timeIntervalSince1970, jobID])
+        }
+        await publish(jobID, database: database, sink: sink)
+    }
+
+    private func samplePool(source: URL, duration: Double) async throws -> VideoFramePool.Pool {
+        let task = Task { try await VideoFrameWorker.samplePool(source: source, durationHint: duration) }
+        poolTask = task
+        defer { poolTask = nil }
+        return try await task.value
+    }
+
+    /// CLIP vectors for every pool frame; luma signatures stand in when CLIP is unavailable.
+    nonisolated static func poolFrames(_ pool: VideoFramePool.Pool) -> [VideoSceneSelection.Frame] {
+        let clip = MobileCLIPService.shared.loadImageEncoder()
+        var previous: [UInt8]?
+        return pool.manifest.frames.map { frame in
+            var embedding: [Float]?
+            if clip, let source = CGImageSourceCreateWithURL(pool.url(frame) as CFURL, nil),
+               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+                embedding = MobileCLIPService.shared.embedImage(image)
+            }
+            if embedding == nil {
+                let mean = Float(frame.signature.reduce(0) { $0 + Int($1) }) / Float(max(1, frame.signature.count))
+                embedding = frame.signature.map { Float($0) - mean }
+            }
+            let change = previous.map { VideoSceneSelection.lumaChange($0, frame.signature) } ?? 0
+            previous = frame.signature
+            return VideoSceneSelection.Frame(seconds: frame.seconds, embedding: embedding ?? [], change: change)
+        }
+    }
+
+    /// One frame-pool decode per video; the VLM captions one representative per CLIP scene
+    /// (the caption covers the whole scene) and, for moments, only windows with motion.
+    private func analyzeScenes(fileID: Int64, sourceURL: URL, sourceRevision: String, duration: Double,
+                               model: String, modelVersion: String, timelineMode: String?,
+                               fileIndex: Int, totalFiles: Int, jobID: String, database: Database, sink: IPCSink) async throws {
+        let started = ContinuousClock.now
+        let pool: VideoFramePool.Pool
+        do {
+            pool = try await samplePool(source: sourceURL, duration: duration)
+        } catch is VideoFrameWorker.SourceRevisionChanged {
+            throw SourceChanged()
+        }
+        defer { VideoFramePool.remove(pool) }
+        guard pool.manifest.revision == sourceRevision else { throw SourceChanged() }
+        let decodeMs = VLMTiming.milliseconds(since: started)
+        let embedStarted = ContinuousClock.now
+        let frames = await Task.detached(priority: .userInitiated) { Self.poolFrames(pool) }.value
+        let embedMs = VLMTiming.milliseconds(since: embedStarted)
+        let scenes = VideoSceneSelection.scenes(frames, duration: duration)
+        let signals = frames.map { TimelineSignalAnalysis.Signal(seconds: $0.seconds, changeScore: min(1, $0.change)) }
+        try await recordSignalCoverage(fileID: fileID, sourceRevision: sourceRevision, start: 0, end: duration,
+                                       status: "sampled", database: database)
+        var captioned = 0
+        for scene in scenes {
+            try await requireRunning(jobID, database: database)
+            guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState, activeModel.rawValue == model else { throw ModelChanged() }
+            let evidenceID = "scene:\(fileID):\(sourceRevision):\(modelVersion):\(Int(scene.start * 1_000))"
+            let exists = try await database.pool.read { db in
+                try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=? AND source_revision=? AND stale=0)",
+                                  arguments: [evidenceID, sourceRevision]) ?? false
+            }
+            if exists { continue }
+            let frameURL = pool.url(pool.manifest.frames[scene.representative])
+            let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                await DeepAnalyze.shared.analyze(imageURL: frameURL, mediaKind: .video, proposeFilename: false)
+            }
+            try await requireRunning(jobID, database: database)
+            guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
+            captioned += 1
+            let caption = result.description
+            let at = pool.manifest.frames[scene.representative].seconds
+            try await database.pool.write { db in
+                guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+                try db.execute(sql: "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?,?,?,?,?,?,?,0)",
+                               arguments: [evidenceID, fileID, scene.start, scene.end, caption, sourceRevision, modelVersion])
+                try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,'sampled',?,?)",
+                               arguments: [evidenceID, fileID, scene.start, scene.end, sourceRevision, modelVersion])
+            }
+            JSONLog.shared.info(ev: "timeline_scene_caption", extra: ["at": AnyCodable(at), "start": AnyCodable(scene.start), "end": AnyCodable(scene.end)])
+        }
+        var momentWindows = 0
+        if timelineMode == "moments" {
+            momentWindows = try await analyzePoolMoments(fileID: fileID, pool: pool, frames: frames, sourceURL: sourceURL,
+                                                         sourceRevision: sourceRevision, duration: duration, model: model,
+                                                         modelVersion: modelVersion, fileIndex: fileIndex, totalFiles: totalFiles,
+                                                         jobID: jobID, database: database, sink: sink)
+            try await analyzeTakeGoals(fileID: fileID, sourceURL: sourceURL, sourceRevision: sourceRevision, duration: duration,
+                                       signals: signals, model: model, modelVersion: modelVersion, jobID: jobID, database: database)
+        }
+        JSONLog.shared.info(ev: "timeline_scene_timing", extra: [
+            "duration": AnyCodable(duration), "poolFrames": AnyCodable(frames.count), "scenes": AnyCodable(scenes.count),
+            "captioned": AnyCodable(captioned), "momentWindows": AnyCodable(momentWindows),
+            "decodeMs": AnyCodable(decodeMs.rounded()), "embedMs": AnyCodable(embedMs.rounded()),
+            "totalMs": AnyCodable(VLMTiming.milliseconds(since: started).rounded()), "load1": AnyCodable(VLMTiming.loadAverage()),
+        ])
+    }
+
+    private func analyzePoolMoments(fileID: Int64, pool: VideoFramePool.Pool, frames: [VideoSceneSelection.Frame],
+                                    sourceURL: URL, sourceRevision: String, duration: Double, model: String, modelVersion: String,
+                                    fileIndex: Int, totalFiles: Int, jobID: String, database: Database, sink: IPCSink) async throws -> Int {
+        let windows = VideoSceneSelection.activityWindows(frames, duration: duration)
+        let version = "timeline-moment-sequence-v1/" + modelVersion
+        var still: [(Double, Double)] = []
+        var cursor = 0.0
+        for window in windows {
+            if window.start > cursor + 0.001 { still.append((cursor, window.start)) }
+            cursor = max(cursor, window.end)
+        }
+        if duration > cursor + 0.001 { still.append((cursor, duration)) }
+        let stillSpans = still
+        try await database.pool.write { db in
+            guard try CatalogStore.revision(db, fileID: fileID) == sourceRevision else { throw SourceChanged() }
+            for (start, end) in stillSpans {
+                try db.execute(sql: "INSERT OR REPLACE INTO catalog_coverage(id,file_id,start_seconds,end_seconds,status,source_revision,model_version) VALUES(?,?,?,?,'sampled',?,?)",
+                               arguments: ["moment-still:\(fileID):\(sourceRevision):\(version):\(Int(start * 1_000))", fileID, start, end, sourceRevision, version])
+            }
+        }
+        let byTime = Dictionary(pool.manifest.frames.map { ($0.seconds, $0) }, uniquingKeysWith: { first, _ in first })
+        for (index, window) in windows.enumerated() {
+            try await requireRunning(jobID, database: database)
+            guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState, activeModel.rawValue == model else { throw ModelChanged() }
+            let coverageID = "moment-window:\(fileID):\(sourceRevision):\(version):\(Int(window.start * 1_000))"
+            let processed = try await database.pool.read { db in
+                try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=? AND status='sampled' AND source_revision=? AND model_version=?)",
+                                  arguments: [coverageID, sourceRevision, version]) ?? false
+            }
+            if !processed {
+                let picked = window.times.compactMap { byTime[$0] }
+                guard picked.count >= 2 else { continue }
+                let times = picked.map(\.seconds)
+                let momentWindow = TimelineMomentAnalysis.Window(start: window.start, end: window.end, times: times)
+                let urls = picked.map { pool.url($0) }
+                let result = await DeepAnalyze.shared.runCancellableAnalysis {
+                    await DeepAnalyze.shared.analyzeMomentSequence(imageURLs: urls, times: times)
+                }
+                try await requireRunning(jobID, database: database)
+                guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
+                let moments = try TimelineMomentAnalysis.parse(result.description, frameCount: times.count)
+                let chapters = TimelineMomentAnalysis.chapters(moments: moments, times: times, window: momentWindow,
+                                                               fileID: fileID, sourceRevision: sourceRevision, modelVersion: version)
+                try await Self.persistMomentWindow(chapters: chapters, coverageID: coverageID, window: momentWindow,
+                                                   fileID: fileID, sourceRevision: sourceRevision, modelVersion: version,
+                                                   jobID: jobID, database: database)
+            }
+            let progress = min(1, (Double(fileIndex) + 0.7 * Double(index + 1) / Double(max(1, windows.count))) / Double(max(1, totalFiles)))
+            try await database.pool.write { db in
+                try db.execute(sql: "UPDATE catalog_jobs SET progress=MAX(progress,?),updated_at=? WHERE id=? AND state='running'",
+                               arguments: [progress, Date().timeIntervalSince1970, jobID])
+            }
+            await publish(jobID, database: database, sink: sink)
+        }
+        return windows.count
     }
 
     static func persistMomentWindow(chapters: [CatalogChapter], coverageID: String, window: TimelineMomentAnalysis.Window,
