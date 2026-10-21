@@ -902,6 +902,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn walk(root: &std::path::Path) -> (Vec<DiscoveredFile>, u64) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
