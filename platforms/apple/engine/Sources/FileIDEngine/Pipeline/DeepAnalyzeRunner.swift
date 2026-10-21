@@ -444,6 +444,14 @@ public enum DeepAnalyzeRunner {
                         proposedName: proposedName,
                         modelKind: modelKey
                     )))
+                    if !tagsOnly, !(await analyzer.isCancelled()) {
+                        let fileID = target.id
+                        _ = await analyzer.runCancellableAnalysis {
+                            await Self.transcribeTextIfNeeded(analyzer: analyzer, database: database,
+                                                              fileID: fileID, url: url, kind: kind)
+                            return DeepAnalyze.AnalysisResult(description: "", proposedName: nil)
+                        }
+                    }
                 } catch {
                     failed += 1
                     JSONLog.shared.warn(ev: "deep_analyze_persist_failed",

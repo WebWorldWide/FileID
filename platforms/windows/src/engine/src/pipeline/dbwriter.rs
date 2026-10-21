@@ -359,10 +359,10 @@ impl DbWriter {
             // AFTER DELETE trigger only when recursive triggers are enabled,
             // which would strand the old text's FTS postings.
             let mut ocr_text_stmt = tx
-                .prepare_cached("INSERT INTO ocr_text (file_id, text) VALUES (?1, ?2)")
+                .prepare_cached("INSERT INTO ocr_text (file_id, text) SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
                 .context("preparing ocr_text insert")?;
             let mut ocr_text_delete = tx
-                .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1")
+                .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1 AND source = 'ocr'")
                 .context("preparing ocr_text delete")?;
             let mut doc_text_stmt = tx
                 .prepare_cached("INSERT INTO doc_text (file_id, text) VALUES (?1, ?2)")
@@ -579,7 +579,9 @@ impl DbWriter {
                 // skip path. This clears stale ocr_text (and, via the v15
                 // triggers, ocr_fts) when a re-process now yields empty text
                 // (phantom FTS hits, #11) while leaving valid prior text
-                // untouched on the common skipped sessions.
+                // untouched on the common skipped sessions. A Deep Analyze
+                // transcription (source 'vlm') outlives rescans of an unchanged
+                // file; the v25 trigger drops it when the file changes.
                 if f.ocr_stage_ran {
                     ocr_text_delete
                         .execute(params![file_id])
