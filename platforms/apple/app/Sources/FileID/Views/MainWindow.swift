@@ -157,8 +157,19 @@ struct MainWindow: View {
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()
+                let handoff = ChatHandoff.shared
+                handoff.store = store
+                handoff.toolsSession = toolsSession
+                handoff.activeTab = activeTab
+                handoff.libraryRoot = pickedURL
+                handoff.navigate = { activeTabBinding.wrappedValue = $0 }
+                handoff.chooseFolder = { choose($0) }
             }
-            .onChange(of: pickedURL) { _, newValue in persistPickedFolder(newValue) }
+            .onChange(of: pickedURL) { _, newValue in
+                persistPickedFolder(newValue)
+                ChatHandoff.shared.libraryRoot = newValue
+            }
+            .onChange(of: activeTabRaw) { _, _ in ChatHandoff.shared.activeTab = activeTab }
             // Guide the user through the workflow as each stage finishes.
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
                 guard let result = engine.lastFaceClustering, result.personCount > 0, activeTab == .library else { return }

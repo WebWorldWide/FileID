@@ -196,6 +196,7 @@ struct LibraryView: View {
         }
         .onChange(of: kindFilterRaw) { _, _ in reload() }
         .onChange(of: similarSeed?.id) { _, _ in reload() }
+        .modifier(LibraryChatHooks(checked: checkedFiles.keys.sorted(), searchText: $searchText, similarSeed: $similarSeed))
         // Keep the tile-refresh epoch tracking store.version while idle so a
         // tag edit / undo refreshes the dots, but leave it frozen during a
         // scan (the per-second counter bump must not re-task every tile).

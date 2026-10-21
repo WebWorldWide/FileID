@@ -48,6 +48,12 @@ struct CatalogWorkbench: View {
                 resultsPane
                     .frame(width: Theme.Metrics.sidePane)
                     .focusSection()
+                    .onChange(of: ChatHandoff.shared.momentsQuery, initial: true) { _, handed in
+                        guard let handed else { return }
+                        ChatHandoff.shared.momentsQuery = nil
+                        query = handed
+                        search()
+                    }
                 VHairline()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {

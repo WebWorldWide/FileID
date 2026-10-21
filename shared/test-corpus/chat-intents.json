@@ -79,6 +79,7 @@
     {"text": "oldest photos of Emma", "question": {"measure": "list", "order": "oldest", "explicitOrder": true, "duplicates": false, "undescribed": false, "reduced": "photos of Emma"}},
     {"text": "photos of Kyle", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "photos of Kyle"}},
     {"text": "birthday videos from 9/19/2024", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "date": {"from": ["2024-09-19"], "to": ["2024-09-19", "+1 day"], "phrase": "from September 19, 2024"}, "duplicates": false, "undescribed": false, "reduced": "birthday videos"}},
+    {"text": "the last photos of this trip", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "the last photos of this trip"}},
     {"text": "may I see the beach photos", "question": {"measure": "list", "order": "newest", "explicitOrder": false, "duplicates": false, "undescribed": false, "reduced": "may I see the beach photos"}}
   ],
   "labels": [

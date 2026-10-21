@@ -491,7 +491,8 @@ struct ChatIntent: Codable, Equatable, Sendable {
         switch word {
         case "today": return Span(filter: exact(["now", "localtime", "start of day"], ["now", "localtime", "start of day", "+1 day"], "today"), length: 1)
         case "yesterday": return Span(filter: exact(["now", "localtime", "start of day", "-1 day"], ["now", "localtime", "start of day"], "yesterday"), length: 1)
-        case "this", "last", "past" where ["week", "month", "year"].contains(next):
+        case "this", "last", "past":
+            guard ["week", "month", "year"].contains(next) else { break }
             let start: [String] = switch next {
             case "week": ["now", "localtime", "start of day", "-6 days", "weekday 1"]
             case "month": ["now", "localtime", "start of month"]

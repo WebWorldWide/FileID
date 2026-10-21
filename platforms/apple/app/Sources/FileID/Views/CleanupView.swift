@@ -377,16 +377,9 @@ struct CleanupView: View {
         deleting = true
         statusWarning = false
         defer { deleting = false }
-        // Build the parallel work list first: every (id, url, size) we
-        // intend to trash. Doing this on the main actor up front keeps
-        // SwiftUI selection/state reads off the concurrent path.
-        struct TrashItem: Sendable {
-            let id: Int64
-            let url: URL
-            let size: Int64
-            let exactKeeper: URL?
-        }
-        var work: [TrashItem] = []
+        // Build the work list first on the main actor so SwiftUI selection
+        // reads stay off the concurrent trash path.
+        var work: [DuplicateTrashItem] = []
         var keeperTagsByVictim: [Int64: [URL]] = [:]
         var verificationRejected = 0
         for group in groupsToScan {
@@ -398,7 +391,7 @@ struct CleanupView: View {
                 continue
             }
             for file in trashed {
-                work.append(TrashItem(
+                work.append(DuplicateTrashItem(
                     id: file.id, url: file.url, size: file.sizeBytes,
                     exactKeeper: exactKeeper))
                 keeperTagsByVictim[file.id] = kept.map(\.url)
@@ -408,55 +401,7 @@ struct CleanupView: View {
         // Trash up to 8 files concurrently. Foundation's trashItem isn't
         // thread-hostile (Finder serializes journaling underneath), but
         // doing them sequentially on a 10K dedup pass = 10–50 s freeze.
-        struct TrashResult: Sendable {
-            let id: Int64
-            let size: Int64
-            let success: Bool
-            let verificationFailed: Bool
-        }
-        let results: [TrashResult] = await withTaskGroup(of: TrashResult.self) { group in
-            var inFlight = 0
-            var i = 0
-            var collected: [TrashResult] = []
-            collected.reserveCapacity(work.count)
-            let maxConcurrency = 8
-            while i < work.count {
-                if inFlight >= maxConcurrency {
-                    if let r = await group.next() { collected.append(r); inFlight -= 1 }
-                }
-                let item = work[i]
-                group.addTask {
-                    if let keeper = item.exactKeeper {
-                        guard let verifiedVictim = await ExactDuplicateVerifier.matchesImmediately(
-                            keeper: keeper, victim: item.url, expectedSize: item.size),
-                              ExactFileDigest.pathStillMatches(verifiedVictim) else {
-                            return TrashResult(
-                                id: item.id, size: item.size, success: false,
-                                verificationFailed: true)
-                        }
-                    }
-                    do {
-                        try ReadOnlyLocations.requireSourceMutation(item.url)
-                        try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-                        return TrashResult(
-                            id: item.id, size: item.size, success: true,
-                            verificationFailed: false)
-                    } catch {
-                        // NSError descriptions embed the full path — log
-                        // domain+code only, beside the redacted copy.
-                        let ns = error as NSError
-                        NSLog("FileID v2 cleanup: could not trash %@: %@ (%ld)", redactPathForLog(item.url.path), ns.domain, ns.code)
-                        return TrashResult(
-                            id: item.id, size: item.size, success: false,
-                            verificationFailed: false)
-                    }
-                }
-                inFlight += 1
-                i += 1
-            }
-            for await r in group { collected.append(r) }
-            return collected
-        }
+        let results = await ExactDuplicateVerifier.trash(work)
 
         var trashedIDs: [Int64] = []
         var freedBytes: Int64 = 0
