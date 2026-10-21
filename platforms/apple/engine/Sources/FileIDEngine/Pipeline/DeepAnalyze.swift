@@ -618,6 +618,7 @@ public actor DeepAnalyze {
         ) else { return AnalysisResult(description: "Inference failed: Processing capacity unavailable.", proposedName: nil) }
         defer { Task { await ResourceScheduler.shared.release(computeLease) } }
         guard let container else { return AnalysisResult(description: "Model not loaded.", proposedName: nil) }
+        let started = ContinuousClock.now
         var images: [UncheckedSendableBox<CIImage>] = []
         for url in imageURLs {
             guard !Task.isCancelled, let image = await Self.decodeImageOffActor(url: url, maxPixelSize: 256).get() else {
@@ -627,6 +628,10 @@ public actor DeepAnalyze {
         }
         let sequenceImages = images
         let collector = TokenCollector()
+        let stats = VLMPassStats()
+        stats.set("decodeMs", VLMTiming.milliseconds(since: started))
+        stats.set("frames", Double(images.count))
+        defer { VLMTiming.log("deep_sequence_timing", stats: stats, totalMs: VLMTiming.milliseconds(since: started)) }
         let params = MLXLMCommon.GenerateParameters(maxTokens: 512, temperature: 0.1, topP: 0.9)
         do {
             try await container.perform { (context: ModelContext) -> Void in
@@ -641,6 +646,7 @@ public actor DeepAnalyze {
                 for await item in stream {
                     try Task.checkCancellation()
                     if let chunk = item.chunk { collector.append(chunk) }
+                    if let info = item.info { stats.record("sequence", info) }
                 }
             }
             return AnalysisResult(description: collector.snapshot(), proposedName: nil)
@@ -676,9 +682,14 @@ public actor DeepAnalyze {
         // would block deepAnalyzeCancel (and every queued IPC command) behind
         // it. The detached task does the (possibly hanging) read; the actor
         // suspends at `await`, staying responsive to cancel.
+        let started = ContinuousClock.now
+        let stats = VLMPassStats()
+        defer { VLMTiming.log("deep_analyze_timing", stats: stats, totalMs: VLMTiming.milliseconds(since: started)) }
         let boundedText = Self.boundedDocumentText(documentText)
         let box = await Self.decodeImageOffActor(url: imageURL, maxPixelSize: 768)
         let cg = box.get()
+        stats.set("decodeMs", VLMTiming.milliseconds(since: started))
+        if let cg { stats.set("decodedLongSide", Double(max(cg.width, cg.height))) }
         guard cg != nil || boundedText != nil else {
             return AnalysisResult(description: "Could not decode image.", proposedName: nil)
         }
@@ -722,6 +733,7 @@ public actor DeepAnalyze {
                         collector.append(chunk)
                         if let onToken { await onToken(chunk) }
                     }
+                    if let info = item.info { stats.record("caption", info) }
                 }
             }
         } catch {
@@ -785,6 +797,7 @@ public actor DeepAnalyze {
                     for await item in stream {
                         try Task.checkCancellation()
                         if let chunk = item.chunk { filenameCollector.append(chunk) }
+                        if let info = item.info { stats.record("filename", info) }
                     }
                 }
                 proposedName = Self.filenameOnlyCandidate(filenameCollector.snapshot())
@@ -831,6 +844,7 @@ public actor DeepAnalyze {
                     for await item in stream {
                         try Task.checkCancellation()
                         if let chunk = item.chunk { tagCollector.append(chunk) }
+                        if let info = item.info { stats.record("tags", info) }
                     }
                 }
                 vlmTags = Self.parseVLMTags(tagCollector.snapshot())
