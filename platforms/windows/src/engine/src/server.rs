@@ -282,12 +282,12 @@ async fn async_main() -> Result<()> {
     // Wrapped in Arc<Mutex<…>> so handlers (planRestructure, future
     // applyRestructure, scan_session) can share the single writer.
     let db_path = paths::db_path()?;
-    let db_conn: Option<std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>> =
+    let (db_conn, db_open_error): (Option<std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>>, _) =
         match db::open_writer(&db_path) {
-            Ok(c) => Some(std::sync::Arc::new(parking_lot::Mutex::new(c))),
+            Ok(c) => (Some(std::sync::Arc::new(parking_lot::Mutex::new(c))), None),
             Err(err) => {
                 tracing::error!(?err, path = %platform::redact_path_for_log(&db_path), "failed to open database");
-                None
+                (None, Some(err))
             }
         };
 
@@ -320,17 +320,8 @@ async fn async_main() -> Result<()> {
         .await;
     }
 
-    if db_conn.is_none() {
-        sink.send(EngineError::new(
-            "db_open_failed",
-            format!(
-                "Could not open or migrate the database at {}. The engine cannot scan. Check %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl for the underlying error.",
-                db_path.display()
-            ),
-        )
-        .with_path(db_path.display().to_string())
-        .into_event())
-        .await;
+    if let Some(err) = &db_open_error {
+        sink.send(db_open_error_event(err, &db_path)).await;
         tracing::error!("engine starting without a writable DB — aborting");
         // Drop the sink so the writer task sees EOF, then await it
         // (with a cap) to let the error reach the app before exit.
@@ -1666,6 +1657,30 @@ async fn handle_line(d: &Dispatcher, line: &str) {
     }
 }
 
+/// The startup error for a database the engine could not open. A newer
+/// schema gets macOS's `db_newer_than_engine` kind; a read-only file says so.
+fn db_open_error_event(err: &anyhow::Error, db_path: &std::path::Path) -> IpcEvent {
+    let path = db_path.display().to_string();
+    if let Some(newer) = err.downcast_ref::<db::migrations::NewerThanEngine>() {
+        return EngineError::new(
+            "db_newer_than_engine",
+            format!("{newer}. Update FileID, or wipe the library to rescan."),
+        )
+        .with_path(path)
+        .into_event();
+    }
+    let message = if err.downcast_ref::<db::ReadOnlyDatabase>().is_some() {
+        format!(
+            "The database at {path} is read-only, so the engine cannot scan. Make the file and its folder writable, then restart FileID."
+        )
+    } else {
+        format!(
+            "Could not open or migrate the database at {path}. The engine cannot scan. Check %LOCALAPPDATA%\\FileID\\logs\\engine.jsonl for the underlying error."
+        )
+    };
+    EngineError::new("db_open_failed", message).with_path(path).into_event()
+}
+
 async fn emit_db_unavailable(sink: &Sink, command: &str) {
     sink.send(EngineError::event(
         "db_unavailable",
@@ -1862,6 +1877,25 @@ mod tests {
                 }
             })
         ));
+    }
+
+    #[test]
+    fn database_open_errors_name_their_cause() {
+        let kind_and_message = |err: anyhow::Error| match db_open_error_event(&err, std::path::Path::new("/state/fileid.sqlite")).payload {
+            EventPayload::Error(Wrap { inner }) => (inner.kind, inner.message),
+            _ => panic!("expected an error event"),
+        };
+        let newer = anyhow::Error::from(db::migrations::NewerThanEngine { unknown: vec!["v99".into()] })
+            .context("applying migrations");
+        let (kind, message) = kind_and_message(newer);
+        assert_eq!(kind, "db_newer_than_engine");
+        assert!(message.contains("v99") && message.contains("Update FileID"), "{message}");
+        let (kind, message) = kind_and_message(anyhow::Error::from(db::ReadOnlyDatabase));
+        assert_eq!(kind, "db_open_failed");
+        assert!(message.contains("read-only"), "{message}");
+        let (kind, message) = kind_and_message(anyhow::anyhow!("file is not a database"));
+        assert_eq!(kind, "db_open_failed");
+        assert!(message.starts_with("Could not open or migrate the database at /state/fileid.sqlite."), "{message}");
     }
 
     #[tokio::test]
