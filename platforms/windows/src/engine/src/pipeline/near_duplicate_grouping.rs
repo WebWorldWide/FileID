@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn sequence_suffixes_match_macos() {
-        let p = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let p = |v: &[&str]| v.iter().map(|&s| s.to_owned()).collect::<Vec<_>>();
         assert_eq!(sequence_suffixes(&p(&["/j/A1.JPG", "/r/A1.ARW", "/j/A2.JPG"])), vec![" 1", " 1", " 2"]);
         assert_eq!(sequence_suffixes(&p(&["/j/A1.JPG", "/r/A1.ARW"])), vec!["", ""]);
         let many: Vec<String> = (1..=10).map(|i| format!("/j/S{i}.jpg")).collect();
