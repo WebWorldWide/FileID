@@ -252,15 +252,49 @@ public enum Tagging {
                     // gates its ocr_text delete/reinsert on ocrStageRan so a photo
                     // we never OCR'd (or a primary-pass timeout) can't wipe valid
                     // prior OCR text. Mirrors the Windows `ocr_stage_ran` gate.
+                    // RAM++ primary tagger (4585-class, Apache-2.0) — the macOS
+                    // lockstep mirror of the Windows stack. Falls back to the
+                    // Vision classifier's narrow scene vocabulary when the RAM++
+                    // ONNX isn't installed (tag() returns [] until load() succeeds),
+                    // so tagging always works. RAM++ carries per-tag confidences →
+                    // tags.score; the Vision fallback has none. Runs before OCR so
+                    // its paper/handwriting tags can gate the text read.
+                    let ramStart = CFAbsoluteTimeGetCurrent()
+                    let ramTags = RamPlusService.shared.tag(cgImage)
+                    let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
+
+                    // OCR — fast read when the classifiers or the page shape suggest
+                    // text, then Vision's accurate tier only when TextReading says the
+                    // fast read missed or mangled it (handwriting). The OCR stage "ran"
+                    // iff we entered this branch; the DBWriter gates its ocr_text
+                    // delete/reinsert on ocrStageRan so a photo we never OCR'd (or a
+                    // primary-pass timeout) can't wipe valid prior OCR text. Mirrors
+                    // the Windows `ocr_stage_ran` gate.
+                    let textTags = pass.classifyTags + ramTags.map(\.tag)
                     var ocr: String? = nil
                     var ocrMs: Double = 0
+                    var ocrCarefulMs: Double = 0
+                    var ocrHandwritten = false
                     var ocrStageRan = false
-                    if pass.classifyTags.contains(where: { docHints.contains($0.lowercased()) }) {
+                    let documentShape = TextReading.isDocumentShape(
+                        width: cgImage.width, height: cgImage.height, hasCamera: exif.cameraModel != nil
+                    )
+                    if pass.classifyTags.contains(where: { docHints.contains($0.lowercased()) })
+                        || TextReading.isTextBearing(textTags) || documentShape {
                         ocrStageRan = true
                         let ocrStart = CFAbsoluteTimeGetCurrent()
-                        let text = worker.ocrFast(cgImage)
-                        ocr = text.isEmpty ? nil : text
+                        let fast = worker.ocrFast(cgImage)
                         ocrMs = (CFAbsoluteTimeGetCurrent() - ocrStart) * 1000
+                        var text = fast
+                        if TextReading.needsCarefulRead(fastText: fast, tags: textTags, textBearing: documentShape) {
+                            let carefulStart = CFAbsoluteTimeGetCurrent()
+                            let careful = worker.ocrAccurate(cgImage)
+                            ocrCarefulMs = (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
+                            ocrHandwritten = TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: textTags)
+                            text = TextReading.preferred(fast: fast, careful: careful)
+                        }
+                        ocr = text.isEmpty ? nil : text
+                        if ocr == nil { ocrHandwritten = false }
                     }
 
                     let phash = computeDHash(cgImage)
@@ -269,18 +303,6 @@ public enum Tagging {
                     // with the Windows engine's content_hash. nil on read error, in
                     // which case the file simply won't participate in dedup.
                     let aesthetic = lightweightAesthetic(cgImage: cgImage, fileSizeMB: sizeMB)
-
-                    // RAM++ primary tagger (4585-class, Apache-2.0) — the macOS
-                    // lockstep mirror of the Windows stack. Falls back to the
-                    // Vision classifier's narrow scene vocabulary when the RAM++
-                    // ONNX isn't installed (tag() returns [] until load() succeeds),
-                    // so tagging always works. RAM++ carries per-tag confidences →
-                    // tags.score; the Vision fallback has none. The OCR doc-hint
-                    // above keeps using pass.classifyTags (its heuristic was tuned
-                    // for the Vision vocab).
-                    let ramStart = CFAbsoluteTimeGetCurrent()
-                    let ramTags = RamPlusService.shared.tag(cgImage)
-                    let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
                     var tagScores: [String: Double]? = nil
                     var primaryTags: [String]
                     if !ramTags.isEmpty {
@@ -351,6 +373,8 @@ public enum Tagging {
                     tagged.clipMs = clipMs
                     tagged.ramMs = ramMs
                     tagged.ocrMs = ocrMs
+                    tagged.ocrCarefulMs = ocrCarefulMs
+                    tagged.ocrHandwritten = ocrHandwritten
                     return tagged
                 }
                 cont.resume(returning: result)
@@ -559,6 +583,8 @@ public enum Tagging {
                     }
                     let pageCount = min(pdf.numberOfPages, 3)
                     var fullText: [String] = []
+                    var carefulMs: Double = 0
+                    var handwritten = false
                     for pageNum in 1..<(pageCount + 1) {
                         guard let page = pdf.page(at: pageNum) else { continue }
                         let bounds = page.getBoxRect(.mediaBox)
@@ -590,12 +616,22 @@ public enum Tagging {
                         ctx.scaleBy(x: scale, y: scale)
                         ctx.drawPDFPage(page)
                         if let cg = ctx.makeImage() {
-                            let text = worker.ocrFast(cg)
+                            let fast = worker.ocrFast(cg)
+                            var text = fast
+                            if TextReading.needsCarefulRead(fastText: fast, tags: [], textBearing: true) {
+                                let carefulStart = CFAbsoluteTimeGetCurrent()
+                                let careful = worker.ocrAccurate(cg)
+                                carefulMs += (CFAbsoluteTimeGetCurrent() - carefulStart) * 1000
+                                if TextReading.isHandwritten(fastText: fast, carefulText: careful, tags: []) {
+                                    handwritten = true
+                                }
+                                text = TextReading.preferred(fast: fast, careful: careful)
+                            }
                             if !text.isEmpty { fullText.append(text) }
                         }
                     }
                     let ocr = fullText.joined(separator: "\n\n")
-                    return TaggedFile(
+                    var scanned = TaggedFile(
                         url: url, kind: "pdf", extension: "pdf",
                         sizeBytes: discovered.sizeBytes,
                         createdAt: discovered.creationDate,
@@ -606,6 +642,9 @@ public enum Tagging {
                         tagsEvaluated: true,
                         ocrStageRan: true
                     )
+                    scanned.ocrCarefulMs = carefulMs
+                    scanned.ocrHandwritten = handwritten && !ocr.isEmpty
+                    return scanned
                 }
                 // Cache the BGE content embedding for restructure (PDFKit text, not the
                 // lossy OCR) — reusing the single extraction above — unless the file

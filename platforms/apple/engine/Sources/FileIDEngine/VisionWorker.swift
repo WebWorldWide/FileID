@@ -225,15 +225,30 @@ public final class VisionWorker: @unchecked Sendable {
         return bestDist < 0.01 ? bestQ : -1
     }
 
-    /// Fast OCR — `recognitionLevel = .fast`, no language correction.
-    /// ~200 ms/page on M1 vs ~3 s/page for `.accurate`. Used for inline
-    /// per-image OCR (documents, screenshots, signs). Whiteboard photos
-    /// where accuracy matters get re-OCR'd lazily in M3 if user asks.
+    /// Fast OCR — `recognitionLevel = .fast`, no language correction. Cheap
+    /// enough to run inline on every text-bearing image; it reads character by
+    /// character, so it mangles handwriting.
     public func ocrFast(_ cgImage: CGImage) -> String {
+        recognizeText(cgImage, level: .fast)
+    }
+
+    /// Accurate OCR — line-level model with language correction and automatic
+    /// language detection. Reads handwriting the fast tier can't; several times
+    /// slower, so the tagging stage runs it only when `TextReading` asks.
+    public func ocrAccurate(_ cgImage: CGImage) -> String {
+        recognizeText(cgImage, level: .accurate)
+    }
+
+    private func recognizeText(_ cgImage: CGImage, level: VNRequestTextRecognitionLevel) -> String {
         let req = VNRecognizeTextRequest()
-        req.recognitionLevel = .fast
-        req.usesLanguageCorrection = false
-        req.recognitionLanguages = ["en-US"]
+        req.recognitionLevel = level
+        if level == .accurate {
+            req.usesLanguageCorrection = true
+            req.automaticallyDetectsLanguage = true
+        } else {
+            req.usesLanguageCorrection = false
+            req.recognitionLanguages = ["en-US"]
+        }
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         // Same gate + timeout as runPrimaryPass — OCR also goes through ANE.
         // Gate released inside the worker thread so a timed-out perform holds
