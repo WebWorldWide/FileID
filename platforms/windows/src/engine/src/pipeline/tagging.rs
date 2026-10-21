@@ -897,6 +897,24 @@ pub struct Tagger {
     models: Arc<ModelStack>,
     scan_root: Option<std::path::PathBuf>,
     legacy_hashes: bool,
+    scheduler: Arc<crate::resource_scheduler::ResourceScheduler>,
+}
+
+/// How long one scan file may wait for CPU/memory admission before it is
+/// recorded as failed. Searches, residents and low free memory are transient;
+/// the wait ends at once when the scan is cancelled.
+const SCAN_ADMISSION_PATIENCE: Duration = Duration::from_secs(600);
+
+/// Working-set estimate for one file's analysis: four copies of the decoded
+/// frame plus a fixed floor.
+fn scan_working_mb(predecoded: &PreDecoded) -> u64 {
+    predecoded
+        .decoded
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|(rgb, _, _)| (rgb.len() as u64).saturating_mul(4).div_ceil(1_048_576))
+        .unwrap_or(0)
+        + 32
 }
 
 impl Tagger {
@@ -907,7 +925,14 @@ impl Tagger {
             models,
             scan_root: None,
             legacy_hashes: false,
+            scheduler: crate::resource_scheduler::ResourceScheduler::shared(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_scheduler(mut self, scheduler: Arc<crate::resource_scheduler::ResourceScheduler>) -> Self {
+        self.scheduler = scheduler;
+        self
     }
 
     /// Have the decoders also compute the legacy BLAKE3 digests the
@@ -1127,6 +1152,7 @@ impl Tagger {
             let vision_sem = vision_sem.clone();
             let clip_sem = clip_sem.clone();
             let models = self.models.clone();
+            let scheduler = self.scheduler.clone();
 
             tokio::spawn(async move {
                 // Drop per-worker thread priority to LOWEST so foreground
@@ -1154,28 +1180,52 @@ impl Tagger {
                     let timeout_size = predecoded.file.size_bytes;
                     let timeout_modified = predecoded.file.modified_unix;
                     let timeout_created = predecoded.file.created_unix;
+                    // Admission waits outside the per-file timeout: a busy
+                    // machine (a search, a resident model, low free memory)
+                    // delays a file but never fails it.
+                    let demand = crate::resource_scheduler::Demand { memory_mb: scan_working_mb(&predecoded), cpu: 1, io: 0 };
+                    let (admission_scheduler, admission_coord) = (scheduler.clone(), coord.clone());
+                    let admission = tokio::task::spawn_blocking(move || {
+                        admission_scheduler.reserve_patient(
+                            demand,
+                            crate::resource_scheduler::Priority::Background,
+                            || admission_coord.is_cancelled(),
+                            SCAN_ADMISSION_PATIENCE,
+                        )
+                    })
+                    .await;
+                    let (_lease, refused) = match admission {
+                        Ok(Ok(lease)) => (Some(lease), None),
+                        _ if coord.is_cancelled() => break,
+                        Ok(Err(error)) => (None, Some(error.to_string())),
+                        Err(error) => (None, Some(error.to_string())),
+                    };
                     // Bounds async inference after decoding; platform decoder
                     // calls enforce their own limits where the OS permits. A
                     // panic on one file becomes that file's failure so the
                     // worker keeps draining the queue.
-                    let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                        process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
-                    ));
-                    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
-                        Ok(Ok(t)) => Ok(t),
-                        Ok(Err(_panic)) => {
-                            tracing::error!(
-                                path = %crate::platform::redact_path_for_log(&path_for_timeout),
-                                "per-file processing panicked; marking failed and continuing"
-                            );
-                            Err(("the file could not be analyzed (internal error)", 0.0))
-                        }
-                        Err(_elapsed) => {
-                            tracing::warn!(
-                                path = %crate::platform::redact_path_for_log(&path_for_timeout),
-                                "per-file timeout after 60s; marking failed and continuing"
-                            );
-                            Err(("per-file timeout after 60s", 60000.0))
+                    let outcome = if let Some(message) = refused {
+                        Err((message, 0.0))
+                    } else {
+                        let fut = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                            process_file_predecoded(predecoded, &models, &vision_sem, &clip_sem, worker_idx, &coord),
+                        ));
+                        match tokio::time::timeout(std::time::Duration::from_secs(60), fut).await {
+                            Ok(Ok(t)) => Ok(t),
+                            Ok(Err(_panic)) => {
+                                tracing::error!(
+                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    "per-file processing panicked; marking failed and continuing"
+                                );
+                                Err(("the file could not be analyzed (internal error)".to_string(), 0.0))
+                            }
+                            Err(_elapsed) => {
+                                tracing::warn!(
+                                    path = %crate::platform::redact_path_for_log(&path_for_timeout),
+                                    "per-file timeout after 60s; marking failed and continuing"
+                                );
+                                Err(("per-file timeout after 60s".to_string(), 60000.0))
+                            }
                         }
                     };
                     let tagged = match outcome {
@@ -1207,7 +1257,7 @@ impl Tagger {
                                 clip_ms: 0.0,
                                 total_ms,
                                 failed: true,
-                                error_message: Some(message.into()),
+                                error_message: Some(message),
                                 file_ref: None,
                                 content_hash: None,
                                 legacy_hashes: None,
@@ -2055,20 +2105,6 @@ async fn process_file_predecoded(
         doc_stage_ran: false,
         text_stage_done: false,
         tags_evaluated: false,
-    };
-
-    let working_mb = decoded.as_ref().and_then(|result| result.as_ref().ok()).map(|(rgb, _, _)| (rgb.len() as u64).saturating_mul(4).div_ceil(1_048_576)).unwrap_or(0) + 32;
-    let admission_coord = coord.clone();
-    let admission = tokio::task::spawn_blocking(move || crate::resource_scheduler::ResourceScheduler::shared().reserve(
-        crate::resource_scheduler::Demand { memory_mb: working_mb, cpu: 1, io: 0 },
-        crate::resource_scheduler::Priority::Background, || admission_coord.is_cancelled())).await;
-    let _lease = match admission {
-        Ok(Ok(lease)) => lease,
-        result => {
-            tagged.failed = true;
-            tagged.error_message = Some(match result { Ok(Err(error)) => error.to_string(), Err(error) => error.to_string(), Ok(Ok(_)) => String::new() });
-            return tagged;
-        }
     };
 
     // Content identity for rename/move heal. The decoder thread already
@@ -3113,6 +3149,67 @@ mod tests {
     fn face_is_excluded_still_gates_on_pose() {
         assert!(face_is_excluded(60.0_f32.to_radians(), 0.0, 1.0, 200.0));
         assert!(face_is_excluded(0.0, 40.0_f32.to_radians(), 1.0, 200.0));
+    }
+
+    /// A catalog search holds an interactive lease for the whole scan and free
+    /// memory dips at the start: every file must still be catalogued, not
+    /// marked failed as "deferred" or "memory too low".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scan_files_wait_for_admission_instead_of_failing() {
+        use crate::resource_scheduler::{Demand, Priority, ResourceScheduler};
+        use std::sync::atomic::AtomicU64;
+        let dir = std::env::temp_dir().join(format!("fileid-scan-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let free = Arc::new(AtomicU64::new(12_000));
+        let reading = free.clone();
+        let scheduler = ResourceScheduler::new(move || (16_384, reading.load(Ordering::Relaxed)), 2, 2);
+        let search = scheduler
+            .reserve(Demand { memory_mb: 32, cpu: 1, io: 1 }, Priority::Interactive, || false)
+            .unwrap();
+        free.store(600, Ordering::Relaxed);
+        let restore = free.clone();
+        let recovery = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            restore.store(12_000, Ordering::Relaxed);
+        });
+
+        let coord = ScanCoordinator::new();
+        let (tx, rx) = mpsc::channel(32);
+        let tagger = Tagger::new(coord, 4, Arc::new(ModelStack::empty())).with_scheduler(scheduler.clone());
+        let (mut out, decoder_join) = tagger.spawn(rx);
+        let total = 12;
+        for i in 0..total {
+            let path = dir.join(format!("note{i}.txt"));
+            std::fs::write(&path, format!("garden notes number {i}")).unwrap();
+            tx.send(DiscoveredFile {
+                path,
+                kind: FileKind::Doc,
+                size_bytes: 20,
+                modified_unix: 1.0,
+                created_unix: None,
+                online_only: false,
+                file_ref: None,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        let mut failed = Vec::new();
+        for _ in 0..total {
+            let file = tokio::time::timeout(Duration::from_secs(30), out.recv())
+                .await
+                .expect("every file is emitted")
+                .expect("channel open");
+            if file.failed {
+                failed.push(file.error_message);
+            }
+        }
+        drop(out);
+        decoder_join.await.unwrap();
+        recovery.join().unwrap();
+        drop(search);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(failed.is_empty(), "files failed during a search: {failed:?}");
     }
 
     #[tokio::test]
