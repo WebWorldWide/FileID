@@ -1,23 +1,5 @@
-// Deep Analyze tab — on-device VLM captions + smart renames, the 1:1 port of
-// macOS `DeepAnalyzeViews.swift` (`DeepAnalyzeView`).
-//
-// The tab is mostly engine-driven: it routes Deep Analyze commands to the
-// engine and renders progress + results.
-//
-//   * a model picker over the installed VLM kinds (Qwen2.5-VL 7B / Gemma 3 4B /
-//     Mistral-Small 3.2), install status read from the shared engine model
-//     `registry`, active kind highlighted in gold,
-//   * a "Library status" card (total images / not-yet-analyzed / ETA), counts
-//     read directly from the same SQLite WAL DB (single-writer engine, many
-//     readers — exactly like macOS `ReadStore`),
-//   * a "Run Deep Analyze" action that sends `deepAnalyzeAll` (entire library)
-//     or `deepAnalyzeFolder` (a picked sub-tree), plus per-file `deepAnalyzeFile`
-//     re-analyze and `deepAnalyzeCancel`,
-//   * live Starting / Working / Completion / Most-recent-caption cards driven by
-//     the engine's `deepAnalyze*` events, and a model-download progress bar
-//     driven by `modelDownloadProgress`,
-//   * a "Smart names ready" list (files.vlm_proposed_name / vlm_description) with
-//     per-file Rename (`renameFiles`) + an Apply-all.
+// Describe Files page (tab id "deep-analyze"): on-device VLM descriptions and
+// suggested names, the port of macOS `DeepAnalyzeViews.swift`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -179,6 +161,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
 
     let lbl_active = value_label(vlm_by_key(default_kind).display);
     lbl_active.set_tooltip_text(Some("Change the description model below"));
+    lbl_active.remove_css_class("numeric");
     let lbl_total = value_label("0 files");
     let lbl_pending = value_label("0 files");
     let lbl_eta_key = dim_key("Time needed");
@@ -921,9 +904,9 @@ fn begin_run(ui: &Rc<DeepUi>) {
     ui.cancel_btn.set_visible(true);
     ui.completion_card.set_visible(false);
     ui.progress_card.set_visible(false);
-    ui.starting_subtitle
-        .set_text("Loading the on-device model. The first image usually appears in 5–15 seconds.");
+    ui.starting_subtitle.set_text(STARTING_SUBTITLE);
     reveal(&ui.starting_card);
+    sync_run_state(ui);
 }
 
 /// Tear down the live cards (crash / cancel / clean exit). Mirrors macOS
@@ -933,7 +916,7 @@ fn end_run(ui: &Rc<DeepUi>) {
     ui.starting_card.set_visible(false);
     ui.progress_card.set_visible(false);
     ui.cancel_btn.set_visible(false);
-    ui.run_btn.set_sensitive(vlm_runtime_available());
+    sync_run_state(ui);
 }
 
 // ─── Event handling ──────────────────────────────────────────────────────────
@@ -942,27 +925,30 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
     match ev {
         EngineEvent::DeepAnalyzeStarting(s) => {
             ui.in_flight.set(true);
-            ui.run_btn.set_sensitive(false);
-            ui.cancel_btn.set_visible(true);
             ui.progress_card.set_visible(false);
             ui.completion_card.set_visible(false);
             ui.download_card.set_visible(false);
             ui.starting_subtitle.set_text(&s.message);
             reveal(&ui.starting_card);
+            sync_run_state(ui);
         }
         EngineEvent::DeepAnalyzeProgress(p) => {
-            ui.in_flight.set(true);
+            let was_running = ui.in_flight.replace(true);
             ui.starting_card.set_visible(false);
-            ui.cancel_btn.set_visible(true);
-            ui.run_btn.set_sensitive(false);
+            if !was_running {
+                sync_run_state(ui);
+            }
             let total = p.total.max(1) as f64;
             ui.progress_bar.set_fraction(p.processed as f64 / total);
-            ui.progress_count
-                .set_text(&format!("{} / {}", p.processed, p.total));
+            ui.progress_count.set_text(&format!(
+                "{} of {} files",
+                crate::shell::grouped(p.processed),
+                crate::shell::grouped(p.total)
+            ));
             match p.eta_seconds {
                 Some(eta) => ui
                     .progress_eta
-                    .set_text(&format!("ETA {}", format_duration(eta))),
+                    .set_text(&format!("about {} left", format_duration(eta))),
                 None => ui.progress_eta.set_text(""),
             }
             match p.current_path.as_deref() {
@@ -982,7 +968,7 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.last_desc.set_text(&d.description);
             match d.proposed_name.as_deref().filter(|s| !s.is_empty()) {
                 Some(name) => {
-                    ui.last_name.set_text(&format!("Smart name: {name}"));
+                    ui.last_name.set_text(&format!("Suggested name: {name}"));
                     ui.last_name.set_visible(true);
                 }
                 None => ui.last_name.set_visible(false),
@@ -998,10 +984,16 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             } else {
                 &["gold-accent"]
             });
+            ui.completion_title
+                .set_text(if c.cancelled { "Stopped" } else { "Finished" });
+            let failed = if c.failed > 0 {
+                format!(" · {} couldn't be read", c.failed)
+            } else {
+                String::new()
+            };
             ui.completion_label.set_text(&format!(
-                "{} processed · {} failed · {} wall time",
-                c.processed,
-                c.failed,
+                "{} described{failed} · took {}",
+                plural(c.processed as usize, "file"),
                 format_duration(c.total_seconds),
             ));
             reveal(&ui.completion_card);
@@ -1048,31 +1040,30 @@ fn refresh(ui: &Rc<DeepUi>) {
 }
 
 fn apply_status(ui: &Rc<DeepUi>, c: StatusCounts) {
-    ui.lbl_total.set_text(&c.total_files.to_string());
-    ui.lbl_pending.set_text(&c.pending.to_string());
+    ui.counts.set(c);
+    ui.lbl_total
+        .set_text(&plural(c.total_files.max(0) as usize, "file"));
+    ui.lbl_pending
+        .set_text(&plural(c.pending.max(0) as usize, "file"));
     let secs = c.pending as f64 * vlm_by_key(ui.active_kind.get()).secs_per_image;
-    ui.lbl_eta.set_text(&format_duration(secs));
-    ui.naming_banner
-        .set_visible(c.named_people == 0 && !ui.in_flight.get());
-    if !ui.in_flight.get() {
-        ui.run_btn.set_sensitive(vlm_runtime_available());
-    }
+    ui.lbl_eta.set_text(&format!("about {}", format_duration(secs)));
+    ui.lbl_eta_key.set_visible(c.pending > 0);
+    ui.lbl_eta.set_visible(c.pending > 0);
+    ui.status_empty.set_visible(c.total_files == 0);
+    sync_run_state(ui);
 }
 
 fn apply_proposed(ui: &Rc<DeepUi>, rows: Vec<ProposedRow>) {
     while let Some(child) = ui.smart_list.first_child() {
         ui.smart_list.remove(&child);
     }
-    ui.smart_count.set_text(&format!(
-        "{} file{}",
-        rows.len(),
-        if rows.len() == 1 { "" } else { "s" }
-    ));
+    ui.smart_count.set_text(&plural(rows.len(), "file"));
     for row in &rows {
         ui.smart_list.append(&build_proposed_row(ui, row));
     }
     ui.smart_card.set_visible(!rows.is_empty());
     *ui.proposed.borrow_mut() = rows;
+    sync_run_state(ui);
 }
 
 fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
@@ -1119,8 +1110,9 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
     hbox.append(&names);
 
     let reanalyze = gtk::Button::builder()
-        .label("Re-analyze")
+        .label("Describe again")
         .css_classes(["pill"])
+        .tooltip_text("Write a new description and suggested name for this file")
         .valign(gtk::Align::Center)
         .build();
     let id = row.id;
@@ -1128,8 +1120,6 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
         #[strong]
         ui,
         move |button| {
-            // Gate the restricted-model download (parity with macOS, which gates
-            // every Deep Analyze entry point); the gate re-emits on acceptance.
             let kind = ui.active_kind.get();
             if !crate::model_license::ensure_or_prompt(button, kind) {
                 return;
@@ -1202,9 +1192,9 @@ fn populate_picker(ui: &Rc<DeepUi>) {
 
         let badge = gtk::Label::builder()
             .label(if installed {
-                "Downloaded".to_string()
+                "Ready".to_string()
             } else {
-                format!("Will download {gb:.1} GB")
+                format!("{gb:.1} GB download")
             })
             .css_classes(if installed {
                 ["kind-badge"]
@@ -1223,7 +1213,7 @@ fn populate_picker(ui: &Rc<DeepUi>) {
 
         let stats = gtk::Label::builder()
             .label(format!(
-                "≈ {:.1} GB RAM · {:.1} s/image · {}",
+                "Needs ≈ {:.1} GB memory · about {:.0} s a photo · {}",
                 vlm.ram_gb, vlm.secs_per_image, vlm.license
             ))
             .xalign(0.0)
@@ -1278,10 +1268,7 @@ fn populate_picker(ui: &Rc<DeepUi>) {
                         row.title.remove_css_class("gold-accent");
                     }
                 }
-                ui.skip_check.set_label(Some(&format!(
-                    "Skip files already analyzed by {}",
-                    vlm_by_key(key).display
-                )));
+                ui.skip_check.set_tooltip_text(Some(&skip_tooltip(key)));
                 refresh(&ui);
             }
         ));
@@ -1310,11 +1297,12 @@ fn model_install_info(key: &str) -> (bool, f64) {
 
 // ─── DB queries (fresh read-only connection, WAL-safe) ───────────────────────
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct StatusCounts {
     total_files: i64,
     pending: i64,
     named_people: i64,
+    people: i64,
 }
 
 #[derive(Clone)]
@@ -1367,10 +1355,19 @@ fn status_counts(conn: &rusqlite::Connection, active: &str) -> StatusCounts {
             |r| r.get(0),
         )
         .unwrap_or(0);
+    let people: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM persons WHERE IFNULL(is_unknown, 0) = 0",
+            [],
+            |r| r.get(0),
+        )
+        .or_else(|_| conn.query_row("SELECT COUNT(*) FROM persons", [], |r| r.get(0)))
+        .unwrap_or(0);
     StatusCounts {
         total_files,
         pending,
         named_people,
+        people,
     }
 }
 
@@ -1474,9 +1471,20 @@ fn person_tag_name(parts: &[String], legacy: &str) -> String {
 
 // ─── Static card builders ────────────────────────────────────────────────────
 
+const STARTING_SUBTITLE: &str =
+    "Loading the model on this computer. The first description usually appears within 15 seconds.";
+const NOT_READY: &str = "FileID is still getting ready. Try again in a moment.";
+
+fn skip_tooltip(kind: &str) -> String {
+    format!(
+        "Leave this on to skip files that already have a description from {}",
+        vlm_by_key(kind).display
+    )
+}
+
 fn build_header() -> gtk::Label {
     wrap_caption(
-        "Reads photos, videos, documents, PDFs, and audio metadata to write useful descriptions and smart filenames.",
+        "FileID's local AI looks at each file, writes a sentence about it and suggests a clearer name. Nothing is renamed until you approve it.",
     )
 }
 
@@ -1494,12 +1502,12 @@ fn build_explainer() -> gtk::Box {
         .spacing(6)
         .hexpand(true)
         .build();
-    text.append(&heading("Tagging vs. Deep Analyze"));
+    text.append(&heading("Tags and descriptions"));
     text.append(&wrap_caption(
-        "Tagging runs automatically as you scan — it adds quick keyword tags (like sunset, beach, \
-         dog) so search works. Deep Analyze is an optional, heavier step: it reads each photo, \
-         writes a full sentence describing it, and suggests a smart filename — using the people \
-         you've named.",
+        "Tags like sunset, beach or dog are added automatically during the scan, so search \
+         already works. Describing is an optional extra step: the AI writes a full sentence about \
+         each file and suggests a clearer name, using the names you gave people. It is slower, so \
+         it runs only when you ask.",
     ));
     let dismiss = gtk::Button::builder()
         .icon_name("window-close-symbolic")
@@ -1520,43 +1528,42 @@ fn build_explainer() -> gtk::Box {
 }
 
 fn build_status_card(
+    empty: &gtk::Label,
     active: &gtk::Label,
     total: &gtk::Label,
     pending: &gtk::Label,
+    eta_key: &gtk::Label,
     eta: &gtk::Label,
 ) -> gtk::Box {
     let card = glass_card();
-    card.append(&heading("Library status"));
-    card.append(&wrap_caption(
-        "Run a scan first (top bar). Then come back here — Deep Analyze adds human-readable \
-         captions and suggests smart filenames for every supported file.",
-    ));
+    card.append(&heading("This library"));
+    card.append(empty);
     let grid = gtk::Grid::builder()
-        .row_spacing(4)
+        .row_spacing(6)
         .column_spacing(16)
         .build();
-    grid.attach(&dim_key("Active model"), 0, 0, 1, 1);
-    grid.attach(active, 1, 0, 1, 1);
-    grid.attach(&dim_key("Total files"), 0, 1, 1, 1);
-    grid.attach(total, 1, 1, 1, 1);
-    grid.attach(&dim_key("Not yet analyzed"), 0, 2, 1, 1);
-    grid.attach(pending, 1, 2, 1, 1);
-    grid.attach(&dim_key("Estimated batch time"), 0, 3, 1, 1);
-    grid.attach(eta, 1, 3, 1, 1);
+    grid.attach(&dim_key("Can be described"), 0, 0, 1, 1);
+    grid.attach(total, 1, 0, 1, 1);
+    grid.attach(&dim_key("Not described yet"), 0, 1, 1, 1);
+    grid.attach(pending, 1, 1, 1, 1);
+    grid.attach(eta_key, 0, 2, 1, 1);
+    grid.attach(eta, 1, 2, 1, 1);
+    grid.attach(&dim_key("AI model"), 0, 3, 1, 1);
+    grid.attach(active, 1, 3, 1, 1);
     card.append(&grid);
     card
 }
 
 fn build_picker_card(picker_box: &gtk::Box, download_card: &gtk::Box) -> gtk::Box {
     let card = glass_card();
-    card.append(&heading("AI Models — accuracy tier (Deep Analyze)"));
+    card.append(&heading("Description model"));
     let runtime_note = if std::env::var_os("FLATPAK_ID").is_some() {
-        "Deep Analyze is unavailable in this Flatpak until a reviewed llama-mtmd-cli is bundled; do not download VLM weights yet."
+        "Describing isn't available in this Flatpak yet, so don't download a model for it."
     } else {
-        "Weights download on first run. A compatible external llama-mtmd-cli must be visible on PATH."
+        "The model downloads the first time you describe. It also needs llama-mtmd-cli installed on this computer."
     };
     card.append(&wrap_caption(&format!(
-        "Reads supported media and documents, then writes captions, tags, and smart filenames. {runtime_note}"
+        "The AI that writes descriptions and suggested names. Bigger models write better but need more memory. {runtime_note}"
     )));
     card.append(picker_box);
     card.append(download_card);
@@ -1569,9 +1576,10 @@ fn build_actions_card(
     run_btn: &gtk::Button,
     folder_btn: &gtk::Button,
     cancel_btn: &gtk::Button,
+    run_meta: &gtk::Label,
 ) -> gtk::Box {
     let card = glass_card();
-    card.append(&heading("Run Deep Analyze"));
+    card.append(&heading("Describe files"));
     card.append(naming_banner);
     card.append(skip_check);
     let actions = gtk::Box::builder()
@@ -1582,38 +1590,42 @@ fn build_actions_card(
     actions.append(folder_btn);
     actions.append(cancel_btn);
     card.append(&actions);
-    card.append(&wrap_caption(
-        "Runs serially on the GPU. Safe to leave running — captions need named people to read \
-         best (name faces in the People tab first).",
-    ));
+    card.append(run_meta);
     card
 }
 
-fn build_apply_card(status: &gtk::Label, tags: &gtk::Button, people: &gtk::Button) -> gtk::Box {
+fn build_apply_card(
+    status: &gtk::Label,
+    tags: &gtk::Button,
+    people: &gtk::Button,
+    all: &gtk::Button,
+) -> gtk::Box {
     let card = glass_card();
-    card.append(&heading("Apply to your files"));
+    card.append(&heading("Save to your files"));
     card.append(&wrap_caption(
-        "Write analyzed tags and named people onto the files as native Linux file tags. Existing tags are preserved.",
+        "Add what FileID found to the files themselves as Linux file tags, so file managers that read them can find them too. Your own tags are kept.",
     ));
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(10)
+        .homogeneous(true)
         .build();
     actions.append(tags);
     actions.append(people);
     card.append(&actions);
+    card.append(all);
     card.append(status);
     card
 }
 
-fn build_naming_banner() -> gtk::Box {
+fn build_naming_banner() -> (gtk::Box, gtk::Button) {
     let banner = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(10)
         .css_classes(["glass-card"])
         .build();
     banner.set_visible(false);
-    let icon = gtk::Image::from_icon_name("dialog-warning-symbolic");
+    let icon = gtk::Image::from_icon_name("avatar-default-symbolic");
     icon.add_css_class("lavender-accent");
     icon.set_valign(gtk::Align::Start);
     let text = gtk::Box::builder()
@@ -1621,34 +1633,43 @@ fn build_naming_banner() -> gtk::Box {
         .spacing(4)
         .hexpand(true)
         .build();
-    text.append(&heading("Name your people first (recommended)"));
+    text.append(&heading("Tip: name people first"));
     text.append(&wrap_caption(
-        "Deep Analyze writes captions like \"Mia playing piano\" — that needs at least one named \
-         person. Without names, captions fall back to generic descriptions like \"a person \
-         playing piano.\" You can still run now and re-run later after naming.",
+        "With names, descriptions read \"Mia playing piano\" instead of \"a person playing piano\". \
+         You can also describe now and again later.",
     ));
+    let dismiss = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .css_classes(["flat", "circular"])
+        .valign(gtk::Align::Start)
+        .tooltip_text("Hide this tip")
+        .build();
     banner.append(&icon);
     banner.append(&text);
-    banner
+    banner.append(&dismiss);
+    (banner, dismiss)
 }
 
-fn build_smart_card(count: &gtk::Label, list: &gtk::ListBox, apply_all: &gtk::Button) -> gtk::Box {
+fn build_smart_card(
+    count: &gtk::Label,
+    review_btn: &gtk::Button,
+    revealer: &gtk::Revealer,
+) -> gtk::Box {
     let card = glass_card();
     let head = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
-    head.append(&heading("Smart names ready"));
+    head.append(&heading("Suggested names"));
     let spacer = gtk::Box::builder().hexpand(true).build();
     head.append(&spacer);
     head.append(count);
     card.append(&head);
     card.append(&wrap_caption(
-        "Deep Analyze suggested new filenames for these images. Apply them per-file or all at \
-         once — the originals are only renamed when you apply.",
+        "FileID suggested clearer names for these files. Check them and choose which to use; nothing is renamed until you do.",
     ));
-    card.append(list);
-    card.append(apply_all);
+    card.append(review_btn);
+    card.append(revealer);
     card
 }
 
@@ -1664,7 +1685,7 @@ fn build_starting_card(subtitle: &gtk::Label) -> gtk::Box {
         .spacing(2)
         .hexpand(true)
         .build();
-    text.append(&heading("Starting Deep Analyze…"));
+    text.append(&heading("Getting the AI ready…"));
     text.append(subtitle);
     row.append(&spinner);
     row.append(&text);
@@ -1684,7 +1705,7 @@ fn build_progress_card(
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
-    head.append(&heading("Working…"));
+    head.append(&heading("Describing files…"));
     let spacer = gtk::Box::builder().hexpand(true).build();
     head.append(&spacer);
     head.append(eta);
@@ -1696,14 +1717,14 @@ fn build_progress_card(
     card
 }
 
-fn build_completion_card(icon: &gtk::Label, label: &gtk::Label) -> gtk::Box {
+fn build_completion_card(icon: &gtk::Label, title: &gtk::Label, label: &gtk::Label) -> gtk::Box {
     let card = glass_card();
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
     row.append(icon);
-    row.append(&heading("Last run complete"));
+    row.append(title);
     card.append(&row);
     card.append(label);
     card
@@ -1711,7 +1732,7 @@ fn build_completion_card(icon: &gtk::Label, label: &gtk::Label) -> gtk::Box {
 
 fn build_last_card(desc: &gtk::Label, name: &gtk::Label) -> gtk::Box {
     let card = glass_card();
-    card.append(&heading("Most recent caption"));
+    card.append(&heading("Latest description"));
     card.append(desc);
     card.append(name);
     card
@@ -1744,11 +1765,11 @@ fn dim_key(text: &str) -> gtk::Label {
         .build()
 }
 
-fn mono_value(text: &str) -> gtk::Label {
+fn value_label(text: &str) -> gtk::Label {
     gtk::Label::builder()
         .label(text)
         .xalign(0.0)
-        .css_classes(["monospace"])
+        .css_classes(["numeric"])
         .build()
 }
 
