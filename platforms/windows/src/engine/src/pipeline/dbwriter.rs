@@ -2082,6 +2082,41 @@ mod tests {
     // read the legacy digest off disk and matched it via the `?6` fallback —
     // exercising the hoisted (pre-lock) read path end-to-end.
     #[test]
+    fn a_full_database_fails_the_batch_whole_and_the_writer_recovers() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        {
+            let c = conn.lock();
+            let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
+            c.execute_batch(&format!("PRAGMA max_page_count = {pages}")).unwrap();
+        }
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let batch = || -> Vec<TaggedFile> {
+            (0..200)
+                .map(|i| {
+                    let mut file = fixture(&format!("/lib/full/{i}.txt"));
+                    file.kind = FileKind::Doc;
+                    file.doc_text = Some("words ".repeat(400));
+                    file
+                })
+                .collect()
+        };
+        let mut buffer = batch();
+        let (mut total, mut failed) = (0u64, 0u64);
+        assert!(writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 0).is_err(), "SQLITE_FULL must surface");
+        {
+            let c = conn.lock();
+            assert!(c.is_autocommit(), "the failed batch must not leave a transaction open");
+            let rows: i64 = c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 0, "a failed batch commits nothing");
+            c.execute_batch("PRAGMA max_page_count = 1073741823").unwrap();
+        }
+        let mut buffer = batch();
+        writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 1).expect("writer works once space frees");
+        let rows: i64 = conn.lock().query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 200);
+    }
+
+    #[test]
     fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
         let dir = unique_tmp_dir("overcap_legacy");
         let over_cap_bytes = crate::util::content_hash::FULL_HASH_MAX_BYTES + 4096;

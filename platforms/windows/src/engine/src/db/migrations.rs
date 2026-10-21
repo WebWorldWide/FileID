@@ -206,6 +206,26 @@ const V20_VLM_FULL_MODEL: &str = "
 ALTER TABLE files ADD COLUMN vlm_full_model TEXT;
 ";
 
+/// The database carries migration identifiers this engine does not know: a
+/// newer FileID wrote it. Opening refuses before any migration runs.
+#[derive(Debug)]
+pub struct NewerThanEngine {
+    pub unknown: Vec<String>,
+}
+
+impl std::fmt::Display for NewerThanEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "db_newer_than_engine: database was migrated by a newer FileID \
+             version (unknown migrations: {}) — refusing to open for writing",
+            self.unknown.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for NewerThanEngine {}
+
 /// Apply every registered migration that hasn't been applied yet, in
 /// registration order, each in its own transaction.
 pub fn apply(conn: &Connection) -> Result<()> {
@@ -221,17 +241,13 @@ pub fn apply(conn: &Connection) -> Result<()> {
         .query_map([], |row| row.get(0))?
         .collect::<std::result::Result<_, _>>()
         .context("listing applied migrations")?;
-    let unknown: Vec<&str> = applied
+    let unknown: Vec<String> = applied
         .iter()
-        .map(String::as_str)
-        .filter(|id| !known.contains(id))
+        .filter(|id| !known.contains(&id.as_str()))
+        .cloned()
         .collect();
     if !unknown.is_empty() {
-        anyhow::bail!(
-            "db_newer_than_engine: database was migrated by a newer FileID \
-             version (unknown migrations: {}) — refusing to open for writing",
-            unknown.join(", ")
-        );
+        return Err(NewerThanEngine { unknown }.into());
     }
 
     for (id, sql) in registry() {
@@ -643,6 +659,7 @@ mod tests {
         let err = apply(&conn).unwrap_err();
         assert!(err.to_string().contains("db_newer_than_engine"));
         assert!(err.to_string().contains("v99_from_the_future"));
+        assert!(err.downcast_ref::<NewerThanEngine>().is_some());
     }
 
     /// The migration chains forked at v14 (macOS registered

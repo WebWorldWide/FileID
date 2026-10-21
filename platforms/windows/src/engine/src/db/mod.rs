@@ -56,6 +56,23 @@ pub const SETUP_PRAGMAS: &[&str] = &[
     "PRAGMA foreign_keys = ON",
 ];
 
+/// How long any connection waits on another connection's lock before
+/// returning SQLITE_BUSY. Matches the macOS engine's `busyMode = .timeout(5)`.
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The database file (or its folder) can't be written, so SQLite opened it
+/// read-only. The engine refuses to run on it rather than fail every write.
+#[derive(Debug)]
+pub struct ReadOnlyDatabase;
+
+impl std::fmt::Display for ReadOnlyDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the library database is read-only")
+    }
+}
+
+impl std::error::Error for ReadOnlyDatabase {}
+
 /// Open the engine's writer connection. Creates the file + schema if absent.
 /// Applies every migration up to v20 in registered order.
 pub fn open_writer(db_path: &Path) -> Result<Connection> {
@@ -66,6 +83,11 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(db_path)
         .with_context(|| format!("opening db at {}", db_path.display()))?;
+    conn.busy_timeout(BUSY_TIMEOUT).context("setting busy timeout")?;
+    // SQLite silently falls back to read-only when the file isn't writable.
+    if conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false) {
+        return Err(ReadOnlyDatabase.into());
+    }
     for pragma in SETUP_PRAGMAS {
         conn.execute_batch(pragma)
             .with_context(|| format!("applying {pragma}"))?;
@@ -164,6 +186,7 @@ pub fn open_read(db_path: &Path) -> Result<Connection> {
             | OpenFlags::SQLITE_OPEN_URI,
     )
     .with_context(|| format!("opening read-only db at {}", db_path.display()))?;
+    conn.busy_timeout(BUSY_TIMEOUT).context("setting busy timeout")?;
     conn.execute_batch(
         "PRAGMA query_only = ON; \
          PRAGMA temp_store = MEMORY; \
@@ -396,6 +419,164 @@ mod tests {
         assert_eq!(hash, crate::util::path_safety::stable_path_hash("/lib/Photo.JPG"));
         let version: i64 = w.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
         assert_eq!(version & 1, 1);
+    }
+
+    fn temp_db(label: &str) -> (std::path::PathBuf, TempDir) {
+        let dir = std::env::temp_dir().join(format!("fileid-db-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.join("fileid.sqlite"), TempDir(dir))
+    }
+
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn seeded(path: &Path) {
+        let w = open_writer(path).expect("open_writer");
+        w.execute(
+            "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
+             VALUES ('/lib/a.txt', 1, 1, 0, 'document', 'txt')",
+            [],
+        )
+        .unwrap();
+        checkpoint_truncate(&w).unwrap();
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_without_touching_the_database() {
+        let (path, _dir) = temp_db("newer");
+        seeded(&path);
+        {
+            let w = open_writer(&path).unwrap();
+            w.execute("INSERT INTO grdb_migrations (identifier) VALUES ('v99_from_the_future')", [])
+                .unwrap();
+            checkpoint_truncate(&w).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let err = open_writer(&path).expect_err("newer schema must be refused");
+        assert!(err.downcast_ref::<migrations::NewerThanEngine>().is_some(), "{err:#}");
+        drop(err);
+        let r = open_read(&path).unwrap();
+        let files: i64 = r.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).unwrap();
+        assert_eq!(files, 1);
+        drop(r);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "refusal must not rewrite the file");
+    }
+
+    #[test]
+    fn a_foreign_user_version_is_preserved_and_data_survives() {
+        let (path, _dir) = temp_db("user-version");
+        seeded(&path);
+        {
+            let w = open_writer(&path).unwrap();
+            w.execute_batch("PRAGMA user_version = 4096").unwrap();
+        }
+        let w = open_writer(&path).expect("a high user_version is not a schema version");
+        let version: i64 = w.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        assert_eq!(version & !1, 4096);
+        let files: i64 = w.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0)).unwrap();
+        assert_eq!(files, 1);
+    }
+
+    #[test]
+    fn garbage_and_truncated_files_fail_cleanly() {
+        let (path, _dir) = temp_db("garbage");
+        std::fs::write(&path, b"this is not a sqlite database, just some bytes .....").unwrap();
+        assert!(open_writer(&path).is_err());
+
+        let (path, _dir2) = temp_db("truncated");
+        seeded(&path);
+        let bytes = std::fs::read(&path).unwrap();
+        for cut in [0usize, 50, 100, 4096, bytes.len() / 2, bytes.len() - 1] {
+            let cut = cut.min(bytes.len());
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+            let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+            if let Ok(conn) = open_writer(&path) {
+                let _ = quick_check(&conn);
+                let _ = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0));
+            }
+        }
+    }
+
+    #[test]
+    fn bit_flipped_pages_never_panic() {
+        let (path, _dir) = temp_db("bitflip");
+        seeded(&path);
+        let pristine = std::fs::read(&path).unwrap();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..40 {
+            let mut bytes = pristine.clone();
+            for _ in 0..8 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let at = (state as usize) % bytes.len();
+                bytes[at] ^= 1 << (state >> 61);
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+            let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+            if let Ok(conn) = open_writer(&path) {
+                let _ = quick_check(&conn);
+                let _ = wipe_all(&conn);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_database_is_refused_with_a_clear_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let (path, _dir) = temp_db("read-only");
+        seeded(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // Permission bits don't bind root (some CI containers); nothing to test there.
+        let enforced = std::fs::OpenOptions::new().write(true).open(&path).is_err();
+        let result = open_writer(&path);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        if enforced {
+            let err = result.expect_err("a read-only database must not open as the writer");
+            assert!(err.downcast_ref::<ReadOnlyDatabase>().is_some(), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn the_writer_waits_out_another_connections_lock() {
+        let (path, _dir) = temp_db("busy");
+        seeded(&path);
+        let holder = Connection::open(&path).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            holder.execute_batch("COMMIT").unwrap();
+        });
+        let w = open_writer(&path).expect("busy_timeout must outlast a short lock");
+        w.execute("UPDATE files SET size_bytes = 2", []).expect("write after the lock clears");
+        release.join().unwrap();
+    }
+
+    #[test]
+    fn a_full_disk_rolls_the_migration_back_and_reports_it() {
+        let (path, _dir) = temp_db("full");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA max_page_count = 8").unwrap();
+            assert!(migrations::apply(&conn).is_err(), "migrations cannot fit in 8 pages");
+            let applied: i64 = conn
+                .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |row| row.get(0))
+                .unwrap_or(0);
+            let tables: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'files'", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(tables > 0, applied > 0, "a failed migration must not leave half its schema");
+        }
+        open_writer(&path).expect("the next open finishes the migrations");
     }
 
     #[test]

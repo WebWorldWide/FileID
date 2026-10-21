@@ -19,11 +19,7 @@ pub struct Pose {
 /// Greedy NMS by descending score. O(n²) is fine: detectors emit at most
 /// a few hundred candidates per image after the score filter.
 pub(crate) fn nms(mut candidates: Vec<Detection>, iou_threshold: f32) -> Vec<Detection> {
-    candidates.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut kept: Vec<Detection> = Vec::with_capacity(candidates.len());
     for cand in candidates {
         let overlaps_existing = kept.iter().any(|k| iou(&k.bbox, &cand.bbox) > iou_threshold);

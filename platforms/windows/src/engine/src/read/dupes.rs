@@ -99,10 +99,10 @@ pub fn exact_candidates(conn: &Connection, caps: ExactCaps) -> Result<ExactCandi
             class.push(next.0);
         }
         let count = class.len() as u64;
-        let bytes: u64 = class.iter().map(|c| c.indexed_size.max(0) as u64).sum();
+        let bytes: u64 = class.iter().fold(0u64, |sum, c| sum.saturating_add(c.indexed_size.max(0) as u64));
         if admitted + count <= caps.max_candidates && budget.saturating_add(bytes) <= caps.max_bytes {
             admitted += count;
-            budget += bytes;
+            budget = budget.saturating_add(bytes);
             out.candidates.extend(class);
         } else {
             out.skipped_candidates += count;

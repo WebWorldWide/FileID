@@ -207,8 +207,10 @@ pub(crate) async fn handle_deep_analyze_file(
     let caption_buf_cb = caption_buf.clone();
     let last_emit_cb = last_emit.clone();
     let face_names = {
-        let conn = db.lock();
-        fetch_face_names(&conn, file_id)
+        let db = db.clone();
+        tokio::task::spawn_blocking(move || fetch_face_names(&db.lock(), file_id))
+            .await
+            .unwrap_or_default()
     };
     let on_token = move |chunk: &str| {
             // Intentional try_send + drop-on-overflow. Per-token streaming
@@ -315,14 +317,17 @@ pub(crate) async fn handle_deep_analyze_folder(
     // non-sargable `LIKE 'prefix%'` full-table scan.
     let lo = payload.path_prefix.clone();
     let filter = deep_analyze_target_filter();
-    let ids_result = match crate::scan_session::prefix_upper_bound(&lo) {
+    let query_db = db.clone();
+    let ids_result = tokio::task::spawn_blocking(move || match crate::scan_session::prefix_upper_bound(&lo) {
         Some(hi) => collect_file_ids(
-            &db,
+            &query_db,
             &format!("WHERE path_text >= ?1 AND path_text < ?2 AND {filter}"),
             &[&lo, &hi],
         ),
-        None => collect_file_ids(&db, &format!("WHERE {filter}"), &[]),
-    };
+        None => collect_file_ids(&query_db, &format!("WHERE {filter}"), &[]),
+    })
+    .await
+    .unwrap_or_else(|join| Err(rusqlite::Error::ToSqlConversionFailure(Box::new(join))));
     let ids = match ids_result {
         Ok(v) => v,
         Err(err) => {

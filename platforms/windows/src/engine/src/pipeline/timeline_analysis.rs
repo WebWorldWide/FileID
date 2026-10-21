@@ -93,6 +93,12 @@ pub fn sample_times(duration: f64, interval_seconds: f64, signals: &[Signal]) ->
     if !duration.is_finite() || duration <= 0.0 || !interval_seconds.is_finite() || interval_seconds <= 0.0 {
         return vec![];
     }
+    // The recipe is read back from catalog_jobs; a tiny interval would never
+    // advance the window (1e-300) or spin for trillions of steps.
+    const MAX_WINDOWS: f64 = 100_000.0;
+    if duration / interval_seconds > MAX_WINDOWS {
+        return vec![];
+    }
     let valid = valid_signals(signals, duration, 0.0);
     let mut result = vec![0.0];
     let mut window_start = 0.0;

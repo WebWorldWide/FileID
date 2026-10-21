@@ -26,6 +26,13 @@ const MAX_TAGS: usize = 6;
 /// symphonia probes the in-memory bytes via a tiny MediaSource adapter and
 /// skips a second file open. When `None`, the existing path-based open runs.
 pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Vec<(String, Option<f32>)> {
+    let source = match bytes {
+        Some(b) => Some(super::container_guard::Source::Bytes(b)),
+        None => super::container_guard::Source::open(path),
+    };
+    if !source.is_some_and(super::container_guard::symphonia_safe) {
+        return Vec::new();
+    }
     let mss = if let Some(b) = bytes {
         // symphonia owns the source for the stream's lifetime; copy once into
         // the adapter. Cost is bounded by FULL_HASH_MAX_BYTES (16 MB) per file
@@ -92,6 +99,9 @@ pub(crate) struct AudioTags {
 }
 
 pub(crate) fn extract_structured(path: &Path) -> AudioTags {
+    if !super::container_guard::Source::open(path).is_some_and(super::container_guard::symphonia_safe) {
+        return AudioTags::default();
+    }
     let p = crate::util::path_safety::to_extended_length(path);
     let file = match std::fs::File::open(&p) {
         Ok(f) => f,

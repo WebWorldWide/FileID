@@ -3,8 +3,19 @@ use parking_lot::{Condvar, Mutex};
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+/// How `reserve_internal` treats a request it can't admit right now.
+#[derive(Clone, Copy)]
+enum Wait {
+    /// Fail at once while an interactive lease is active or memory is tight.
+    Immediate,
+    /// Wait behind interactive leases; still fail when nothing can release.
+    Queued,
+    /// Wait through every transient condition until the deadline.
+    Until(Instant),
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Demand {
@@ -149,18 +160,29 @@ impl ResourceScheduler {
         self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
         priority: Priority, cancelled: impl Fn() -> bool,
     ) -> Result<Lease> {
-        self.reserve_internal(demand, accelerators, priority, cancelled, false)
+        self.reserve_internal(demand, accelerators, priority, cancelled, Wait::Immediate)
+    }
+    /// Admission for work that must not fail just because the machine is busy
+    /// (a scan file): waits, cancellably and for at most `patience`, for
+    /// interactive leases, residents and low free memory to clear. Fails at
+    /// once only when the demand could never fit on this machine.
+    pub fn reserve_patient(
+        self: &Arc<Self>, demand: Demand, priority: Priority,
+        cancelled: impl Fn() -> bool, patience: Duration,
+    ) -> Result<Lease> {
+        self.reserve_internal(demand, AcceleratorDemand::default(), priority, cancelled, Wait::Until(Instant::now() + patience))
     }
     pub fn reserve_queued(
         self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
         priority: Priority, cancelled: impl Fn() -> bool,
     ) -> Result<Lease> {
-        self.reserve_internal(demand, accelerators, priority, cancelled, true)
+        self.reserve_internal(demand, accelerators, priority, cancelled, Wait::Queued)
     }
     fn reserve_internal(
         self: &Arc<Self>, demand: Demand, accelerators: AcceleratorDemand,
-        priority: Priority, cancelled: impl Fn() -> bool, wait_background: bool,
+        priority: Priority, cancelled: impl Fn() -> bool, wait: Wait,
     ) -> Result<Lease> {
+        let wait_background = !matches!(wait, Wait::Immediate);
         for (requested, capacity) in [(accelerators.gpu_mb, self.accelerator_capacity.gpu_mb), (accelerators.npu_mb, self.accelerator_capacity.npu_mb)] {
             if requested > 0 && capacity.is_none_or(|capacity| requested > capacity) {
                 bail!("Accelerator capacity unknown or exceeded")
@@ -177,7 +199,13 @@ impl ResourceScheduler {
             if let Some(reason) =
                 crate::util::model_memory::rejection(total, available, demand.memory_mb)
             {
-                bail!("{reason}")
+                // Free memory comes and goes; only a demand larger than the
+                // whole budget is permanent for a patient caller.
+                let reserve = (total / 4).clamp(2048, 8192);
+                let never_fits = total == 0 || total <= reserve || demand.memory_mb > total - reserve;
+                if !matches!(wait, Wait::Until(_)) || never_fits {
+                    bail!("{reason}")
+                }
             }
         }
         let mut state = self.state.lock();
@@ -235,24 +263,29 @@ impl ResourceScheduler {
             let resident_blocks_budget = demand.memory_mb > 0
                 && demand.memory_mb.saturating_add(resident_memory)
                     > total.saturating_sub((total / 4).clamp(2048, 8192));
-            if (!accelerator_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
+            let stuck_on_residents = (!accelerator_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
                 || resident_blocks_budget
-                || (!memory_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0))
-            {
-                state.waiting.remove(&id);
-                self.changed.notify_all();
-                bail!("Resource admission deferred: resident memory cannot release during this operation")
-            }
-            if state.active.is_empty()
+                || (!memory_ok && state.active.values().all(|(d, _)| d.cpu == 0 && d.io == 0));
+            let busy = state.active.is_empty()
                 || (!wait_background && priority == Priority::Background
                     && state
                         .active
                         .values()
-                        .any(|(_, p)| *p == Priority::Interactive))
-            {
-                state.waiting.remove(&id);
-                self.changed.notify_all();
-                bail!("Resource admission deferred: local capacity or available memory is busy")
+                        .any(|(_, p)| *p == Priority::Interactive));
+            if stuck_on_residents || busy {
+                // Residents retire when idle and free memory recovers, so a
+                // patient caller keeps polling until its deadline.
+                let reason = match wait {
+                    Wait::Until(deadline) if Instant::now() < deadline => None,
+                    Wait::Until(_) => Some("Resource admission timed out: the machine stayed too busy or low on memory"),
+                    _ if stuck_on_residents => Some("Resource admission deferred: resident memory cannot release during this operation"),
+                    _ => Some("Resource admission deferred: local capacity or available memory is busy"),
+                };
+                if let Some(reason) = reason {
+                    state.waiting.remove(&id);
+                    self.changed.notify_all();
+                    bail!("{reason}")
+                }
             }
             self.changed.wait_for(&mut state, Duration::from_millis(50));
         }
@@ -409,6 +442,60 @@ mod tests {
         assert_eq!(order.lock().first(), Some(&2));
         assert!(scheduler.state.lock().waiting.is_empty());
     }
+    #[test]
+    fn patient_admission_waits_out_interactive_leases_and_low_memory() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let available = Arc::new(AtomicU64::new(12000));
+        let reading = available.clone();
+        let scheduler = ResourceScheduler::new(move || (16384, reading.load(Ordering::Relaxed)), 2, 2);
+        let interactive = scheduler
+            .reserve(Demand { memory_mb: 64, cpu: 1, io: 0 }, Priority::Interactive, || false)
+            .unwrap();
+        let busy = scheduler
+            .reserve(Demand { memory_mb: 64, cpu: 1, io: 0 }, Priority::Background, || false)
+            .unwrap();
+        let demand = Demand { memory_mb: 32, cpu: 1, io: 0 };
+        let deferred = scheduler.reserve(demand, Priority::Background, || false).err().expect("the immediate mode defers");
+        assert!(deferred.to_string().contains("deferred"), "{deferred}");
+        available.store(600, Ordering::Relaxed);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(busy);
+            std::thread::sleep(Duration::from_millis(100));
+            available.store(12000, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        let lease = scheduler
+            .reserve_patient(demand, Priority::Background, || false, Duration::from_secs(10))
+            .expect("waits for memory instead of failing");
+        assert!(started.elapsed() >= Duration::from_millis(250), "admitted only after the CPU and memory freed");
+        releaser.join().unwrap();
+        drop(lease);
+        drop(interactive);
+        assert!(scheduler.state.lock().waiting.is_empty());
+    }
+
+    #[test]
+    fn patient_admission_is_bounded_cancellable_and_refuses_impossible_demands() {
+        let scheduler = ResourceScheduler::new(|| (16384, 100), 4, 2);
+        let demand = Demand { memory_mb: 32, cpu: 1, io: 0 };
+        let error = scheduler
+            .reserve_patient(demand, Priority::Background, || false, Duration::from_millis(150))
+            .err().expect("timed out");
+        assert!(error.to_string().contains("timed out"), "{error}");
+        let started = Instant::now();
+        assert!(scheduler
+            .reserve_patient(demand, Priority::Background, || started.elapsed() > Duration::from_millis(100), Duration::from_secs(30))
+            .err().expect("cancelled")
+            .to_string()
+            .contains("cancelled"));
+        let huge = Demand { memory_mb: 16_000, cpu: 1, io: 0 };
+        let started = Instant::now();
+        assert!(scheduler.reserve_patient(huge, Priority::Background, || false, Duration::from_secs(30)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(1), "a demand that never fits fails at once");
+        assert!(scheduler.state.lock().waiting.is_empty());
+    }
+
     fn scheduler_waiting(scheduler: &ResourceScheduler, count: usize) -> usize {
         usize::from(scheduler.state.lock().waiting.len() >= count)
     }

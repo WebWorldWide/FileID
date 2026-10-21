@@ -313,7 +313,7 @@ fn restructure_move() -> RestructureMove {
 
 /// Optional fields are deliberately `Some(...)` so every serializable key is
 /// exercised against the schema's `properties`.
-fn command_exemplars() -> Vec<CommandPayload> {
+pub(crate) fn command_exemplars() -> Vec<CommandPayload> {
     vec![
         serde_json::from_value(serde_json::json!({"chatRequest":{"request":{"requestID":"chat","conversationID":"c","action":"send","text":"birthday","useModel":true}}})).unwrap(),
         serde_json::from_value(serde_json::json!({"toolRequest":{"request":{"requestID":"tool","action":"preview","fileIDs":[1],"destination":"/internal","destinationBookmark":"AQID","recipe":{"kind":"photo","format":"png","maxDimension":64,"allowUpscale":true},"operationID":"plan"}}})).unwrap(),
