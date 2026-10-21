@@ -5,7 +5,7 @@
 //   * a `gtk::FlowBox` of person cards (representative face crop + name +
 //     "N photos · M faces"), read directly from the DB (the engine is the
 //     single writer; the app is a reader, mirroring `library.rs`),
-//   * "Group photos by face" → `runFaceClustering`,
+//   * "Group faces" → `runFaceClustering`,
 //   * a person-detail `adw::Dialog` (structured-name `adw::EntryRow`s + photo
 //     grid + "I don't know who this is") that saves via `renamePerson` /
 //     `markPersonsAsUnknown` on close,
@@ -227,7 +227,7 @@ impl FaceClusteringLifecycle {
 
     fn begin(&mut self) -> Result<u64, &'static str> {
         if !self.engine_ready {
-            return Err("The engine is still starting.");
+            return Err("FileID is still getting ready. Try again in a moment.");
         }
         if self.active_generation.is_some() {
             return Err("Face grouping is already in progress.");
@@ -474,7 +474,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     set_empty_text(&empty_page, 0);
 
     let group_btn = gtk::Button::builder()
-        .label("Group photos by face")
+        .label("Group faces")
         .halign(gtk::Align::Center)
         .css_classes(["gold-button", "pill"])
         .build();
@@ -490,8 +490,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .icon_name("view-grid-symbolic")
         .title("Ready to group faces")
         .description(
-            "Click Group photos by face. The app compares every face to every other and \
-             creates one card per person. Once grouped, open a card to add a name.",
+            "Press Group faces to sort them into one card per person. It takes a few seconds. \
+             Then click a card to type that person's name.",
         )
         .child(&no_clusters_inner)
         .vexpand(true)
@@ -597,7 +597,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
                             set_status(
                                 &ui,
-                                "Grouping stopped because the engine restarted.".to_string(),
+                                "Grouping stopped because FileID restarted. Press Group faces to try again.".to_string(),
                             );
                         }
                         refresh_view(&ui);
@@ -633,7 +633,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         if ui.face_clustering.borrow_mut().on_unavailable().is_some() {
                             set_status(
                                 &ui,
-                                "Grouping stopped because the engine exited.".to_string(),
+                                "Grouping stopped because FileID restarted. Press Group faces to try again.".to_string(),
                             );
                         }
                         refresh_view(&ui);
@@ -739,11 +739,11 @@ fn refresh_view(ui: &Rc<Ui>) {
         ));
     } else {
         ui.no_clusters_page.set_title(&format!(
-            "{total_faces} face{} detected — ready to group",
+            "{total_faces} face{} found",
             plural(total_faces),
         ));
         ui.no_clusters_page.set_description(Some(
-            "Click Group photos by face to create one card per person. Open a card to add a name.",
+            "Press Group faces to sort them into one card per person. It takes a few seconds. Then click a card to type that person's name.",
         ));
     }
 
@@ -811,7 +811,7 @@ fn count_line(persons: &[PersonRow], total_faces: i64, clustering: bool) -> Stri
     }
     if p == 0 {
         return if clustering {
-            format!("{total_faces} face{} · clustering…", plural(total_faces))
+            format!("{total_faces} face{} · grouping…", plural(total_faces))
         } else {
             format!(
                 "{total_faces} face{} · not grouped yet",
@@ -932,7 +932,7 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                                 set_status(
                                     &ui,
                                     format!(
-                                        "Marked {} cluster{} as unknown.",
+                                        "Marked {} card{} as unknown.",
                                         result.succeeded,
                                         plural(result.succeeded as i64)
                                     ),
@@ -955,7 +955,7 @@ fn on_bulk_clicked(ui: &Rc<Ui>) {
                             finish_person_action(&ui, "markPersonsAsUnknown");
                             set_status(
                                 &ui,
-                                "Couldn't mark as unknown: the engine exited.".to_string(),
+                                "Couldn't mark as unknown: FileID restarted. Try again.".to_string(),
                             );
                             update_bulk_strip(&ui);
                             break;
@@ -1307,7 +1307,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     let unknown_check = gtk::CheckButton::with_label("I don't know who this is");
     unknown_check.set_active(person.is_unknown);
     unknown_check.set_tooltip_text(Some(
-        "Excludes this person from AI clustering and Deep Analyze captions.",
+        "Hides this person and leaves them out of descriptions. Their photos stay in the library.",
     ));
     let title_row = adw::EntryRow::builder()
         .title("Title (Uncle, Grandma…)")
@@ -1559,7 +1559,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                             show_person_dialog_error(
                                 &ui,
                                 &error_label,
-                                "Couldn't save person: the engine exited.".to_string(),
+                                "Couldn't save person: FileID restarted. Try again.".to_string(),
                             );
                             handled = true;
                             break;
@@ -1581,7 +1581,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                     show_person_dialog_error(
                         &ui,
                         &error_label,
-                        "Couldn't save person: the engine connection closed.".to_string(),
+                        "Couldn't save person: FileID restarted. Try again.".to_string(),
                     );
                 }
             });
@@ -1725,7 +1725,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                             show_person_dialog_error(
                                 &ui,
                                 &error_label,
-                                "Couldn't mark as unknown: the engine exited.".to_string(),
+                                "Couldn't mark as unknown: FileID restarted. Try again.".to_string(),
                             );
                             handled = true;
                             break;
@@ -1747,7 +1747,7 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
                     show_person_dialog_error(
                         &ui,
                         &error_label,
-                        "Couldn't mark as unknown: the engine connection closed.".to_string(),
+                        "Couldn't mark as unknown: FileID restarted. Try again.".to_string(),
                     );
                 }
             });
@@ -1886,8 +1886,8 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
         .build();
     let info = gtk::Label::builder()
         .label(
-            "Pick which person becomes the primary. The others are absorbed — their photos \
-             move in, and the source clusters disappear.",
+            "Choose the card to keep. Photos from the other cards move into it, and those cards \
+             go away.",
         )
         .wrap(true)
         .xalign(0.0)
@@ -1942,7 +1942,7 @@ fn open_merge_target_picker(ui: &Rc<Ui>) {
             }
             if sent > 0 {
                 let status = if sent == sources.len() {
-                    format!("Merging {} clusters into one…", ids2.len())
+                    format!("Combining {} cards into one…", ids2.len())
                 } else {
                     format!(
                         "Sent {sent} of {} merges; reloading after a connection failure.",
@@ -2044,7 +2044,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
 
     let sub = gtk::Label::builder()
         .label(format!(
-            "{} cluster pair{} are similar enough to review. Compare each pair before merging.",
+            "{} pair{} of cards might be the same person. Check each pair before combining.",
             displayable.len(),
             plural(displayable.len() as i64)
         ))
@@ -2060,7 +2060,7 @@ fn open_suggested_merges(ui: &Rc<Ui>) {
         .build();
     if displayable.is_empty() {
         let none = gtk::Label::builder()
-            .label("No merge-review candidates found.")
+            .label("Every card is clearly a different person. Check again after adding more photos.")
             .wrap(true)
             .xalign(0.0)
             .css_classes(["dim-label"])
@@ -2798,7 +2798,7 @@ mod tests {
     #[test]
     fn face_clustering_lifecycle_is_generation_owned_and_terminal_driven() {
         let mut lifecycle = FaceClusteringLifecycle::new(false);
-        assert_eq!(lifecycle.begin(), Err("The engine is still starting."));
+        assert_eq!(lifecycle.begin(), Err("FileID is still getting ready. Try again in a moment."));
         lifecycle.on_ready();
         let first = lifecycle.begin().unwrap();
         assert!(lifecycle.is_active());
