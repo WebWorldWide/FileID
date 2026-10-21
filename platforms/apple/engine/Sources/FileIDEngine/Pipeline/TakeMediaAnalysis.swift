@@ -12,26 +12,29 @@ import Vision
 protocol TakeFaceAnalyzing: Sendable {
     var id: String { get }
     /// Nil when the detector could not run (timed out); the result is then
-    /// used once but not cached.
-    func faces(in image: CGImage) -> [TakeScoring.Face]?
+    /// used once but not cached. `people` is empty when the platform has no
+    /// person detector.
+    func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])?
 }
 
 /// Apple Vision faces with capture quality and an eye-openness estimate from
 /// the eye-contour landmarks (height over width of each eye outline).
 struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
-    let id = "vision-landmarks-v1"
+    let id = "vision-landmarks-humans-v1"
     static let closedRatio = 0.12
     static let openRatio = 0.26
 
-    func faces(in image: CGImage) -> [TakeScoring.Face]? {
+    func analyze(_ image: CGImage) -> (faces: [TakeScoring.Face], people: [TakeScoring.Box])? {
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         let landmarks = VNDetectFaceLandmarksRequest()
         let quality = VNDetectFaceCaptureQualityRequest()
-        let box = _VisionUncheckedBox((handler, landmarks, quality))
+        let humans = VNDetectHumanRectanglesRequest()
+        humans.upperBodyOnly = false
+        let box = _VisionUncheckedBox((handler, landmarks, quality, humans))
         let finished = runVisionWithTimeout {
-            let (handler, landmarks, quality) = box.value
+            let (handler, landmarks, quality, humans) = box.value
             do {
-                try handler.perform([landmarks])
+                try handler.perform([landmarks, humans])
                 if let found = landmarks.results, !found.isEmpty {
                     quality.inputFaceObservations = found
                     try handler.perform([quality])
@@ -39,15 +42,20 @@ struct VisionTakeFaceAnalyzer: TakeFaceAnalyzing {
             } catch {}
         }
         guard finished else { return nil }
-        guard let found = landmarks.results else { return [] }
+        let people = (humans.results ?? []).prefix(16).map { h in
+            TakeScoring.Box(x: TakeScoring.round4(h.boundingBox.minX), y: TakeScoring.round4(1 - h.boundingBox.maxY),
+                            width: TakeScoring.round4(h.boundingBox.width), height: TakeScoring.round4(h.boundingBox.height))
+        }
+        guard let found = landmarks.results else { return ([], people) }
         let qualities = quality.results ?? []
-        return found.prefix(16).enumerated().map { index, face in
+        let faces = found.prefix(16).enumerated().map { index, face in
             let r = face.boundingBox
             let q = index < qualities.count ? qualities[index].faceCaptureQuality.map(Double.init) : nil
             return TakeScoring.Face(x: TakeScoring.round4(r.minX), y: TakeScoring.round4(1 - r.maxY),
                                     width: TakeScoring.round4(r.width), height: TakeScoring.round4(r.height),
                                     quality: q.map(TakeScoring.round4), eyesOpen: Self.eyesOpen(face).map(TakeScoring.round4))
         }
+        return (faces, people)
     }
 
     static func eyesOpen(_ face: VNFaceObservation) -> Double? {
@@ -73,8 +81,8 @@ enum TakeMediaAnalysis {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let decoded = decodeBoundedImage(source, maxPixelSize: TakeScoring.analysisLongSide),
               let fitted = fit(decoded, longSide: TakeScoring.analysisLongSide) else { return nil }
-        let faces = analyzer.faces(in: fitted.image)
-        return (TakeScoring.signals(fitted.luma, faces: faces ?? []), faces != nil)
+        let found = analyzer.analyze(fitted.image)
+        return (TakeScoring.signals(fitted.luma, faces: found?.faces ?? [], people: found?.people), found != nil)
     }
 
     /// Draws `image` into an 8-bit RGBA buffer no larger than `longSide`.

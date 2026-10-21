@@ -5,7 +5,7 @@ import Foundation
 /// 8-bit luma so the Rust engine (pipeline/take_scoring.rs) computes the same
 /// signals, scores and reasons from the same pixels; change both together.
 enum TakeScoring {
-    static let version = "take-signals-v1"
+    static let version = "take-signals-v2"
     static let analysisLongSide = 1024
     static let videoLongSide = 384
     static let motionLongSide = 96
@@ -70,6 +70,8 @@ enum TakeScoring {
         var faces: [Face]
         var faceSharpness: Double?
         var video: VideoSignals?
+        /// Whole-person boxes, when the platform has a person detector.
+        var people: [Box]?
     }
 
     // MARK: - Per-image signals
@@ -88,7 +90,7 @@ enum TakeScoring {
         max(8, Int((Double(max(width, height)) / 32).rounded()))
     }
 
-    static func signals(_ image: Luma, faces: [Face]) -> Signals {
+    static func signals(_ image: Luma, faces: [Face], people: [Box]? = nil) -> Signals {
         let w = image.width, h = image.height
         let cell = cellSize(width: w, height: h)
         let columns = (w + cell - 1) / cell, rows = (h + cell - 1) / cell
@@ -163,7 +165,8 @@ enum TakeScoring {
         let faceSharpness = primary.first.flatMap { regionSharpness(image, $0) }
         return Signals(width: w, height: h, sharpness: round4(sharpness), anisotropy: round4(anisotropy), subject: subject,
                        meanLuma: round4(Double(lumaSum) / n / 255), highlights: round4(Double(bright) / n),
-                       shadows: round4(Double(dark) / n), faces: faces, faceSharpness: faceSharpness.map(round4), video: nil)
+                       shadows: round4(Double(dark) / n), faces: faces, faceSharpness: faceSharpness.map(round4), video: nil,
+                       people: people)
     }
 
     static func regionSharpness(_ image: Luma, _ face: Face) -> Double? {
@@ -305,6 +308,8 @@ enum TakeScoring {
         let peakSeconds: Double?
         let highlights: Double?
         let shadows: Double?
+        let framing: Double?
+        let personCut: Bool
     }
 
     enum Reason {
@@ -327,6 +332,10 @@ enum TakeScoring {
         static let shaky = "Shaky"
         static let littleAction = "Little action"
         static let unreadable = "Couldn't read this file"
+        static let fillsFrame = "Subject fills the frame"
+        static let everyone = "Everyone in the shot"
+        static let smallSubject = "Subject small in the frame"
+        static let personCut = "Someone is cut off at the edge"
     }
 
     static let motionBlurBelow = 0.75
@@ -356,6 +365,9 @@ enum TakeScoring {
         let anisotropies = readable.map(\.anisotropy).sorted()
         let medianAnisotropy = anisotropies.isEmpty ? 0 : anisotropies[anisotropies.count / 2]
         let maxAction = readable.compactMap { $0.video?.action }.max() ?? 0
+        let maxArea = readable.map(personArea).max() ?? 0
+        let maxPeople = readable.map(personCount).max() ?? 0
+        let groupHasPeople = !isVideo && readable.contains { ($0.people ?? []).contains { $0.height >= minPersonHeight } }
 
         var drafts: [(Shot, Double, Double, Quality)] = []
         for shot in shots {
@@ -363,7 +375,8 @@ enum TakeScoring {
                 drafts.append((shot, -1, 0, Quality(primaryFileID: shot.primaryFileID, fileIDs: shot.fileIDs, path: shot.path, score: 0, rank: 0,
                                                     recommended: false, reasons: [Reason.unreadable], sharpness: nil, exposure: nil,
                                                     motionBlur: false, faceCount: 0, eyesClosed: false, faceCutOff: false, stability: nil,
-                                                    action: nil, subject: nil, faces: [], peakSeconds: nil, highlights: nil, shadows: nil)))
+                                                    action: nil, subject: nil, faces: [], peakSeconds: nil, highlights: nil, shadows: nil,
+                                                    framing: nil, personCut: false)))
                 continue
             }
             let peakRel = maxSharp > 0 ? s.sharpness / maxSharp : 1
@@ -376,6 +389,11 @@ enum TakeScoring {
             let faceCut = primary.contains { $0.x <= edgeMargin || $0.y <= edgeMargin || $0.x + $0.width >= 1 - edgeMargin || $0.y + $0.height >= 1 - edgeMargin }
             let motionBlur = !isVideo && sharpRel < motionBlurBelow && s.anisotropy >= max(motionAnisotropy, medianAnisotropy + motionAnisotropyMargin)
             let faceCount = visible(s)
+            let largest = (s.people ?? []).max { $0.width * $0.height < $1.width * $1.height }
+            let personCut = groupHasPeople && !faceCut && largest.map { $0.x <= edgeMargin || $0.x + $0.width >= 1 - edgeMargin } == true
+            let framing: Double? = groupHasPeople
+                ? round4(0.6 * (maxArea > 0 ? personArea(s) / maxArea : 0) + 0.4 * (maxPeople > 0 ? Double(personCount(s)) / Double(maxPeople) : 0))
+                : nil
             var total: Double
             var stability: Double?, action: Double?
             if let video = s.video {
@@ -387,9 +405,18 @@ enum TakeScoring {
                 let qualities = primary.map { $0.quality ?? 0.5 }
                 let avgQuality = qualities.isEmpty ? 0 : qualities.reduce(0, +) / Double(qualities.count)
                 let faceScore = (maxVisible > 0 ? 0.5 * Double(faceCount) / Double(maxVisible) : 0) + 0.5 * avgQuality
-                total = 0.45 * sharpRel + 0.20 * exposure + 0.35 * faceScore
+                if let framing {
+                    total = 0.35 * sharpRel + 0.15 * exposure + 0.25 * faceScore + 0.25 * framing
+                } else {
+                    total = 0.45 * sharpRel + 0.20 * exposure + 0.35 * faceScore
+                }
+                if personCut { total -= 0.05 }
                 if eyesClosed { total -= 0.25 }
                 if faceCut { total -= 0.10 }
+                if motionBlur { total -= 0.10 }
+            } else if let framing {
+                total = 0.45 * sharpRel + 0.20 * exposure + 0.35 * framing
+                if personCut { total -= 0.05 }
                 if motionBlur { total -= 0.10 }
             } else {
                 total = 0.65 * sharpRel + 0.35 * exposure
@@ -401,7 +428,9 @@ enum TakeScoring {
             if motionBlur { negatives.append(Reason.motionBlur) }
             else if !isVideo && sharpRel < outOfFocusBelow { negatives.append(Reason.outOfFocus) }
             if faceCut { negatives.append(Reason.faceCut) }
+            if personCut { negatives.append(Reason.personCut) }
             if groupHasFaces && faceCount < maxVisible { negatives.append(Reason.faceHidden) }
+            if groupHasPeople, maxArea > 0, personArea(s) < 0.5 * maxArea { negatives.append(Reason.smallSubject) }
             if s.highlights > 0.05 { negatives.append(Reason.highlights) }
             if s.meanLuma < 0.20 || s.shadows > 0.25 { negatives.append(Reason.tooDark) }
             else if s.meanLuma > 0.78 { negatives.append(Reason.tooBright) }
@@ -413,7 +442,8 @@ enum TakeScoring {
                 reasons: negatives, sharpness: sharpRel, exposure: exposure, motionBlur: motionBlur, faceCount: faceCount,
                 eyesClosed: eyesClosed, faceCutOff: faceCut, stability: stability, action: action,
                 subject: primary.first.map { Box(x: $0.x, y: $0.y, width: $0.width, height: $0.height) } ?? s.subject,
-                faces: s.faces, peakSeconds: s.video?.peakSeconds, highlights: s.highlights, shadows: s.shadows)))
+                faces: s.faces, peakSeconds: s.video?.peakSeconds, highlights: s.highlights, shadows: s.shadows,
+                framing: framing, personCut: personCut)))
         }
         let order = drafts.indices.sorted { a, b in
             let l = drafts[a], r = drafts[b]
@@ -446,6 +476,10 @@ enum TakeScoring {
                     if groupHasFaces && q.faceCount == maxVisible && drafts.contains(where: { $0.3.faceCount < maxVisible && $0.1 >= 0 }) {
                         positives.append(Reason.allFaces)
                     }
+                    if groupHasPeople, let s = drafts[index].0.signals, maxArea > 0, personArea(s) >= maxArea,
+                       readable.contains(where: { personArea($0) < 0.7 * maxArea }) { positives.append(Reason.fillsFrame) }
+                    if groupHasPeople, maxPeople >= 2, let s = drafts[index].0.signals, personCount(s) == maxPeople,
+                       readable.contains(where: { personCount($0) < maxPeople }) { positives.append(Reason.everyone) }
                     if let e = q.exposure, e == maxExposure, maxExposure - secondExposure >= 0.1 { positives.append(Reason.bestExposure) }
                 }
                 reasons = positives + reasons.filter { $0 != Reason.soft }
@@ -454,8 +488,19 @@ enum TakeScoring {
                            recommended: index == winner && shots.count > 1, reasons: Array(reasons.prefix(3)), sharpness: q.sharpness,
                            exposure: q.exposure, motionBlur: q.motionBlur, faceCount: q.faceCount, eyesClosed: q.eyesClosed,
                            faceCutOff: q.faceCutOff, stability: q.stability, action: q.action, subject: q.subject, faces: q.faces,
-                           peakSeconds: q.peakSeconds, highlights: q.highlights, shadows: q.shadows)
+                           peakSeconds: q.peakSeconds, highlights: q.highlights, shadows: q.shadows,
+                           framing: q.framing, personCut: q.personCut)
         }
+    }
+
+    static let minPersonHeight = 0.15
+
+    static func personArea(_ s: Signals) -> Double {
+        (s.people ?? []).filter { $0.height >= 0.1 }.map { $0.width * $0.height }.max() ?? 0
+    }
+
+    static func personCount(_ s: Signals) -> Int {
+        (s.people ?? []).filter { $0.height >= 0.1 }.count
     }
 
     static func clampBox(_ box: Box) -> Box {
