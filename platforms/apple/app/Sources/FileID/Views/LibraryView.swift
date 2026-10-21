@@ -462,7 +462,7 @@ struct LibraryView: View {
             HStack(alignment: .center, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
-                    TextField("Filter by name, tag, caption or person", text: $searchText)
+                    TextField("Filter by name, tag, description or person", text: $searchText)
                         .textFieldStyle(.plain)
                         .font(Theme.Font.body(13.5))
                         .focused($searchFocused)

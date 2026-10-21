@@ -45,7 +45,7 @@ struct Detail: View {
         case .deep:
             if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) / \(d.total.formatted())" }
             return ""
-        case .settings: return "macOS"
+        case .settings: return ""
         case .restructure: return pickedURL?.lastPathComponent ?? ""
         default: return ""
         }

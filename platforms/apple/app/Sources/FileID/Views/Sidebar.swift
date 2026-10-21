@@ -140,7 +140,7 @@ struct Sidebar: View {
             let running = engine.catalogJobs.filter { $0.state == "running" }.count
             return running > 0 ? ("\(running)", Theme.ai) : nil
         case .restructure:
-            return engine.restructurePlan != nil ? ("Plan", Theme.gold) : nil
+            return engine.restructurePlan != nil ? ("Ready", Theme.gold) : nil
         default:
             return nil
         }

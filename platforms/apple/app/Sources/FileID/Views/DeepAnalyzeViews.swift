@@ -23,12 +23,12 @@ struct DeepAnalyzeModelPickerCard: View {
         Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("AI models · Deep Analyze").font(Theme.Font.body(14, .semibold))
+                    Text("Descriptions and Chat").font(Theme.Font.body(14, .semibold))
                     Spacer()
-                    Text("Recommended for this Mac (\(Int(ramGB)) GB RAM)")
+                    Text("Suggested for this Mac (\(Int(ramGB)) GB memory)")
                         .font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
                 }
-                Text("Reads images and writes captions plus smart filenames.")
+                Text("The AI that writes descriptions and suggested names, and answers Chat. Bigger models write better but need more memory.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
                 Divider().opacity(0.3)
                 if !AIModelKind.favorites.contains(settings.activeKind) {
@@ -48,7 +48,7 @@ struct DeepAnalyzeModelPickerCard: View {
                 }
                 Divider().opacity(0.3)
                 Button { catalogPresented = true } label: {
-                    Label("Browse \(MLXModelCatalog.entries.count) catalog models", systemImage: "magnifyingglass")
+                    Label("Browse \(MLXModelCatalog.entries.count) more models", systemImage: "magnifyingglass")
                 }.buttonStyle(.dsSecondary)
                 DisclosureGroup("More favorites") {
                     VStack(alignment: .leading, spacing: 6) {
@@ -103,7 +103,7 @@ private struct ModelOptionRow: View {
                         .foregroundStyle(Theme.text3)
                     statsLine
                     if !fits {
-                        Text("This model exceeds the memory budget of this Mac. Choose a smaller model.")
+                        Text("Too big for this Mac's memory. Choose a smaller model.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.warning)
                     }
@@ -153,13 +153,13 @@ private struct ModelOptionRow: View {
             BadgePill(label: "Downloaded", color: Theme.delight)
         } else {
             let gb = String(format: "%.1f GB", Double(kind.approxBytes) / 1_073_741_824)
-            BadgePill(label: "Will download \(gb)", color: .secondary)
+            BadgePill(label: "\(gb) download", color: .secondary)
         }
     }
 
     @ViewBuilder
     private var statsLine: some View {
-        Text(kind.secondsPerImage > 0 ? "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · \(String(format: "%.1f", kind.secondsPerImage)) s/image · \(kind.licenseName)" : "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · Speed not measured · \(kind.licenseName)")
+        Text(kind.secondsPerImage > 0 ? "Needs ≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB memory · about \(String(format: "%.0f", kind.secondsPerImage)) s a photo · \(kind.licenseName)" : "≈ \(String(format: "%.1f", kind.ramBudgetGB)) GB RAM · Speed not measured · \(kind.licenseName)")
             .font(Theme.Font.mono(10.5))
             .foregroundStyle(Theme.text3)
     }
