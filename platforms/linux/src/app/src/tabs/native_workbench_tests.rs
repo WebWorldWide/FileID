@@ -147,7 +147,7 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     wait(|| engine.borrow().is_ready());
     wait(|| !tools_ui.state.borrow().capabilities.is_empty());
 
-    let query = entry(&catalog, "Search names, captions, chapters");
+    let query = entry(&catalog, "Search files and videos");
     query.set_text("photo-fixture");
     query.emit_activate();
     wait(|| text(&catalog).contains(source.to_str().unwrap()));
