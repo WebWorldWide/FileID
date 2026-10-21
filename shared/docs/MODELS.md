@@ -1,5 +1,19 @@
 # Models — canonical registry
 
+## 2026-10-20 — Handwriting OCR candidate (not installed, no download wired)
+
+Handwriting currently reads through Apple Vision's accurate tier on macOS and, on every engine, a VLM transcription of text-bearing images during Describe Files (Deep Analyze). A dedicated ONNX handwriting reader would let Windows and Linux read handwriting during the scan without a VLM. Licenses were read from the Hugging Face model cards and API on 2026-10-20. Nothing below is in `catalog.json`; adding one needs the owner's sign-off, a pinned revision and hashes, the license gate, and a measurement on the dev machines.
+
+| Candidate | License (code / weights) | Size (ONNX) | Published speed | Verdict |
+|---|---|---|---|---|
+| [PP-OCRv6 small det + rec](https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx) | Apache-2.0 / Apache-2.0; upstream ships the ONNX files | rec 21.2 MB + det 9.9 MB (2.5M + 5.2M params) | 0.61 s per full page on a Xeon 8350C, 1.29 s on Apple M4 (ORT, includes I/O and pre/post-processing) | **Recommended candidate.** CPU tier; detector + line recognizer, fits the existing PaddleOCR opt-in slot below |
+| [PP-OCRv6 medium det + rec](https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_det_onnx) | Apache-2.0 / Apache-2.0 | rec 76.6 MB + det 62.0 MB | 3.3 s per page on CPU, 1.4 s with OpenVINO | GPU tier of the same family |
+| [TrOCR small / base handwritten](https://huggingface.co/microsoft/trocr-base-handwritten) | MIT code; `base` card says MIT, `small` and `large` cards carry no license | small 62M params (Xenova ONNX: 87 + 159 MB fp32, no license field) | about 0.3 s per line on 2 CPU threads, so 7–9 s per 25-line page; needs a separate line detector | **Fails the strict gate:** fine-tuned on IAM, whose terms are non-commercial research, and two of three cards have no license |
+| Kraken PP-OCRv6 HTR | Apache-2.0 / Apache-2.0 | 13–64 MB safetensors, no ONNX | not published | Hold: trained partly on IAM, would need our own ONNX export |
+| Surya, Chandra, MinerU2.5, Qwen2.5-VL-3B | restrictive or non-commercial | — | — | Excluded |
+
+Accuracy figures for PP-OCRv6 are Baidu's own benchmark (handwritten English 61.1 for small, 67.8 for medium; large VLMs score about 73). The handwriting training data isn't documented. On Windows, `Windows.Media.Ocr` reads printed text only, and the Windows AI `TextRecognizer` that does read some handwriting needs a Copilot+ PC NPU, Windows 11 25H2 and Windows App SDK 1.7.1+ with package identity, so it isn't a general answer.
+
 ## 2026-10-15 — Gap research: families not yet in the catalog
 
 Checked against the 333-entry catalog for widely used local models it lacks. Licenses are from the upstream model cards; none of these is added to `catalog.json` yet, because each entry needs a pinned revision, file hashes and a runtime check. The new macOS `benchmarkModel` and the shared engine's benchmark are the measurement gate for promotion.
