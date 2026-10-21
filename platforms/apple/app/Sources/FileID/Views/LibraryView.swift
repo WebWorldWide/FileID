@@ -1007,6 +1007,9 @@ private struct FilePreviewSheet: View {
                         if let model = file.vlmModel, let kind = AIModelKind(rawValue: model) {
                             MetaText("Written by \(kind.displayName)", size: 11)
                         }
+                        if file.vlmInheritedFrom != nil {
+                            MetaText("Shared with a similar shot", size: 11)
+                        }
                         if let proposed = file.vlmProposedName, !proposed.isEmpty {
                             HStack(spacing: 10) {
                                 Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
@@ -1485,6 +1488,9 @@ private struct LibrarySelectedPane: View {
                 if let caption = row.vlmDescription, !caption.isEmpty {
                     Text(caption).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
+                    if row.vlmInheritedFrom != nil {
+                        MetaText("Shared with a similar shot", size: 11)
+                    }
                 }
 
                 if !tags.isEmpty {

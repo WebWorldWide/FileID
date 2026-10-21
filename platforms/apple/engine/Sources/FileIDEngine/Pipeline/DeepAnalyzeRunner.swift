@@ -294,8 +294,12 @@ public enum DeepAnalyzeRunner {
         var cancelled = false
         let batchStart = Date()
         var reservedProposedNames = Set<String>()
+        let grouping = await Self.nearDuplicatePlan(database: database, targets: targets)
+        let orderedTargets = grouping.ordered
+        var sharedResults: [Int: SharedResult] = [:]
+        var inheritedCount = 0
 
-        for (i, target) in targets.enumerated() {
+        for (i, target) in orderedTargets.enumerated() {
             if await analyzer.isCancelled() {
                 cancelled = true
                 break
@@ -345,7 +349,14 @@ public enum DeepAnalyzeRunner {
             let faceNames = namingContext?.subjects ?? []
             var result: DeepAnalyze.AnalysisResult
             var requiresGeneratedFilenameMinimum = false
-            if kind == .audio {
+            let groupIndex = grouping.groupOf[target.id]
+            var inheritedFrom: Int64?
+            if kind == .image, let groupIndex, let shared = sharedResults[groupIndex],
+               shared.fileID != target.id, Set(shared.faceNames) == Set(faceNames) {
+                result = shared.result
+                inheritedFrom = shared.fileID
+                requiresGeneratedFilenameMinimum = true
+            } else if kind == .audio {
                 result = await analyzer.runCancellableAnalysis {
                     await DeepAnalyzeNaming.metadataResult(url: url, kind: kind)
                 }
@@ -394,6 +405,9 @@ public enum DeepAnalyzeRunner {
             if isFailure {
                 failed += 1
             } else {
+                if inheritedFrom == nil, kind == .image, let groupIndex, sharedResults[groupIndex] == nil {
+                    sharedResults[groupIndex] = SharedResult(fileID: target.id, result: result, faceNames: faceNames)
+                }
                 let proposedName: String?
                 if proposeRenames && !tagsOnly {
                     let trustedYears = (try? await Self.trustedYears(
@@ -410,7 +424,8 @@ public enum DeepAnalyzeRunner {
                     if contextNameAvailable {
                         acceptedName = namingContext?.proposedName
                     } else if requiresGeneratedFilenameMinimum {
-                        acceptedName = meetsMinimum ? groundedName.flatMap { SmartFileName.stem($0, confirmedSubjects: faceNames, originalStem: originalStem) } : nil
+                        acceptedName = meetsMinimum ? groundedName.flatMap { SmartFileName.stem($0, confirmedSubjects: faceNames, originalStem: originalStem) }
+                            .map { Self.appendingSequence($0, grouping.suffixes[target.id] ?? "") } : nil
                     } else {
                         acceptedName = groundedName.map { FilesystemNameSafe.componentSafe($0, maxLength: 60) }
                     }
@@ -436,13 +451,16 @@ public enum DeepAnalyzeRunner {
                                       updatesDescription: !tagsOnly,
                                       updatesProposedName: proposeRenames && !tagsOnly,
                                       completesFullPass: completesFullPass,
-                                      namingContext: namingContext)
+                                      namingContext: namingContext,
+                                      inheritedFrom: inheritedFrom)
                     processed += 1
+                    if inheritedFrom != nil { inheritedCount += 1 }
                     await sink.emit(.deepAnalyzeFileDone(DeepAnalyzeFileDone(
                         fileID: target.id,
                         description: result.description,
                         proposedName: proposedName,
-                        modelKind: modelKey
+                        modelKind: modelKey,
+                        inheritedFromFileID: inheritedFrom
                     )))
                 } catch {
                     failed += 1
@@ -455,10 +473,82 @@ public enum DeepAnalyzeRunner {
         let dur = Date().timeIntervalSince(started)
         JSONLog.shared.info(ev: "deep_analyze_done",
                             extra: ["processed": AnyCodable(processed),
+                                    "inherited": AnyCodable(inheritedCount),
+                                    "groups": AnyCodable(grouping.groupCount),
                                     "failed": AnyCodable(failed),
                                     "cancelled": AnyCodable(cancelled),
                                     "seconds": AnyCodable(dur)])
         await finish(processed: processed, failed: failed, cancelled: cancelled)
+    }
+
+    struct SharedResult: Sendable {
+        let fileID: Int64
+        let result: DeepAnalyze.AnalysisResult
+        let faceNames: [String]
+    }
+
+    struct GroupingPlan: Sendable {
+        var ordered: [(id: Int64, path: String)]
+        var groupOf: [Int64: Int] = [:]
+        var suffixes: [Int64: String] = [:]
+        var groupCount = 0
+    }
+
+    static func groupingEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        environment["FILEID_DEEP_GROUPING"] != "0"
+    }
+
+    static func appendingSequence(_ name: String, _ suffix: String) -> String {
+        guard !suffix.isEmpty else { return name }
+        let base = String(name.prefix(max(1, 60 - suffix.count))).trimmingCharacters(in: CharacterSet(charactersIn: " -_"))
+        return base + suffix
+    }
+
+    /// Orders targets so each near-duplicate group's representative runs first and its
+    /// members follow. Embeddings are read only for files inside a capture-time burst.
+    static func nearDuplicatePlan(database: Database, targets: [(id: Int64, path: String)]) async -> GroupingPlan {
+        var plan = GroupingPlan(ordered: targets)
+        guard targets.count > 1, groupingEnabled() else { return plan }
+        let ids = targets.map(\.id)
+        let items: [NearDuplicateGrouping.Item]
+        do {
+            items = try await database.pool.read { db in
+                try NearDuplicateGrouping.loadItems(db, ids: ids)
+            }
+        } catch {
+            JSONLog.shared.warn(ev: "deep_grouping_failed", error: "\(error)")
+            return plan
+        }
+        let groups = NearDuplicateGrouping.groups(items).filter { $0.members.count > 1 }
+        guard !groups.isEmpty else { return plan }
+        let pathByID = Dictionary(targets.map { ($0.id, $0.path) }, uniquingKeysWith: { first, _ in first })
+        for (index, group) in groups.enumerated() {
+            let paths = group.members.map { pathByID[$0] ?? "" }
+            for (id, suffix) in zip(group.members, NearDuplicateGrouping.sequenceSuffixes(paths: paths)) {
+                plan.groupOf[id] = index
+                plan.suffixes[id] = suffix
+            }
+        }
+        plan.groupCount = groups.count
+        var emitted = Set<Int64>()
+        var ordered: [(id: Int64, path: String)] = []
+        for target in targets where !emitted.contains(target.id) {
+            if let index = plan.groupOf[target.id] {
+                let group = groups[index]
+                for id in [group.representative] + group.members.filter({ $0 != group.representative })
+                where emitted.insert(id).inserted {
+                    ordered.append((id, pathByID[id] ?? ""))
+                }
+            } else {
+                emitted.insert(target.id)
+                ordered.append(target)
+            }
+        }
+        plan.ordered = ordered
+        JSONLog.shared.info(ev: "deep_grouping", extra: ["targets": AnyCodable(targets.count),
+                                                          "groups": AnyCodable(groups.count),
+                                                          "grouped": AnyCodable(plan.groupOf.count)])
+        return plan
     }
 
     /// A `DeepAnalyze.analyze` description that signals the file wasn't usefully analyzed
@@ -579,7 +669,8 @@ public enum DeepAnalyzeRunner {
         updatesDescription: Bool = true,
         updatesProposedName: Bool = true,
         completesFullPass: Bool = true,
-        namingContext: CatalogNamingContext? = nil
+        namingContext: CatalogNamingContext? = nil,
+        inheritedFrom: Int64? = nil
     ) async throws {
         let safeDesc = (description?.isEmpty == true) ? nil : description
         let safeName = (proposedName?.isEmpty == true) ? nil : proposedName
@@ -600,7 +691,8 @@ public enum DeepAnalyzeRunner {
                             WHEN ? THEN ? ELSE vlm_proposed_name END,
                         vlm_model = ?,
                         vlm_full_model = ?,
-                        vlm_analyzed_at = ?
+                        vlm_analyzed_at = ?,
+                        vlm_inherited_from = ?
                     WHERE id = ?
                     """, arguments: [
                         updatesDescription,
@@ -610,6 +702,7 @@ public enum DeepAnalyzeRunner {
                         modelKey,
                         modelKey,
                         Date().timeIntervalSince1970,
+                        inheritedFrom,
                         fileID
                     ])
             } else {
@@ -624,7 +717,8 @@ public enum DeepAnalyzeRunner {
                         vlm_full_model = CASE
                             WHEN vlm_full_model = ? THEN vlm_full_model ELSE NULL END,
                         vlm_analyzed_at = CASE
-                            WHEN vlm_full_model = ? THEN vlm_analyzed_at ELSE NULL END
+                            WHEN vlm_full_model = ? THEN vlm_analyzed_at ELSE NULL END,
+                        vlm_inherited_from = ?
                     WHERE id = ?
                     """, arguments: [
                         updatesDescription,
@@ -634,6 +728,7 @@ public enum DeepAnalyzeRunner {
                         modelKey,
                         modelKey,
                         modelKey,
+                        inheritedFrom,
                         fileID
                     ])
             }

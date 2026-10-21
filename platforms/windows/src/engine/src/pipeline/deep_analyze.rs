@@ -405,7 +405,7 @@ fn persist_vlm_results(
         tx.execute(
             "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
                               vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
-                              vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4 WHERE id=?5",
+                              vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4, vlm_inherited_from=NULL WHERE id=?5",
             rusqlite::params![model_kind, description, proposed_name, now, file_id],
         )?;
     } else {
@@ -417,7 +417,7 @@ fn persist_vlm_results(
         if completed_with_model {
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name) \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), vlm_inherited_from=NULL \
                  WHERE id=?3",
                 rusqlite::params![description, proposed_name, file_id],
             )?;
@@ -425,7 +425,7 @@ fn persist_vlm_results(
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
                                   vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
-                                  vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL \
+                                  vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL, vlm_inherited_from=NULL \
                  WHERE id=?3",
                 rusqlite::params![description, proposed_name, file_id],
             )?;
@@ -445,6 +445,34 @@ fn persist_vlm_results(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Copy a near-duplicate's persisted caption and VLM tags onto `file_id`, flagged
+/// with `vlm_inherited_from`, instead of running the model again (burst frames and
+/// RAW+JPEG pairs). `proposed_name` is the member's own sequence-suffixed name.
+pub(crate) fn inherit_vlm_results(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+    from_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    proposed_name: Option<&str>,
+) -> anyhow::Result<AnalyzeOutcome> {
+    let (description, source_name): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT vlm_description, vlm_proposed_name FROM files WHERE id=?1",
+        rusqlite::params![from_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let tags: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT tag FROM tags WHERE file_id=?1 AND source='vlm' ORDER BY rowid")?;
+        let rows = stmt.query_map(rusqlite::params![from_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let description = if mode.requests_caption() { description } else { None };
+    let proposed_name = if mode.requests_rename() { proposed_name.map(str::to_owned).or(source_name) } else { None };
+    persist_vlm_results(conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+    conn.execute("UPDATE files SET vlm_inherited_from=?1 WHERE id=?2", rusqlite::params![from_id, file_id])?;
+    Ok(AnalyzeOutcome { file_id, description, proposed_name })
 }
 
 /// one-shot probe that the persistent llama-server actually accepts our
