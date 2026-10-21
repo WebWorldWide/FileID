@@ -800,7 +800,7 @@ public sealed partial class DeepAnalyzeView : UserControl
                 });
             }
             var sheet = new Views.Library.BulkRenameSheet();
-            sheet.SetPlan(plan);
+            sheet.SetPlan(plan, suggested: true);
             var dialog = new ContentDialog
             {
                 XamlRoot = XamlRoot,

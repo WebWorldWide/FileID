@@ -88,7 +88,7 @@
                             MinHeight="30"
                             HorizontalAlignment="Stretch"
                             Click="OnOpenPreviewClicked"
-                            ToolTipService.ToolTip="Full preview with tags, smart name and Deep Analyze (or double-click the tile)">
+                            ToolTipService.ToolTip="Full preview with tags, the suggested name and Describe (or double-click the tile)">
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <FontIcon Glyph="&#xE7B3;" FontSize="12" />
                             <TextBlock Text="Open preview" />
