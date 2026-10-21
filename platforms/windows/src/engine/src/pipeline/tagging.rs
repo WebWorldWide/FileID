@@ -1643,6 +1643,14 @@ fn predecode_one(
                 _ => Vec::new(),
             }
         };
+        // Video, WIC and OBJ frames come from decoders without a pixel check of
+        // their own; every consumer downstream indexes by w*h*3.
+        if let Some(Ok((rgb, w, h))) = &decoded {
+            let expected = (*w as usize).checked_mul(*h as usize).and_then(|p| p.checked_mul(3));
+            if *w == 0 || *h == 0 || expected != Some(rgb.len()) {
+                decoded = Some(Err(anyhow::anyhow!("decoder returned a {w}x{h} frame of {} bytes", rgb.len())));
+            }
+        }
         let frame_bytes = match &decoded {
             Some(Ok((rgb, _, _))) => rgb.len(),
             _ => 0,

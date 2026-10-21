@@ -102,7 +102,7 @@ pub(crate) async fn analyze_file_scoped(
     }
     let weights_installed = naming::vlm_weights_installed(model_kind);
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, &cancel, scope).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, true, &cancel, scope).await?
     {
         return Ok(outcome);
     }
@@ -116,7 +116,7 @@ pub(crate) async fn analyze_file_scoped(
         Ok(r) => r,
         Err(e) => {
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel, scope).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
             {
                 return Ok(outcome);
             }
@@ -511,7 +511,9 @@ pub(crate) async fn analyze_file_via_server(
     {
         return Ok(outcome);
     }
-    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, &cancel, scope).await? {
+    // The caller holds a resident lease; transcribing would acquire another
+    // and wait on that same lock until the user cancels.
+    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, false, &cancel, scope).await? {
         return Ok(outcome);
     }
     let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id, scope).await {
@@ -519,7 +521,7 @@ pub(crate) async fn analyze_file_via_server(
         Err(e) => {
             // A 3D model we couldn't render falls back to its embedded names.
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel, scope).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, false, &cancel, scope).await?
             {
                 return Ok(outcome);
             }
@@ -667,7 +669,7 @@ async fn analyze_document_via_server(
         }
     };
     let Some(text) = naming::bounded_document_text(&text) else {
-        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, cancel, scope).await;
+        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, false, cancel, scope).await;
     };
     let (_, fallback_name, deterministic_tags) = naming::document_metadata_from_text(&text);
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
@@ -717,6 +719,7 @@ async fn analyze_metadata_named_file(
     model_kind: &str,
     mode: AnalyzeMode,
     model_to_vlm: bool,
+    may_transcribe: bool,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
@@ -737,7 +740,7 @@ async fn analyze_metadata_named_file(
         tokio::task::spawn_blocking(move || metadata_naming_blocking(&source, &task_kind))
             .await
             .context("metadata naming task failed")??;
-    if kind == "audio" && proposed_name.is_none() && mode.requests_rename() {
+    if may_transcribe && kind == "audio" && proposed_name.is_none() && mode.requests_rename() {
         if let Some((name, transcript)) = transcribe_audio_name(&path, cancel).await {
             proposed_name = Some(name);
             description = description.or(Some(transcript));
