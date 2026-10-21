@@ -57,6 +57,7 @@
   },
   "vlmRepoLicenses": {
     "mlx-community/Qwen2.5-VL-7B-Instruct-4bit": "Apache-2.0",
+    "mlx-community/Qwen3-VL-2B-Instruct-4bit": "Apache-2.0",
     "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit": "Apache-2.0",
     "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit": "Apache-2.0",
     "mlx-community/Qwen3.5-2B-MLX-4bit": "Apache-2.0",
@@ -296,6 +297,15 @@
       ],
       "revision": "fdcc572e8b05ba9daeaf71be8c9e4267c826ff9b",
       "approxBytes": 4300000000
+    },
+    {
+      "repo": "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+      "kind": "qwen3_vl_2b",
+      "platforms": [
+        "macos"
+      ],
+      "revision": "9c4f5209e57b31f4b9dfba735de3fb983739c9cc",
+      "approxBytes": 1800000000
     },
     {
       "repo": "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
