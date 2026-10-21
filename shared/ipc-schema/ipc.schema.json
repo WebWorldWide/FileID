@@ -1606,7 +1606,7 @@
     "ChatAction": {
       "type": "object",
       "additionalProperties": false,
-      "description": "A proposed FileID action. The client runs it only through the existing command it names. requiresConfirmation is true for every kind that changes, moves, renames, writes or deletes files or user identities; clients must show a confirmation card with the counts, examples and undo story before sending anything. Other kinds start read-only views or jobs and may run directly.",
+      "description": "A proposed FileID action. The client runs it only through the existing command it names. requiresConfirmation is true for every kind that changes, moves, renames or deletes files or user identities (moveDuplicatesToTrash, applyFolderLayout, undoLastMove, renameToSuggested, namePerson, mergePeople); clients must show a confirmation card with the counts, examples and undo story before sending anything. Other kinds start read-only views or jobs and may run directly.",
       "required": ["id", "kind", "title", "detail", "requiresConfirmation", "source"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 300 },
@@ -1616,7 +1616,7 @@
             "suggestFolderLayout", "applyFolderLayout", "undoLastMove", "renameToSuggested", "namePerson",
             "mergePeople", "findMoments", "exportFiles", "openPage", "search", "changeSetting"
           ],
-          "description": "scanFolder/rescan → startScan; describeFiles → deepAnalyzeAll (fileIDs in batches of 100) or deepAnalyzeFolder; stopJob → cancelScan, deepAnalyzeCancel, cancelRestructure or catalog cancelJob; findDuplicates → the Cleanup page; moveDuplicatesToTrash → the platform's Cleanup trash path with byte verification against keeperFileIDs; suggestFolderLayout → planRestructure; applyFolderLayout → applyRestructure of the current plan; undoLastMove → undoRestructure; renameToSuggested → renameFiles or the platform's suggested-name apply path; namePerson → renamePerson; mergePeople → mergeClusters into personID; findMoments → Search & Moments; exportFiles → File Tools with the selection; openPage/search → navigation; changeSetting → a whitelisted client setting."
+          "description": "scanFolder/rescan → startScan; describeFiles → deepAnalyzeAll (fileIDs in batches of 100) or deepAnalyzeFolder; stopJob → cancelScan, deepAnalyzeCancel, cancelRestructure or catalog cancelJob; findDuplicates → the Cleanup page; moveDuplicatesToTrash → the platform's Cleanup trash path with byte verification against keeperFileIDs; suggestFolderLayout → planRestructure; applyFolderLayout → applyRestructure of the current plan; undoLastMove → undoRestructure; renameToSuggested → renameFiles or the platform's suggested-name apply path; namePerson → renamePerson; mergePeople → mergeClusters into personID; findMoments → Search & Moments; exportFiles → File Tools with the selection, whose own preview confirms before writing; openPage/search → navigation; changeSetting → a whitelisted client setting."
         },
         "title": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Primary button label in plain language, e.g. Move 42 extra copies to Trash." },
         "detail": { "type": "string", "maxLength": 2000, "description": "What will happen, with counts." },

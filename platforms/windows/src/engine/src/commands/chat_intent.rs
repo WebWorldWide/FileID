@@ -128,7 +128,7 @@ fn is_path(word: &str) -> bool {
     word.starts_with('/')
         || word.starts_with("~/")
         || word == "~"
-        || (word.len() >= 3 && word.as_bytes()[0].is_ascii_alphabetic() && &word[1..3] == ":\\")
+        || (word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) && word.get(1..3) == Some(":\\"))
 }
 
 /// Strips polite lead-ins and trailing courtesy words. Returns cleaned and
@@ -180,7 +180,7 @@ pub fn folder_reference(words: &[String], cased: &[String], text: &str) -> Optio
             if matches!(before, Some("this" | "current" | "that")) {
                 return Some("this".into());
             }
-            if let Some(name) = before.filter(|name| !["the", "my", "a", "whole", "entire"].contains(name)) {
+            if before.is_some_and(|name| !["the", "my", "a", "whole", "entire"].contains(&name)) {
                 return Some(format!("named:{}", cased[index - 1]));
             }
             if words.get(index + 1).is_some_and(|next| !["in", "to", "for", "and"].contains(&next.as_str())) {
@@ -861,16 +861,28 @@ mod tests {
 
     #[test]
     fn shared_intent_cases() {
-        for case in fixtures().intents {
-            assert_eq!(parse_intent(&case.text), case.intent, "{}", case.text);
-        }
+        let failures: Vec<String> = fixtures()
+            .intents
+            .into_iter()
+            .filter_map(|case| {
+                let actual = parse_intent(&case.text);
+                (actual != case.intent).then(|| format!("{} → {}", case.text, serde_json::to_string(&actual).unwrap()))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
     fn shared_question_cases() {
-        for case in fixtures().questions {
-            assert_eq!(parse_question(&case.text), case.question, "{}", case.text);
-        }
+        let failures: Vec<String> = fixtures()
+            .questions
+            .into_iter()
+            .filter_map(|case| {
+                let actual = parse_question(&case.text);
+                (actual != case.question).then(|| format!("{} → {}", case.text, serde_json::to_string(&actual).unwrap()))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

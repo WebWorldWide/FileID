@@ -26,6 +26,8 @@ mod catalog_take_suggestions;
 pub mod chat;
 mod chat_search;
 pub(crate) mod chat_intent;
+mod chat_facts;
+mod chat_actions;
 pub mod tools;
 pub mod models;
 pub mod benchmark;

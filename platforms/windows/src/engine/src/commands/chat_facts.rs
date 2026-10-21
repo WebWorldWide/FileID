@@ -10,6 +10,9 @@ use std::path::Path;
 
 pub(crate) const ANALYZABLE: [&str; 6] = ["image", "video", "pdf", "doc", "audio", "model"];
 pub(crate) const SHOWN: usize = 50;
+/// Above this many matches a listing walks the date or size index; below it,
+/// SQLite sorts the matches. Same threshold in macOS `ChatFacts`.
+pub(crate) const LARGE: i64 = 2_000;
 const TAKEN: &str = "COALESCE(f.created_at,f.modified_at)";
 
 /// Which files a structured answer or action covers.
@@ -50,10 +53,16 @@ impl Filter {
 
     /// The SQL predicate over `files f`, appending its parameters.
     pub fn clause(&self, args: &mut Vec<Value>) -> String {
+        self.predicate(args, false)
+    }
+
+    /// `ordered` hides the kind column from the planner (`+f.kind`) so a
+    /// large listing walks the ORDER BY index instead of sorting every match.
+    fn predicate(&self, args: &mut Vec<Value>, ordered: bool) -> String {
         let mut parts = vec!["f.failed=0".to_owned()];
         let kinds = self.effective_kinds();
         if !kinds.is_empty() {
-            parts.push("f.kind IN (SELECT value FROM json_each(?))".into());
+            parts.push(if ordered { "+f.kind IN (SELECT value FROM json_each(?))" } else { "f.kind IN (SELECT value FROM json_each(?))" }.into());
             args.push(json(&kinds));
         }
         if !self.person_ids.is_empty() {
@@ -135,15 +144,16 @@ pub(crate) fn totals(conn: &Connection, filter: &Filter) -> Result<(i64, i64)> {
     )?)
 }
 
-/// Matching files as citations, in the requested order.
-pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usize) -> Result<Vec<CatalogHit>> {
+/// Matching files as citations, in the requested order. `count` is the
+/// number of matches, from [`totals`].
+pub(crate) fn listed(conn: &Connection, filter: &Filter, order: &str, limit: usize, count: i64) -> Result<Vec<CatalogHit>> {
     let mut args = Vec::new();
-    let clause = filter.clause(&mut args);
+    let clause = filter.predicate(&mut args, count > LARGE);
     let order = match order {
         "largest" => "f.size_bytes DESC,f.id DESC".to_owned(),
         "smallest" => "f.size_bytes ASC,f.id ASC".to_owned(),
         "oldest" => format!("{TAKEN} IS NULL,{TAKEN} ASC,f.id ASC"),
-        _ => format!("{TAKEN} IS NULL,{TAKEN} DESC,f.id DESC"),
+        _ => format!("{TAKEN} DESC,f.id DESC"),
     };
     args.push(Value::Integer(limit as i64));
     let sql = format!("SELECT f.id,f.path_text,f.kind,f.size_bytes,strftime('%Y-%m-%d',{TAKEN},'unixepoch','localtime') FROM files f WHERE {clause} ORDER BY {order} LIMIT ?");
@@ -188,17 +198,21 @@ pub(crate) fn extras(conn: &Connection, filter: &Filter, limit: usize) -> Result
          FROM files f JOIN twins ON f.content_hash=twins.h AND f.size_bytes=twins.s WHERE f.failed=0), \
          chosen AS (SELECT r.* FROM ranked r JOIN files f ON f.id=r.id WHERE r.rank>1 AND {clause})"
     );
-    let (groups, count, bytes) = conn.query_row(
-        &format!("{base} SELECT COUNT(DISTINCT keeper),COUNT(*),COALESCE(SUM(size_bytes),0) FROM chosen"),
-        rusqlite::params_from_iter(args.clone()),
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    )?;
-    args.push(Value::Integer(limit as i64));
-    let mut statement = conn.prepare(&format!("{base} SELECT id,keeper,path_text,keeper_path,size_bytes FROM chosen ORDER BY size_bytes DESC,path_text ASC,id ASC LIMIT ?"))?;
-    let copies = statement
-        .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok(Extras { groups, count, bytes, copies })
+    let mut statement = conn.prepare(&format!("{base} SELECT id,keeper,path_text,keeper_path,size_bytes FROM chosen ORDER BY size_bytes DESC,path_text ASC,id ASC"))?;
+    let mut keepers = std::collections::HashSet::new();
+    let (mut count, mut bytes) = (0i64, 0i64);
+    let mut copies = Vec::new();
+    let mut rows = statement.query(rusqlite::params_from_iter(args))?;
+    while let Some(row) = rows.next()? {
+        let (keeper, size): (i64, i64) = (row.get(1)?, row.get(4)?);
+        keepers.insert(keeper);
+        count += 1;
+        bytes += size;
+        if copies.len() < limit {
+            copies.push((row.get(0)?, keeper, row.get(2)?, row.get(3)?, size));
+        }
+    }
+    Ok(Extras { groups: keepers.len() as i64, count, bytes, copies })
 }
 
 pub(crate) fn extra_hits(extras: &Extras) -> Vec<CatalogHit> {
@@ -239,10 +253,12 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
         let extras = extras(conn, filter, SHOWN)?;
         let message = if question.measure == "size" && extras.count > 0 {
             format!(
-                "Extra copies of identical files{qualifiers} use {} ({} copies of {} files). Cleanup checks every copy byte by byte before anything moves.",
+                "Extra copies of identical files{qualifiers} use {} ({} {} of {} {}). Cleanup checks every copy byte by byte before anything moves.",
                 bytes_label(extras.bytes),
                 count_label(extras.count),
-                count_label(extras.groups)
+                if extras.count == 1 { "copy" } else { "copies" },
+                count_label(extras.groups),
+                if extras.groups == 1 { "file" } else { "files" }
             )
         } else {
             duplicates_sentence(&extras, &qualifiers)
@@ -251,7 +267,7 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     }
     let kinds = filter.kinds.clone();
     let (count, bytes) = totals(conn, filter)?;
-    let hits = listed(conn, filter, &question.order, SHOWN)?;
+    let hits = listed(conn, filter, &question.order, SHOWN, count)?;
     if count == 0 {
         return Ok((format!("No {}{qualifiers}.", noun(&kinds, 2)), hits));
     }

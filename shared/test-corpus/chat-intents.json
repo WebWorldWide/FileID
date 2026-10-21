@@ -15,7 +15,7 @@
     {"text": "cancel describing", "intent": {"kind": "stopJob", "job": "describe"}},
     {"text": "stop everything", "intent": {"kind": "stopJob", "job": "all"}},
     {"text": "stop", "intent": null},
-    {"text": "find duplicates", "intent": {"kind": "findDuplicates"}},
+    {"text": "find duplicates", "intent": {"kind": "findDuplicates", "scope": "duplicates"}},
     {"text": "show duplicate photos in Downloads", "intent": {"kind": "findDuplicates", "scope": "duplicate photos in downloads"}},
     {"text": "move the extra copies to the trash", "intent": {"kind": "moveDuplicatesToTrash", "scope": "the extra copies to the trash"}},
     {"text": "delete duplicates", "intent": {"kind": "moveDuplicatesToTrash", "scope": "duplicates"}},

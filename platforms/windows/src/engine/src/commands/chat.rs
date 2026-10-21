@@ -650,6 +650,7 @@ mod tests {
             text: Some("Please find my birthday videos".into()),
             use_model: Some(true),
             model_kind: None,
+            ..Default::default()
         };
         let result = execute(&mut conn, &request).unwrap();
         assert_eq!(result.hits[0].file_id, 1);
@@ -687,6 +688,7 @@ mod tests {
             text: Some("photos of Grandma".into()),
             use_model: Some(false),
             model_kind: None,
+            ..Default::default()
         };
         assert_eq!(
             execute(&mut conn, &request).unwrap().message,
@@ -746,6 +748,7 @@ mod tests {
             text: Some("dogs".into()),
             use_model: Some(true),
             model_kind: None,
+            ..Default::default()
         };
         let cancel = Arc::new(AtomicBool::new(false));
         let claim = Claim::take(&request("send"), &cancel).unwrap();
@@ -803,6 +806,7 @@ mod tests {
                 text: Some(text.into()),
                 use_model: Some(false),
                 model_kind: None,
+                ..Default::default()
             };
             let result = execute(&mut conn, &request).unwrap();
             if text == "only videos" {
@@ -823,6 +827,7 @@ mod tests {
                 text: Some(text),
                 use_model: None,
                 model_kind: None,
+                ..Default::default()
             };
             assert!(execute(&mut conn, &request).is_err());
         }

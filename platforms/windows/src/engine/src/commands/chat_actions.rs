@@ -3,7 +3,7 @@
 //! changes files or the catalog.
 
 use super::catalog_retrieval::{KnownEvents, KnownPeople};
-use super::chat_facts::{self, capitalized, extra_hits, extras, file_name, listed, totals, Filter, SHOWN};
+use super::chat_facts::{self, extra_hits, extras, file_name, listed, totals, Filter, SHOWN};
 use super::chat_intent::{bytes_label, clean, count_label, noun, parse_question, Intent};
 use super::chat_search::SearchPlan;
 use crate::ipc::{CatalogHit, ChatAction, ChatContext, ChatRename, CHAT_ACTION_KINDS, CHAT_JOBS, CHAT_PAGES, CHAT_SETTINGS};
@@ -18,7 +18,7 @@ const DESCRIBE_BATCH: usize = 100;
 pub(crate) fn requires_confirmation(kind: &str) -> bool {
     matches!(
         kind,
-        "moveDuplicatesToTrash" | "applyFolderLayout" | "undoLastMove" | "renameToSuggested" | "namePerson" | "mergePeople" | "exportFiles"
+        "moveDuplicatesToTrash" | "applyFolderLayout" | "undoLastMove" | "renameToSuggested" | "namePerson" | "mergePeople"
     )
 }
 
@@ -85,14 +85,12 @@ fn folder_path(conn: &Connection, reference: &str, context: &Context<'_>) -> Res
                 root
             } else {
                 let pattern = format!("%/{}/%", chat_facts::like_escape(name));
-                let path: Option<String> = conn
-                    .query_row("SELECT path_text FROM files WHERE path_text LIKE ?1 ESCAPE '\\' ORDER BY length(path_text),id LIMIT 1", [pattern], |row| row.get(0))
-                    .optional()?;
-                path.and_then(|path| {
-                    let lower = path.to_lowercase();
-                    let marker = format!("/{}/", name.to_lowercase());
-                    lower.find(&marker).map(|at| path[..at + marker.len() - 1].to_owned())
-                })
+                conn.query_row(
+                    "SELECT substr(path_text,1,instr(lower(path_text),lower(?2))+length(?2)-2) FROM files WHERE path_text LIKE ?1 ESCAPE '\\' ORDER BY length(path_text),id LIMIT 1",
+                    params![pattern, format!("/{name}/")],
+                    |row| row.get(0),
+                )
+                .optional()?
             }
         }
         path => {
@@ -145,8 +143,6 @@ fn plural(count: i64, one: &str, many: &str) -> String {
 /// The files an action's scope words describe.
 struct Scope {
     filter: Filter,
-    query: String,
-    explicit: bool,
     everything: bool,
 }
 
@@ -196,7 +192,7 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
         filter.ids = Some(ids);
     }
     let everything = query.is_empty() && filter.kinds.is_empty() && filter.person_ids.is_empty() && filter.date.is_none() && filter.folder.is_none() && filter.ids.is_none();
-    Ok(Ok(Scope { filter, query, explicit, everything }))
+    Ok(Ok(Scope { filter, everything }))
 }
 
 fn examples(hits: &[CatalogHit]) -> Option<Vec<String>> {
@@ -323,7 +319,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 Ok(scope) => scope,
                 Err(message) => return Ok(Resolution::say(message)),
             };
-            let filter = Filter { ids: if scope.explicit { scope.filter.ids.clone() } else { None }, ..scope.filter.clone() };
+            let filter = scope.filter.clone();
             let qualifiers = filter.qualifiers();
             let found = extras(conn, &filter, if intent.kind == "findDuplicates" { SHOWN } else { MAX_IDS })?;
             if found.count == 0 {
@@ -377,7 +373,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 if count == 0 {
                     return Ok(Resolution::say("Every file is already described."));
                 }
-                let hits = listed(conn, &filter, "newest", SHOWN)?;
+                let hits = listed(conn, &filter, "newest", SHOWN, count)?;
                 let mut proposed = action(
                     context,
                     "describeFiles",
@@ -397,7 +393,7 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 return Ok(Resolution::say(format!("No {}{qualifiers} to {}.", noun(&filter.kinds, 2), if describe { "describe" } else { "export" })));
             }
             let limit = if describe { DESCRIBE_BATCH } else { MAX_IDS };
-            let hits = listed(conn, &filter, "newest", limit)?;
+            let hits = listed(conn, &filter, "newest", limit, count)?;
             let taken = hits.len() as i64;
             let things = format!("{} {}", count_label(taken), noun(&filter.kinds, taken));
             let mut proposed = if describe {
@@ -724,7 +720,7 @@ mod tests {
     #[test]
     fn mutating_kinds_always_require_confirmation() {
         for kind in CHAT_ACTION_KINDS {
-            let mutating = ["moveDuplicatesToTrash", "applyFolderLayout", "undoLastMove", "renameToSuggested", "namePerson", "mergePeople", "exportFiles"].contains(&kind);
+            let mutating = ["moveDuplicatesToTrash", "applyFolderLayout", "undoLastMove", "renameToSuggested", "namePerson", "mergePeople"].contains(&kind);
             assert_eq!(requires_confirmation(kind), mutating, "{kind}");
         }
         let mut proposal = ChatAction {
@@ -786,7 +782,7 @@ mod tests {
             request_id: "r".into(),
             conversation_id: "c".into(),
             action: "send".into(),
-            text: Some("what does the contract say?".into()),
+            text: Some("show the contract".into()),
             use_model: Some(false),
             ..Default::default()
         };
