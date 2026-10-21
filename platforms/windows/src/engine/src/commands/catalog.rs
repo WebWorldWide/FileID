@@ -32,10 +32,12 @@ pub async fn handle(
     let response = match result {
         Ok(Ok((response, queued))) => {
             if let Some(database) = scheduler {
-                let resumed = action == "resumeJob"
-                    && job_id
-                        .as_deref()
-                        .is_some_and(|id| super::timeline::is_timeline_job(&database.lock(), id).unwrap_or(false));
+                let resumed = match (action == "resumeJob", job_id.clone()) {
+                    (true, Some(id)) => super::timeline::with_db(&database, move |conn| super::timeline::is_timeline_job(conn, &id))
+                        .await
+                        .unwrap_or(false),
+                    _ => false,
+                };
                 if let Some(id) = queued.or(if resumed { job_id.clone() } else { None }) {
                     super::timeline::schedule(id, sink.clone(), database);
                 }
