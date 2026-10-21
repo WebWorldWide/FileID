@@ -1008,7 +1008,7 @@ private struct FilePreviewSheet: View {
                             MetaText("Written by \(kind.displayName)", size: 11)
                         }
                         if file.vlmInheritedFrom != nil {
-                            MetaText("Shared with a similar shot", size: 11)
+                            MetaText("Same as a similar photo", size: 11)
                         }
                         if let proposed = file.vlmProposedName, !proposed.isEmpty {
                             HStack(spacing: 10) {
@@ -1489,7 +1489,7 @@ private struct LibrarySelectedPane: View {
                     Text(caption).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
                         .fixedSize(horizontal: false, vertical: true)
                     if row.vlmInheritedFrom != nil {
-                        MetaText("Shared with a similar shot", size: 11)
+                        MetaText("Same as a similar photo", size: 11)
                     }
                 }
 
