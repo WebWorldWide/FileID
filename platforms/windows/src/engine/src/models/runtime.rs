@@ -15,7 +15,6 @@
 
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
 pub const INSTALL_COMMAND: &str = "fileid scan-models download";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

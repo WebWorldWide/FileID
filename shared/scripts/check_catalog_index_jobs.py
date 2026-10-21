@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import time
 
-from check_catalog_roundtrip import Engine
+from conformance import Engine
 
 
 def verify(binary: Path) -> None:

@@ -199,7 +199,7 @@ pub(crate) fn enqueue(
         bail!("Timeline analysis needs the vetted local FFmpeg runtime, which is not installed with this build.")
     }
     let Some(model) = model else {
-        bail!("Install a visual model in Deep Analyze before starting timeline analysis. No model will be downloaded automatically.")
+        bail!("Install a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.")
     };
     let mut unique = ids.to_vec();
     unique.sort_unstable();

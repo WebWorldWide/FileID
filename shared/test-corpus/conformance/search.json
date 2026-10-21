@@ -1,0 +1,50 @@
+[
+  {
+    "name": "catalog-search-plural-words-reach-singular-tags",
+    "description": "Keyword search matches scan tags at word starts, folds plural query words onto singular tags, keeps only files matching the most words, ignores rejected tags and orders newest id first.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/IMG_0001.jpg',1,10,0,'image','jpg'),(2,'{root}/IMG_0002.jpg',2,10,0,'image','jpg'),(3,'{root}/IMG_0003.jpg',3,10,0,'image','jpg'),(4,'{root}/clip.mov',4,10,0,'video','mov'),(5,'{root}/notes.txt',5,10,0,'doc','txt')",
+      "INSERT INTO tags(file_id,tag,source,score) VALUES(1,'dog','auto',0.9),(1,'grass','auto',0.8),(2,'cat','auto',0.9),(2,'grassland','auto',0.7),(2,'dog_park','rejected',0.9),(3,'dog','auto',0.9),(4,'dog','auto',0.9),(4,'grass','auto',0.9),(5,'puppy','auto',0.5)"
+    ],
+    "steps": [
+      {"label": "dogs on grass", "catalog": {"action": "search", "query": "dogs on grass"}, "expect": {"status": "ok", "hits": [{"fileID": 4, "path": "{root}/clip.mov", "kind": "video", "text": "Tags: dog, grass"}, {"fileID": 1, "path": "{root}/IMG_0001.jpg", "kind": "image", "text": "Tags: dog, grass"}]}},
+      {"label": "dogs", "catalog": {"action": "search", "query": "dogs"}, "expect": {"hits": [{"fileID": 4}, {"fileID": 3}, {"fileID": 1}]}},
+      {"label": "puppies", "catalog": {"action": "search", "query": "puppies"}, "expect": {"hits": [{"fileID": 5, "kind": "doc", "text": "Tags: puppy"}]}},
+      {"label": "word-start prefix", "catalog": {"action": "search", "query": "grass"}, "expect": {"hits": [{"fileID": 4}, {"fileID": 2, "text": "Tags: cat, grassland"}, {"fileID": 1}]}},
+      {"label": "rejected tag ignored", "catalog": {"action": "search", "query": "park"}, "expect": {"status": "ok", "hits": []}}
+    ]
+  },
+  {
+    "name": "chat-search-wording-and-follow-ups",
+    "description": "Chat without a model reports “Found N matches for …” with media filters, carries the subject into follow-ups and words the empty result the same way.",
+    "extends": "catalog-search-plural-words-reach-singular-tags",
+    "steps": [
+      {"label": "dogs on grass", "chat": {"action": "send", "text": "dogs on grass", "useModel": false}, "expect": {"status": "completed", "message": "Found 2 matches for “dogs on grass”.", "hits": {"$tol": "set", "value": [{"fileID": 4}, {"fileID": 1}]}}},
+      {"label": "follow-up filter", "chat": {"action": "send", "text": "only videos", "useModel": false}, "expect": {"message": "Found 1 match for “dogs on grass” (videos).", "hits": [{"fileID": 4, "kind": "video"}]}},
+      {"label": "history", "chat": {"action": "history"}, "expect": {"status": "completed", "messages": {"$tol": "count", "value": 4}}},
+      {"label": "plural photos", "chat": {"action": "send", "text": "photos of dogs", "useModel": false, "conversationID": "fresh-1"}, "expect": {"message": "Found 2 matches for “dogs” (photos).", "hits": {"$tol": "set", "value": [{"fileID": 3}, {"fileID": 1}]}}},
+      {"label": "no match", "chat": {"action": "send", "text": "beach", "useModel": false, "conversationID": "fresh-2"}, "expect": {"message": "No matches for “beach”. Try names or a few descriptive words; files that haven't been analyzed may still contain it.", "hits": []}},
+      {"label": "clear", "chat": {"action": "clear"}, "expect": {"status": "completed", "messages": []}},
+      {"label": "conversation deleted", "db": "SELECT COUNT(*) FROM catalog_chat WHERE conversation_id='{conversation}'", "expect": [[0]]}
+    ]
+  },
+  {
+    "name": "chat-search-nothing-to-search",
+    "description": "A message with no subject or media type runs no search and says what to add.",
+    "steps": [
+      {"label": "empty plan", "chat": {"action": "send", "text": "please", "useModel": false}, "expect": {"status": "completed", "hits": [], "message": "Add a subject, event, time, or media type such as videos or photos. No search was run."}}
+    ]
+  },
+  {
+    "name": "chat-search-names-the-person",
+    "description": "A chat question naming a known person filters by that person's faces and says so in the reply.",
+    "sql": [
+      "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'{root}/IMG_0001.jpg',1,10,0,'image','jpg'),(2,'{root}/IMG_0002.jpg',2,10,0,'image','jpg')",
+      "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(7,'Grandma','Grandma',0,1)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,7,X'00','[0,0,1,1]')"
+    ],
+    "steps": [
+      {"label": "person photos", "chat": {"action": "send", "text": "photos of Grandma", "useModel": false}, "expect": {"status": "completed", "hits": [{"fileID": 1}], "message": "Found 1 match in the library (photos) (people: Grandma)."}}
+    ]
+  }
+]

@@ -122,9 +122,9 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
         conn.execute("INSERT INTO catalog_jobs(id,kind,file_ids_json,recipe_json,state,progress,error,created_at,updated_at) VALUES('fixture-job','timelineSample','[1]','{}','completed',1,'Synthetic completed record; no timeline inference ran',0,0)",[]).unwrap();
     }
     let engine = Rc::new(RefCell::new(EngineClient::new()));
-    let catalog = workbenches::catalog(engine.clone());
+    let catalog = super::moments::catalog(engine.clone());
     let (tools, tools_ui) = super::file_tools::build_tools(engine.clone());
-    let chat = workbenches::chat(engine.clone());
+    let chat = super::chat::chat(engine.clone());
     let deep = deep_analyze::build_deep_analyze_tab(engine.clone());
     let restructure = restructure::build_restructure_tab(engine.clone());
     let stack = gtk::Stack::new();

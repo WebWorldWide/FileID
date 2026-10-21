@@ -88,7 +88,7 @@ label, button, entry, headerbar, .nav-row, row, popover, gridview, listview {
 .meta { font-size: 11.5px; color: @fileid_text3; }
 /* Corner scale xs 4 / s 6 / m 8 / l 10: controls s, cards and rows m, panels and floating cards l. */
 button, entry, .pill, .chip { border-radius: 6px; }
-.card, .glass-card, .padded-card, .fileid-glass, popover > contents { border-radius: 10px; }
+.card, popover > contents { border-radius: 10px; }
 check { border-radius: 4px; }
 radio, switch, switch > slider, progressbar > trough, progressbar > trough > progress { border-radius: 99px; }
 
@@ -105,24 +105,17 @@ window { background-color: @fileid_base; }
    the drifting gold/orange blobs actually read (macOS frosts, doesn't black-out). */
 .fileid-scrim { background-color: alpha(#0A0A0C, 0.18); }
 
-/* ── Glass card: dark frosted fill + hairline highlight + soft depth ──────── */
-/* GTK has no backdrop blur; approximate the Windows AcrylicBrush (black @0.5 +
-   white @0.06 + 1px white @0.08) with a dark translucent fill + highlight. */
-.glass-card, .padded-card {
+/* ── Panel: frosted fill (no backdrop blur in GTK), radius 10, strong hairline ── */
+.glass-card, .fileid-glass, .v3-panel {
     background-color: alpha(#18181B, 0.78);
-    border: 1px solid alpha(#FFFFFF, 0.11);
+    border: 1px solid alpha(#FFFFFF, 0.112);
     border-radius: 10px;
-    padding: 14px;
     box-shadow: none;
 }
-.fileid-glass {
-    background-color: alpha(#18181B, 0.78);
-    border: 1px solid alpha(#FFFFFF, 0.11);
-    border-radius: 10px;
-}
+.glass-card { padding: 14px; }
 
 /* ── Title bar (Prototype v3): 48 px over bg1, bottom hairline ───────────── */
-headerbar, .fileid-headerbar {
+headerbar {
     background: transparent;
     box-shadow: none;
     border: none;
@@ -161,14 +154,6 @@ headerbar windowcontrols button:hover { background-color: alpha(#FFFFFF, 0.10); 
 .nav-row image { color: @fileid_text2; }
 .nav-row.active image { color: @fileid_gold; }
 .nav-badge { font-size: 11.5px; font-weight: 500; font-feature-settings: "tnum"; }
-
-/* Settings / page section headings — readable uppercase divider. */
-.settings-heading {
-    color: alpha(#FFFFFF, 0.62);
-    font-size: 10pt;
-    font-weight: 800;
-    letter-spacing: 1px;
-}
 
 /* ── Buttons: brand the stock greys ──────────────────────────────────────── */
 button {
@@ -292,8 +277,6 @@ spinner { color: @fileid_gold; }
 /* ── Accents ─────────────────────────────────────────────────────────────── */
 .gold-accent     { color: @fileid_gold; }
 .lavender-accent { color: @fileid_lavender; }
-.cyan-accent     { color: @fileid_cyan; }
-.pink-accent     { color: @fileid_pink; }
 
 /* ── File tile ───────────────────────────────────────────────────────────── */
 .file-tile {
@@ -324,11 +307,6 @@ spinner { color: @fileid_gold; }
     font-size: 10pt;
     font-weight: 700;
     margin-top: 2px;
-}
-
-.people-flow-banner {
-    padding: 10px 12px;
-    border-color: alpha(@fileid_gold, 0.35);
 }
 
 /* Centered ▶ badge over video tile keyframes. */
@@ -590,7 +568,6 @@ spinbutton.v3-number > text { font-family: "JetBrains Mono", "Roboto Mono", "Dej
 spinbutton.v3-number > button { min-width: 20px; min-height: 26px; padding: 0; border: none; background: transparent; }
 .v3-toggle-row { min-height: 28px; }
 .v3-dashed { padding: 26px; border-radius: 10px; border: 1px dashed alpha(#FFFFFF, 0.16); }
-.v3-panel { background-color: alpha(#18181B, 0.78); border-radius: 10px; border: 1px solid alpha(#FFFFFF, 0.112); }
 .v3-panel-header { padding: 10px 14px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); min-height: 28px; }
 .v3-panel-footer { padding: 8px 14px; background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.08); border-radius: 0 0 10px 10px; }
 .v3-soft-row { border-bottom: 1px solid alpha(#FFFFFF, 0.06); }
@@ -687,6 +664,43 @@ button.v3-staying-header { min-height: 38px; padding: 0 14px; border: none; bord
 button.v3-staying-header:hover { background-color: alpha(#FFFFFF, 0.04); }
 .v3-review-head { padding: 20px 26px 14px 26px; }
 .v3-review-list { padding: 16px 26px; }
+.v3-map-head { font-size: 10px; font-weight: 700; letter-spacing: 0.8px; color: @fileid_text2; }
+button.v3-map-node {
+    padding: 4px 10px; border-radius: 8px; box-shadow: 0 1px 2.5px alpha(#000000, 0.22);
+    background-color: alpha(#18181B, 0.9); border: 1px solid alpha(#FFFFFF, 0.14);
+    transition: border-color 180ms ease-out, background-color 180ms ease-out;
+}
+button.v3-map-node:hover, button.v3-map-node.lit { border-color: alpha(@fileid_gold, 0.95); background-color: alpha(@fileid_gold, 0.10); }
+.v3-map-node-name { font-size: 12px; font-weight: 600; color: @fileid_text1; }
+.v3-map-node-count { font-size: 10px; font-weight: 500; color: @fileid_text3; font-feature-settings: "tnum"; }
+.v3-letter {
+    min-width: 18px; min-height: 18px; border-radius: 99px;
+    font-family: "JetBrains Mono", "Roboto Mono", "DejaVu Sans Mono", monospace; font-size: 11px; font-weight: 600;
+}
+.v3-letter.tone-done { background-color: @fileid_pink; color: #141414; }
+.v3-letter.tone-warning { background-color: @fileid_warning; color: #141414; }
+.v3-letter.tone-gold { background-color: @fileid_gold; color: #141414; }
+.v3-tree-pane { padding: 8px; border-radius: 6px; border: 1px solid alpha(#FFFFFF, 0.14); }
+.v3-title-12 { font-size: 12px; font-weight: 600; color: @fileid_text1; }
+.v3-tree-row, button.v3-tree-row {
+    min-height: 28px; padding: 3px 8px; border-radius: 6px; box-shadow: none;
+    border: 1px solid transparent; transition: background-color 180ms ease-out;
+}
+.v3-tree-row.tone-done { background-color: alpha(@fileid_pink, 0.06); }
+.v3-tree-row.tone-warning { background-color: alpha(@fileid_warning, 0.06); }
+.v3-tree-row.tone-gold { background-color: alpha(@fileid_gold, 0.06); }
+.v3-tree-row.tone-done.lit { background-color: alpha(@fileid_pink, 0.22); border-color: alpha(@fileid_pink, 0.7); }
+.v3-tree-row.tone-warning.lit { background-color: alpha(@fileid_warning, 0.22); border-color: alpha(@fileid_warning, 0.7); }
+.v3-tree-row.tone-gold.lit { background-color: alpha(@fileid_gold, 0.22); border-color: alpha(@fileid_gold, 0.7); }
+.v3-tree-row, button.v3-tree-row { color: @fileid_text1; }
+.v3-rec.lit { background-color: alpha(#FFFFFF, 0.06); box-shadow: inset 3px 0 alpha(@fileid_gold, 0.8); }
+.v3-staying-row.lit { background-color: alpha(@fileid_pink, 0.08); }
+.v3-inspector { background-color: alpha(#0F0F11, 0.86); border-left: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-inspector-header { padding: 12px 16px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-inspector-pad { padding: 16px; }
+.v3-composer-box.inspector { padding: 12px 16px; }
+button.v3-sources-toggle { min-height: 34px; padding: 0 16px; border: none; border-radius: 0; box-shadow: none; background: transparent; }
+button.v3-sources-toggle:hover { background-color: alpha(#FFFFFF, 0.04); }
 .drop-zone {
     margin: 14px;
     border: 2px dashed @fileid_gold;
@@ -737,7 +751,7 @@ const HIGH_CONTRAST_CSS: &str = r#"
 .dim-label, .tile-caption { color: alpha(#FFFFFF, 0.85); }
 .meta, .pop-meta, .scan-sub, .stat-key, .stat-trailing, .tone-muted, .tone-paused, .section-label, .kv-key { color: #D6D9DD; }
 .page-meta, .scan-step, .tone-text2, .nav-row image, .chip { color: #EBEDEF; }
-.glass-card, .padded-card, .fileid-glass, .file-tile { border-color: alpha(#FFFFFF, 0.34); }
+.glass-card, .fileid-glass, .file-tile { border-color: alpha(#FFFFFF, 0.34); }
 .fileid-sidebar { border-right-color: alpha(#FFFFFF, 0.34); }
 .selected-pane { border-left-color: alpha(#FFFFFF, 0.34); }
 headerbar.fileid-titlebar, .page-header { border-bottom-color: alpha(#FFFFFF, 0.34); }

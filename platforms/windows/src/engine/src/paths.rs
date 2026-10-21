@@ -88,8 +88,7 @@ pub fn models_dir() -> Result<PathBuf> {
 /// model-aware code path (and any spawned engine) agrees on it.
 ///
 /// Used by the cross-platform `fileid` CLI (an external lib consumer); the
-/// engine binary itself never calls it — hence `allow(dead_code)`.
-#[allow(dead_code)]
+/// engine binary itself never calls it.
 pub fn engine_models_dir() -> Result<PathBuf> { Ok(root()?.join("Models")) }
 
 /// The engine's runtime-dependency directory: `<root>/runtime`.

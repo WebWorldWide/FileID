@@ -407,7 +407,6 @@ pub mod reveal {
     /// Open the containing folder and select the file. Prefers the file-manager
     /// DBus interface (`org.freedesktop.FileManager1.ShowItems`, which selects
     /// the item); falls back to opening the parent dir with `xdg-open`.
-    #[allow(dead_code)]
     pub fn reveal(path: &Path) -> Result<()> {
         let abs = absolute(path);
         let uri = format!("file://{}", percent_encode_path(&abs));
@@ -459,7 +458,6 @@ pub mod reveal {
 pub mod reveal {
     use anyhow::Result;
     use std::path::Path;
-    #[allow(dead_code)]
     pub fn reveal(_path: &Path) -> Result<()> {
         anyhow::bail!("shell::reveal::reveal not implemented on this platform")
     }
@@ -511,7 +509,6 @@ pub mod tags {
 
     /// Read the file's tag list. Absent attribute (or a filesystem without
     /// `user.*` xattr support) yields an empty list, never an error.
-    #[allow(dead_code)]
     pub fn read_tags(path: &Path) -> Result<Vec<String>> {
         let c = cpath(path)?;
         if !xattr_present(&c, TAGS_ATTR) {
@@ -628,26 +625,15 @@ pub mod tags {
 
 /// Image-rs thumbnails for the Linux app; the WinUI app renders its own.
 #[cfg(not(windows))]
-#[allow(dead_code)] // GTK app consumer
 pub mod thumbnail {
     use anyhow::{Context, Result};
     use std::path::Path;
-
-    pub const THUMB_DIM: i32 = 512;
 
     #[derive(Debug, Clone)]
     pub struct Thumbnail {
         pub width: u32,
         pub height: u32,
         pub rgba: Vec<u8>,
-    }
-
-    pub fn render(path: &Path) -> Result<Thumbnail> {
-        render_at(path, THUMB_DIM)
-    }
-
-    pub fn render_at(path: &Path, dim: i32) -> Result<Thumbnail> {
-        render_oriented(path, dim)
     }
 
     /// Upright thumbnail, like macOS ImageIO with the EXIF transform applied:
@@ -786,7 +772,7 @@ pub mod thumbnail {
             let path = fixture.join("generated.png");
             image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 40, 60, 255]))
                 .save(&path).unwrap();
-            let thumb = render_at(&path, 8).unwrap();
+            let thumb = render_oriented(&path, 8).unwrap();
             assert_eq!((thumb.width, thumb.height), (8, 4));
             let rotated = fixture.join("portrait.jpg");
             std::fs::write(&rotated, jpeg_with_orientation(40, 20, Some(6))).unwrap();
@@ -798,7 +784,6 @@ pub mod thumbnail {
             assert_eq!((preview.width, preview.height), (6, 8), "RAW preview with its container orientation");
             assert_eq!(thumb.rgba.len(), 8 * 4 * 4);
             assert_eq!(&thumb.rgba[0..4], &[200, 40, 60, 255]);
-            assert!(render_at(&path, 0).is_err());
             assert!(render_oriented(&path, 0).is_err());
             std::fs::remove_dir_all(fixture).unwrap();
         }
@@ -843,7 +828,6 @@ pub mod trash {
     /// Batch wrapper. Trashes each path; returns one bool per input, true =
     /// success. Order is preserved. Filesystem moves are cheap, so this runs
     /// sequentially (no worker pool, unlike the COM-apartment Windows path).
-    #[allow(dead_code)]
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         let trash = match home_trash_dir() {
             Ok(t) => t,
@@ -854,7 +838,6 @@ pub mod trash {
 
     /// Move a single file to the home trash. Idempotent: a missing source is
     /// treated as success ("already not on disk").
-    #[allow(dead_code)]
     pub fn trash_path(path: &Path) -> Result<()> {
         let trash = home_trash_dir()?;
         trash_into(path, &trash)
@@ -1900,7 +1883,6 @@ pub mod trash {
     use std::path::{Path, PathBuf};
     /// Fallback stub: returns all-false so the caller logs failure cleanly
     /// rather than silently claiming a successful trash.
-    #[allow(dead_code)]
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         vec![false; paths.len()]
     }
@@ -1986,7 +1968,6 @@ pub mod video {
     pub(crate) const VIDEO_DECODE_RESERVATION_BYTES: usize = 64 * 1024 * 1024;
 
     #[derive(Debug, Clone)]
-    #[allow(dead_code)]
     pub struct VideoFrame {
         pub width: u32,
         pub height: u32,
@@ -2139,7 +2120,6 @@ pub mod video {
     use std::path::Path;
     pub(crate) const VIDEO_DECODE_RESERVATION_BYTES: usize = 64 * 1024 * 1024;
     #[derive(Debug, Clone)]
-    #[allow(dead_code)] // fields are read only on Windows
     pub struct VideoFrame {
         pub width: u32,
         pub height: u32,
@@ -2348,7 +2328,6 @@ pub mod heic {
 pub mod heic {
     use anyhow::Result;
     use std::path::Path;
-    #[allow(dead_code)]
     pub fn decode(_path: &Path) -> Result<(Vec<u8>, u32, u32)> {
         anyhow::bail!("shell::heic::decode not implemented on this platform")
     }

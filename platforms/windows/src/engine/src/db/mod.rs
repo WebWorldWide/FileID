@@ -7,7 +7,33 @@
 //! reads use ephemeral read-only connections opened on demand.
 
 pub mod migrations;
+#[path = "../read/mod.rs"]
+pub mod read;
 pub mod zero_byte;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use rusqlite::{params, Connection};
+
+    /// A migrated in-memory catalog.
+    pub(crate) fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        super::migrations::apply(&conn).unwrap();
+        conn
+    }
+
+    /// A `files` row with `path_hash = id`, 100 bytes, modified at 10,
+    /// scanned at 0 and the extension taken from `path`.
+    pub(crate) fn insert_file(conn: &Connection, id: i64, path: &str, kind: &str) {
+        let extension = path.rsplit_once('.').map_or("", |(_, ext)| ext).to_ascii_lowercase();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension) \
+             VALUES(?1,?2,?1,100,10,0,?3,?4)",
+            params![id, path, kind, extension],
+        )
+        .unwrap();
+    }
+}
 
 use std::path::Path;
 
@@ -374,8 +400,7 @@ mod tests {
 
     #[test]
     fn wipe_all_empties_every_fts_kind() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute_batch(
             "INSERT INTO files (path_text, path_hash, size_bytes, scanned_at, kind, extension) \
              VALUES ('/lib/a.txt', 1, 1, 0, 'document', 'txt'); \

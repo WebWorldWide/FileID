@@ -259,6 +259,29 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
+    private int? _totalCount;
+
+    /// <summary>Library files matching the kind filter, for "X of Y shown".
+    /// Null while a search is active (the view shows the hit count instead).</summary>
+    public int? TotalCount
+    {
+        get => _totalCount;
+        private set
+        {
+            if (_totalCount == value) return;
+            _totalCount = value;
+            OnPropertyChanged();
+        }
+    }
+
+    internal static int CountForKind(IReadOnlyDictionary<string, int> counts, string? kind)
+    {
+        if (kind is not null) return counts.TryGetValue(kind, out var n) ? n : 0;
+        int total = 0;
+        foreach (var n in counts.Values) total += n;
+        return total;
+    }
+
     public bool IsLoading
     {
         get => _isLoading;
@@ -300,6 +323,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             });
 
             IReadOnlyList<FileRow> rows;
+            int? total = null;
             bool pageable = false;
             if (string.IsNullOrWhiteSpace(_query))
             {
@@ -313,7 +337,15 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 // Keep every page already scrolled into, so a live-scan refresh
                 // doesn't snap the grid back to the first page.
                 int want = Math.Max(PageSize, Volatile.Read(ref _loadedRows));
-                rows = await Task.Run(() => _store.RecentAsync(want, token, _kindFilter == "all" ? null : _kindFilter), token).ConfigureAwait(false);
+                string? kind = _kindFilter == "all" ? null : _kindFilter;
+                var listing = await Task.Run(async () =>
+                {
+                    var recent = await _store.RecentAsync(want, token, kind).ConfigureAwait(false);
+                    var counts = await _store.KindCountsAsync(token).ConfigureAwait(false);
+                    return (Rows: recent, Total: CountForKind(counts, kind));
+                }, token).ConfigureAwait(false);
+                rows = listing.Rows;
+                total = listing.Total;
                 pageable = rows.Count == want;
             }
             else
@@ -333,7 +365,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
 
             int loaded = rows.Count;
-            ApplyOnUi(filtered, myGen, pageable, loaded);
+            ApplyOnUi(filtered, myGen, pageable, loaded, total);
         }
         catch (OperationCanceledException)
         {
@@ -448,7 +480,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0)
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -457,6 +489,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             if (Interlocked.Read(ref _refreshGen) != gen) return;
             ReplaceItems(next);
+            TotalCount = total;
             _hasMore = hasMore;
             Volatile.Write(ref _loadedRows, hasMore || loadedRows > 0 ? loadedRows : 0);
         }
@@ -489,7 +522,10 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             OnUi(() =>
             {
                 if (Interlocked.Read(ref _refreshGen) != gen || Volatile.Read(ref _loadedRows) != offset) return;
-                Items.AppendRange(page);
+                // Rows the engine inserted since the last refresh shift the
+                // OFFSET window, so the page can repeat tiles already shown.
+                // _loadedRows still advances by the raw DB count.
+                Items.AppendRange(WithoutKnownIds(Items, page));
                 Volatile.Write(ref _loadedRows, offset + rows.Count);
                 _hasMore = rows.Count == PageSize;
             });
@@ -536,6 +572,22 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
         MergeById(Items, next);
+    }
+
+    /// <summary>The tiles of <paramref name="page"/> whose Id is not already in
+    /// <paramref name="items"/> (or earlier in the page), in page order.</summary>
+    internal static List<FileTile> WithoutKnownIds(
+        IReadOnlyCollection<FileTile> items,
+        IReadOnlyList<FileTile> page)
+    {
+        var known = new HashSet<long>(items.Count + page.Count);
+        foreach (var t in items) known.Add(t.Id);
+        var fresh = new List<FileTile>(page.Count);
+        foreach (var t in page)
+        {
+            if (known.Add(t.Id)) fresh.Add(t);
+        }
+        return fresh;
     }
 
     /// <summary>True when no Id in <paramref name="next"/> is already in
@@ -611,6 +663,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             int cur = IndexOfInstance(items, want, j);
             if (cur >= 0) items.RemoveAt(cur);
             items.Insert(j, want);
+        }
+
+        // 3) Anything left past the desired sequence is a stale duplicate
+        //    instance of an Id already placed above.
+        for (int i = items.Count - 1; i >= desired.Count; i--)
+        {
+            items.RemoveAt(i);
         }
     }
 
@@ -998,11 +1057,5 @@ internal sealed class FileTile : INotifyPropertyChanged
         };
     }
 
-    private static string FormatSize(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
-        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
-    }
+    private static string FormatSize(long bytes) => FileID.Services.ByteFormat.File(bytes);
 }

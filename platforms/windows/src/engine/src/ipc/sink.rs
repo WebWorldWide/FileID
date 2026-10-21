@@ -9,7 +9,7 @@
 use std::io::Write;
 use tokio::sync::mpsc;
 
-use super::{EngineError, EventPayload, IpcEvent, Wrap};
+use super::{EngineError, IpcEvent};
 
 // 16384 is comfortable for the worst burst we've measured: Deep Analyze
 // emits ~50 token events/sec/file and a batch of 100 files can transiently
@@ -151,16 +151,14 @@ fn write_line<W: Write>(w: &mut W, buf: &mut Vec<u8>, event: &IpcEvent) -> bool 
 /// Emit the structured replacement for an over-cap frame. Tiny and fixed-size,
 /// so it can never itself exceed the cap.
 fn write_frame_too_large<W: Write>(w: &mut W, frame_bytes: usize) -> bool {
-    let event = IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "ipc_frame_too_large".into(),
-        message: format!(
+    let event = EngineError::event(
+        "ipc_frame_too_large",
+        format!(
             "The engine produced a response too large to send ({frame_bytes} bytes, cap {MAX_FRAME_BYTES}). \
              It was dropped to keep the pipe in sync. If this was a Restructure plan on a very large \
              library, try restructuring a subfolder."
         ),
-        path: None,
-        model_kind: None,
-    })));
+    );
     match serde_json::to_vec(&event) {
         Ok(bytes) => write_raw_line(w, &bytes),
         Err(err) => {
@@ -184,7 +182,7 @@ fn write_raw_line<W: Write>(w: &mut W, bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::{EngineInfo, ScanPhase};
+    use crate::ipc::{EngineInfo, EventPayload, ScanPhase, Wrap};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn sink_writes_one_line_per_event() {

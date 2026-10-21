@@ -45,18 +45,24 @@ struct Sidebar: View {
 
             Group {
                 if let url = pickedURL {
-                    PipelineBlock(engine: engine, store: store, pickedURL: url)
+                    PipelineBlock(engine: engine, store: store, pickedURL: url, openPage: { activeTab = $0 })
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Pick a folder to start").font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1)
-                        Button { pickFolder() } label: { Label("Pick a folder…", systemImage: "folder.badge.plus") }
-                            .buttonStyle(DSPrimaryButtonStyle(height: 30))
-                            .keyboardShortcut("o", modifiers: .command)
-                        MetaText("Or drop a folder on the window.")
+                        Text("Start with a folder").font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1)
+                        if store.totalFiles == 0 {
+                            Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
+                                .buttonStyle(DSSecondaryButtonStyle(height: 30))
+                        } else {
+                            Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
+                                .buttonStyle(DSPrimaryButtonStyle(height: 30))
+                                .keyboardShortcut("o", modifiers: .command)
+                        }
+                        MetaText("Or drag a folder onto this window.")
                     }
                 }
             }
             .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous).stroke(Theme.hairline, lineWidth: 1))
             .padding(10)
@@ -93,7 +99,7 @@ struct Sidebar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("\(area.rawValue) pages (\(area.shortcutHint))")
+                .help("\(area.rawValue): \(area.tabs.map(\.title).joined(separator: ", ")) (\(area.shortcutHint))")
                 .accessibilityLabel("\(area.rawValue) pages")
                 .accessibilityAddTraits(on ? [.isSelected, .isButton] : [.isButton])
             }
@@ -134,15 +140,14 @@ struct Sidebar: View {
             let running = engine.catalogJobs.filter { $0.state == "running" }.count
             return running > 0 ? ("\(running)", Theme.ai) : nil
         case .restructure:
-            return engine.restructurePlan != nil ? ("Plan", Theme.gold) : nil
+            return engine.restructurePlan != nil ? ("Ready", Theme.gold) : nil
         default:
             return nil
         }
     }
 
     private var isFaceModelInstalled: Bool {
-        if case .installed = ArcFaceModelInstaller.shared.status[.sface] ?? .unknown { return true }
-        return false
+        ModelInstaller.face.status.isInstalled
     }
 
     private func compact(_ n: Int) -> String {
@@ -158,7 +163,7 @@ struct Sidebar: View {
                     .font(.system(size: 13, weight: on ? .semibold : .regular))
                     .foregroundStyle(on ? Theme.gold : Theme.text2)
                     .frame(width: 18)
-                Text(tab.rawValue)
+                Text(tab.title)
                     .font(Theme.Font.body(13.5, on ? .semibold : .regular))
                     .foregroundStyle(on ? Theme.gold : Theme.text1)
                     .lineLimit(1)
@@ -174,8 +179,9 @@ struct Sidebar: View {
         }
         .buttonStyle(.dsRow)
         .padding(.horizontal, 8)
-        .help(tab.shortcutIndex.map { "\(tab.rawValue) (⌘\($0))" } ?? tab.rawValue)
-        .accessibilityLabel("\(tab.rawValue) page")
+        .help(tab.shortcutIndex.map { "\(tab.summary) (⌘\($0))" } ?? tab.summary)
+        .accessibilityLabel("\(tab.title) page")
+        .accessibilityHint(tab.summary)
         .accessibilityAddTraits(on ? [.isSelected, .isButton] : [.isButton])
         .animation(Theme.quick, value: on)
     }

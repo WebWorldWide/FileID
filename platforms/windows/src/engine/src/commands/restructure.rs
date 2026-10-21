@@ -17,6 +17,11 @@ use crate::ipc::{
     RestructurePlan, Wrap,
 };
 use crate::pipeline::discovery::FileKind;
+use crate::db::read::restructure::{
+    plan_root_bounds, plan_row_to_file, PLAN_FILES_PAGE_SQL, PLAN_FILES_SQL,
+};
+#[cfg(test)]
+use crate::db::read::restructure::unambiguous_person_name;
 use crate::pipeline::restructure::{self, classify, FileForClassify, FolderClassification};
 use crate::pipeline::restructure_apply::RestructureApply;
 use crate::pipeline::restructure_feedback;
@@ -511,65 +516,6 @@ fn roots_equal(left: &str, right: &str) -> bool {
     }
 }
 
-fn single_person_name(names: Option<&str>) -> Option<String> {
-    let mut names = names
-        .into_iter()
-        .flat_map(|names| names.split('\x1F'))
-        .map(str::trim)
-        .filter(|name| !name.is_empty());
-    let name = names.next()?.to_string();
-    names.next().is_none().then_some(name)
-}
-
-fn unambiguous_person_name(
-    names: Option<&str>,
-    face_count: i64,
-    named_face_count: i64,
-    named_person_count: i64,
-) -> Option<String> {
-    (face_count > 0 && face_count == named_face_count && named_person_count == 1)
-        .then(|| single_person_name(names))
-        .flatten()
-}
-
-fn plan_row_to_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileForClassify> {
-    let kind_str: String = row.get(2)?;
-    let kind = match kind_str.as_str() {
-        "image" => FileKind::Image,
-        "video" => FileKind::Video,
-        "pdf" => FileKind::Pdf,
-        "doc" => FileKind::Doc,
-        "audio" => FileKind::Audio,
-        "model" => FileKind::Model,
-        _ => FileKind::Other,
-    };
-    let names: Option<String> = row.get(8)?;
-    let person_name = unambiguous_person_name(
-        names.as_deref(),
-        row.get(9)?,
-        row.get(10)?,
-        row.get(11)?,
-    );
-    Ok(FileForClassify {
-        file_id: row.get(0)?,
-        source: PathBuf::from(row.get::<_, String>(1)?),
-        kind,
-        modified_unix: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-        created_unix: row.get(4)?,
-        person_name,
-        location_lat: row.get(5)?,
-        location_lon: row.get(6)?,
-        has_text: row.get::<_, Option<i64>>(7)?.unwrap_or(0) != 0,
-        vlm_proposed: row.get(12)?,
-        identity: Some(restructure::PlannedIdentity {
-            content_hash: row.get::<_, Option<Vec<u8>>>(13)?.map(hex::encode),
-            size_bytes: row.get::<_, Option<u64>>(14)?.unwrap_or(0),
-            file_ref: row.get::<_, Option<u64>>(15)?,
-            modified_at: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-        }),
-    })
-}
-
 fn folder_tier(
     folder: &str,
     library_root: &str,
@@ -913,89 +859,6 @@ fn plan_large_library_in_with_cancel(
     result
 }
 
-/// Files + per-file person names for restructure planning. Person names come
-/// from a deduped, ordered correlated subquery — NOT
-/// `GROUP_CONCAT(DISTINCT p.name, char(31))`, which SQLite rejects at run with
-/// "DISTINCT aggregates must have exactly one argument". `names` (column 8) is a
-/// char(31)-separated list; only an unambiguous single-person result enables
-/// the People rule so group photos are not auto-filed under an arbitrary name.
-const PLAN_FILES_SQL: &str = "SELECT
-   f.id, f.path_text, f.kind, f.modified_at, f.created_at,
-   f.location_lat, f.location_lon, f.has_text,
-   (SELECT GROUP_CONCAT(name, char(31))
-      FROM (SELECT DISTINCT p.name
-              FROM persons p
-              JOIN face_prints fp ON fp.person_id = p.id
-             WHERE fp.file_id = f.id
-               AND p.name IS NOT NULL AND TRIM(p.name) <> ''
-             ORDER BY p.name)) AS names,
-   (SELECT COUNT(*) FROM face_prints fp
-     WHERE fp.file_id = f.id AND COALESCE(fp.excluded, 0) = 0) AS face_count,
-   (SELECT COUNT(*) FROM face_prints fp
-      JOIN persons p ON p.id = fp.person_id
-     WHERE fp.file_id = f.id
-       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_face_count,
-   (SELECT COUNT(DISTINCT fp.person_id) FROM face_prints fp
-      JOIN persons p ON p.id = fp.person_id
-     WHERE fp.file_id = f.id
-       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_person_count,
-   f.vlm_proposed_name, f.content_hash, f.size_bytes, f.file_ref
- FROM files f
- WHERE f.failed = 0
-   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
-        OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))
- ORDER BY f.id";
-
-const PLAN_FILES_PAGE_SQL: &str = "SELECT
-   f.id, f.path_text, f.kind, f.modified_at, f.created_at,
-   f.location_lat, f.location_lon, f.has_text,
-   (SELECT GROUP_CONCAT(name, char(31))
-      FROM (SELECT DISTINCT p.name
-              FROM persons p
-              JOIN face_prints fp ON fp.person_id = p.id
-             WHERE fp.file_id = f.id
-               AND p.name IS NOT NULL AND TRIM(p.name) <> ''
-             ORDER BY p.name)) AS names,
-   (SELECT COUNT(*) FROM face_prints fp
-     WHERE fp.file_id = f.id AND COALESCE(fp.excluded, 0) = 0) AS face_count,
-   (SELECT COUNT(*) FROM face_prints fp
-      JOIN persons p ON p.id = fp.person_id
-     WHERE fp.file_id = f.id
-       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_face_count,
-   (SELECT COUNT(DISTINCT fp.person_id) FROM face_prints fp
-      JOIN persons p ON p.id = fp.person_id
-     WHERE fp.file_id = f.id
-       AND p.name IS NOT NULL AND TRIM(p.name) <> '') AS named_person_count,
-   f.vlm_proposed_name, f.content_hash, f.size_bytes, f.file_ref
- FROM files f
- WHERE f.failed = 0
-   AND (?1 = '' OR f.path_text COLLATE NOCASE = ?1
-        OR (f.path_text COLLATE NOCASE >= ?2 AND f.path_text COLLATE NOCASE < ?3))
-   AND f.id > ?4
- ORDER BY f.id
- LIMIT ?5";
-
-fn plan_root_bounds(root: &str) -> (String, String, String) {
-    // Pick the separator from the ORIGINAL root, before trimming. A Windows
-    // drive-root like "C:\" trims to "C:" — which contains no backslash — so
-    // deriving the separator from the trimmed string chose '/', built the
-    // prefix "C:/", and produced a range that matched ZERO backslash-stored
-    // files (every real "C:\Users\..." path sorts past the '/'-based upper
-    // bound). Result: an empty/incorrect plan scope for a whole-drive library.
-    let separator = if root.contains('\\') { '\\' } else { '/' };
-    let root = root.trim_end_matches(['/', '\\']).to_string();
-    let prefix = format!("{root}{separator}");
-    let mut bytes = prefix.as_bytes().to_vec();
-    for index in (0..bytes.len()).rev() {
-        if bytes[index] != u8::MAX {
-            bytes[index] += 1;
-            bytes.truncate(index + 1);
-            return (root, prefix, String::from_utf8_lossy(&bytes).into_owned());
-        }
-    }
-    (root, prefix, "\u{10ffff}".into())
-}
-
 /// Max embeddings of each modality retained for one restructure plan. Every
 /// tier is bounded: "high memory" cannot mean unbounded when the library can
 /// contain millions of 2 KiB vectors.
@@ -1100,12 +963,10 @@ async fn stop_cancelled_plan(
     if !cancel.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "plan_restructure_cancelled".into(),
-        message: "Restructure planning was cancelled.".into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "plan_restructure_cancelled",
+        "Restructure planning was cancelled.",
+    ))
     .await;
     true
 }
@@ -1123,12 +984,10 @@ pub(crate) async fn handle_plan_restructure(
     let library_root = payload.library_root.clone();
     let library_root_path = Path::new(&library_root);
     if !library_root_path.is_absolute() || !library_root_path.is_dir() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "plan_restructure_root".into(),
-            message: "Restructure planning requires an existing absolute library root.".into(),
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event(
+            "plan_restructure_root",
+            "Restructure planning requires an existing absolute library root.",
+        ))
         .await;
         return;
     }
@@ -1192,22 +1051,18 @@ pub(crate) async fn handle_plan_restructure(
                     }
                     Ok(Err(err)) => {
                         tracing::warn!(?err, "large restructure planning failed");
-                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                            kind: "plan_restructure_failed".into(),
-                            message: format!("Restructure planning did not complete: {err}"),
-                            path: None,
-                            model_kind: None,
-                        }))))
+                        sink.send(EngineError::event(
+                            "plan_restructure_failed",
+                            format!("Restructure planning did not complete: {err}"),
+                        ))
                         .await;
                     }
                     Err(err) => {
                         tracing::warn!(?err, "large restructure planning task failed");
-                        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                            kind: "plan_restructure_failed".into(),
-                            message: format!("Restructure planning did not complete: {err}"),
-                            path: None,
-                            model_kind: None,
-                        }))))
+                        sink.send(EngineError::event(
+                            "plan_restructure_failed",
+                            format!("Restructure planning did not complete: {err}"),
+                        ))
                         .await;
                     }
                 }
@@ -1255,12 +1110,10 @@ pub(crate) async fn handle_plan_restructure(
                 if stop_cancelled_plan(&sink, &cancel).await {
                     return;
                 }
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "plan_restructure_db".into(),
-                    message: format!("planRestructure query failed: {err}"),
-                    path: None,
-                    model_kind: None,
-                }))))
+                sink.send(EngineError::event(
+                    "plan_restructure_db",
+                    format!("planRestructure query failed: {err}"),
+                ))
                 .await;
                 return;
             }
@@ -1270,12 +1123,10 @@ pub(crate) async fn handle_plan_restructure(
                 // plan…" status recovers instead of awaiting forever (mirrors
                 // the face_clustering PAR-111 JoinError handling).
                 tracing::warn!(?err, "planRestructure spawn_blocking failed");
-                sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                    kind: "plan_restructure_failed".into(),
-                    message: format!("Restructure planning did not complete: {err}"),
-                    path: None,
-                    model_kind: None,
-                }))))
+                sink.send(EngineError::event(
+                    "plan_restructure_failed",
+                    format!("Restructure planning did not complete: {err}"),
+                ))
                 .await;
                 return;
             }
@@ -1656,23 +1507,19 @@ pub(crate) async fn handle_plan_restructure(
         Ok(Ok(encoded)) => encoded,
         Ok(Err(err)) => {
             tracing::warn!(?err, "persisting paged restructure plan failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "plan_restructure_store".into(),
-                message: format!("Could not store the restructure plan: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "plan_restructure_store",
+                format!("Could not store the restructure plan: {err}"),
+            ))
             .await;
             return;
         }
         Err(err) => {
             tracing::warn!(?err, "encoding restructure plan task failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "plan_restructure_failed".into(),
-                message: format!("Restructure planning did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "plan_restructure_failed",
+                format!("Restructure planning did not complete: {err}"),
+            ))
             .await;
             return;
         }
@@ -1747,22 +1594,18 @@ pub(crate) async fn handle_undo_restructure(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "undoRestructure failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "undo_restructure".into(),
-                message: format!("Undo failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "undo_restructure",
+                format!("Undo failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
             tracing::warn!(?err, "undoRestructure spawn_blocking failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "undo_restructure".into(),
-                message: format!("Undo did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "undo_restructure",
+                format!("Undo did not complete: {err}"),
+            ))
             .await;
         }
     }
@@ -1838,12 +1681,10 @@ pub(crate) async fn handle_apply_restructure(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "applyRestructure failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "apply_restructure".into(),
-                message: format!("Apply failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "apply_restructure",
+                format!("Apply failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
@@ -1852,12 +1693,10 @@ pub(crate) async fn handle_apply_restructure(
             // instead of hanging forever (ApplyRestructureAsync has no app-side
             // timeout; mirrors the face_clustering PAR-111 JoinError handling).
             tracing::warn!(?err, "applyRestructure spawn_blocking failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "apply_restructure".into(),
-                message: format!("Apply did not complete: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "apply_restructure",
+                format!("Apply did not complete: {err}"),
+            ))
             .await;
         }
     }
@@ -2182,8 +2021,7 @@ mod tests {
         let incoming = root.join("incoming");
         std::fs::create_dir_all(&incoming).unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let mut moves = Vec::new();
         for (index, confidence) in ["auto", "ask", "review"].iter().enumerate() {
             let source = incoming.join(format!("{index}.jpg"));
@@ -2255,8 +2093,7 @@ mod tests {
         let incoming = root.join("incoming");
         std::fs::create_dir_all(&incoming).unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let total = 10usize;
         let mut moves = Vec::with_capacity(total);
         for index in 0..total {
@@ -2324,8 +2161,7 @@ mod tests {
     #[test]
     #[ignore = "explicit million-file disk-backed planner regression"]
     fn million_file_large_plan_is_disk_backed_and_preview_bounded() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for start in (1..=1_000_000_i64).step_by(10_000) {
             let end = (start + 9_999).min(1_000_000);
             conn.execute(
@@ -2367,8 +2203,7 @@ mod tests {
     /// must sweep those orphans, or they accumulate without bound.
     #[test]
     fn large_plan_sweeps_stale_planning_scratch() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
         let dir = std::env::temp_dir().join(format!(
             "fileid-stale-scratch-{}-{}",
@@ -2443,8 +2278,7 @@ mod tests {
         let src = root.join("a.jpg");
         std::fs::write(&src, b"data").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed) \
              VALUES (1, ?1, 0, 4, 0.0, 'image', 'jpg', 0)",
@@ -2499,8 +2333,7 @@ mod tests {
         std::fs::write(&source, b"auto").unwrap();
         let source_text = source.to_string_lossy().into_owned();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO files
                 (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed,file_ref)
@@ -2589,8 +2422,7 @@ mod tests {
         let vanished_source = incoming.join("vanished.jpg");
         std::fs::write(&vanished_source, b"vanished").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for (id, path) in [(1, &healthy_source), (2, &vanished_source)] {
             conn.execute(
                 "INSERT INTO files
@@ -2695,8 +2527,7 @@ mod tests {
             1,
         )
         .unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let cancel = Arc::new(AtomicBool::new(true));
         let apply = RestructureApply::new(
             Arc::new(parking_lot::Mutex::new(conn)),
@@ -2752,8 +2583,7 @@ mod tests {
 
     #[test]
     fn plan_query_rejects_named_unknown_and_same_name_identity_ambiguity() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute_batch(
             "INSERT INTO files
                 (id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed)
@@ -2845,8 +2675,7 @@ mod tests {
             .join("March")
             .join("a.jpg");
         let actionable = root.join("Inbox").join("b.jpg");
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for (id, path) in [(1_i64, canonical), (2_i64, actionable)] {
             conn.execute(
                 "INSERT INTO files
@@ -2960,8 +2789,7 @@ mod tests {
         let incoming = root.join("incoming");
         let plan_dir = root.join("plans");
         std::fs::create_dir_all(&incoming).unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let mut moves = Vec::new();
         for index in 0..4 {
             let source = incoming.join(format!("{index}.jpg"));
@@ -3257,8 +3085,7 @@ mod tests {
     async fn respect_moves_survive_the_plan_and_their_folders_are_not_kept() {
         let root = std::env::temp_dir().join(format!("fileid-respect-plan-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let sep19 = 1_789_840_800.0;
         let mar1 = 1_772_388_000.0;
         let mut rows: Vec<(String, f64)> = (0..5)

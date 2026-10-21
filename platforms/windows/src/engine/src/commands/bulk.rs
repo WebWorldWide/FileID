@@ -346,6 +346,15 @@ pub(crate) async fn handle_apply_tags(
 
 /// Bulk-rename a set of files (filename only, same directory). Each move is a
 /// no-clobber `MoveFileExW` (no `MOVEFILE_REPLACE_EXISTING`) + DB row update.
+/// The `files.extension` value for a renamed path: lowercased, empty when the
+/// new name has none, so kind filters follow the rename as they do on macOS.
+fn renamed_extension(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
+}
+
 pub(crate) async fn handle_rename_files(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -509,12 +518,13 @@ pub(crate) async fn handle_rename_files(
                 // silently REPLACE-delete that row + cascade its user metadata. OR
                 // ABORT raises instead, routing into the Err arm below (record +
                 // report failed) rather than losing data. (audit 2026-07 sibling)
-                "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4 WHERE id = ?3",
+                "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5 WHERE id = ?3",
                 rusqlite::params![
                     dest_text,
                     dest_hash,
                     file_id,
-                    crate::pipeline::dbwriter::nfc_path_search(dest_text)
+                    crate::pipeline::dbwriter::nfc_path_search(dest_text),
+                    renamed_extension(dest_text)
                 ],
             ) {
                 Ok(1) => {
@@ -1189,7 +1199,7 @@ struct ManualMergeAnchor {
 fn manual_merge_anchor(
     tx: &rusqlite::Transaction<'_>,
     person_id: i64,
-) -> anyhow::Result<ManualMergeAnchor> {
+) -> anyhow::Result<Option<ManualMergeAnchor>> {
     tx.query_row(
         "SELECT fp.id, fp.file_id, fp.bbox \
          FROM face_prints fp \
@@ -1207,7 +1217,8 @@ fn manual_merge_anchor(
             })
         },
     )
-    .with_context(|| format!("person #{person_id} has no face anchor to merge"))
+    .optional()
+    .with_context(|| format!("person #{person_id} face anchor lookup failed"))
 }
 
 fn resolve_merge_verification_face(
@@ -1250,8 +1261,14 @@ fn persist_manual_merge_constraint(
     source_person_id: i64,
     destination_person_id: i64,
 ) -> anyhow::Result<()> {
-    let source_anchor = manual_merge_anchor(tx, source_person_id)?;
-    let destination_anchor = manual_merge_anchor(tx, destination_person_id)?;
+    // A person whose faces were all reassigned away has nothing to anchor a
+    // verdict to; the merge itself still goes ahead, as on macOS.
+    let (Some(source_anchor), Some(destination_anchor)) = (
+        manual_merge_anchor(tx, source_person_id)?,
+        manual_merge_anchor(tx, destination_person_id)?,
+    ) else {
+        return Ok(());
+    };
     let contradictory_rows = {
         let mut statement = tx.prepare(
             "SELECT person_a, person_b, face_a, face_b, file_a, bbox_a, file_b, bbox_b \
@@ -2459,22 +2476,18 @@ pub(crate) async fn handle_find_merge_suggestions(
         }
         Ok(Err(err)) => {
             tracing::warn!(?err, "find_merge_suggestions failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "find_merge_suggestions_failed".into(),
-                message: format!("Find merge suggestions failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "find_merge_suggestions_failed",
+                format!("Find merge suggestions failed: {err}"),
+            ))
             .await;
         }
         Err(err) => {
             tracing::warn!(?err, "find_merge_suggestions spawn failed");
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "find_merge_suggestions_failed".into(),
-                message: format!("Find merge suggestions worker failed: {err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event(
+                "find_merge_suggestions_failed",
+                format!("Find merge suggestions worker failed: {err}"),
+            ))
             .await;
         }
     }
@@ -2565,8 +2578,7 @@ mod tests {
     }
     #[test]
     fn naming_unknown_person_restores_known_cluster() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute(
             "INSERT INTO persons (id, created_at, is_unknown) VALUES (42, 1, 1)",
             [],
@@ -2591,8 +2603,7 @@ mod tests {
 
     #[test]
     fn removed_person_rename_reports_failure() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         conn.execute("INSERT INTO persons (id, created_at) VALUES (42, 1)", []).unwrap();
         conn.execute("DELETE FROM persons WHERE id=42", []).unwrap();
         let result = save_person_name(&conn, &ipc::RenamePersonPayload {
@@ -2703,6 +2714,22 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn manual_merge_of_a_faceless_person_records_no_edge() {
+        let mut connection = manual_merge_db();
+        connection
+            .execute("INSERT INTO persons(id, representative_face_id) VALUES (40, NULL)", [])
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        persist_manual_merge_constraint(&transaction, 40, 10).unwrap();
+        persist_manual_merge_constraint(&transaction, 10, 40).unwrap();
+        transaction.commit().unwrap();
+        let edges: i64 = connection
+            .query_row("SELECT COUNT(*) FROM face_verifications", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(edges, 0);
     }
 
     #[test]
@@ -3260,6 +3287,51 @@ mod tests {
                     .unwrap_or_default()
                     .contains("worker failed")
         }));
+    }
+
+    #[tokio::test]
+    async fn rename_updates_the_lowercased_extension() {
+        let directory = std::env::temp_dir().join(format!(
+            "fileid-rename-extension-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("notes.txt");
+        std::fs::write(&source, b"notes").unwrap();
+        let file_ref = crate::platform::file_identity(&source).unwrap().file as i64;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,file_ref) \
+             VALUES(1,?1,1,5,0,'doc','txt',?2)",
+            rusqlite::params![source.to_string_lossy(), file_ref],
+        )
+        .unwrap();
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_rename_files(
+            sink,
+            db.clone(),
+            ipc::RenameFilesPayload {
+                renames: vec![ipc::RenameEntry { file_id: 1, new_name: "Notes.MD".into() }],
+            },
+        )
+        .await;
+        let EventPayload::BulkActionResult(result) = events.recv().await.unwrap().payload else {
+            panic!("expected BulkActionResult");
+        };
+        assert_eq!((result.inner.succeeded, result.inner.failed), (1, 0));
+        let extension: String = db
+            .lock()
+            .query_row("SELECT extension FROM files WHERE id=1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(extension, "md");
+        assert_eq!(renamed_extension("/a/b/README"), "");
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test]

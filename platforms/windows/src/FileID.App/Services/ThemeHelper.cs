@@ -43,6 +43,10 @@ public static class ThemeHelper
         {
             // KeyNotFound / unresolvable — fall through to the fallback.
         }
+        if (FindInThemeDictionaries(key) is Brush themed)
+        {
+            return themed;
+        }
         WarnOnce(key);
         return fallback ?? new SolidColorBrush(Colors.Transparent);
     }
@@ -64,6 +68,36 @@ public static class ThemeHelper
             // missing — return null (default style), no crash.
         }
         WarnOnce(key);
+        return null;
+    }
+
+    /// <summary>Second chance for keys that live only in a merged dictionary's
+    /// ThemeDictionaries (Theme.xaml's contrast-sensitive tokens): the active
+    /// high-contrast entry when the OS is in high contrast, else Default.</summary>
+    private static object? FindInThemeDictionaries(string key)
+    {
+        try
+        {
+            var res = Application.Current?.Resources;
+            if (res is null) return null;
+            bool highContrast = false;
+            try { highContrast = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast; }
+            catch (Exception) { /* default theme */ }
+            var themeKey = highContrast ? "HighContrast" : "Default";
+            foreach (var merged in res.MergedDictionaries)
+            {
+                if (merged.ThemeDictionaries.TryGetValue(themeKey, out var themed)
+                    && themed is ResourceDictionary dictionary
+                    && dictionary.TryGetValue(key, out var value))
+                {
+                    return value;
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Unresolvable — caller falls back.
+        }
         return null;
     }
 

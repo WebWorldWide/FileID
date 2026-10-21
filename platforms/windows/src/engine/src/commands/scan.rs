@@ -13,7 +13,7 @@ use crate::coordinator::ScanCoordinator;
 use crate::ipc::{
     self, sink::Sink, EngineError, EventPayload, IpcEvent, ScanPhase, ScanProgress, Wrap,
 };
-use crate::models::{self, registry::LookupResult};
+use crate::models;
 use crate::pipeline::tagging::ModelStack;
 use crate::platform;
 use crate::scan_session::ScanSession;
@@ -45,14 +45,12 @@ async fn reject_stranded_decoders(
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
     active: usize,
 ) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "decoder_shutdown_incomplete".into(),
-        message: format!(
+    sink.send(EngineError::event(
+        "decoder_shutdown_incomplete",
+        format!(
             "{active} decoder worker(s) from the previous scan are still stopping. Wait and retry; restart FileID if they do not exit."
         ),
-        path: None,
-        model_kind: None,
-    }))))
+    ))
     .await;
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Failed,
@@ -65,18 +63,26 @@ async fn reject_gpu_device_removed(
     sink: &Sink,
     scan_state: &Arc<Mutex<Option<ScanCoordinator>>>,
 ) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "gpu_device_removed".into(),
-        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-        path: None,
-        model_kind: None,
-    }))))
+    sink.send(EngineError::event(
+        "gpu_device_removed",
+        crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
+    ))
     .await;
     sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
         ScanPhase::Failed,
     ))))
     .await;
     *scan_state.lock() = None;
+}
+
+#[cfg(target_os = "macos")]
+fn ort_runtime_available() -> bool {
+    crate::ort_runtime::is_available()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ort_runtime_available() -> bool {
+    true
 }
 
 pub(crate) async fn handle_start_scan(
@@ -107,12 +113,10 @@ pub(crate) async fn handle_start_scan(
         }
     };
     if already_running {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "scan_already_running".into(),
-            message: "A scan is already running. Cancel it before starting a new one.".into(),
-            path: None,
-            model_kind: None,
-        }))))
+        sink.send(EngineError::event(
+            "scan_already_running",
+            "A scan is already running. Cancel it before starting a new one.",
+        ))
         .await;
         tracing::warn!("[SCAN] handle_start_scan exiting: scan_already_running");
         return;
@@ -143,76 +147,25 @@ pub(crate) async fn handle_start_scan(
         return;
     }
 
-    // Pre-flight before ModelStack::load_default. Without this, a user who
-    // clicked Scan before completing Welcome would wedge ORT for the full
-    // timeout window with no actionable feedback.
-    //
-    // ONLY the models the SCAN pipeline actually consumes belong here. `arcface`
-    // (the YuNet detector + SFace embedder bundle) drives faces; `mobileclip_s2`
-    // drives per-file image embedding. `clip_text` (the CLIP *text* encoder) is
-    // a QUERY-TIME-only model — it is loaded lazily on the first semantic search
-    // (commands/embed.rs) and is never touched by load_default or any
-    // scan→detect→embed→cluster stage. Requiring it here was a bug: a stalled or
-    // incomplete clip_text install (its sentinel never written) aborted the
-    // ENTIRE scan with models_not_installed, so face scanning produced zero
-    // faces even though YuNet+SFace+MobileCLIP were fully installed. clip_text's
-    // absence must only degrade query-time search, never block a scan.
-    let missing_models: Vec<&str> = ["mobileclip_s2", "arcface"]
-        .iter()
-        .filter_map(|kind| {
-            let model = match models::registry::lookup_full(kind) {
-                LookupResult::Found(m) => m,
-                LookupResult::Unknown => return Some(*kind),
-            };
-            (!models::registry::installation_complete(&model)).then_some(*kind)
-        })
+    // Missing models never block a scan (macOS parity): every file is still
+    // catalogued — kind, size, dates, content hash, perceptual hash, text — and
+    // only the stages whose weights are absent skip, each logging once at load.
+    // Front ends offer the install before scanning; a later rescan fills the
+    // embeddings and faces in.
+    let missing_models: Vec<&str> = models::required::missing_required()
+        .into_iter()
+        .map(|missing| missing.kind)
         .collect();
     if !missing_models.is_empty() {
-        tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; aborting scan");
-        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-            ScanPhase::Failed,
-        ))))
-        .await;
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "models_not_installed".into(),
-            message: format!(
-                "Install the AI models from the Welcome screen (or Settings → Local AI) before scanning. Missing: {}.",
-                missing_models.join(", ")
-            ),
-            path: None,
-            model_kind: None,
-        }))))
-        .await;
-        *scan_state.lock() = None;
-        tracing::warn!("[SCAN] handle_start_scan exiting: models_not_installed");
-        return;
+        tracing::warn!(missing = ?missing_models, "[SCAN] required models missing; their stages will skip");
     }
-
-    // macOS pre-flight: the engine's `load-dynamic` ONNX Runtime build needs an
-    // installed `libonnxruntime.dylib` (ORT's `download-binaries` ships only a
-    // STATIC lib for arm64). If it isn't resolvable, fail fast with a distinct,
-    // actionable `runtime_not_installed` error — pointing at the ONE-TIME
-    // runtime install, NOT the model download — instead of wedging ORT for the
-    // 120 s model-load timeout and then surfacing an opaque dlopen panic as
-    // `model_load_failed`. No-op on Windows/Linux (`is_available()` is always
-    // true there). main.rs already pinned `ORT_DYLIB_PATH` when resolvable.
-    #[cfg(target_os = "macos")]
-    if !crate::ort_runtime::is_available() {
-        tracing::warn!("[SCAN] ONNX Runtime dylib not installed; aborting scan");
-        sink.send(IpcEvent::now(EventPayload::PhaseChanged(Wrap::new(
-            ScanPhase::Failed,
-        ))))
-        .await;
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "runtime_not_installed".into(),
-            message: crate::ort_runtime::missing_runtime_message(),
-            path: None,
-            model_kind: None,
-        }))))
-        .await;
-        *scan_state.lock() = None;
-        tracing::warn!("[SCAN] handle_start_scan exiting: runtime_not_installed");
-        return;
+    // The macOS `load-dynamic` build cannot bind ONNX Runtime without an
+    // installed dylib (ORT's `download-binaries` ships only a static arm64 lib),
+    // so without it the scan runs with no models at all instead of panicking at
+    // the first session bind. Always true on Windows/Linux.
+    let runtime_available = ort_runtime_available();
+    if !runtime_available {
+        tracing::warn!("[SCAN] ONNX Runtime not installed; model stages will skip");
     }
 
     // Emit Discovering immediately so the UI flips out of IdlePanel within
@@ -273,7 +226,13 @@ pub(crate) async fn handle_start_scan(
     let armed_ep = models::runtime::armed_provider();
     let ep_guard = models::ep_guard::ArmGuard::arm(armed_ep.as_str());
     let load_result = wait_for_blocking(
-        tokio::task::spawn_blocking(move || ModelStack::load_default(models_worker_count)),
+        tokio::task::spawn_blocking(move || {
+            if runtime_available {
+                ModelStack::load_default(models_worker_count)
+            } else {
+                ModelStack::empty()
+            }
+        }),
         Duration::from_secs(120),
     )
     .await;
@@ -299,15 +258,13 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_load_failed".into(),
-                message: format!(
+            sink.send(EngineError::event(
+                "model_load_failed",
+                format!(
                     "The inference engine couldn't load its models: {err}.\n\
                      Try reinstalling models from Settings → Local AI.{runtime_hint}"
                 ),
-                path: None,
-                model_kind: None,
-            }))))
+            ))
             .await;
             *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed");
@@ -319,19 +276,15 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_load_timeout".into(),
-                message:
-                    "Loading inference models took longer than 120 seconds. The native \
+            sink.send(EngineError::event(
+                "model_load_timeout",
+                "Loading inference models took longer than 120 seconds. The native \
                      loader cannot be cancelled safely, so FileID will reject another scan \
                      until it finishes. Restart the engine before retrying if it remains stuck.\n\nTry:\n\
                      • Close other memory- or GPU-heavy apps.\n\
                      • Reinstall the models from Settings → Local AI.\n\
-                     • Pick a smaller Deep Analyze model in Settings → Local AI."
-                        .into(),
-                path: None,
-                model_kind: None,
-            }))))
+                     • Pick a smaller Deep Analyze model in Settings → Local AI.",
+            ))
             .await;
             let late_result = load_task.await;
             drop(ep_guard);
@@ -351,7 +304,7 @@ pub(crate) async fn handle_start_scan(
         return;
     }
 
-    // A model whose install SENTINEL passed the pre-flight above but whose
+    // A model that IS installed (missing ones were reported above) but whose
     // weights won't actually LOAD (corrupt/incomplete .onnx, AV-quarantined
     // file, or an EP bind failure on every provider) must ABORT the scan — not
     // silently skip its stage. A skipped stage still writes every file row with
@@ -361,14 +314,16 @@ pub(crate) async fn handle_start_scan(
     // permanently empty even after the model is repaired (a real "face scanning
     // is totally broken, and stays broken" trap). Aborting (mirroring the
     // missing-sentinel pre-flight) leaves the files un-stamped so a later scan
-    // re-processes them once the model loads. Both checked models are pre-flight
-    // requirements, so reaching here with one None means a genuine load failure.
-    {
+    // re-processes them once the model loads.
+    if runtime_available {
         let mut failed_to_load: Vec<&str> = Vec::new();
-        if models.scrfd.is_none() || models.arcface.is_none() {
+        if (models.scrfd.is_none() || models.arcface.is_none()) && !missing_models.contains(&"arcface") {
             failed_to_load.push("face detection + recognition");
         }
-        if models.mobileclip_pool.is_none() && models.mobileclip_batch.is_none() {
+        if models.mobileclip_pool.is_none()
+            && models.mobileclip_batch.is_none()
+            && !missing_models.contains(&"mobileclip_s2")
+        {
             failed_to_load.push("image embedding");
         }
         if !failed_to_load.is_empty() {
@@ -380,9 +335,9 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "model_load_failed".into(),
-                message: format!(
+            sink.send(EngineError::event(
+                "model_load_failed",
+                format!(
                     "These installed AI models failed to load, so the scan was stopped: {}.\n\n\
                      The model files are likely incomplete or blocked by antivirus. \
                      Reinstall them from Settings → Local AI, then scan again. \
@@ -391,9 +346,7 @@ pub(crate) async fn handle_start_scan(
                      on future scans.)",
                     failed_to_load.join(", ")
                 ),
-                path: None,
-                model_kind: None,
-            }))))
+            ))
             .await;
             *scan_state.lock() = None;
             tracing::warn!("[SCAN] handle_start_scan exiting: model_load_failed (post-load)");
@@ -430,12 +383,12 @@ pub(crate) async fn handle_start_scan(
                 ScanPhase::Failed,
             ))))
             .await;
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "scan_failed".into(),
-                message: format!("Scan failed: {err}"),
-                path: Some(payload.root_path),
-                model_kind: None,
-            }))))
+            sink.send(EngineError::new(
+                "scan_failed",
+                format!("Scan failed: {err}"),
+            )
+            .with_path(payload.root_path)
+            .into_event())
             .await;
             tracing::warn!("[SCAN] handle_start_scan exiting: scan_failed");
             return;

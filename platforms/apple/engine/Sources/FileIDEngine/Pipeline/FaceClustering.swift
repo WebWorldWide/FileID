@@ -520,7 +520,7 @@ public enum FaceClustering {
         let deferredFaces = try requireUnchangedPartition(partition, from: db, expectedSpace: expectedSpace,
             phaseZeroUnknownFaceIDs: phaseZeroUnknownFaceIDs, minQuality: minQuality)
         let denseToFaceID = partition.rows.map(\.id)
-        let vecsByDense = partition.rows.map { ArcFaceService.blobToEmbedding($0.arcFace) }
+        let vecsByDense = partition.rows.map { FloatBlob.decode($0.arcFace) }
         let firstDim = 128
         let faceQualityByID = Dictionary(uniqueKeysWithValues: partition.rows.map { ($0.id,$0.quality) })
         let poolExcludedPersonIDs: Set<Int64> = []
@@ -680,7 +680,7 @@ public enum FaceClustering {
                 let personCount = try FaceClusterPersistence.apply(db,
                     clusters: personsList.enumerated().map { index, cluster in
                         .init(personID: stableIDs[index], faceIDs: cluster.faceIDs, representative: cluster.repFaceID,
-                              centroid: ArcFaceService.embeddingToBlob(cluster.centroid), radius: Double(cluster.anchorRadius))
+                              centroid: FloatBlob.encode(cluster.centroid), radius: Double(cluster.anchorRadius))
                     }, pool: poolFaceIDs, preserved: preserveIDs, now: Date().timeIntervalSince1970)
 
                 return PersistStats(
@@ -838,7 +838,7 @@ public enum FaceClustering {
         var decoded: [DecodedFace] = []
         decoded.reserveCapacity(rows.count)
         for row in rows {
-            let vec = ArcFaceService.blobToEmbedding(row.arcFace)
+            let vec = FloatBlob.decode(row.arcFace)
             if !vec.isEmpty {
                 decoded.append(DecodedFace(id: row.id, vec: vec))
             }
@@ -1111,7 +1111,7 @@ public enum FaceClustering {
                 var owners: [Int64:Int64] = [:]
                 for (row,snapshot) in zip(partition.rows,partition.snapshots) {
                     guard let owner = snapshot.personID, completeOwners.contains(owner) else { continue }
-                    let vector = ArcFaceService.blobToEmbedding(row.arcFace)
+                    let vector = FloatBlob.decode(row.arcFace)
                     var sum = sums[owner] ?? [Float](repeating: 0, count: 128)
                     for index in sum.indices { sum[index] += vector[index] }
                     sums[owner] = sum
@@ -1841,7 +1841,7 @@ public enum FaceClustering {
                         }
                         guard let crop else { continue }
                         guard let vec = ArcFaceService.shared.embed(crop) else { continue }
-                        out.append(PendingExtract(input: row, arcFace: ArcFaceService.embeddingToBlob(vec), jpeg: faceCropJPEG(crop)))
+                        out.append(PendingExtract(input: row, arcFace: FloatBlob.encode(vec), jpeg: faceCropJPEG(crop)))
                     }
                     if FaceAlign.enabled {
                         JSONLog.shared.info(ev: "face_align_applied",

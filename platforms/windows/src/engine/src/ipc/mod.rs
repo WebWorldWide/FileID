@@ -222,6 +222,39 @@ pub enum CommandPayload {
     PurgeExcluded(PurgeExcludedPayload),
 }
 
+impl CommandPayload {
+    /// `BulkActionResult.action` for the commands that answer with one.
+    pub fn action_name(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::ApplyTags(_) => "applyTags",
+            Self::RenameFiles(_) => "renameFiles",
+            Self::TrashFiles(_) => "trashFiles",
+            Self::MergeClusters(_) => "mergeClusters",
+            Self::RenamePerson(_) => "renamePerson",
+            Self::ReassignFace(_) => "reassignFace",
+            Self::MarkPersonsAsUnknown(_) => "markPersonsAsUnknown",
+            Self::MarkPersonsDifferent(_) => "markPersonsDifferent",
+            Self::RestoreFromTrash(_) => "restoreFromTrash",
+            Self::RevertMerge(_) => "revertMerge",
+            Self::PurgeExcluded(_) => "purgeExcluded",
+            _ => return None,
+        })
+    }
+
+    /// Ids a bulk action reports per item; empty means one summary item.
+    pub fn target_ids(&self) -> Vec<i64> {
+        match self {
+            Self::ApplyTags(payload) => payload.file_ids.clone(),
+            Self::TrashFiles(payload) => payload.file_ids.clone(),
+            Self::RenameFiles(payload) => payload.renames.iter().map(|rename| rename.file_id).collect(),
+            Self::MarkPersonsAsUnknown(payload) => payload.person_ids.clone(),
+            Self::RenamePerson(payload) => vec![payload.person_id],
+            Self::ReassignFace(payload) => vec![payload.face_id],
+            _ => Vec::new(),
+        }
+    }
+}
+
 const MAX_BULK_ITEMS: usize = 100_000;
 const MAX_RESTRUCTURE_MOVES: usize = 250_000;
 const MAX_EXCLUDED_PATHS: usize = 10_000;
@@ -1219,6 +1252,30 @@ pub struct EngineError {
     /// path-string matching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_kind: Option<String>,
+}
+
+impl EngineError {
+    pub fn new(kind: impl Into<String>, message: impl Into<String>) -> Self {
+        Self { kind: kind.into(), message: message.into(), path: None, model_kind: None }
+    }
+
+    pub fn event(kind: impl Into<String>, message: impl Into<String>) -> IpcEvent {
+        Self::new(kind, message).into_event()
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn with_model(mut self, model_kind: impl Into<String>) -> Self {
+        self.model_kind = Some(model_kind.into());
+        self
+    }
+
+    pub fn into_event(self) -> IpcEvent {
+        IpcEvent::now(EventPayload::Error(Wrap::new(self)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,7 +17,7 @@ use anyhow::Result;
 use rusqlite::params;
 
 use crate::context::{
-    display_path, escape_like, human_size, print_json, resolve_file_id, terminal_text, Ctx,
+    display_path, escape_like, file_size_i64, print_json, resolve_file_id, terminal_text, Ctx,
 };
 
 struct Hit {
@@ -83,14 +83,16 @@ pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> 
     }
     ctx.require_db_exists()?;
     let conn = fileid_engine::db::open_read(&ctx.db)?;
-    let fts_expr = to_fts_expr(raw);
+    let fts_expr = fileid_engine::read::text::fts_phrase_query(raw);
 
     // id → Hit, insertion order preserved within source tier by BTreeMap on id;
     // we re-sort by source tier for display so content matches lead.
     let mut hits: BTreeMap<i64, Hit> = BTreeMap::new();
 
-    collect_fts(&conn, "doc_fts", &fts_expr, limit, "content", &mut hits)?;
-    collect_fts(&conn, "ocr_fts", &fts_expr, limit, "ocr", &mut hits)?;
+    if !fts_expr.is_empty() {
+        collect_fts(&conn, "doc_fts", &fts_expr, limit, "content", &mut hits)?;
+        collect_fts(&conn, "ocr_fts", &fts_expr, limit, "ocr", &mut hits)?;
+    }
     collect_filename(&conn, raw, limit, &mut hits)?;
 
     let mut rows: Vec<Hit> = hits.into_values().collect();
@@ -132,7 +134,7 @@ pub fn run(ctx: &Ctx, terms: &[String], similar: Option<&str>, limit: usize) -> 
             ctx.dim(&format!(
                 "[{}, {}, {}]",
                 h.kind,
-                human_size(h.size),
+                file_size_i64(h.size),
                 h.source
             ))
         );
@@ -219,16 +221,6 @@ fn source_rank(source: &str) -> u8 {
         "ocr" => 1,
         _ => 2,
     }
-}
-
-/// Turn a free-text query into a safe FTS5 expression: each whitespace token
-/// becomes a quoted phrase, AND-ed together. Quoting neutralizes FTS operator
-/// characters so an arbitrary user string can't be a syntax error.
-fn to_fts_expr(raw: &str) -> String {
-    raw.split_whitespace()
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// `--similar <path-or-id>`: rank embedded files by cosine similarity to the
@@ -377,7 +369,7 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
             ctx.dim(&format!(
                 "[{}, {}, cos {:.3}]",
                 h.kind,
-                human_size(h.size),
+                file_size_i64(h.size),
                 cos
             ))
         );

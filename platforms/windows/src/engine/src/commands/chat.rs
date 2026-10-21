@@ -241,6 +241,12 @@ fn is_newline(c: char) -> bool {
 }
 
 /// Same wording as macOS `ChatService.kindLabel`.
+/// Minutes and seconds for a video moment, as macOS `ChatService.timeLabel`.
+fn time_label(seconds: f64) -> String {
+    let total = seconds.round() as i64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
 fn kind_label(kind: &str) -> &str {
     match kind {
         "image" => "photos",
@@ -256,7 +262,7 @@ fn model_note(no_hits: bool) -> &'static str {
     if no_hits {
         " Nothing was downloaded."
     } else {
-        " Load a model in Deep Analyze for a written answer; these are the matching files. Nothing was downloaded."
+        " Load a local AI model for a written answer; these are the matching files. Nothing was downloaded."
     }
 }
 
@@ -340,15 +346,27 @@ fn prepare_send(conn: &Connection, request: &ChatRequest) -> Result<(String, Str
         let labels: Vec<&str> = plan.kinds.iter().map(|kind| kind_label(kind)).collect();
         format!(" ({})", labels.join(", "))
     };
+    let people = if plan.person_names.is_empty() {
+        String::new()
+    } else {
+        format!(" (people: {})", plan.person_names.join(", "))
+    };
+    let events = if plan.event_names.is_empty() {
+        String::new()
+    } else {
+        format!(" (event: {})", plan.event_names.join(", "))
+    };
+    let time = plan.time_seconds.map(|seconds| format!(" (near {})", time_label(seconds))).unwrap_or_default();
+    let qualifiers = format!("{filter}{people}{events}{time}");
     let explanation = if plan.query.is_empty()
         && plan.kinds.is_empty()
         && plan.person_ids.is_empty()
         && plan.event_ids.is_empty()
         && plan.time_seconds.is_none()
     {
-        "Add a subject or a media type such as videos or photos. No search was run.".into()
+        "Add a subject, event, time, or media type such as videos or photos. No search was run.".into()
     } else if hits.is_empty() {
-        format!("No matches {scope}{filter}. Try names or a few descriptive words; files that haven't been analyzed may still contain it.")
+        format!("No matches {scope}{qualifiers}. Try names or a few descriptive words; files that haven't been analyzed may still contain it.")
     } else {
         let sample_note = if hits.iter().any(|hit| hit.kind == "sampledFrame") {
             " Sampled-frame descriptions remain unverified."
@@ -356,7 +374,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest) -> Result<(String, Str
             ""
         };
         let noun = if hits.len() == 1 { "match" } else { "matches" };
-        format!("Found {} {noun} {scope}{filter}.{sample_note}", hits.len())
+        format!("Found {} {noun} {scope}{qualifiers}.{sample_note}", hits.len())
     };
     Ok((text, explanation, hits))
 }
@@ -412,8 +430,7 @@ mod tests {
     use super::*;
     #[test]
     fn history_search_and_clear_preserve_catalog_files() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'/offline/birthday.mov',1,100,0,'video','mov','Birthday gift opening')",[]).unwrap();
         let mut request = ChatRequest {
             request_id: "r".into(),
@@ -440,6 +457,38 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn replies_match_macos_wording() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/a/IMG_1.jpg',1,10,0,'image','jpg');\
+             INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(7,'Grandma','Grandma',0,1);\
+             INSERT INTO face_prints(id,file_id,person_id,print_data,bbox) VALUES(1,1,7,X'00','[0,0,1,1]');",
+        )
+        .unwrap();
+        let mut request = ChatRequest {
+            request_id: "r".into(),
+            conversation_id: "c".into(),
+            action: "send".into(),
+            text: Some("photos of Grandma".into()),
+            use_model: Some(false),
+            model_kind: None,
+        };
+        assert_eq!(
+            execute(&mut conn, &request).unwrap().message,
+            "Found 1 match in the library (photos) (people: Grandma)."
+        );
+        request.conversation_id = "empty".into();
+        request.text = Some("please".into());
+        assert_eq!(
+            execute(&mut conn, &request).unwrap().message,
+            "Add a subject, event, time, or media type such as videos or photos. No search was run."
+        );
+        assert_eq!(time_label(65.4), "1:05");
+        assert_eq!(time_label(3_600.0), "60:00");
     }
 
     #[test]
@@ -477,8 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_stops_the_running_summary_for_its_conversation() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let database = Arc::new(Mutex::new(conn));
         let request = |action: &str| ChatRequest {
             request_id: format!("{action}-request"),
@@ -508,8 +556,7 @@ mod tests {
 
     #[test]
     fn refinement_filters_files_and_evidence_before_limits() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         for id in 1..=150 {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,100,0,?3,'mov','Birthday gift opening')",params![id,format!("/offline/birthday-{id}.mov"),if id == 1 { "video" } else { "image" }]).unwrap();
         }
@@ -556,8 +603,7 @@ mod tests {
 
     #[test]
     fn invalid_requests_cannot_write_history_or_change_files() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         for text in [String::new(), "x".repeat(2001)] {
             let request = ChatRequest {
                 request_id: "r".into(),

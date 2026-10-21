@@ -25,7 +25,7 @@ struct ChatWorkbench: View {
 
     private var isPage: Bool { onClose == nil }
     private var modelName: String { AIModelKind(rawValue: chatModelKind)?.displayName ?? "Local model" }
-    private static let lookingIn = ["Names", "Tags", "Captions", "Chapters", "Text in files"]
+    private static let lookingIn = ["Names", "Tags", "Descriptions", "Chapters", "Text in files"]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -107,12 +107,12 @@ struct ChatWorkbench: View {
                     ForEach(isPage ? Self.lookingIn : Array(Self.lookingIn.prefix(3)), id: \.self) { TagChip(text: $0) }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Looking in names, tags, captions, chapters and text in files")
+                .accessibilityLabel("Looking in names, tags, descriptions, chapters and text in files")
             }
             Spacer(minLength: 8)
             Button("Clear") { control("clear") }
                 .buttonStyle(.dsGhost)
-                .help("Delete this conversation")
+                .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted.")
                 .disabled(messages.isEmpty && hits.isEmpty)
             if let onClose {
                 DSIconButton("Close chat", systemImage: "xmark") { onClose() }
@@ -198,7 +198,7 @@ struct ChatWorkbench: View {
                     Button("Send", action: send)
                         .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                         .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || input.count > 2000)
-                        .help("Send (Return)")
+                        .help(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type a question first" : input.count > 2000 ? "Shorten the question to 2,000 characters" : "Send (Return)")
                 }
             }
             HStack(spacing: 10) {
@@ -211,14 +211,14 @@ struct ChatWorkbench: View {
                 }
                 .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
                 .disabled(!useModel)
-                .help("Choose, download and load a local chat model")
+                .help(useModel ? "Choose the local AI model that writes answers" : "Turn on Summarize with local AI to choose a model")
                 .accessibilityLabel("Chat model: \(modelName)")
                 Spacer(minLength: 0)
             }
             if !busy && !message.isEmpty && message != messages.last(where: { $0.role != "user" })?.text {
                 Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(3).textSelection(.enabled)
             } else if !useModel {
-                MetaText("Keyword search only. Turn on local AI for written answers.")
+                MetaText("Answers list matching files only. Turn on local AI for written answers.")
             }
         }
         .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, 12)
@@ -333,7 +333,7 @@ struct ChatWorkbench: View {
         activeRequest = UUID().uuidString
         let request = ChatRequest(requestID: activeRequest, conversationID: conversationID, action: "send", text: input, useModel: useModel, modelKind: chatModelKind)
         if engine.send(.chatRequest(request: request)) { input = ""; busy = true; openedSource = nil }
-        else { message = "The engine is unavailable." }
+        else { message = "FileID is still getting ready. Try again in a moment." }
     }
 
     private func control(_ action: String) {
@@ -342,7 +342,7 @@ struct ChatWorkbench: View {
         if action == "history" { historyRequest = request.requestID }
         if engine.send(.chatRequest(request: request)) {
             if action == "clear" { messages = []; hits = []; player?.pause(); player = nil; openedSource = nil }
-        } else { message = "The engine is unavailable." }
+        } else { message = "FileID is still getting ready. Try again in a moment." }
     }
 }
 
@@ -350,9 +350,9 @@ struct ChatWorkbench: View {
 
 private func sourceMeta(_ hit: CatalogHit) -> String {
     var parts: [String] = []
-    if let seconds = hit.startSeconds { parts.append(Timecode.string(seconds)) }
+    if let seconds = hit.startSeconds { parts.append(DurationText.clock(seconds)) }
     if let page = hit.page { parts.append("Page \(page)") }
-    if hit.kind == "sampledFrame" { parts.append("Unverified frame") }
+    if hit.kind == "sampledFrame" { parts.append("Video frame, not checked") }
     return parts.joined(separator: " · ")
 }
 

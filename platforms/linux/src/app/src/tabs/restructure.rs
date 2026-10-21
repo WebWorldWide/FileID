@@ -15,6 +15,8 @@ use fileid_engine::ipc::{
     RestructureMove, RestructurePlan, UndoRestructurePayload,
 };
 
+use super::restructure_map::{Drill, MapView};
+use super::restructure_map_layout::{Hover, HoverBus, MapItem};
 use super::restructure_model::*;
 use crate::engine_client::{EngineClient, EngineState};
 use crate::shell::status::Tone;
@@ -22,6 +24,40 @@ use crate::v3;
 
 const INLINE_ROWS: usize = 50;
 const SEE_ALL_AFTER: usize = 30;
+
+/// What the Review sheet lists.
+#[derive(Clone, Debug, PartialEq)]
+enum ReviewFilter {
+    All,
+    Group(Outcome),
+    Drill(Drill),
+}
+
+impl ReviewFilter {
+    fn title(&self) -> String {
+        match self {
+            ReviewFilter::All => "All moves".into(),
+            ReviewFilter::Group(Outcome::Tidy) => "Tidying".into(),
+            ReviewFilter::Group(Outcome::Reorganize) => "Reorganizing".into(),
+            ReviewFilter::Drill(Drill::Source(folder)) => format!("From {}", v3::file_name(folder)),
+            ReviewFilter::Drill(Drill::Bucket(bucket)) => format!("To {bucket}"),
+            ReviewFilter::Drill(Drill::Sources(_)) => "Other folders".into(),
+            ReviewFilter::Drill(Drill::Buckets(_)) => "Other destinations".into(),
+        }
+    }
+
+    fn keeps(&self, movement: &RestructureMove, root: &str) -> bool {
+        let folder = || v3::parent_name(&movement.source);
+        match self {
+            ReviewFilter::All => true,
+            ReviewFilter::Group(group) => outcome(movement) == *group,
+            ReviewFilter::Drill(Drill::Source(source)) => folder() == *source,
+            ReviewFilter::Drill(Drill::Bucket(target)) => bucket(movement, root) == *target,
+            ReviewFilter::Drill(Drill::Sources(sources)) => sources.contains(&folder()),
+            ReviewFilter::Drill(Drill::Buckets(targets)) => targets.contains(&bucket(movement, root)),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Operation {
@@ -75,6 +111,8 @@ struct Ui {
     staying_chevron: gtk::Image,
     staying_list: gtk::Revealer,
     staying_rows: gtk::Box,
+    bus: Rc<HoverBus>,
+    map: Rc<MapView>,
 }
 
 fn step_cell(index: usize, title: &str) -> StepCell {
@@ -193,10 +231,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         cell.add_css_class("v3-metric");
         let head = v3::hbox(6);
         head.append(
-            &gtk::Box::builder()
-                .css_classes(["v3-dot", tone.css()])
-                .valign(gtk::Align::Center)
-                .build(),
+            &v3::dot(tone.css()),
         );
         head.append(&v3::label(label, &["v3-meta"]));
         cell.append(&head);
@@ -224,6 +259,22 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     clip_notice.append(&clip_button);
     clip_notice.set_visible(false);
     content.append(&clip_notice);
+
+    let bus = Rc::new(HoverBus::default());
+    let drill_target: Rc<RefCell<std::rc::Weak<Ui>>> = Rc::new(RefCell::new(std::rc::Weak::new()));
+    let drill_slot = drill_target.clone();
+    let map = MapView::new(
+        bus.clone(),
+        Rc::new(move |drill| {
+            let ui = drill_slot.borrow().upgrade();
+            if let Some(ui) = ui {
+                let anchor = ui.map.root.clone();
+                ui.open_review(&anchor, ReviewFilter::Drill(drill));
+            }
+        }),
+    );
+    map.root.set_visible(false);
+    content.append(&map.root);
 
     let recommendations = v3::panel("Recommendations");
     recommendations
@@ -262,11 +313,7 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     staying.append(&staying_list);
     content.append(&staying);
 
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&content)
-        .build();
+    let scroll = v3::scroller(&content);
     let page = v3::vbox(0);
     page.add_css_class("fileid-tab");
     page.append(&strip_outer);
@@ -311,7 +358,10 @@ pub fn build_restructure_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         staying_chevron,
         staying_list,
         staying_rows,
+        bus,
+        map,
     });
+    drill_target.replace(Rc::downgrade(&ui));
     if let Some(root) = ui.root.borrow().clone() {
         ui.set_folder_label(&root);
     }
@@ -478,6 +528,7 @@ impl Ui {
         let Some(plan) = plan else {
             self.metrics.set_visible(false);
             self.recommendations.root.set_visible(false);
+            self.map.root.set_visible(false);
             self.staying.set_visible(false);
             return;
         };
@@ -539,6 +590,12 @@ impl Ui {
         self.recommendations
             .root
             .set_visible(self.recommendations.body.first_child().is_some());
+        let root = self.root.borrow().clone().unwrap_or_default();
+        let items: Vec<MapItem> = moves
+            .iter()
+            .map(|m| MapItem { source_folder: v3::parent_name(&m.source), bucket: bucket(m, &root), outcome: outcome(m) })
+            .collect();
+        self.map.set_data(items, library.staying.clone());
         self.render_staying();
     }
 
@@ -557,6 +614,9 @@ impl Ui {
         outer.add_css_class("v3-soft-row");
         let row = v3::hbox(12);
         row.add_css_class("v3-rec");
+        if let Some(group) = group {
+            self.bus.track(&row, Hover::Outcome(group), move |hover| *hover == Hover::Outcome(group));
+        }
         let skipped = group.is_some_and(|g| self.skipped.borrow().contains(&g));
         if skipped {
             row.add_css_class("skipped");
@@ -678,7 +738,7 @@ impl Ui {
             let weak = Rc::downgrade(self);
             see_all.connect_clicked(move |button| {
                 if let Some(ui) = weak.upgrade() {
-                    ui.open_review(button, Some(group));
+                    ui.open_review(button, ReviewFilter::Group(group));
                 }
             });
             list.append(&see_all);
@@ -806,7 +866,7 @@ impl Ui {
     fn render_staying(self: &Rc<Self>) {
         let library = self.library.borrow().clone();
         v3::clear(&self.staying_rows);
-        let files: u64 = library.staying.iter().map(|(_, n)| n).sum();
+        let files: u64 = library.staying.iter().map(|(_, _, n)| n).sum();
         self.staying
             .set_visible(!library.staying.is_empty() && self.plan.borrow().is_some());
         self.staying_meta.set_text(&format!(
@@ -814,15 +874,13 @@ impl Ui {
             plural(library.staying.len(), "folder"),
             plural(files as usize, "file")
         ));
-        for (folder, count) in library.staying.iter().take(500) {
-            let row = v3::hbox(10);
-            row.add_css_class("v3-row-pad");
-            row.add_css_class("v3-soft-row");
+        for (full, folder, count) in library.staying.iter().take(500) {
+            let row = v3::list_row(10);
+            row.add_css_class("v3-staying-row");
+            let lit = full.clone();
+            self.bus.track(&row, Hover::Source(full.clone()), move |hover| hover.touches_source(&lit));
             row.append(
-                &gtk::Box::builder()
-                    .css_classes(["v3-dot", "tone-done"])
-                    .valign(gtk::Align::Center)
-                    .build(),
+                &v3::dot("tone-done"),
             );
             let name = v3::mono(folder, "s12");
             name.set_hexpand(true);
@@ -837,7 +895,7 @@ impl Ui {
 
     /// Drill-down sheet with every move (or one group's), grouped by
     /// destination; Done (Return) closes it.
-    fn open_review(self: &Rc<Self>, anchor: &impl IsA<gtk::Widget>, group: Option<Outcome>) {
+    fn open_review(self: &Rc<Self>, anchor: &impl IsA<gtk::Widget>, filter: ReviewFilter) {
         let dialog = adw::Dialog::builder()
             .content_width(820)
             .content_height(640)
@@ -849,14 +907,7 @@ impl Ui {
         let titles = v3::vbox(6);
         titles.set_hexpand(true);
         titles.append(&v3::section("Restructure / Review"));
-        titles.append(&v3::label(
-            match group {
-                Some(Outcome::Tidy) => "Tidying",
-                Some(Outcome::Reorganize) => "Reorganizing",
-                None => "All moves",
-            },
-            &["v3-serif-28"],
-        ));
+        titles.append(&v3::label(&filter.title(), &["v3-serif-28"]));
         head.append(&titles);
         let meta = v3::meta("");
         meta.set_valign(gtk::Align::End);
@@ -872,7 +923,7 @@ impl Ui {
         let root = self.root.borrow().clone().unwrap_or_default();
         let mut buckets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (index, movement) in self.moves().iter().enumerate() {
-            if group.map_or(true, |group| group == outcome(movement)) {
+            if filter.keeps(movement, &root) {
                 buckets
                     .entry(bucket(movement, &root))
                     .or_default()
@@ -885,11 +936,7 @@ impl Ui {
             list.append(&self.bucket_section(name, indices, indices));
         }
         column.append(
-            &gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .vexpand(true)
-                .child(&list)
-                .build(),
+            &v3::scroller(&list),
         );
         dialog.set_child(Some(&column));
         let close = dialog.downgrade();
@@ -929,16 +976,7 @@ impl Ui {
             .iter()
             .map(|m| v3::parent_name(&m.source))
             .collect();
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let library = fileid_engine::paths::db_path()
-                .ok()
-                .filter(|path| path.exists())
-                .and_then(|path| fileid_engine::db::open_read(&path).ok())
-                .map(|conn| library_under(&conn, &root, &moved_from))
-                .unwrap_or_default();
-            let _ = tx.send_blocking(library);
-        });
+        let rx = crate::engine_client::read_db(move |conn| library_under(conn, &root, &moved_from));
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let Ok(library) = rx.recv().await else { return };
@@ -1149,7 +1187,7 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
     let weak = Rc::downgrade(ui);
     ui.review_button.connect_clicked(move |button| {
         if let Some(ui) = weak.upgrade() {
-            ui.open_review(button, None);
+            ui.open_review(button, ReviewFilter::All);
         }
     });
     let weak = Rc::downgrade(ui);
@@ -1248,4 +1286,27 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn review_filters_title_and_select_moves() {
+        let movement = RestructureMove {
+            source: "/lib/Untitled/a.jpg".into(),
+            destination: "/lib/Photos/2024/a.jpg".into(),
+            tier: Some("Junk".into()),
+            ..RestructureMove::default()
+        };
+        let source = ReviewFilter::Drill(Drill::Source("/lib/Untitled".into()));
+        assert_eq!(source.title(), "From Untitled");
+        assert!(source.keeps(&movement, "/lib"));
+        assert!(ReviewFilter::Drill(Drill::Bucket("Photos/2024".into())).keeps(&movement, "/lib"));
+        assert!(!ReviewFilter::Drill(Drill::Buckets(vec!["Docs".into()])).keeps(&movement, "/lib"));
+        assert!(ReviewFilter::Group(Outcome::Reorganize).keeps(&movement, "/lib"));
+        assert!(!ReviewFilter::Group(Outcome::Tidy).keeps(&movement, "/lib"));
+        assert_eq!(ReviewFilter::Drill(Drill::Bucket("Docs".into())).title(), "To Docs");
+    }
 }

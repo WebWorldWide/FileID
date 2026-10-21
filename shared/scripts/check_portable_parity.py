@@ -12,7 +12,7 @@ import tempfile
 import time
 import uuid
 
-from check_catalog_roundtrip import Engine
+from conformance import Engine
 
 MODEL = 'clip-vitb32-openai-v1:126bacbb4038a0820ca6582bd81f58d7892070deab8317b390e37d7632a53471'
 PNG = bytes.fromhex('89504e470d0a1a0a0000000d494844520000000200000002080600000072b60d240000001149444154789c63f87f86e13f0833c0180066120b29b97883690000000049454e44ae426082')

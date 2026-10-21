@@ -25,6 +25,7 @@ pub enum Action {
     AskChat(String),
     LibraryQuery(String),
     FocusSearch,
+    ToggleChat,
     DismissNote,
 }
 
@@ -214,37 +215,6 @@ pub fn compact(n: u64) -> String {
     } else {
         grouped(n)
     }
-}
-
-pub fn section_label(text: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text.to_uppercase())
-        .xalign(0.0)
-        .css_classes(["section-label"])
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .build()
-}
-
-pub fn label(text: &str, classes: &[&str]) -> gtk::Label {
-    let label = gtk::Label::builder().label(text).xalign(0.0).build();
-    for class in classes {
-        label.add_css_class(class);
-    }
-    label
-}
-
-pub fn hbox(spacing: i32) -> gtk::Box {
-    gtk::Box::new(gtk::Orientation::Horizontal, spacing)
-}
-
-pub fn vbox(spacing: i32) -> gtk::Box {
-    gtk::Box::new(gtk::Orientation::Vertical, spacing)
-}
-
-pub fn spacer() -> gtk::Box {
-    let spacer = hbox(0);
-    spacer.set_hexpand(true);
-    spacer
 }
 
 pub fn set_tone(widget: &impl IsA<gtk::Widget>, tone: status::Tone) {

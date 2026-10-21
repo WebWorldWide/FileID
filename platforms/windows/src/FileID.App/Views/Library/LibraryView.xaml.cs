@@ -20,38 +20,6 @@ namespace FileID.Views.Library;
 
 public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 {
-    private async void OnCatalogClicked(object sender, RoutedEventArgs args)
-        => await DebugLog.SafeRunAsync(nameof(OnCatalogClicked), async () =>
-        {
-            using var workbench = new CatalogWorkbench();
-            var dialog = new ContentDialog
-            {
-                XamlRoot = XamlRoot,
-                Title = "Search & Moments",
-                Content = workbench,
-                CloseButtonText = "Done",
-                DefaultButton = ContentDialogButton.Close
-            };
-            dialog.Resources["ContentDialogMaxWidth"] = 980d;
-            await dialog.ShowAsync();
-        });
-
-    private async void OnToolsClicked(object sender, RoutedEventArgs e)
-        => await DebugLog.SafeRunAsync(nameof(OnToolsClicked), async () =>
-        {
-            using var workbench = new ToolsWorkbench();
-            var dialog = new ContentDialog
-            {
-                XamlRoot = XamlRoot,
-                Title = "File Tools",
-                Content = workbench,
-                CloseButtonText = "Done",
-                DefaultButton = ContentDialogButton.Close
-            };
-            dialog.Resources["ContentDialogMaxWidth"] = 980d;
-            await dialog.ShowAsync();
-        });
-
     internal LibraryViewModel ViewModel { get; }
     private FileTile? _lastClickedTile;
     private int _trashInFlight;
@@ -117,6 +85,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         _gridKeyHandler = new Microsoft.UI.Xaml.Input.KeyEventHandler(OnGridPreviewKeyDown);
         GridScroller.AddHandler(UIElement.PreviewKeyDownEvent, _gridKeyHandler, handledEventsToo: true);
         GridScroller.ViewChanged += OnGridScrolled;
+        SelectedPane.Store = _store;
+        SelectedPane.CloseRequested += (_, _) => ClosePane();
+        SelectedPane.OpenPreviewRequested += OnPaneOpenPreviewRequested;
+        SelectedPane.FindSimilarRequested += OnPaneFindSimilarRequested;
 
         Loaded += async (_, _) =>
         {
@@ -383,6 +355,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        => DebugLog.SafeRun(nameof(OnViewModelPropertyChanged), () => OnViewModelPropertyChangedCore(e));
+
+    private void OnViewModelPropertyChangedCore(System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (_unloaded) return;
         if (e.PropertyName is nameof(LibraryViewModel.IsLoading)
@@ -400,6 +375,10 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         {
             DispatcherQueue.TryEnqueue(UpdateSelectionBar);
         }
+        if (e.PropertyName is nameof(LibraryViewModel.TotalCount))
+        {
+            DispatcherQueue.TryEnqueue(SyncShownCount);
+        }
     }
 
     private void OnItemsCollectionChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -407,6 +386,32 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+        SyncShownCount();
+        // A reorder is Remove+Insert of the same instance, so check after the
+        // merge settles rather than closing on the Remove.
+        if (SelectedPane.Tile is { } paneTile
+            && (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset
+                || e.OldItems?.Contains(paneTile) == true))
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (!_unloaded && IsPaneOpen && !ViewModel.Items.Contains(paneTile)) ClosePane();
+            });
+        }
+    }
+
+    /// <summary>macOS filter bar: "N of M shown" for the paged listing, the hit
+    /// count while searching.</summary>
+    internal static string ShownCount(int shown, int? total) =>
+        total is { } all
+            ? $"{shown:N0} of {all:N0} shown"
+            : $"{shown:N0} result{(shown == 1 ? "" : "s")}";
+
+    private void SyncShownCount()
+    {
+        if (_unloaded) return;
+        int shown = ViewModel.Items.Count;
+        ShownCountText.Text = shown == 0 && ViewModel.TotalCount is null or 0 ? string.Empty : ShownCount(shown, ViewModel.TotalCount);
     }
 
     public string StatusText
@@ -457,6 +462,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
     private void OnEscapeAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
         => DebugLog.SafeRun(nameof(OnEscapeAccelerator), () =>
         {
+            if (IsPaneOpen)
+            {
+                ClosePane();
+                args.Handled = true;
+                return;
+            }
             if (ViewModel.SelectedCount > 0)
             {
                 ViewModel.ClearSelection();
@@ -877,21 +888,62 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             else
             {
-                // Plain click — only update selection if user is mid-multi-select;
-                // otherwise let double-tap open the preview without setting any
-                // selection.
-                if (ViewModel.SelectedCount > 0)
+                // Plain click (macOS parity): select just this tile and open the
+                // Selected pane; double-click still opens the full preview.
+                using (ViewModel.BulkSelectionScope())
                 {
-                    using (ViewModel.BulkSelectionScope())
-                    {
-                        foreach (var t in ViewModel.Items) t.IsSelected = false;
-                        tile.IsSelected = true;
-                    }
-                    _lastClickedTile = tile;
+                    foreach (var t in ViewModel.Items) t.IsSelected = false;
+                    tile.IsSelected = true;
                 }
+                _lastClickedTile = tile;
+                ShowPane(tile);
             }
 
             UpdateSelectionBar();
+        });
+
+    private const double PaneWidth = 312;
+
+    private void ShowPane(FileTile tile)
+    {
+        bool wasHidden = PaneHost.Visibility != Visibility.Visible;
+        SelectedPane.Show(tile);
+        PaneColumn.Width = new GridLength(PaneWidth);
+        PaneHost.Visibility = Visibility.Visible;
+        if (wasHidden && !FileID.Theme.Motion.ReducedMotion.Instance.IsReduced)
+        {
+            var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(PaneHost);
+            Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.SetIsTranslationEnabled(PaneHost, true);
+            visual.Opacity = 0f;
+            visual.Properties.InsertVector3("Translation", new System.Numerics.Vector3(24, 0, 0));
+            FileID.Theme.Motion.SpringEasing.AnimateOpacity(PaneHost, 1f, 0.40, 0.80);
+            FileID.Theme.Motion.SpringEasing.AnimateScalar(PaneHost, "Translation.X", 0f, 0.40, 0.80);
+        }
+    }
+
+    private void ClosePane()
+    {
+        if (_unloaded) return;
+        PaneHost.Visibility = Visibility.Collapsed;
+        PaneColumn.Width = new GridLength(0);
+    }
+
+    private bool IsPaneOpen => PaneHost.Visibility == Visibility.Visible;
+
+    private async void OnPaneOpenPreviewRequested(object? sender, EventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnPaneOpenPreviewRequested), async () =>
+        {
+            if (SelectedPane.Tile is not { } tile) return;
+            int index = ViewModel.Items.IndexOf(tile);
+            if (index < 0) return;
+            await OpenPreview(tile, index);
+        });
+
+    private async void OnPaneFindSimilarRequested(object? sender, EventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnPaneFindSimilarRequested), async () =>
+        {
+            if (SelectedPane.Tile is not { } tile) return;
+            await ViewModel.FindSimilarAsync(tile.Id, System.Threading.CancellationToken.None);
         });
 
     private void UpdateSelectionBar()
@@ -1344,13 +1396,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         }
     }
 
-    private static string FormatSize(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
-        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024):0.#} MB";
-        return $"{bytes / (1024.0 * 1024 * 1024):0.##} GB";
-    }
+    private static string FormatSize(long bytes) => FileID.Services.ByteFormat.File(bytes);
 
     // Double-click any tile → open the FilePreviewSheet modal. The Tag
     // on the tile carries the absolute path; we look up the FileTile in

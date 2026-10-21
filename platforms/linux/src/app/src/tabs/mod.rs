@@ -1,16 +1,18 @@
 // Native GTK tabs share the typed engine connection.
 
-mod chat;
+pub mod chat;
 pub mod cleanup;
 pub mod deep_analyze;
-mod file_tools;
+pub mod file_tools;
 pub mod library;
 mod library_pane;
 mod model_catalog;
-mod moments;
+pub mod moments;
 mod moments_timeline;
 pub mod people;
 pub mod restructure;
+mod restructure_map;
+mod restructure_map_layout;
 mod restructure_model;
 pub mod settings;
 pub(crate) mod util;

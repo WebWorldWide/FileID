@@ -48,7 +48,7 @@ actor ChatService {
                 let filter = plan.kinds.isEmpty ? "" : " (\(plan.kinds.map(Self.kindLabel).joined(separator: ", ")))"
                 let people = plan.personNames.isEmpty ? "" : " (people: \(plan.personNames.joined(separator: ", ")))"
                 let events = plan.eventNames.isEmpty ? "" : " (event: \(plan.eventNames.joined(separator: ", ")))"
-                let time = plan.timeSeconds.map { " (near \(Self.timeLabel($0)))" } ?? ""
+                let time = plan.timeSeconds.map { " (near \(DurationText.clock($0)))" } ?? ""
                 let explanation = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.timeSeconds == nil
                     ? "Add a subject, event, time, or media type such as videos or photos. No search was run."
                     : hits.isEmpty
@@ -65,7 +65,7 @@ actor ChatService {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
                 } else {
-                    let modelNote = hits.isEmpty ? "" : " Load a model in Deep Analyze for a written answer; these are the matching files."
+                    let modelNote = hits.isEmpty ? "" : " Load a local AI model for a written answer; these are the matching files."
                     let message = explanation + (request.useModel == true ? modelNote + " Nothing was downloaded." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }
@@ -108,11 +108,6 @@ actor ChatService {
     private static func knownEvents(_ db: GRDB.Database) throws -> [ChatSearchPlan.KnownEvent] {
         try Row.fetchAll(db, sql: "SELECT id,title FROM catalog_events WHERE user_edited=1 AND length(trim(title))>0 ORDER BY title LIMIT 200")
             .map { row in ChatSearchPlan.KnownEvent(id: row["id"], names: [row["title"]]) }
-    }
-
-    private static func timeLabel(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     static func kindLabel(_ kind: String) -> String {

@@ -561,7 +561,7 @@ fn resident_owner_actual_deep_and_shutdown_consume_service_not_private_tracker()
     assert!(deep.contains("ResidentService::shared().acquire(model_kind, cancel.clone()).await"));
     assert!(deep.contains("server.finish(keep).await"));
     assert!(deep.contains("ProcessTracker::shared().allows_discovery()"));
-    let main = include_str!("../main.rs");
+    let main = include_str!("../server.rs");
     assert!(
         main.find("ResidentService::shared().shutdown()").unwrap()
             < main.find("ProcessTracker::shared().shutdown()").unwrap()

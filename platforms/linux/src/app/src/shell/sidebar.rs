@@ -4,7 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use super::status::{ScanControls, Status, Tone, STAGES};
-use super::{hbox, label, set_tone, spacer, vbox, Action, Area, GrainBar};
+use super::{set_tone, Action, Area, GrainBar};
+use crate::v3::{hbox, label, spacer, vbox};
 
 struct NavRow {
     id: &'static str,

@@ -25,7 +25,7 @@ actor TimelineAnalysis {
             guard !request.requestID.isEmpty, request.requestID.count <= 200, let ids = request.fileIDs, !ids.isEmpty, ids.count <= 1000 else { throw CatalogStore.InvalidRequest() }
             if let mode = request.timelineMode, !["sampled", "moments"].contains(mode) { throw CatalogStore.InvalidRequest() }
             guard case .ready(let model) = await DeepAnalyze.shared.loadState else {
-                return CatalogResponse(requestID: request.requestID, status: "error", message: "Load a visual model in Deep Analyze before starting timeline analysis. No model will be downloaded automatically.")
+                return CatalogResponse(requestID: request.requestID, status: "error", message: "Load a visual model on the Describe Files page before analyzing videos. No model will be downloaded automatically.")
             }
             let unique = Array(Set(ids)).sorted()
             let id = UUID().uuidString

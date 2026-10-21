@@ -39,7 +39,8 @@ public final class ThumbnailService {
 
     private init() {}
 
-    public func thumbnail(for url: URL, size: CGFloat = 192, revision: String? = nil) async -> NSImage? {
+    public func thumbnail(for url: URL, size requested: CGFloat = 192, revision: String? = nil) async -> NSImage? {
+        let size = Self.bucket(requested)
         let key = ("\(url.path)|\(Int(size))" + (revision.map { "|" + $0 } ?? "")) as NSString
         if let hit = cache.object(forKey: key) { return hit }
         if let task = inflight[key as String] {
@@ -66,6 +67,11 @@ public final class ThumbnailService {
             return image
         }
         return nil
+    }
+
+    /// Requests round up to a few shared sizes so views reuse one cache entry.
+    nonisolated static func bucket(_ size: CGFloat) -> CGFloat {
+        [256, 512, 1024].first { size <= $0 } ?? size
     }
 
     /// Screen-sized still for the preview sheet, decoded straight from the

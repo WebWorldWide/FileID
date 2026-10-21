@@ -22,22 +22,22 @@ struct SettingsTab: View {
 
                 // ─── User-facing settings (always visible) ───────────────
 
-                GlassCard {
+                Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Cleanup").font(Theme.Font.body(14, .semibold))
-                        SettingToggleRow("Tag kept files after Cleanup",
-                                         subtitle: "After you trash duplicates, the copies you keep get the Finder tag “\(AppSettings.cleanupAutoTagName)”, so a Smart Folder can find them.",
+                        Text("Duplicates").font(Theme.Font.body(14, .semibold))
+                        SettingToggleRow("Tag kept files after removing duplicates",
+                                         subtitle: "After you move extra copies to Trash, the copies you keep get the Finder tag “\(AppSettings.cleanupAutoTagName)”, so a Smart Folder can find them.",
                                          isOn: $cleanupAutoTag)
                     }
                 }
 
-                GlassCard {
+                Panel(padding: 16) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Restructure").font(Theme.Font.body(14, .semibold))
+                        Text("Organize Folders").font(Theme.Font.body(14, .semibold))
                         LabeledSegment("Folder granularity") {
                             SegmentedBar(selection: $restructureGranularity, options: [("loose", "Looser"), ("normal", "Balanced"), ("tight", "Tighter")])
                         }
-                        Text("How finely Restructure splits your files into folders — Looser groups broadly into fewer folders, Tighter makes more, smaller ones. Takes effect the next time the engine starts (relaunch FileID, or Settings ▸ Advanced ▸ Restart Engine).")
+                        Text("How finely Organize Folders splits your files. Looser makes fewer, broader folders; Tighter makes more, smaller ones. Takes effect after you quit and reopen FileID.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.text3)
                     }
@@ -47,19 +47,19 @@ struct SettingsTab: View {
 
                 // AI Models — visible because users genuinely care about
                 // which models are installed and download status.
-                CLIPSemanticSearchCard()
-                RamPlusTaggerCard()
-                BGEDocCard()
+                ModelInstallCard.clip
+                ModelInstallCard.ramPlus
+                ModelInstallCard.bge
 
                 DeepAnalyzeModelPickerCard(engine: engine)
-                FaceEmbedderCard(engine: engine, store: store)
+                ModelInstallCard.face
 
                 // ─── Advanced (collapsed by default) ─────────────────────
                 // Engine PIDs, DB paths, log files. Power-user info that
                 // doesn't help a casual user choose anything; hiding it
                 // declutters the page.
 
-                GlassCard {
+                Panel(padding: 16) {
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(alignment: .leading, spacing: 16) {
                             Divider().opacity(0.3)
@@ -77,11 +77,11 @@ struct SettingsTab: View {
                                 HStack(spacing: 8) {
                                     Button("Restart Engine") { engine.start() }
                                         .buttonStyle(.dsSecondary)
-                                        .help("Spawn a fresh engine process. Cancels any in-flight scan.")
+                                        .help("Restart FileID's background helper. Stops any scan in progress.")
                                     if case .ready = engine.state {
                                         Button("Stop Engine") { engine.shutdown() }
                                             .buttonStyle(.dsSecondary)
-                                            .help("Cleanly shut down the engine process.")
+                                            .help("Stop FileID's background helper.")
                                     }
                                 }
                             }
@@ -164,7 +164,7 @@ struct SettingsTab: View {
                                     }
                                     Button("Cancel", role: .cancel) { }
                                 } message: {
-                                    Text("This will permanently delete the database, all tags, faces, settings, FileID-managed models, and caches. Shared Deep Analyze model downloads are kept. This action cannot be undone.")
+                                    Text("This permanently deletes everything FileID learned (tags, faces, descriptions), its settings, downloaded models and caches. The large description models are kept. Your own files are not touched. This can't be undone.")
                                 }
                             }
                         }
@@ -174,7 +174,7 @@ struct SettingsTab: View {
                             Image(systemName: "wrench.and.screwdriver")
                                 .foregroundStyle(Theme.text3)
                             Text("Advanced").font(Theme.Font.body(14, .semibold))
-                            Text("(engine status, database, scan history, logs)")
+                            Text("(troubleshooting: background helper, storage, scan history, logs)")
                                 .font(Theme.Font.body(12))
                                 .foregroundStyle(Theme.text3)
                         }
@@ -253,10 +253,10 @@ struct DeepAnalyzeExclusionsCard: View {
     @State private var message: (text: String, isError: Bool)?
 
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Deep Analyze exclusions").font(Theme.Font.body(14, .semibold))
-                Text("FileID skips these folders when running Deep Analyze over your whole library. Files stay in the library and search normally — only the VLM pass (captions, smart renames, tags) is skipped. Selecting specific files to analyze always ignores this list.")
+                Text("Folders not to describe").font(Theme.Font.body(14, .semibold))
+                Text("Describe Files skips these folders when it describes the whole library. Their files still show up and can be searched. Describing a single file ignores this list.")
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
 
@@ -274,7 +274,7 @@ struct DeepAnalyzeExclusionsCard: View {
                 }
 
                 if settings.excludedFolders.isEmpty {
-                    Text("No folders are excluded from Deep Analyze.")
+                    Text("No folders are skipped.")
                         .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
                 } else {
                     ForEach(settings.excludedFolders, id: \.self) { folder in
@@ -284,7 +284,7 @@ struct DeepAnalyzeExclusionsCard: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            DSIconButton("Stop excluding \(folder) from Deep Analyze", systemImage: "xmark", tint: Theme.text3) {
+                            DSIconButton("Describe \(folder) again", systemImage: "xmark", tint: Theme.text3) {
                                 settings.removeExcludedFolder(folder)
                             }
                         }
@@ -302,562 +302,233 @@ struct DeepAnalyzeExclusionsCard: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a folder to exclude from Deep Analyze"
+        panel.message = "Choose a folder for Describe Files to skip"
         panel.prompt = "Exclude"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         switch settings.addExcludedFolder(url.path) {
         case .added:
-            message = ("Excluded. Deep Analyze will skip this folder starting with the next whole-library run.", false)
+            message = ("Done. Describe Files will skip this folder from the next run.", false)
         case .alreadyExcluded:
-            message = ("That folder is already excluded from Deep Analyze.", false)
+            message = ("That folder is already skipped.", false)
         case .invalid:
-            message = ("Couldn't exclude that folder — pick a folder on this Mac.", true)
+            message = ("Couldn't skip that folder. Choose a folder on this Mac.", true)
         }
     }
 }
 
-// MARK: - CLIP semantic-search card
+// MARK: - Model install card
 
-/// Settings card for the CLIP semantic-search tier. State-driven —
-/// shows install status, download/extract progress, and the manual
-/// "install from local zip" fallback.
-struct CLIPSemanticSearchCard: View {
-    @State private var installer = CLIPModelInstaller.shared
-    @State private var confirmUninstall = false
-
-    private var downloadSizeLabel: String {
-        ByteCountFormatter.string(
-            fromByteCount: CLIPModelInstaller.approxDownloadBytes,
-            countStyle: .file)
+struct ModelInstallCard: View {
+    struct Row {
+        let name: String
+        var detail: String? = nil
+        let path: URL
     }
 
+    let installer: any ModelInstalling
+    let title: String
+    let blurb: String
+    let rows: [Row]
+    let approxBytes: Int64
+    let removeTitle: String
+    let fallback: String
+    var onRemoved: () -> Void = {}
+    var localZip: ((URL) -> Void)? = nil
+    @State private var confirmRemove = false
+
+    private var sizeLabel: String { ByteCountFormatter.string(fromByteCount: approxBytes, countStyle: .file) }
+
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("AI Models — semantic search (CLIP)").font(Theme.Font.body(14, .semibold))
-                Text("Type natural-language searches like \"sunset at the beach\" and FileID ranks every photo by visual relevance. Uses OpenCLIP ViT-B/32 — runs entirely on your Mac.")
+                Text(title).font(Theme.Font.body(14, .semibold))
+                Text(blurb)
                     .font(Theme.Font.meta).foregroundStyle(Theme.text3)
                     .fixedSize(horizontal: false, vertical: true)
-
                 Divider().opacity(0.3)
-
-                // Per-file install state.
-                fileStatusRow(
-                    name: "CLIP ViT-B/32 (image)",
-                    url: CLIPModelInstaller.modelsRoot
-                        .appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")
-                )
-                fileStatusRow(
-                    name: "CLIP ViT-B/32 (text)",
-                    url: CLIPTextEncoder.defaultModelURL
-                )
-                fileStatusRow(
-                    name: "BPE vocabulary (vocab.json + merges.txt)",
-                    url: CLIPTextEncoder.defaultDirectory
-                        .appendingPathComponent("vocab.json")
-                )
-
+                ForEach(rows, id: \.path) { rowView($0) }
                 Divider().opacity(0.3)
-
-                // State-aware footer.
-                statusFooter
+                footer
             }
         }
         .onAppear { installer.refreshStatus() }
-        .confirmationDialog(
-            "Remove CLIP models?",
-            isPresented: $confirmUninstall,
-            titleVisibility: .visible
-        ) {
+        .confirmationDialog(removeTitle, isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
                 Task {
                     await installer.uninstall()
-                    // Drop the in-memory text encoder too — otherwise semantic
-                    // search keeps running against the model we just deleted until
-                    // the next app launch, with no fallback.
-                    CLIPTextEncoder.shared.unload()
+                    onRemoved()
                 }
             }
             Button("Keep", role: .cancel) {}
         } message: {
-            Text("Frees approximately \(downloadSizeLabel). Semantic search will revert to keyword search until you reinstall.")
+            Text("Frees about \(sizeLabel). \(fallback)")
         }
     }
 
-    @ViewBuilder
-    private var statusFooter: some View {
-        switch installer.status {
-        case .unknown:
-            ProgressView().controlSize(.small)
-        case .missing(let reason):
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.down.circle")
-                    .foregroundStyle(Theme.gold)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(reason).font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
-                    Text("Approximately \(downloadSizeLabel) from huggingface.co (Xenova CLIP ViT-B/32 + OpenAI BPE vocabulary).")
-                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+    private func rowView(_ row: Row) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            rowIcon(present: installer.presentFilePaths.contains(row.path.path)).padding(.top, 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.name).font(Theme.Font.body(13.5, .semibold))
+                if let detail = row.detail {
+                    Text(detail).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
-                Spacer()
-            }
-            HStack(spacing: 8) {
-                Button {
-                    installer.install()
-                } label: {
-                    Label("Download", systemImage: "arrow.down.circle.fill")
-                }
-                .buttonStyle(.dsPrimary)
-                .tint(Theme.gold)
-
-                Button("Install from local zip…") { pickLocalZip() }
-                    .buttonStyle(.dsSecondary)
-
-                Button("Open Models folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(Theme.text3)
-                Spacer()
-            }
-
-        case .downloading(let frac, let msg, let bps, let eta):
-            VStack(alignment: .leading, spacing: 6) {
-                if frac > 0 {
-                    ProgressView(value: frac)
-                } else {
-                    ProgressView()
-                }
-                HStack {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(msg).font(Theme.Font.mono(10.5))
-                            .foregroundStyle(Theme.text3)
-                        let rateETA = DownloadFormat.rateAndETA(
-                            DownloadTick(written: 0, total: 0,
-                                          bytesPerSecond: bps, etaSeconds: eta))
-                        if !rateETA.isEmpty {
-                            Text(rateETA).font(Theme.Font.mono(10.5))
-                                .foregroundStyle(Theme.text3)
-                        }
-                    }
-                    Spacer()
-                    Button("Cancel") { installer.cancel() }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                }
-            }
-
-        case .extracting:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Extracting…").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                Spacer()
-            }
-
-        case .installed(let bytes):
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.seal.fill")
-                    .foregroundStyle(Theme.delight)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Installed").font(Theme.Font.body(13.5, .semibold))
-                    Text("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) on disk · semantic search active.")
-                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
-                }
-                Spacer()
-                Button("Open Models folder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                Button("Uninstall") { confirmUninstall = true }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .foregroundStyle(Theme.danger)
-            }
-
-        case .installFailed(let why):
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(Theme.danger)
-                    Text(why).font(Theme.Font.body(12))
-                        .foregroundStyle(Theme.danger)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                }
-                HStack(spacing: 8) {
-                    Button("Retry") { installer.install() }
-                        .buttonStyle(.dsSecondary)
-                    Button("Install from local zip…") { pickLocalZip() }
-                        .buttonStyle(.dsSecondary)
-                    Button("Open Models folder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
-                    }
-                    .buttonStyle(.borderless)
-                    Spacer()
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func fileStatusRow(name: String, url: URL) -> some View {
-        let installed = installer.presentFilePaths.contains(url.path)
-        HStack(alignment: .center, spacing: 8) {
-            Image(systemName: installed ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(installed ? Theme.delight : .secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(name).font(Theme.Font.body(13.5))
-                Text(url.path)
-                    .font(Theme.Font.mono(10.5))
-                    .foregroundStyle(Theme.text3)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Text(row.path.path)
+                    .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
+                    .lineLimit(1).truncationMode(.middle)
             }
             Spacer()
         }
     }
 
-    private func pickLocalZip() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.zip]
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose the clip-models.zip file."
-        panel.prompt = "Install"
-        if panel.runModal() == .OK, let url = panel.url {
-            installer.installFromLocalZip(url)
-        }
-    }
-}
-
-// MARK: - Face embedder card
-
-/// Settings card for the face-recognition tier. Per-variant install
-/// state with Download/Uninstall buttons. The engine picks up whichever
-/// .mlpackage is on disk the next time face clustering runs.
-// AI Models — RAM++ tagger (macOS lockstep). Single-model card; the engine's
-// RamPlusService reads whatever this installs and falls back to Vision tags if
-// absent, so installing is purely an upgrade.
-struct RamPlusTaggerCard: View {
-    @State private var installer = RamPlusModelInstaller.shared
-    @State private var confirmUninstall = false
-
-    private var modelPath: String {
-        RamPlusModelInstaller.modelsRoot.appendingPathComponent("ram_plus/ram_plus.onnx").path
-    }
-
-    var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("AI Models — image tagging").font(Theme.Font.body(14, .semibold))
-                Text("RAM++ recognizes 4585 everyday tags on-device (richer than the built-in classifier). Apache-2.0; install with one click, no Python required. Without it, tagging uses the lighter built-in classifier.")
-                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
-                Divider().opacity(0.3)
-                HStack(alignment: .top, spacing: 8) {
-                    statusIcon.padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("RAM++ (Recognize Anything Plus)").font(Theme.Font.body(13.5, .semibold))
-                        Text("Swin-Large @384 · 4585-tag English vocabulary").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                        Text(modelPath)
-                            .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    Spacer()
-                }
-                footer.padding(.leading, 24)
-            }
-        }
-        .onAppear { installer.refreshStatus() }
-        .confirmationDialog(
-            "Remove RAM++ tagger?",
-            isPresented: $confirmUninstall,
-            titleVisibility: .visible
-        ) {
-            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
-            Button("Keep", role: .cancel) { confirmUninstall = false }
-        } message: {
-            Text("Frees ~450 MB. Tagging falls back to the lighter built-in classifier.")
-        }
-    }
-
-    @ViewBuilder private var statusIcon: some View {
+    @ViewBuilder
+    private func rowIcon(present: Bool) -> some View {
         switch installer.status {
-        case .installed: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.delight)
-        case .downloading: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
+        case _ where present: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.delight)
+        case .downloading, .extracting: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
         case .installFailed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
-        default: Image(systemName: "xmark.circle").foregroundStyle(Theme.warning)
-        }
-    }
-
-    @ViewBuilder private var footer: some View {
-        switch installer.status {
-        case .unknown:
-            EmptyView()
-        case .missing:
-            Button { installer.install() } label: {
-                Label("Install (~450 MB)", systemImage: "arrow.down.circle.fill")
-            }
-            .buttonStyle(.dsPrimary)
-        case .downloading(let fraction, let message, _, _):
-            VStack(alignment: .leading, spacing: 4) {
-                ProgressView(value: fraction).frame(maxWidth: 280)
-                HStack {
-                    Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                    Spacer()
-                    Button("Cancel") { installer.cancel() }.font(Theme.Font.body(12))
-                }
-            }
-        case .installed(let sizeBytes):
-            HStack(spacing: 8) {
-                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                Spacer()
-                Button("Remove", role: .destructive) { confirmUninstall = true }.font(Theme.Font.body(12))
-            }
-        case .installFailed(let msg):
-            VStack(alignment: .leading, spacing: 4) {
-                Text(msg).font(Theme.Font.body(12)).foregroundStyle(Theme.danger)
-                Button("Retry") { installer.install() }.buttonStyle(.dsSecondary)
-            }
-        }
-    }
-}
-
-// AI Models — BGE document embedder. The engine's restructure clusters documents by
-// content when this is installed, else by filename — so installing is purely an upgrade.
-struct BGEDocCard: View {
-    @State private var installer = BGEModelInstaller.shared
-    @State private var confirmUninstall = false
-
-    private var modelPath: String {
-        BGEModelInstaller.modelsRoot.appendingPathComponent("bge_text/bge_small.onnx").path
-    }
-
-    var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("AI Models — document understanding").font(Theme.Font.body(14, .semibold))
-                Text("BGE-small reads a document's content so Restructure groups files by what they say, not their filename (a physics paper joins your physics folder). MIT; one-click, no Python. Without it, documents group by filename.")
-                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
-                Divider().opacity(0.3)
-                HStack(alignment: .top, spacing: 8) {
-                    statusIcon.padding(.top, 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("BGE-small-en-v1.5").font(Theme.Font.body(13.5, .semibold))
-                        Text("384-d BERT text embedder · runs on the Neural Engine").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                        Text(modelPath)
-                            .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    Spacer()
-                }
-                footer.padding(.leading, 24)
-            }
-        }
-        .onAppear { installer.refreshStatus() }
-        .confirmationDialog(
-            "Remove document understanding?",
-            isPresented: $confirmUninstall,
-            titleVisibility: .visible
-        ) {
-            Button("Remove", role: .destructive) { installer.uninstall(); confirmUninstall = false }
-            Button("Keep", role: .cancel) { confirmUninstall = false }
-        } message: {
-            Text("Frees ~135 MB. Documents fall back to filename-based grouping in Restructure.")
-        }
-    }
-
-    @ViewBuilder private var statusIcon: some View {
-        switch installer.status {
-        case .installed: Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.delight)
-        case .downloading: Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
-        case .installFailed: Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
-        default: Image(systemName: "xmark.circle").foregroundStyle(Theme.warning)
-        }
-    }
-
-    @ViewBuilder private var footer: some View {
-        switch installer.status {
-        case .unknown:
-            EmptyView()
-        case .missing:
-            Button { installer.install() } label: {
-                Label("Install (~135 MB)", systemImage: "arrow.down.circle.fill")
-            }
-            .buttonStyle(.dsPrimary)
-        case .downloading(let fraction, let message, _, _):
-            VStack(alignment: .leading, spacing: 4) {
-                ProgressView(value: fraction).frame(maxWidth: 280)
-                HStack {
-                    Text(message).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                    Spacer()
-                    Button("Cancel") { installer.cancel() }.font(Theme.Font.body(12))
-                }
-            }
-        case .installed(let sizeBytes):
-            HStack(spacing: 8) {
-                Text("Installed · \(ByteCountFormatter.string(fromByteCount: Int64(sizeBytes), countStyle: .file))").font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                Spacer()
-                Button("Remove", role: .destructive) { confirmUninstall = true }.font(Theme.Font.body(12))
-            }
-        case .installFailed(let msg):
-            VStack(alignment: .leading, spacing: 4) {
-                Text(msg).font(Theme.Font.body(12)).foregroundStyle(Theme.danger)
-                Button("Retry") { installer.install() }.buttonStyle(.dsSecondary)
-            }
-        }
-    }
-}
-
-struct FaceEmbedderCard: View {
-    let engine: EngineClient
-    let store: ReadStore
-    @State private var installer = ArcFaceModelInstaller.shared
-    @State private var confirmUninstall: FaceEmbedderKind?
-
-    var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("AI Models — face recognition").font(Theme.Font.body(14, .semibold))
-                Text("SFace (Apache-2.0) produces a 128-d face embedding per detected face, used to cluster people across your library — install with one click, no Python required.")
-                    .font(Theme.Font.meta).foregroundStyle(Theme.text3)
-                Divider().opacity(0.3)
-                ForEach(FaceEmbedderKind.allCases, id: \.rawValue) { kind in
-                    embedderRow(kind)
-                    if kind != FaceEmbedderKind.allCases.last {
-                        Divider().opacity(0.2)
-                    }
-                }
-            }
-        }
-        .onAppear { installer.refreshStatus() }
-        .confirmationDialog(
-            "Remove face model?",
-            isPresented: Binding(
-                get: { confirmUninstall != nil },
-                set: { if !$0 { confirmUninstall = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: confirmUninstall
-        ) { kind in
-            Button("Remove", role: .destructive) {
-                installer.uninstall(kind)
-                confirmUninstall = nil
-            }
-            Button("Keep", role: .cancel) { confirmUninstall = nil }
-        } message: { kind in
-            let size = ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file)
-            Text("Frees about \(size). Face clustering will fall back to whichever other variant is installed, or pause if none are.")
+        default: Image(systemName: "circle.dashed").foregroundStyle(Theme.text3)
         }
     }
 
     @ViewBuilder
-    private func embedderRow(_ kind: FaceEmbedderKind) -> some View {
-        let path = FaceEmbedderKind.modelsDirectory.appendingPathComponent(kind.modelFileName).path
-        let status = installer.status[kind] ?? .unknown
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 8) {
-                statusIcon(status)
-                    .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(kind.displayName).font(Theme.Font.body(13.5, .semibold))
-                    Text(kind.subtitle).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
-                    Text(path)
-                        .font(Theme.Font.mono(10.5))
-                        .foregroundStyle(Theme.text3)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer()
-            }
-            statusFooter(for: kind, status: status)
-                .padding(.leading, 24)
-        }
-    }
-
-    @ViewBuilder
-    private func statusIcon(_ status: ArcFaceModelInstaller.Status) -> some View {
-        switch status {
-        case .installed:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.delight)
-        case .downloading:
-            Image(systemName: "arrow.down.circle.fill").foregroundStyle(Theme.gold)
-        case .installFailed:
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
-        default:
-            Image(systemName: "xmark.circle").foregroundStyle(Theme.warning)
-        }
-    }
-
-    @ViewBuilder
-    private func statusFooter(for kind: FaceEmbedderKind,
-                              status: ArcFaceModelInstaller.Status) -> some View {
-        switch status {
+    private var footer: some View {
+        switch installer.status {
         case .unknown:
-            EmptyView()
-
-        case .missing:
+            ProgressView().controlSize(.small)
+        case .missing(let reason):
+            MetaText("\(reason) About \(sizeLabel) from huggingface.co.", size: 11)
             HStack(spacing: 8) {
-                Button {
-                    installer.install(kind)
-                } label: {
-                    Label("Install (~\(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file)))",
-                          systemImage: "arrow.down.circle.fill")
+                Button { installer.install() } label: {
+                    Label("Download (~\(sizeLabel))", systemImage: "arrow.down.circle.fill")
                 }
                 .buttonStyle(.dsPrimary)
-                .tint(Theme.gold)
-                .controlSize(.small)
+                localZipButton
+                openFolderButton
                 Spacer()
             }
-
-        case .downloading(let frac, let msg, let bps, let eta):
-            VStack(alignment: .leading, spacing: 4) {
-                if frac > 0 {
-                    ProgressView(value: frac)
-                } else {
-                    ProgressView()
-                }
+        case .downloading(let fraction, let message, _, _):
+            VStack(alignment: .leading, spacing: 6) {
+                if fraction > 0 { ProgressView(value: fraction) } else { ProgressView() }
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(msg).font(Theme.Font.mono(10.5))
-                            .foregroundStyle(Theme.text3)
-                        let rateETA = DownloadFormat.rateAndETA(
-                            DownloadTick(written: 0, total: 0,
-                                          bytesPerSecond: bps, etaSeconds: eta))
-                        if !rateETA.isEmpty {
-                            Text(rateETA).font(Theme.Font.mono(10.5))
-                                .foregroundStyle(Theme.text3)
+                        Text(message).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
+                        if let rate = installer.status.rateAndETA, !rate.isEmpty {
+                            Text(rate).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
                         }
                     }
                     Spacer()
-                    Button("Cancel") { installer.cancel(kind) }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
+                    Button("Cancel") { installer.cancel() }
+                        .buttonStyle(.borderless).controlSize(.small)
                 }
             }
-
+        case .extracting:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                MetaText("Extracting…")
+                Spacer()
+            }
         case .installed(let bytes):
             HStack(spacing: 8) {
-                Text("\(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) installed")
-                    .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                MetaText("Ready · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) on disk", size: 11)
                 Spacer()
-                Button("Uninstall") { confirmUninstall = kind }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
+                openFolderButton
+                Button("Remove") { confirmRemove = true }
+                    .buttonStyle(.borderless).controlSize(.small)
                     .foregroundStyle(Theme.danger)
             }
-
         case .installFailed(let why):
-            VStack(alignment: .leading, spacing: 4) {
-                Text(why).font(Theme.Font.body(11))
-                    .foregroundStyle(Theme.danger)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(why).font(Theme.Font.body(12)).foregroundStyle(Theme.danger)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
-                    Button("Retry") { installer.install(kind) }
-                        .buttonStyle(.dsSecondary)
-                        .controlSize(.small)
+                    Button("Retry") { installer.install() }.buttonStyle(.dsSecondary)
+                    localZipButton
+                    openFolderButton
                     Spacer()
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private var localZipButton: some View {
+        if let localZip {
+            Button("Install from local zip…") {
+                let panel = NSOpenPanel()
+                panel.allowedContentTypes = [.zip]
+                panel.allowsMultipleSelection = false
+                panel.message = "Choose the clip-models.zip file."
+                panel.prompt = "Install"
+                if panel.runModal() == .OK, let url = panel.url { localZip(url) }
+            }
+            .buttonStyle(.dsSecondary)
+        }
+    }
+
+    private var openFolderButton: some View {
+        Button("Open Models folder") {
+            NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
+        }
+        .buttonStyle(.borderless).controlSize(.small)
+        .foregroundStyle(Theme.text3)
+    }
+}
+
+extension ModelInstallCard {
+    static var clip: ModelInstallCard {
+        let installer = CLIPModelInstaller.shared
+        return ModelInstallCard(
+            installer: installer,
+            title: "Search by description",
+            blurb: "Lets you search photos by what's in them, like \"sunset at the beach\". Model: OpenCLIP ViT-B/32 (MIT), runs on this Mac.",
+            rows: [
+                Row(name: "CLIP ViT-B/32 (image)", path: CLIPModelInstaller.modelsRoot.appendingPathComponent("mobileclip_image/clip_vitb32_image.onnx")),
+                Row(name: "CLIP ViT-B/32 (text)", path: CLIPTextEncoder.defaultModelURL),
+                Row(name: "BPE vocabulary (vocab.json + merges.txt)", path: CLIPTextEncoder.defaultDirectory.appendingPathComponent("vocab.json")),
+            ],
+            approxBytes: CLIPModelInstaller.approxDownloadBytes,
+            removeTitle: "Remove the Search by description model?",
+            fallback: "Search goes back to matching names and tags until you download it again.",
+            onRemoved: { CLIPTextEncoder.shared.unload() },
+            localZip: { installer.installFromLocalZip($0) })
+    }
+
+    static var ramPlus: ModelInstallCard {
+        let installer = ModelInstaller.ramPlus
+        return ModelInstallCard(
+            installer: installer,
+            title: "Photo tags",
+            blurb: "Labels what's in each photo (thousands of everyday things) so you can search and sort by it. Model: RAM++ (Apache-2.0). Without it, FileID uses a simpler built-in tagger.",
+            rows: [Row(name: "RAM++ (Recognize Anything Plus)", detail: "Swin-Large @384 · 4585-tag English vocabulary", path: installer.spec.primaryFile)],
+            approxBytes: installer.spec.approxBytes,
+            removeTitle: "Remove the Photo tags model?",
+            fallback: "Tagging falls back to the simpler built-in tagger.")
+    }
+
+    static var bge: ModelInstallCard {
+        let installer = ModelInstaller.bge
+        return ModelInstallCard(
+            installer: installer,
+            title: "Documents",
+            blurb: "Reads what documents are about, so Organize Folders puts a physics paper with your physics files. Model: BGE-small (MIT). Without it, documents are grouped by file name.",
+            rows: [Row(name: "BGE-small-en-v1.5", detail: "384-d BERT text embedder · runs on the Neural Engine", path: installer.spec.primaryFile)],
+            approxBytes: installer.spec.approxBytes,
+            removeTitle: "Remove the Documents model?",
+            fallback: "Organize Folders groups documents by file name instead.")
+    }
+
+    static var face: ModelInstallCard {
+        let installer = ModelInstaller.face
+        let kind = FaceEmbedderKind.sface
+        return ModelInstallCard(
+            installer: installer,
+            title: "Faces",
+            blurb: "Recognizes the same person across your photos so People can group them. Model: SFace (Apache-2.0), runs on this Mac.",
+            rows: [Row(name: kind.displayName, detail: kind.subtitle, path: installer.spec.primaryFile)],
+            approxBytes: installer.spec.approxBytes,
+            removeTitle: "Remove face model?",
+            fallback: "Grouping faces stops until you download it again.")
     }
 }
 
@@ -866,7 +537,7 @@ struct FaceEmbedderCard: View {
 struct AppearanceCard: View {
     @AppStorage("lavaMode") private var lavaMode: String = LavaMode.full.rawValue
     var body: some View {
-        GlassCard {
+        Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Appearance").font(Theme.Font.body(14, .semibold))
                 HStack(spacing: 12) {

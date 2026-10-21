@@ -47,9 +47,9 @@ struct BulkRenameSheet: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Apply smart names")
+                Text("Suggested names")
                     .font(Theme.Font.body(20, .semibold))
-                Text("Deep Analyze produced a smart filename for each photo based on its content. Pick which ones to apply.")
+                Text("FileID suggested a clearer name for each file based on what it shows. Tick the ones you want, then press Rename.")
                     .font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
             }
             Spacer()
@@ -64,8 +64,8 @@ struct BulkRenameSheet: View {
             Image(systemName: "wand.and.rays")
                 .font(.system(size: 48, weight: .light))
                 .foregroundStyle(Theme.text3)
-            Text("No smart names yet").font(Theme.Font.body(16, .semibold))
-            Text("Run Deep Analyze on your photos first — smart filenames will appear here.")
+            Text("No suggested names yet").font(Theme.Font.body(16, .semibold))
+            Text("Describe your files first (Describe Files page). Suggested names appear here.")
                 .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text3)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -257,7 +257,6 @@ private struct BulkRenameRow: View {
     let isSelected: Bool
     let onToggle: (Int64) -> Void
 
-    @State private var thumb: NSImage?
 
     var body: some View {
         let oldName = file.url.lastPathComponent
@@ -272,24 +271,17 @@ private struct BulkRenameRow: View {
                 .foregroundStyle(isSelected ? Theme.gold : .secondary)
                 .onTapGesture { onToggle(file.id) }
 
-            // Thumbnail — reuses ThumbnailService (QuickLookThumbnailing
-            // backed). Works for images, videos, PDFs, and Office docs.
             ZStack {
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                     .fill(Color.secondary.opacity(0.10))
                     .frame(width: 64, height: 64)
-                if let thumb {
-                    Image(nsImage: thumb)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 64, height: 64)
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
-                        .transition(.opacity)
-                } else {
-                    Image(systemName: kindFallbackIcon(file.kind))
+                AsyncThumbnail(url: file.url, size: 96) {
+                    Image(systemName: FileKind.symbolName(forKind: file.kind))
                         .font(Theme.Font.body(16, .semibold))
                         .foregroundStyle(Theme.text3)
                 }
+                .frame(width: 64, height: 64)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
             }
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
@@ -322,19 +314,5 @@ private struct BulkRenameRow: View {
             RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
                 .fill(isSelected ? Theme.gold.opacity(0.05) : Color.clear)
         )
-        .task(id: file.id) {
-            thumb = await ThumbnailService.shared.thumbnail(for: file.url, size: 96)
-        }
-    }
-
-    private func kindFallbackIcon(_ kind: String) -> String {
-        switch kind {
-        case "image": return "photo"
-        case "video": return "video"
-        case "pdf":   return "doc.richtext"
-        case "doc":   return "doc.text"
-        case "audio": return "waveform"
-        default:      return "doc"
-        }
     }
 }

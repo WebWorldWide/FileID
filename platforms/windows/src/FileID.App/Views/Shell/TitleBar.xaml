@@ -44,7 +44,7 @@
                           FontFamily="{ThemeResource SymbolThemeFontFamily}"
                           Glyph="&#xE700;"
                           FontSize="13"
-                          Foreground="{StaticResource Text2Brush}"
+                          Foreground="{ThemeResource Text2Brush}"
                           AutomationProperties.AccessibilityView="Raw" />
             </Button>
 
@@ -54,7 +54,7 @@
                     MinHeight="30"
                     Padding="10,0,10,0"
                     Background="{StaticResource ShellControlFillBrush}"
-                    BorderBrush="{StaticResource ShellControlBorderBrush}"
+                    BorderBrush="{ThemeResource ShellControlBorderBrush}"
                     BorderThickness="1"
                     AutomationProperties.Name="Switch folder"
                     ToolTipService.ToolTip="Switch folder">
@@ -62,11 +62,11 @@
                     <TextBlock Text="FileID"
                                FontFamily="{StaticResource DisplayFontFamily}"
                                FontSize="18"
-                               Foreground="{StaticResource Text1Brush}"
+                               Foreground="{ThemeResource Text1Brush}"
                                VerticalAlignment="Center" />
                     <Border Width="1"
                             Height="14"
-                            Background="{StaticResource ControlBorderBrush}"
+                            Background="{ThemeResource ControlBorderBrush}"
                             VerticalAlignment="Center" />
                     <TextBlock x:Name="FolderNameText"
                                Text="No folder"
@@ -74,13 +74,13 @@
                                FontFamily="{StaticResource BodyFontFamily}"
                                FontSize="13.5"
                                FontWeight="SemiBold"
-                               Foreground="{StaticResource Text3Brush}"
+                               Foreground="{ThemeResource Text3Brush}"
                                TextTrimming="CharacterEllipsis"
                                VerticalAlignment="Center" />
                     <TextBlock Text="&#x25BE;"
                                FontFamily="{StaticResource MonoFontFamily}"
                                FontSize="11"
-                               Foreground="{StaticResource Text3Brush}"
+                               Foreground="{ThemeResource Text3Brush}"
                                VerticalAlignment="Center" />
                 </StackPanel>
                 <Button.Flyout>
@@ -103,7 +103,7 @@
                     MinHeight="30"
                     Padding="10,0,10,0"
                     Background="{StaticResource ShellControlFillStrongBrush}"
-                    BorderBrush="{StaticResource ShellControlBorderBrush}"
+                    BorderBrush="{ThemeResource ShellControlBorderBrush}"
                     BorderThickness="1"
                     AutomationProperties.Name="Activity"
                     ToolTipService.ToolTip="Activity">
@@ -118,7 +118,7 @@
                                FontFamily="{StaticResource BodyFontFamily}"
                                FontSize="12.5"
                                FontWeight="Medium"
-                               Foreground="{StaticResource Text1Brush}"
+                               Foreground="{ThemeResource Text1Brush}"
                                VerticalAlignment="Center" />
                     <ProgressBar x:Name="ActivityBar"
                                  Width="54"
@@ -146,7 +146,7 @@
                             FlyoutPresenterStyle="{StaticResource ShellFlyoutPresenterStyle}">
                         <StackPanel Width="400">
                             <Grid Padding="14,10,14,10"
-                                  BorderBrush="{StaticResource HairlineBrush}"
+                                  BorderBrush="{ThemeResource HairlineBrush}"
                                   BorderThickness="0,0,0,1">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -174,7 +174,7 @@
                                         Visibility="Collapsed"
                                         Spacing="8"
                                         Padding="14,12,14,12"
-                                        BorderBrush="{StaticResource HairlineSoftBrush}"
+                                        BorderBrush="{ThemeResource HairlineSoftBrush}"
                                         BorderThickness="0,0,0,1">
                                 <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
@@ -186,7 +186,7 @@
                                                FontFamily="{StaticResource BodyFontFamily}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
-                                               Foreground="{StaticResource Text1Brush}" />
+                                               Foreground="{ThemeResource Text1Brush}" />
                                     <TextBlock x:Name="ScanRowSub"
                                                Grid.Column="1"
                                                Style="{StaticResource ShellMetaTextStyle}"
@@ -226,7 +226,7 @@
                                         Visibility="Collapsed"
                                         Spacing="8"
                                         Padding="14,12,14,12"
-                                        BorderBrush="{StaticResource HairlineSoftBrush}"
+                                        BorderBrush="{ThemeResource HairlineSoftBrush}"
                                         BorderThickness="0,0,0,1">
                                 <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
@@ -238,7 +238,7 @@
                                                FontFamily="{StaticResource BodyFontFamily}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
-                                               Foreground="{StaticResource Text1Brush}" />
+                                               Foreground="{ThemeResource Text1Brush}" />
                                     <TextBlock x:Name="DeepRowSub"
                                                Grid.Column="1"
                                                Style="{StaticResource ShellMetaTextStyle}"
@@ -278,7 +278,7 @@
                                         Visibility="Collapsed"
                                         Spacing="8"
                                         Padding="14,12,14,12"
-                                        BorderBrush="{StaticResource HairlineSoftBrush}"
+                                        BorderBrush="{ThemeResource HairlineSoftBrush}"
                                         BorderThickness="0,0,0,1">
                                 <Grid ColumnSpacing="10">
                                     <Grid.ColumnDefinitions>
@@ -290,7 +290,7 @@
                                                FontFamily="{StaticResource BodyFontFamily}"
                                                FontSize="14"
                                                FontWeight="SemiBold"
-                                               Foreground="{StaticResource Text1Brush}" />
+                                               Foreground="{ThemeResource Text1Brush}" />
                                     <TextBlock Grid.Column="1"
                                                Text="Comparing faces"
                                                Style="{StaticResource ShellMetaTextStyle}"
@@ -331,7 +331,7 @@
                           FontFamily="{ThemeResource SymbolThemeFontFamily}"
                           Glyph="&#xE8F2;"
                           FontSize="13"
-                          Foreground="{StaticResource Text2Brush}"
+                          Foreground="{ThemeResource Text2Brush}"
                           AutomationProperties.AccessibilityView="Raw" />
             </Button>
 
@@ -344,7 +344,7 @@
                           FontFamily="{ThemeResource SymbolThemeFontFamily}"
                           Glyph="&#xE713;"
                           FontSize="13"
-                          Foreground="{StaticResource Text2Brush}"
+                          Foreground="{ThemeResource Text2Brush}"
                           AutomationProperties.AccessibilityView="Raw" />
             </Button>
         </StackPanel>
@@ -358,7 +358,7 @@
               HorizontalAlignment="Center"
               VerticalAlignment="Center"
               Background="{StaticResource ShellControlFillStrongBrush}"
-              BorderBrush="{StaticResource ShellControlBorderBrush}"
+              BorderBrush="{ThemeResource ShellControlBorderBrush}"
               BorderThickness="1"
               CornerRadius="{StaticResource CornerRadiusS}">
             <Grid.ColumnDefinitions>
@@ -370,7 +370,7 @@
                       FontFamily="{ThemeResource SymbolThemeFontFamily}"
                       Glyph="&#xE721;"
                       FontSize="12"
-                      Foreground="{StaticResource Text3Brush}"
+                      Foreground="{ThemeResource Text3Brush}"
                       VerticalAlignment="Center"
                       AutomationProperties.AccessibilityView="Raw" />
             <AutoSuggestBox x:Name="SearchBox"
@@ -398,13 +398,13 @@
             <Border Grid.Column="2"
                     Padding="5,1,5,1"
                     VerticalAlignment="Center"
-                    BorderBrush="{StaticResource ShellControlBorderBrush}"
+                    BorderBrush="{ThemeResource ShellControlBorderBrush}"
                     BorderThickness="1"
                     CornerRadius="{StaticResource CornerRadiusS}">
                 <TextBlock Text="Ctrl K"
                            FontFamily="{StaticResource MonoFontFamily}"
                            FontSize="11"
-                           Foreground="{StaticResource Text3Brush}" />
+                           Foreground="{ThemeResource Text3Brush}" />
             </Border>
         </Grid>
     </Grid>

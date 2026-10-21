@@ -109,12 +109,12 @@ pub(crate) async fn send_gpu_failure_complete(
     failed: u64,
     total_seconds: f64,
 ) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "gpu_device_removed".into(),
-        message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-        path: None,
-        model_kind: Some(model_kind.to_string()),
-    }))))
+    sink.send(EngineError::new(
+        "gpu_device_removed",
+        crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
+    )
+    .with_model(model_kind.to_string())
+    .into_event())
     .await;
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
         DeepAnalyzeComplete {
@@ -168,12 +168,7 @@ pub(crate) async fn handle_deep_analyze_file(
     let backend = match single_file_backend(&payload.model_kind, &cancel).await {
         Ok(backend) => backend,
         Err(err) => {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "llama_cpp_missing".into(),
-                message: format!("{err:#}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event("llama_cpp_missing", format!("{err:#}")))
             .await;
             // Always send a terminal Complete so the UI clears the
             // "Loading model…" card instead of stranding forever (#6).
@@ -279,12 +274,7 @@ pub(crate) async fn handle_deep_analyze_file(
             .await;
         }
         Err(err) => {
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                kind: "deep_analyze_failed".into(),
-                message: format!("{err}"),
-                path: None,
-                model_kind: None,
-            }))))
+            sink.send(EngineError::event("deep_analyze_failed", format!("{err}")))
             .await;
             // Terminal Complete on the analyze failure too, mirroring the batch
             // handler's convention so the card clears / Analyze-All re-enables (#6).
@@ -530,10 +520,12 @@ fn scoped_catalog_path(
 }
 
 async fn emit_scope_failure(sink: &Sink, complete: DeepAnalyzeComplete, message: String) {
-    sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-        kind: "deep_analyze_failed".into(), message, path: None,
-        model_kind: Some(complete.model_kind.clone()),
-    })))).await;
+    sink.send(EngineError::new(
+        "deep_analyze_failed",
+        message,
+    )
+    .with_model(complete.model_kind.clone())
+    .into_event()).await;
     sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(complete)))).await;
 }
 
@@ -623,14 +615,14 @@ async fn run_deep_analyze_batch(
     // strand the UI on a "Loading model…" banner.
     let weights = crate::models::vlm::find_weights(model_kind);
     if weights.is_none() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "vlm_model_missing".into(),
-            message: format!(
+        sink.send(EngineError::new(
+            "vlm_model_missing",
+            format!(
                 "The {model_kind} model isn't installed yet. Install it from the Deep Analyze tab, then try again."
             ),
-            path: None,
-            model_kind: Some(model_kind.to_string()),
-        }))))
+        )
+        .with_model(model_kind.to_string())
+        .into_event())
         .await;
         return;
     }
@@ -694,14 +686,12 @@ async fn run_deep_analyze_batch(
                                 return;
                             }
                             tracing::warn!(?probe_err, "[VLM-SERVER] payload self-test failed; falling back to per-file CLI");
-                            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-                                kind: "vlm_server_payload_rejected".into(),
-                                message: format!(
+                            sink.send(EngineError::event(
+                                "vlm_server_payload_rejected",
+                                format!(
                                     "The VLM server rejected the image request format; using the slower per-file path instead. ({probe_err:#})"
                                 ),
-                                path: None,
-                                model_kind: None,
-                            }))))
+                            ))
                             .await;
                             None
                         }
@@ -743,15 +733,12 @@ async fn run_deep_analyze_batch(
     // instead of failing every file in the loop, then clear the UI's
     // DeepAnalyze* state (Starting was already sent above).
     if server.is_none() && runner.is_none() {
-        sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(EngineError {
-            kind: "llama_cpp_missing".into(),
-            message: "The llama.cpp runtime isn't usable for image analysis (no working \
+        sink.send(EngineError::event(
+            "llama_cpp_missing",
+            "The llama.cpp runtime isn't usable for image analysis (no working \
                       llama-server.exe or llama-mtmd-cli.exe). Update it from \
-                      Settings -> Performance -> 'Install llama.cpp runtime'."
-                .into(),
-            path: None,
-            model_kind: None,
-        }))))
+                      Settings -> Performance -> 'Install llama.cpp runtime'.",
+        ))
         .await;
         sink.send(IpcEvent::now(EventPayload::DeepAnalyzeComplete(Wrap::new(
             DeepAnalyzeComplete {
@@ -1112,8 +1099,7 @@ mod tests {
     }
 
     fn in_memory_db() -> Arc<Mutex<rusqlite::Connection>> {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).expect("migrations apply");
+        let conn = crate::db::test_support::memory_db();
         Arc::new(Mutex::new(conn))
     }
 

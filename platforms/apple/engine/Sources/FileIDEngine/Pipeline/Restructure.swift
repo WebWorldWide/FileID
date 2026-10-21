@@ -439,7 +439,7 @@ public enum Restructure {
             while docEmbeddings.count < signalCap, let row = try dcursor.next() {
                 let id: Int64 = row["file_id"] ?? 0
                 if let data: Data = row["embedding"], !data.isEmpty, data.count % 4 == 0 {
-                    docEmbeddings[id] = Self.floatsLE(data)
+                    docEmbeddings[id] = FloatBlob.decode(data)
                 }
             }
             return (rows, embeddings, tags, docEmbeddings)
@@ -961,20 +961,6 @@ public enum Restructure {
         return c
     }()
 
-    /// Decode a little-endian Float32 blob (the CLIP-embedding storage format,
-    /// shared with the Windows engine) into `[Float]`. `loadUnaligned` reads
-    /// each value in host order — correct on Apple's little-endian targets.
-    private static func floatsLE(_ data: Data) -> [Float] {
-        let count = data.count / 4
-        return data.withUnsafeBytes { raw -> [Float] in
-            var out = [Float](repeating: 0, count: count)
-            for i in 0..<count {
-                out[i] = raw.loadUnaligned(fromByteOffset: i * 4, as: Float32.self)
-            }
-            return out
-        }
-    }
-
     /// Apply the user-selected proposals on disk + update the DB. For each move:
     /// re-reads the live `files.path_text` and requires it to still name the
     /// proposal's `oldPath` (stale-plan guard); uniquifies a
@@ -1433,16 +1419,26 @@ public enum Restructure {
             // require it still names `oldPath`, so a plan that went stale (the
             // file was renamed/moved/replaced since planning) can't move the
             // wrong bytes.
-            let live: (path: String, fileRef: Int64?)? =
-                try? await database.pool.read { db -> (path: String, fileRef: Int64?)? in
+            let live: (path: String, fileRef: Int64?, hashed: Bool)? =
+                try? await database.pool.read { db -> (path: String, fileRef: Int64?, hashed: Bool)? in
                     guard let row = try GRDB.Row.fetchOne(
-                        db, sql: "SELECT path_text, file_ref FROM files WHERE id = ?",
+                        db, sql: "SELECT path_text, file_ref, content_hash IS NOT NULL AS hashed FROM files WHERE id = ?",
                         arguments: [p.fileID]) else { return nil }
-                    return (row["path_text"], row["file_ref"])
+                    return (row["path_text"], row["file_ref"], row["hashed"])
                 }
             guard let live else {
                 failed += 1
                 JSONLog.shared.warn(ev: "restructure_stale_plan",
+                                    path: redactPathForLog(p.oldPath))
+                continue
+            }
+            // A row with neither a file_ref nor a content hash cannot prove the
+            // bytes on disk are the ones that were planned, so a forward apply
+            // refuses it (mirrors the shared engine). Undo replays only moves
+            // that passed this check.
+            if recordUndo && live.fileRef == nil && !live.hashed {
+                failed += 1
+                JSONLog.shared.warn(ev: "restructure_unverifiable_source",
                                     path: redactPathForLog(p.oldPath))
                 continue
             }

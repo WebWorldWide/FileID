@@ -22,7 +22,6 @@
 //! Windows keeps its own accelerator-pack `ORT_DYLIB_PATH` pin in `main.rs`, and
 //! Linux relies on the system / `download-binaries` path — both untouched here.
 
-#![allow(dead_code)] // some helpers are consumed only by the cross-platform CLI.
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;

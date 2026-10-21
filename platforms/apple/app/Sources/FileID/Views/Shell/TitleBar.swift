@@ -21,8 +21,6 @@ struct TitleBar: View {
     @FocusState private var searchFocused: Bool
     @State private var userOpened = false
 
-    private var isNarrow: Bool { false }
-
     var body: some View {
         HStack(spacing: 12) {
             leading.frame(maxWidth: .infinity, alignment: .leading)
@@ -40,11 +38,11 @@ struct TitleBar: View {
         .background(Theme.bg1.opacity(0.62), ignoresSafeAreaEdges: [])
         .background(.ultraThinMaterial, ignoresSafeAreaEdges: [])
         .overlay(alignment: .bottom) { Hairline() }
-        .confirmationDialog("Wipe library and rescan from scratch?", isPresented: $confirmWipe, titleVisibility: .visible) {
-            Button("Wipe and rescan", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
+        .confirmationDialog("Start over with this folder?", isPresented: $confirmWipe, titleVisibility: .visible) {
+            Button("Start over", role: .destructive) { if let url = pickedURL { engine.wipeAndRescan(rootURL: url) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Deletes every tag, caption, face cluster and embedding for this library, then runs the full scan again. Your files are not touched.")
+            Text("Forgets everything FileID learned about this folder (tags, descriptions, people and search data), then scans it again from the start. Your files are not changed.")
         }
     }
 
@@ -67,7 +65,7 @@ struct TitleBar: View {
                 HStack(spacing: 10) {
                     Text("FileID").font(Theme.Font.display(18)).foregroundStyle(Theme.text1)
                     VHairline(color: Color.white.opacity(0.18)).frame(height: 14)
-                    Text(pickedURL?.lastPathComponent ?? "No folder").font(Theme.Font.body(13.5, .semibold))
+                    Text(pickedURL?.lastPathComponent ?? "Choose a folder").font(Theme.Font.body(13.5, .semibold))
                         .foregroundStyle(pickedURL == nil ? Theme.text3 : Theme.text1).lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: 180, alignment: .leading)
@@ -80,7 +78,7 @@ struct TitleBar: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Switch folder")
+            .help("Choose, rescan or close the folder FileID is working on")
             .popover(isPresented: $folderOpen, arrowEdge: .bottom) { folderPopover }
         }
     }
@@ -101,10 +99,10 @@ struct TitleBar: View {
                 .padding(.horizontal, 12).padding(.vertical, 9)
                 .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
             } else {
-                MetaText("No folder picked yet.").padding(.horizontal, 12).padding(.bottom, 10)
+                MetaText("No folder chosen yet.").padding(.horizontal, 12).padding(.bottom, 10)
             }
             HStack(spacing: 8) {
-                Button("Add folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("o", modifiers: .command)
+                Button(pickedURL == nil ? "Choose folder…" : "Choose another folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("o", modifiers: .command)
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
                         .buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("r", modifiers: .command)
@@ -117,11 +115,11 @@ struct TitleBar: View {
             .overlay(alignment: .top) { Hairline(color: Theme.hairlineStrong) }
             if pickedURL != nil {
                 HStack(spacing: 8) {
-                    Button("Clear folder") { folderOpen = false; engine.cancel(); engine.clearProgress(); pickedURL = nil }
-                        .buttonStyle(.dsGhost).help("Drop the current folder selection. Doesn't touch the library.")
+                    Button("Close folder") { folderOpen = false; engine.cancel(); engine.clearProgress(); pickedURL = nil }
+                        .buttonStyle(.dsGhost).help("Stop working on this folder. What FileID learned is kept, and your files are not changed.")
                     Spacer()
-                    Button("Wipe library + rescan…") { folderOpen = false; confirmWipe = true }
-                        .buttonStyle(DSGhostButtonStyle(color: Theme.danger)).help("Delete the current library and run a fresh scan against this folder.")
+                    Button("Start over…") { folderOpen = false; confirmWipe = true }
+                        .buttonStyle(DSGhostButtonStyle(color: Theme.danger)).help("Forget everything FileID learned about this folder and scan it again. Your files are not changed.")
                 }
                 .padding(.horizontal, 10).padding(.vertical, 8)
                 .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
@@ -210,10 +208,10 @@ struct TitleBar: View {
                 activeTab = .library
             }]))
         }
-        let pages = MainWindow.Tab.allCases.filter { q.isEmpty || $0.rawValue.localizedCaseInsensitiveContains(q) }.prefix(q.isEmpty ? 10 : 4)
+        let pages = MainWindow.Tab.allCases.filter { q.isEmpty || $0.title.localizedCaseInsensitiveContains(q) || $0.rawValue.localizedCaseInsensitiveContains(q) || $0.summary.localizedCaseInsensitiveContains(q) }.prefix(q.isEmpty ? 10 : 4)
         if !pages.isEmpty {
             groups.append(("Pages", pages.map { tab in
-                SearchItem(id: tab.rawValue, label: tab.rawValue,
+                SearchItem(id: tab.rawValue, label: tab.title,
                            hint: [tab.area?.rawValue ?? "FileID", tab.shortcutIndex.map { "⌘\($0)" }].compactMap { $0 }.joined(separator: " · "),
                            color: Theme.text1) { activeTab = tab }
             }))
@@ -277,7 +275,7 @@ struct TitleBar: View {
             let running = scanRunning
             out.append(ActivityRow(id: "scan", name: "Library scan",
                                    sub: running ? "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" : "\(p.processed.formatted()) files",
-                                   state: p.phase == .completed ? "DONE" : running ? (engine.isPaused ? "PAUSED " : "") + "\(Int(frac * 100))%" : p.phase.rawValue.uppercased(),
+                                   state: p.phase == .completed ? "DONE" : running ? (engine.isPaused ? "PAUSED " : "") + "\(Int(frac * 100))%" : Self.phaseLabel(p.phase),
                                    color: p.phase == .completed ? Theme.delight : engine.isPaused ? Theme.text3 : Theme.gold,
                                    progress: frac, tone: p.phase == .completed ? .done : engine.isPaused ? .paused : .gold,
                                    button: running ? (engine.isPaused ? "Resume" : "Pause", { engine.isPaused ? engine.resume() : engine.pause() }) : nil,
@@ -285,24 +283,36 @@ struct TitleBar: View {
         }
         if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight {
             let frac = d.total > 0 ? Double(d.processed) / Double(d.total) : 0
-            out.append(ActivityRow(id: "deep", name: "Deep Analyze", sub: "\(d.processed.formatted()) of \(d.total.formatted()) · \(d.modelKind)",
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(d.processed.formatted()) of \(d.total.formatted()) files",
                                    state: "\(Int(frac * 100))%", color: Theme.ai, progress: frac, tone: .ai,
                                    button: ("Cancel", { engine.deepAnalyzeCancel() }), open: .deep))
         } else if let done = engine.deepAnalyzeComplete, done.processed > 0 {
-            out.append(ActivityRow(id: "deep", name: "Deep Analyze", sub: "\(done.processed.formatted()) files", state: "DONE", color: Theme.delight,
+            out.append(ActivityRow(id: "deep", name: "Describing files", sub: "\(done.processed.formatted()) files", state: "DONE", color: Theme.delight,
                                    progress: 1, tone: .done, button: nil, open: .deep))
         }
         if engine.faceClusteringInFlight {
-            out.append(ActivityRow(id: "faces", name: "Face grouping", sub: "Comparing faces", state: "RUNNING", color: Theme.ai, progress: 0.5, tone: .ai, button: nil, open: .people))
+            out.append(ActivityRow(id: "faces", name: "Grouping faces", sub: "Finding the same person across photos", state: "RUNNING", color: Theme.ai, progress: 0.5, tone: .ai, button: nil, open: .people))
         }
         for job in engine.catalogJobs where job.state != "completed" || job.updatedAt > Date().timeIntervalSince1970 - 3600 {
             let running = job.state == "running" || job.state == "queued"
-            out.append(ActivityRow(id: "job-\(job.id)", name: job.kind.capitalized, sub: "\(job.fileIDs.count) file\(job.fileIDs.count == 1 ? "" : "s")",
+            out.append(ActivityRow(id: "job-\(job.id)", name: Self.jobName(job.kind), sub: "\(job.fileIDs.count) file\(job.fileIDs.count == 1 ? "" : "s")",
                                    state: job.state == "completed" ? "DONE" : "\(job.state.uppercased()) \(Int(job.progress * 100))%",
                                    color: running ? Theme.ai : job.state == "completed" ? Theme.delight : Theme.text3,
                                    progress: job.progress, tone: running ? .ai : job.state == "completed" ? .done : .paused, button: nil, open: .moments))
         }
         return out
+    }
+
+    private static func jobName(_ kind: String) -> String {
+        kind == "catalogIndex" ? "Search index" : "Video analysis"
+    }
+
+    private static func phaseLabel(_ phase: ScanPhase) -> String {
+        switch phase {
+        case .cancelled: return "STOPPED"
+        case .failed: return "FAILED"
+        default: return phase.rawValue.uppercased()
+        }
     }
 
     private var currentActivity: (label: String, color: Color, progress: Double, tone: ProgressTone, idle: Bool) {
@@ -311,7 +321,7 @@ struct TitleBar: View {
             return ("Scanning", Theme.gold, frac, .gold, false)
         }
         if engine.deepAnalyzeInFlight, let d = engine.deepAnalyzeProgress {
-            return ("Captions", Theme.ai, d.total > 0 ? Double(d.processed) / Double(d.total) : 0, .ai, false)
+            return ("Describing", Theme.ai, d.total > 0 ? Double(d.processed) / Double(d.total) : 0, .ai, false)
         }
         if engine.faceClusteringInFlight { return ("Faces", Theme.ai, 0.5, .ai, false) }
         if let job = engine.catalogJobs.first(where: { $0.state == "running" }) { return ("Moments", Theme.ai, job.progress, .ai, false) }
@@ -334,7 +344,7 @@ struct TitleBar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Activity")
+        .help("What FileID is working on right now")
         .popover(isPresented: $activityOpen, arrowEdge: .bottom) { activityPopover }
     }
 
@@ -346,7 +356,7 @@ struct TitleBar: View {
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 .overlay(alignment: .bottom) { Hairline() }
             if list.isEmpty {
-                MetaText("Scans, captions and moment jobs appear here.").padding(14)
+                MetaText("Nothing is running. Scans, descriptions and video analysis show their progress here.").padding(14)
             }
             ForEach(list) { row in
                 VStack(alignment: .leading, spacing: 8) {
@@ -359,7 +369,7 @@ struct TitleBar: View {
                     GrainProgressBar(progress: row.progress, tone: row.tone)
                     HStack(spacing: 6) {
                         if let button = row.button { Button(button.label) { button.run() }.buttonStyle(DSSecondaryButtonStyle(height: 24)) }
-                        Button("Open \(row.open.rawValue)") { activityOpen = false; activeTab = row.open }.buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        Button("Open \(row.open.title)") { activityOpen = false; activeTab = row.open }.buttonStyle(DSSecondaryButtonStyle(height: 24))
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 12)

@@ -56,7 +56,7 @@ struct CatalogWorkbench: View {
                             chaptersPanel(selected)
                             if !cast.isEmpty { peoplePanel }
                         } else {
-                            DashedNotice(title: "Find a moment", subtitle: "Search on the left, then pick a result to play it, see what was examined and edit its chapters.")
+                            DashedNotice(title: "Find a moment", subtitle: "Type a word on the left and press Return. Pick a result to play it, see which parts FileID has looked at, and add or fix chapters.")
                         }
                         queuePanel
                     }
@@ -97,7 +97,7 @@ struct CatalogWorkbench: View {
     private var resultsPane: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Search names, captions, chapters", text: $query, icon: "magnifyingglass", onSubmit: search)
+                DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
                 HStack(spacing: 8) {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)
@@ -108,7 +108,7 @@ struct CatalogWorkbench: View {
                     Button("Best takes") { showingTakes = true }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                         .disabled(Set(hits.map(\.fileID)).count < 2)
-                        .help("Group these results as attempts and pick the best take")
+                        .help(hits.count < 2 ? "Find at least two clips first" : "Compare these clips as tries of the same shot and pick the best one")
                 }
             }
             .padding(14)
@@ -136,7 +136,7 @@ struct CatalogWorkbench: View {
             }
             .overlay {
                 if hits.isEmpty && pendingAction != "search" {
-                    MetaText(message.isEmpty ? "Results show here: file names, captions, chapters and sampled video frames." : message)
+                    MetaText(message.isEmpty ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : message)
                         .multilineTextAlignment(.center).padding(24).allowsHitTesting(false)
                 }
             }
@@ -151,12 +151,12 @@ struct CatalogWorkbench: View {
 
     private func hitMeta(_ hit: CatalogHit) -> String {
         var parts: [String] = []
-        if let time = hit.startSeconds { parts.append(Timecode.string(time)) }
+        if let time = hit.startSeconds { parts.append(DurationText.clock(time)) }
         if let page = hit.page { parts.append("Page \(page)") }
         switch hit.kind {
-        case "sampledFrame": parts.append("Sampled frame, unverified")
+        case "sampledFrame": parts.append("Video frame, not checked")
         case "chapter": parts.append("Chapter")
-        case "passage": parts.append("Passage")
+        case "passage": parts.append("Speech or text")
         case "person": parts.append("Person")
         case "documentText": parts.append("Text in document")
         case "ocrText": parts.append("Text in image")
@@ -169,10 +169,10 @@ struct CatalogWorkbench: View {
 
     private func playerCard(_ hit: CatalogHit) -> some View {
         let url = URL(fileURLWithPath: hit.path)
-        let video = isVideo(hit.path)
+        let video = FileTypes.isVideo(path: hit.path)
         return Panel {
             PanelHeader("Player") {
-                MetaText(video && duration > 0 ? Timecode.string(clock.seconds) + " / " + Timecode.string(duration) : hitMeta(hit), size: 12)
+                MetaText(video && duration > 0 ? DurationText.clock(clock.seconds) + " / " + DurationText.clock(duration) : hitMeta(hit), size: 12)
                     .monospacedDigit()
             }
             VStack(alignment: .leading, spacing: 12) {
@@ -210,13 +210,13 @@ struct CatalogWorkbench: View {
             .padding(.horizontal, 14).padding(.vertical, 12)
             PanelFooter {
                 if video {
-                    SegmentedBar(selection: $timelineMode, options: [("sampled", "Quick samples"), ("moments", "Full moments")])
-                        .help("Quick samples looks at a frame every few seconds. Full moments reads frame sequences and speech, and takes longer.")
-                    Button("Analyze") {
+                    SegmentedBar(selection: $timelineMode, options: [("sampled", "Quick"), ("moments", "Detailed")])
+                        .help("Quick looks at one frame every few seconds. Detailed watches short sequences and listens for speech, and takes longer.")
+                    Button("Find moments") {
                         send(CatalogRequest(requestID: UUID().uuidString, action: "enqueueTimeline", fileIDs: [hit.fileID], timelineMode: timelineMode))
                     }
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
-                    .help("Queue this video for timeline analysis. Load a model in Deep Analyze first.")
+                    .help("Watch this video and suggest chapters. Uses the description model; if it isn't ready, describe one file on the Describe Files page first.")
                 }
                 Spacer(minLength: 8)
                 if video && player != nil {
@@ -256,7 +256,7 @@ struct CatalogWorkbench: View {
                     .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             }
             if chapters.isEmpty && !editorOpen {
-                MetaText("No chapters yet. Analyze the video for drafts, or add one at the playhead.")
+                MetaText("No chapters yet. Press Find moments for suggestions, or add your own at the current time.")
                     .padding(.horizontal, 14).padding(.vertical, 12)
             }
             ForEach(chapters, id: \.id) { chapter in
@@ -264,7 +264,7 @@ struct CatalogWorkbench: View {
             }
             if editorOpen { chapterEditor(fileID: hit.fileID) }
             PanelFooter {
-                MetaText("Chapters live in FileID's catalog. The video file is never changed.", size: 11.5)
+                MetaText("Chapters are saved in FileID. The video file itself is never changed.", size: 11.5)
                 Spacer(minLength: 0)
             }
         }
@@ -273,10 +273,10 @@ struct CatalogWorkbench: View {
     private var draftNote: String? {
         let drafts = chapters.filter { !$0.userEdited && !$0.stale }
         if drafts.contains(where: { $0.modelVersion.hasPrefix("timeline-moment-sequence-v1/") }) {
-            return "Drafts describe sampled frame sequences. Check the action, outcome and timing before accepting."
+            return "Suggested chapters are drafts. Check what happens and when before you accept them."
         }
         if drafts.contains(where: { $0.modelVersion.hasPrefix("timeline-chapter-suggestion-v1/") }) {
-            return "Drafts come from sparse frame samples, so brief events can be missed. Review before relying on them."
+            return "Suggested chapters come from a few frames, so short moments can be missed. Check them before relying on them."
         }
         return nil
     }
@@ -294,7 +294,7 @@ struct CatalogWorkbench: View {
         return HStack(alignment: .center, spacing: 12) {
             Button { seek(chapter.startSeconds) } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(Timecode.string(chapter.startSeconds))
+                    Text(DurationText.clock(chapter.startSeconds))
                         .font(Theme.Font.mono(12, .medium)).foregroundStyle(current ? Theme.gold : Theme.text2)
                         .frame(width: 56, alignment: .leading)
                     VStack(alignment: .leading, spacing: 2) {
@@ -309,7 +309,7 @@ struct CatalogWorkbench: View {
                 .frame(minHeight: Theme.Metrics.hitTarget)
             }
             .buttonStyle(DSRowButtonStyle(radius: Theme.Radius.s))
-            .accessibilityLabel("\(chapter.title), at \(Timecode.spoken(chapter.startSeconds))")
+            .accessibilityLabel("\(chapter.title), at \(DurationText.spoken(chapter.startSeconds))")
             .accessibilityHint("Plays from this chapter")
             StatusPill(text: status.0, color: status.1)
             if draft {
@@ -380,20 +380,20 @@ struct CatalogWorkbench: View {
                     Text(appearance.text).font(Theme.Font.body(13)).foregroundStyle(Theme.text1).lineLimit(1)
                     Spacer(minLength: 0)
                     if let time = appearance.startSeconds {
-                        Button(Timecode.string(time)) { seek(time) }
+                        Button(DurationText.clock(time)) { seek(time) }
                             .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
                             .font(Theme.Font.mono(12))
                             .disabled(player == nil)
-                            .accessibilityLabel("Play from \(Timecode.spoken(time))")
+                            .accessibilityLabel("Play from \(DurationText.spoken(time))")
                     } else {
-                        MetaText("Sampled image", size: 11.5)
+                        MetaText("Still frame", size: 11.5)
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 6)
                 .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
             }
             PanelFooter {
-                MetaText("Detected names need review in People. Untimed appearances come from sampled images.", size: 11.5)
+                MetaText("Confirm names on the People page. Appearances without a time come from still frames.", size: 11.5)
                 Spacer(minLength: 0)
             }
         }
@@ -403,11 +403,11 @@ struct CatalogWorkbench: View {
 
     private var queuePanel: some View {
         Panel {
-            PanelHeader("Analysis queue") {
+            PanelHeader("Video analysis") {
                 MetaText(engine.catalogJobs.isEmpty ? "Idle" : "\(engine.catalogJobs.count) job\(engine.catalogJobs.count == 1 ? "" : "s")", size: 12)
             }
             if engine.catalogJobs.isEmpty {
-                MetaText("Nothing queued. Pick a video and choose Analyze to sample its frames.")
+                MetaText("Nothing waiting. Pick a video and press Find moments.")
                     .padding(.horizontal, 14).padding(.vertical, 12)
             }
             ForEach(engine.catalogJobs, id: \.id) { job in
@@ -419,7 +419,7 @@ struct CatalogWorkbench: View {
                 }
             }
             PanelFooter {
-                MetaText("Visual sampling can miss events between frames. Load a model in Deep Analyze before starting.", size: 11.5)
+                MetaText("FileID looks at frames, so very short moments can be missed. It uses the description model from Describe Files.", size: 11.5)
                 Spacer(minLength: 0)
             }
         }
@@ -440,7 +440,7 @@ struct CatalogWorkbench: View {
         player = nil
         unplayable = false
         clock.attach(nil)
-        guard isVideo(hit.path) else { return }
+        guard FileTypes.isVideo(path: hit.path) else { return }
         let id = hit.fileID
         Task {
             let asset = await MediaPlayback.playableAsset(URL(fileURLWithPath: hit.path))
@@ -457,7 +457,7 @@ struct CatalogWorkbench: View {
     private func loadTimeline() async {
         duration = 0
         tracks = .empty
-        guard let hit = selected, isVideo(hit.path) else { return }
+        guard let hit = selected, FileTypes.isVideo(path: hit.path) else { return }
         let id = hit.fileID
         if let store {
             let loaded = await Task.detached { store.timelineTracks(forFileID: id) }.value
@@ -516,7 +516,7 @@ struct CatalogWorkbench: View {
         if !engine.send(.catalogRequest(request: request)) {
             pendingID = ""
             pendingAction = ""
-            message = "The engine is unavailable."
+            message = "FileID is still getting ready. Try again in a moment."
         }
     }
 
@@ -528,7 +528,7 @@ struct CatalogWorkbench: View {
         message = response.message ?? (response.status == "ok" ? "" : "The request failed.")
         if !message.isEmpty, action != "search" {
             if action == "enqueueTimeline", response.status != "ok", message.localizedCaseInsensitiveContains("model"), let onSwitchTab {
-                ToastCenter.shared.show(message, actionLabel: "Open Deep Analyze", duration: 8) { onSwitchTab(.deep) }
+                ToastCenter.shared.show(message, actionLabel: "Open Describe Files", duration: 8) { onSwitchTab(.deep) }
             } else {
                 ToastCenter.shared.show(message)
             }
@@ -538,7 +538,7 @@ struct CatalogWorkbench: View {
         case "search":
             hits = response.hits
             selectedIndex = nil
-            if hits.isEmpty { message = "No matches in names, captions, chapters or sampled frames." }
+            if hits.isEmpty { message = "No matches. Try another word, or describe more files so there is more to search." }
         case "jobs":
             engine.applyCatalogJobsSnapshot(response.jobs)
         case "detail", "saveChapter", "undoChapterEdit":
@@ -553,7 +553,6 @@ struct CatalogWorkbench: View {
         }
     }
 
-    private func isVideo(_ path: String) -> Bool { ["mov","mp4","m4v","mkv","avi","mpg","mpeg","mts","m2ts","webm"].contains(URL(fileURLWithPath: path).pathExtension.lowercased()) }
 }
 
 // MARK: - Playhead
@@ -627,7 +626,7 @@ struct MomentTimeline: View {
                     while t <= duration + 0.001 {
                         let px = x(t, size.width)
                         context.fill(Path(CGRect(x: px, y: 0, width: 1, height: 5)), with: .color(Theme.hairlineStrong))
-                        let label = context.resolve(Text(Timecode.string(t)).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3))
+                        let label = context.resolve(Text(DurationText.clock(t)).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3))
                         let anchor: UnitPoint = t == 0 ? .topLeading : (t + step > duration + 0.001 ? .topTrailing : .top)
                         context.draw(label, at: CGPoint(x: px, y: 7), anchor: anchor)
                         t += step
@@ -663,7 +662,7 @@ struct MomentTimeline: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(name)
-        .accessibilityValue("\(value), playhead at \(Timecode.spoken(playhead))")
+        .accessibilityValue("\(value), playhead at \(DurationText.spoken(playhead))")
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: onSeek(min(duration, playhead + 5))
@@ -699,7 +698,7 @@ struct CatalogJobRow: View {
     private var title: String {
         if job.kind == "catalogIndex" { return "Search index" }
         let count = job.fileIDs.count
-        return "\(count) video\(count == 1 ? "" : "s") · timeline"
+        return "\(count) video\(count == 1 ? "" : "s") · finding moments"
     }
 
     private var tone: (Color, ProgressTone) {
@@ -749,8 +748,7 @@ struct CatalogJobRow: View {
 /// Hands back an asset only when AVFoundation can actually play it, so
 /// formats like MKV fall back to the default app instead of a blank player.
 enum MediaPlayback {
-    static let extensions: Set<String> = ["mov", "mp4", "m4v", "mkv", "avi", "mpg", "mpeg", "mts", "m2ts", "webm", "3gp",
-                                          "mp3", "m4a", "wav", "aiff", "aac", "flac"]
+    static let extensions = FileTypes.videos.union(FileTypes.audio)
 
     static func playableAsset(_ url: URL) async -> AVURLAsset? {
         let asset = AVURLAsset(url: url)
@@ -758,20 +756,3 @@ enum MediaPlayback {
     }
 }
 
-enum Timecode {
-    static func string(_ seconds: Double) -> String {
-        let total = Int(max(0, seconds.isFinite ? seconds : 0).rounded(.down))
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
-    }
-
-    static func spoken(_ seconds: Double) -> String {
-        let total = Int(max(0, seconds.isFinite ? seconds : 0).rounded(.down))
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        var parts: [String] = []
-        if h > 0 { parts.append("\(h) hour\(h == 1 ? "" : "s")") }
-        if m > 0 { parts.append("\(m) minute\(m == 1 ? "" : "s")") }
-        parts.append("\(s) second\(s == 1 ? "" : "s")")
-        return parts.joined(separator: " ")
-    }
-}

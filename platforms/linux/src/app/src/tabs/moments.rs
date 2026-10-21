@@ -214,16 +214,7 @@ impl CatalogUi {
     }
 
     fn load_coverage(self: &Rc<Self>, file_id: i64) {
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let coverage = fileid_engine::paths::db_path()
-                .ok()
-                .filter(|path| path.exists())
-                .and_then(|path| fileid_engine::db::open_read(&path).ok())
-                .map(|conn| read_coverage(&conn, file_id))
-                .unwrap_or_default();
-            let _ = tx.send_blocking(coverage);
-        });
+        let rx = crate::engine_client::read_db(move |conn| read_coverage(conn, file_id));
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let Ok(coverage) = rx.recv().await else {
@@ -248,9 +239,7 @@ impl CatalogUi {
         v3::clear(&self.people.body);
         self.people.root.set_visible(!coverage.people.is_empty());
         for person in &coverage.people {
-            let row = v3::hbox(10);
-            row.add_css_class("v3-row-pad");
-            row.add_css_class("v3-soft-row");
+            let row = v3::list_row(10);
             let dot = gtk::Box::builder()
                 .css_classes([
                     "v3-dot",
@@ -783,11 +772,7 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let hits = v3::vbox(2);
     hits.set_margin_top(8);
     hits.set_margin_bottom(8);
-    let hits_scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&hits)
-        .build();
+    let hits_scroll = v3::scroller(&hits);
     pane.append(&hits_scroll);
 
     // ── Detail ─────────────────────────────────────────────────────────────

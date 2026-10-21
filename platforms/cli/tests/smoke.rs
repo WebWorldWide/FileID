@@ -557,7 +557,7 @@ fn apply_dryrun_models_and_similar_model_free() {
         "model-free library has no CLIP embeddings"
     );
 
-    // ── dedupe --apply --dry-run BEFORE any content hashes → 'no signal' ──
+    // ── exact dedupe re-hashes same-size files, so it needs no stored hash ──
     let out = run(&[
         "--db",
         db_s,
@@ -568,10 +568,12 @@ fn apply_dryrun_models_and_similar_model_free() {
         "--dry-run",
     ]);
     assert!(out.status.success());
+    let v = json(&out);
+    assert_eq!(v["available"].as_bool(), Some(true));
     assert_eq!(
-        json(&out)["available"].as_bool(),
-        Some(false),
-        "model-free scan computes no content hashes"
+        v["removeCount"].as_u64(),
+        Some(1),
+        "the byte-identical pair is found on a model-free library"
     );
 
     // Seed identical content hashes on the pair (simulating a full engine scan).

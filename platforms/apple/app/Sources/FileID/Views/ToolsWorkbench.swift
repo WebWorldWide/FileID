@@ -24,7 +24,7 @@ final class ToolsSession {
         true
         #endif
     }
-    var message = "Choose files and an internal output folder. Exports create new versions."
+    var message = "Choose files and a folder to save to. Exports are new files; your originals stay as they are."
     var pending = ""
     var pendingAction = ""
     var searchID = ""
@@ -103,7 +103,7 @@ struct ToolsWorkbench: View {
 
     private var recipePanel: some View {
         Panel {
-            PanelHeader("01 · Recipe") {
+            PanelHeader("01 · Pick files") {
                 SegmentedBar(selection: $session.kind, options: [("photo", "Photo"), ("video", "Video"), ("chapters", "Chapters")])
                     .disabled(busy)
             }
@@ -112,11 +112,12 @@ struct ToolsWorkbench: View {
                 Button("Find", action: search)
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(busy || session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help(session.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Type part of a file name or what's in it first" : "Search the library")
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
             .disabled(busy)
             if session.hits.isEmpty {
-                MetaText("Search the library, then tick the files to export. Exports are new files; originals stay as they are.")
+                MetaText("Search for files by name or by what's in them, then tick the ones to export. Exports are new files; your originals stay as they are.")
                     .padding(.horizontal, 14).padding(.bottom, 12)
             } else {
                 Hairline()
@@ -143,7 +144,7 @@ struct ToolsWorkbench: View {
                 }
                 .disabled(busy)
                 PanelFooter {
-                    MetaText("\(session.selection.count) of \(session.hits.count) selected", size: 12)
+                    MetaText("\(session.selection.count) of \(session.hits.count) chosen", size: 12)
                     Spacer()
                     Button(session.selection.count == session.hits.count ? "Select none" : "Select all") {
                         session.selection = session.selection.count == session.hits.count ? [] : Set(session.hits.map(\.fileID))
@@ -292,8 +293,9 @@ struct ToolsWorkbench: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(summaryLine).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1)
-                        Text(session.capabilities.first(where: { $0.id == session.kind })?.detail ?? "Checking what this Mac can export…")
+                        Text(plainKindDetail)
                             .font(Theme.Font.body(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
+                            .help(session.capabilities.first(where: { $0.id == session.kind })?.detail ?? "")
                     }
 
                     if !session.outputs.isEmpty {
@@ -323,7 +325,7 @@ struct ToolsWorkbench: View {
                     }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(!canPreview)
-                    .help(canPreview ? "List the files this export would write" : "Pick files and an output folder first")
+                    .help(canPreview ? "Show the files this export will create, before writing anything" : session.selection.isEmpty ? "Tick at least one file first" : "Choose a folder to save to first")
                     Button("Export") {
                         send(ToolRequest(requestID: UUID().uuidString, action: "execute", destination: session.destination,
                                          operationID: session.operationID, destinationBookmark: session.destinationBookmark))
@@ -331,7 +333,7 @@ struct ToolsWorkbench: View {
                     .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.controlLarge))
                     .disabled(session.operationID == nil || session.executed || !session.destinationAccessReady || busy)
                     .keyboardShortcut(.defaultAction)
-                    .help("Write the previewed files as new versions")
+                    .help(session.operationID == nil ? "Press Preview first to check what will be created" : session.executed ? "Already exported. Change something and preview again to export more." : "Create the new files in the chosen folder")
                     Spacer(minLength: 0)
                     if session.pendingAction == "execute" {
                         Button("Cancel") {
@@ -346,7 +348,7 @@ struct ToolsWorkbench: View {
                         }
                         .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.controlLarge))
                         .disabled(session.operationID == nil || !session.outputs.contains(where: { $0.state == "completed" }) || !session.destinationAccessReady || busy)
-                        .help("Move the exported files to the Trash")
+                        .help(session.outputs.contains(where: { $0.state == "completed" }) ? "Move the files this export created to Trash" : "Nothing exported yet")
                     }
                 }
                 HStack {
@@ -354,7 +356,7 @@ struct ToolsWorkbench: View {
                         .buttonStyle(.dsGhost)
                         .disabled(busy)
                     Spacer()
-                    MetaText("Review reframed exports before sharing.", size: 11.5)
+                    MetaText("Check reframed videos before sharing them.", size: 11.5)
                 }
             }
             .padding(14)
@@ -400,7 +402,7 @@ struct ToolsWorkbench: View {
                 session.destinationBookmark = authorizedBookmark
                 #if FILEID_APP_STORE
                 if authorizedBookmark == nil {
-                    session.message = "FileID couldn't grant the output folder to its local engine. Choose it again."
+                    session.message = "FileID couldn't get permission to save in that folder. Choose it again."
                 }
                 #endif
                 invalidate()
@@ -408,15 +410,23 @@ struct ToolsWorkbench: View {
         }
     }
 
+    private var plainKindDetail: String {
+        switch session.kind {
+        case "video": return "Makes a new MP4 at the size and shape you choose. Your original video stays as it is."
+        case "chapters": return "Saves a video's chapters as a file other apps can read."
+        default: return "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is."
+        }
+    }
+
     private func search() {
         guard session.pending.isEmpty else { return }
         session.searchID = UUID().uuidString
-        if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = "The engine is unavailable." }
+        if !engine.send(.catalogRequest(request: CatalogRequest(requestID: session.searchID, action: "search", query: session.query))) { session.searchID = ""; session.message = "FileID is still getting ready. Try again in a moment." }
     }
     private func send(_ request: ToolRequest) {
         session.pending = request.requestID; session.pendingAction = request.action
         session.searchID = ""
-        if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = "The engine is unavailable." }
+        if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = "FileID is still getting ready. Try again in a moment." }
     }
     private func consume() {
         guard !session.pending.isEmpty, let response = engine.toolResponses[session.pending] else { return }

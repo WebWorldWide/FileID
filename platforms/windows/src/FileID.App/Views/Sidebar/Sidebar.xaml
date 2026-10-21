@@ -42,7 +42,7 @@
                 Padding="12"
                 CornerRadius="{StaticResource CornerRadiusL}"
                 Background="{StaticResource ScanCardBrush}"
-                BorderBrush="{StaticResource HairlineBrush}"
+                BorderBrush="{ThemeResource HairlineBrush}"
                 BorderThickness="1">
             <local:SidebarProcessingControl />
         </Border>

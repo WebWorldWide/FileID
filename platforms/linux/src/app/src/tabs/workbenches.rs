@@ -13,10 +13,6 @@ pub(super) fn is_playable_media(path: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| matches!(FileKind::from_extension(ext), FileKind::Video | FileKind::Audio))
 }
-pub fn catalog(engine: Engine) -> gtk::Widget {
-    super::moments::catalog(engine)
-}
-
 pub(super) fn timeline_request(file_ids: Vec<i64>, mode: &str) -> CatalogRequest {
     let mut r = catalog_request("enqueueTimeline");
     r.file_ids = Some(file_ids);
@@ -63,14 +59,6 @@ pub(super) fn job_controls(job: &CatalogJob) -> Vec<(&'static str, &'static str)
 // Parent may enable only after accepting the shared Tools Undo atomic no-clobber/cross-volume fix.
 pub(super) const LINUX_TOOL_UNDO_SAFETY_ACCEPTED: bool = true;
 pub(super) const TOOL_UNDO_UNAVAILABLE_REASON: &str = "Export Undo unavailable: the Linux recovery runtime has not passed atomic no-clobber and cross-volume safety acceptance. Export receipts remain visible; no outputs are moved by this disabled action.";
-
-pub fn tools(engine: Engine) -> gtk::Widget {
-    super::file_tools::tools(engine)
-}
-
-pub fn chat(engine: Engine) -> gtk::Widget {
-    super::chat::chat(engine)
-}
 
 #[cfg(test)]
 mod tests {

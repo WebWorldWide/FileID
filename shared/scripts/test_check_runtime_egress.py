@@ -229,7 +229,7 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/windows/src/engine/src/commands/prewarm.rs",
             "platforms/windows/src/engine/src/commands/bulk.rs",
             "platforms/windows/src/engine/src/commands/video_export.rs",
-            "platforms/windows/src/engine/src/main.rs",
+            "platforms/windows/src/engine/src/server.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/shared/Sources/FileIDShared/TLSPinning.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
@@ -243,12 +243,10 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/DocText.swift",
             "platforms/cli/src/runtime.rs",
-            "platforms/cli/src/scan_models.rs",
             "platforms/linux/src/app/src/engine_client.rs",
             "platforms/linux/src/app/src/tabs/settings.rs",
-            "platforms/tui/src/models.rs",
-            "platforms/tui/src/scan.rs",
             "platforms/windows/src/engine/src/commands/trash.rs",
+            "platforms/windows/src/engine/src/client.rs",
             # The reviewed files below match deliberately broad raw-network
             # patterns on non-network constructs — restructure.rs imports the
             # Win32 FILE_SHARE_READ *filesystem* constant, and
@@ -292,10 +290,8 @@ class RuntimeEgressTests(unittest.TestCase):
             "platforms/cli/src/runtime.rs",
             "platforms/apple/shared/Sources/FileIDShared/StreamingDownload.swift",
             "platforms/apple/engine/Sources/FileIDEngine/Pipeline/VLMDownloader.swift",
-            "platforms/apple/app/Sources/FileID/Services/ArcFaceModelInstaller.swift",
-            "platforms/apple/app/Sources/FileID/Services/BGEModelInstaller.swift",
             "platforms/apple/app/Sources/FileID/Services/CLIPModelInstaller.swift",
-            "platforms/apple/app/Sources/FileID/Services/RamPlusModelInstaller.swift",
+            "platforms/apple/app/Sources/FileID/Services/ModelInstaller.swift",
         })
 
     def test_string_decoys_cannot_replace_live_downloader_contracts(self) -> None:
@@ -503,7 +499,7 @@ class RuntimeEgressTests(unittest.TestCase):
                 "loopback raw client/request inventory",
             ),
             (
-                "platforms/windows/src/engine/src/main.rs",
+                "platforms/windows/src/engine/src/server.rs",
                 "\nasync fn beacon(http_client: reqwest::Client) { reqwest::Client::execute(http_client, todo!()).await; }\n",
                 "HTTP client plumbing",
             ),
@@ -559,7 +555,7 @@ class RuntimeEgressTests(unittest.TestCase):
     def test_source_discovery_covers_rust_path_modules_outside_src(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = self.source_tree(directory)
-            main = root / "platforms/windows/src/engine/src/main.rs"
+            main = root / "platforms/windows/src/engine/src/server.rs"
             main.write_text(
                 main.read_text(encoding="utf-8") + '\n#[path = "../rogue.rs"] mod rogue;\n',
                 encoding="utf-8",

@@ -275,10 +275,6 @@ enum ModelsCmd {
         /// Skip the confirmation prompt for a large / `--all` download.
         #[arg(long)]
         yes: bool,
-        /// Machine-readable progress on stdout (`PROGRESS\t<pct>\t<label>`) for
-        /// the TUI installer; suppresses the human bar. Hidden from `--help`.
-        #[arg(long = "porcelain-progress", hide = true)]
-        porcelain_progress: bool,
         /// Model names to download (e.g. `arcface mobileclip_s2 ram_plus`).
         #[arg(value_name = "NAME", num_args = 0.., conflicts_with = "all")]
         names: Vec<String>,
@@ -422,9 +418,8 @@ fn main() -> ExitCode {
                 all,
                 dry_run,
                 yes,
-                porcelain_progress,
                 names,
-            } => models::download(&ctx, all, dry_run, yes, porcelain_progress, &names),
+            } => models::download(&ctx, all, dry_run, yes, &names),
         },
         Command::Runtime { cmd } => match cmd {
             RuntimeCmd::Status => runtime::status(&ctx),

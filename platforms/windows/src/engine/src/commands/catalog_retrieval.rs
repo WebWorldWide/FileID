@@ -45,12 +45,7 @@ pub(super) fn search(
     } else {
         Some(serde_json::to_string(events)?)
     };
-    let quoted = query
-        .split_whitespace()
-        .filter(|s| s.chars().any(char::is_alphanumeric))
-        .map(|s| format!("\"{}\"", s.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let quoted = crate::db::read::text::fts_phrase_query(query);
     if quoted.is_empty() && kinds.is_none() && people.is_none() && events.is_none() && time.is_none() {
         return Ok(vec![]);
     }
@@ -213,10 +208,9 @@ mod tests {
     use super::*;
     #[test]
     fn scanned_tags_answer_without_descriptions() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for id in 1..=3 {
-            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,100,0,'image','jpg')", params![id, format!("/fixture/IMG_{id}.jpg")]).unwrap();
+            crate::db::test_support::insert_file(&conn, id, &format!("/fixture/IMG_{id}.jpg"), "image");
         }
         conn.execute("INSERT INTO tags(file_id,tag,source,score) VALUES(1,'grassland','auto',0.9),(1,'dog','auto',0.8),(2,'blue_sky','auto',0.9),(2,'grass','auto',0.7),(3,'grassy_knoll','rejected',0.9)", []).unwrap();
         let ids = |q: &str| search(&conn, q, &[], &[], &[], None).unwrap().into_iter().map(|h| h.file_id).collect::<Vec<_>>();
@@ -241,8 +235,7 @@ mod tests {
     }
     #[test]
     fn filters_apply_before_limits_and_exclude_failed_stale_and_unknown() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for id in 1..=150 {
             conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?1,?2,?1,100,0,'video','mov','Birthday gifts')",params![id,format!("/fixture/{id}.mov")]).unwrap();
         }

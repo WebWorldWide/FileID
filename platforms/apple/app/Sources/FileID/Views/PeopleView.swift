@@ -15,7 +15,7 @@ struct PeopleView: View {
     @State private var totalFacePrints: Int = 0
     @State private var hiddenUnknownCount: Int = 0
     @State private var showHiddenUnknowns: Bool = false
-    @State private var lastVersionSeen: Int = -1
+    @State private var reloadTask: Task<Void, Never>?
 
     /// Cards become checkboxes; "Merge selected" picks a target.
     @State private var mergeMode: Bool = false
@@ -47,8 +47,10 @@ struct PeopleView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            headerBlock
-            Divider().opacity(0.15)
+            if showsHeader {
+                headerBlock
+                Divider().opacity(0.15)
+            }
             if let s = mergeStatus {
                 Text(s)
                     .font(Theme.Font.body(12))
@@ -195,7 +197,7 @@ struct PeopleView: View {
                 headerActions
             }
             if let count = engine.lastFaceClustering?.deferredFaces, count > 0 {
-                Text("\(count) face\(count == 1 ? "" : "s") await processing. Unknown people are excluded.")
+                Text("\(count) more face\(count == 1 ? " is" : "s are") waiting to be grouped. People you marked as unknown are left out.")
                     .font(Theme.Font.body(13.5))
                     .foregroundStyle(Theme.text3)
             }
@@ -265,7 +267,7 @@ struct PeopleView: View {
                 Label("Merge people", systemImage: "arrow.triangle.merge")
             }
             .buttonStyle(.dsSecondary)
-            .help("Pick two or more people to combine into one. Use this when face clustering split the same person into multiple cards.")
+            .help("Combine two or more cards that show the same person")
 
             Button {
                 unknownMode = true; unknownChecked.removeAll()
@@ -273,7 +275,7 @@ struct PeopleView: View {
                 Label("Mark unknown", systemImage: "person.crop.circle.badge.questionmark")
             }
             .buttonStyle(.dsSecondary)
-            .help("Mark people you don't want to identify (strangers, crowd extras). They're hidden from the People tab and won't be merged into named clusters on the next run.")
+            .help("Hide people you don't need to name, like strangers in a crowd. Their photos stay in the library.")
         }
     }
 
@@ -366,7 +368,7 @@ struct PeopleView: View {
             Image(systemName: "forward.circle")
                 .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(13.5))
-            Text("Don't want to name anyone?")
+            Text("Don't want to name anyone? Descriptions will say \"a person\" instead of a name.")
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
@@ -374,7 +376,7 @@ struct PeopleView: View {
                 engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
                 onSwitchTab(.deep)
             } label: {
-                Label("Skip — run Deep Analyze with generic captions",
+                Label("Describe files without names",
                       systemImage: "forward.fill")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
@@ -383,7 +385,7 @@ struct PeopleView: View {
             }
             .buttonStyle(.plain)
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
-            .help("Run Deep Analyze without naming people. Captions will use generic descriptions like \"a person playing piano\" instead of real names.")
+            .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start describing every file now. You can name people later and describe again.")
             Spacer()
         }
         .padding(10)
@@ -401,7 +403,7 @@ struct PeopleView: View {
             Image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(Theme.gold)
                 .font(Theme.Font.body(13.5))
-            Text("Names set — keep going.")
+            Text("Names saved. Next, FileID can describe your files using these names.")
                 .font(Theme.Font.body(12))
                 .foregroundStyle(Theme.text3)
             Button {
@@ -409,7 +411,7 @@ struct PeopleView: View {
                 engine.deepAnalyzeAll(modelKind: modelKind, skipExisting: true)
                 onSwitchTab(.deep)
             } label: {
-                Label("Continue to Deep Analyze", systemImage: "arrow.forward.circle.fill")
+                Label("Describe files", systemImage: "arrow.forward.circle.fill")
                     .font(Theme.Font.body(12, .semibold))
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold))
@@ -417,74 +419,12 @@ struct PeopleView: View {
             }
             .buttonStyle(.plain)
             .disabled(engine.deepAnalyzeInFlight || !engine.deepAnalyzeAvailable)
-            .help("Generate captions and smart filenames using the names you've set.")
+            .help(engine.deepAnalyzeInFlight ? "FileID is already describing files." : "Start writing a description and a suggested name for every file. Progress shows on the Describe Files page.")
             Spacer()
         }
         .padding(10)
         .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.gold.opacity(0.10)))
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold.opacity(0.30), lineWidth: 0.5))
-    }
-
-    private var headerSubtitle: String {
-        let f = totalFacePrints
-        let p = persons.count
-        let unnamed = persons.filter { !$0.hasAnyName }.count
-        if p == 0 && f == 0 {
-            return "Run a scan first — face detection runs as part of the scan."
-        }
-        if p == 0 {
-            return "\(f) faces detected. Click the button to group them into people."
-        }
-        if unnamed > 0 {
-            return "\(p) people identified · \(unnamed) still unnamed. Naming them lets Deep Analyze use real names in captions."
-        }
-        return "\(p) people identified · all named ✓"
-    }
-
-    @ViewBuilder
-    private var stepsBar: some View {
-        let totalNamed = persons.filter { $0.hasAnyName }.count
-        let scanned = totalFacePrints > 0
-        let clustered = !persons.isEmpty
-        let named = totalNamed > 0
-        HStack(spacing: 6) {
-            stepBadge(idx: 1, label: "Scan finds faces",
-                       done: scanned)
-            stepArrow(active: scanned)
-            stepBadge(idx: 2, label: "Cluster groups them",
-                       done: clustered)
-            stepArrow(active: clustered)
-            stepBadge(idx: 3, label: "You name a few",
-                       done: named)
-            stepArrow(active: named)
-            stepBadge(idx: 4, label: "Deep Analyze uses names",
-                       done: named && persons.contains(where: { $0.fileCount > 0 }))
-            Spacer()
-        }
-        .font(.system(size: 10, weight: .semibold))
-    }
-
-    @ViewBuilder
-    private func stepBadge(idx: Int, label: String, done: Bool) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: done ? "checkmark.circle.fill" : "\(idx).circle")
-                .foregroundStyle(done ? Theme.delight : .secondary)
-            Text(label)
-                .foregroundStyle(done ? Color.primary : Color.secondary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
-                .fill(done ? Theme.delight.opacity(0.10) : Color.white.opacity(0.04))
-        )
-    }
-
-    @ViewBuilder
-    private func stepArrow(active: Bool) -> some View {
-        Image(systemName: "chevron.right")
-            .font(.system(size: 8))
-            .foregroundStyle(active ? Theme.gold.opacity(0.7) : Color.secondary.opacity(0.5))
     }
 
     // MARK: - Content
@@ -582,18 +522,26 @@ struct PeopleView: View {
                 }
                 .buttonStyle(.borderless)
                 .font(Theme.Font.body(12))
-                .help("People marked as unknown stay hidden so the grid only shows folks you might want to identify. They also don't get re-grouped when face clustering re-runs.")
+                .help("People you marked as unknown are hidden here. Show them to change your mind.")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
     }
 
+    private var showsHeader: Bool {
+        !persons.isEmpty || totalFacePrints > 0 || mergeMode || unknownMode
+            || (engine.lastFaceClustering?.deferredFaces ?? 0) > 0
+    }
+
     private var emptyState: some View {
-        EmptyStateView(
+        let images = store.totalImages
+        return EmptyStateView(
             icon: "person.2.crop.square.stack",
-            title: "No people yet",
-            message: "Pick a folder in the sidebar and click Start Scan. As the scan runs, faces in your photos get detected and grouped — they'll appear here as cards you can name."
+            title: images > 0 ? "No faces found" : "No people yet",
+            message: images > 0
+                ? "FileID looked at \(images.formatted()) photo\(images == 1 ? "" : "s") in this library and didn't find any faces. People appear here when a scanned photo has one."
+                : "Scan a folder with photos. Faces are detected as the scan runs and grouped into people you can name."
         )
     }
 
@@ -602,12 +550,12 @@ struct PeopleView: View {
         VStack(spacing: 14) {
             EmptyStateView(
                 icon: "person.crop.circle.badge.questionmark",
-                title: "\(totalFacePrints) faces detected — ready to group",
-                message: "Click Group photos by face. The app compares every face to every other and creates one card per person. Takes a few seconds.",
-                secondaryMessage: "Once grouped, click any card to add a name. Names get used by Deep Analyze in captions and smart filenames."
+                title: "\(totalFacePrints) faces found",
+                message: "Press Group faces to sort them into one card per person. It takes a few seconds.",
+                secondaryMessage: "Then click a card to type that person's name."
             )
             if engine.faceClusteringInFlight {
-                ProgressView("Grouping…")
+                ProgressView("Grouping faces…")
                     .padding(.top, 4)
             }
         }
@@ -623,16 +571,24 @@ struct PeopleView: View {
     // MARK: - Reload
 
     private func reload() {
-        totalFacePrints = store.totalFacePrints()
-        // Drop emptied clusters: moving every face out of a person leaves a
-        // 0-face row whose stale representative_face_id now points at the
-        // target's face — a ghost card showing the wrong person. Hide it.
-        let rows = store.persons(includeUnknown: showHiddenUnknowns)
-            .filter { $0.faceCount > 0 }
-        persons = rows
-        hiddenUnknownCount = store.hiddenUnknownCount()
-        // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
-        personByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
+        let includeUnknown = showHiddenUnknowns
+        reloadTask?.cancel()
+        reloadTask = Task {
+            // Drop emptied clusters: moving every face out of a person leaves a
+            // 0-face row whose stale representative_face_id now points at the
+            // target's face — a ghost card showing the wrong person. Hide it.
+            let loaded = await Task.detached(priority: .userInitiated) { [store] in
+                (faces: store.totalFacePrints(),
+                 rows: store.persons(includeUnknown: includeUnknown).filter { $0.faceCount > 0 },
+                 hidden: store.hiddenUnknownCount())
+            }.value
+            guard !Task.isCancelled else { return }
+            totalFacePrints = loaded.faces
+            persons = loaded.rows
+            hiddenUnknownCount = loaded.hidden
+            // `merging:` to tolerate duplicate ids (uniqueKeysWithValues traps).
+            personByID = Dictionary(loaded.rows.map { ($0.id, $0) }, uniquingKeysWith: { lhs, _ in lhs })
+        }
     }
 
     /// Named cluster wins (so a typed name sticks); else the larger count.
@@ -825,6 +781,13 @@ private struct PersonDetailSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var files: [FileRow] = []
+
+    private func loadFiles() {
+        let id = person.id
+        Task {
+            files = await Task.detached(priority: .userInitiated) { [store] in store.files(forPersonID: id) }.value
+        }
+    }
     @State private var title: String = ""
     @State private var firstName: String = ""
     @State private var middleName: String = ""
@@ -876,7 +839,7 @@ private struct PersonDetailSheet: View {
                         .font(Theme.Font.body(12))
                 }
                 .buttonStyle(.dsSecondary)
-                .help("Move individual photos to another person's group when face clustering put them in the wrong place.")
+                .help("Move photos that show someone else to the right person")
             } else {
                 Spacer()
             }
@@ -902,7 +865,7 @@ private struct PersonDetailSheet: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("I don't know who this is")
                             .font(Theme.Font.body(13.5))
-                        Text("Excludes this person from AI clustering and from Deep Analyze captions. Their photos stay in the library.")
+                        Text("Hides this person and leaves them out of descriptions. Their photos stay in the library.")
                             .font(Theme.Font.body(11))
                             .foregroundStyle(Theme.text3)
                     }
@@ -921,7 +884,7 @@ private struct PersonDetailSheet: View {
                             Color.clear   // grid alignment only
                         }
                     }
-                    Text("Deep Analyze captions will reference this person as **“\(deepAnalyzeRef)”**.")
+                    Text("Descriptions will call this person **“\(deepAnalyzeRef)”**.")
                         .font(Theme.Font.body(11))
                         .foregroundStyle(Theme.text3)
                 }
@@ -968,13 +931,13 @@ private struct PersonDetailSheet: View {
                     moveStatus = "Moved \(count) photo\(count == 1 ? "" : "s") to \(targetName)."
                     selectMode = false
                     checked.removeAll()
-                    files = store.files(forPersonID: person.id)
+                    loadFiles()
                 }
             )
         }
         .frame(minWidth: 720, minHeight: 520)
         .onAppear {
-            files = store.files(forPersonID: person.id)
+            loadFiles()
             title = person.title ?? ""
             firstName = person.firstName ?? person.name ?? ""
             middleName = person.middleName ?? ""
@@ -1141,7 +1104,6 @@ private struct PersonFileTile: View {
     let file: FileRow
     var selectMode: Bool = false
     var isChecked: Bool = false
-    @State private var img: NSImage?
 
     var body: some View {
         VStack(spacing: 4) {
@@ -1161,10 +1123,6 @@ private struct PersonFileTile: View {
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
-        .task(id: file.id) {
-            img = await ThumbnailService.shared.thumbnail(for: file.url, size: 240)
-        }
-        .onDisappear { img = nil }
         .contextMenu {
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([file.url])
@@ -1179,13 +1137,8 @@ private struct PersonFileTile: View {
             : "")
     }
 
-    @ViewBuilder
     private var tile: some View {
-        if let i = img {
-            Image(nsImage: i).resizable().scaledToFill()
-        } else {
-            Image(systemName: "photo").foregroundStyle(Theme.text3)
-        }
+        AsyncThumbnail(url: file.url, size: 240) { Image(systemName: "photo").foregroundStyle(Theme.text3) }
     }
 
     @ViewBuilder
@@ -1268,7 +1221,12 @@ private struct MovePhotosTargetPicker: View {
         }
         .frame(minWidth: 640, minHeight: 480)
         .onAppear {
-            candidates = store.persons().filter { $0.id != sourcePerson.id }
+            let sourceID = sourcePerson.id
+            Task {
+                candidates = await Task.detached(priority: .userInitiated) { [store] in
+                    store.persons().filter { $0.id != sourceID }
+                }.value
+            }
         }
     }
 }
@@ -1295,7 +1253,7 @@ private struct SuggestedMergesSheet: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Suggested merges")
                         .font(Theme.Font.body(14, .semibold))
-                    Text("\(candidates.count) cluster pairs look like they might be the same person.")
+                    Text("\(candidates.count) pairs of cards might be the same person.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.text3)
                 }
@@ -1323,7 +1281,7 @@ private struct SuggestedMergesSheet: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(veryLikely.isEmpty || inFlight)
-                .help("Bulk-merge every pair with cosine similarity ≥ 0.55 (the strongest 'same person' signal). The remaining pairs stay for manual review.")
+                .help("Combine only the pairs FileID is most sure about. The rest stay here for you to check.")
                 Button {
                     onAcceptMany(candidates)
                 } label: {
@@ -1348,7 +1306,7 @@ private struct SuggestedMergesSheet: View {
                         .foregroundStyle(Theme.delight)
                     Text("No borderline pairs found.")
                         .font(Theme.Font.body(13.5, .semibold))
-                    Text("Every cluster centroid is either reliably the same person (already merged) or reliably different. Re-run after adding more photos.")
+                    Text("Every card is clearly a different person. Check again after adding more photos.")
                         .font(Theme.Font.body(12))
                         .foregroundStyle(Theme.text3)
                         .multilineTextAlignment(.center)
@@ -1455,13 +1413,13 @@ private struct MergeTargetPickerSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Merge \(checked.count) clusters into one person")
+                Text("Combine \(checked.count) cards into one person")
                     .font(Theme.Font.body(14, .semibold))
                 Spacer()
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
             }
-            Text("Pick which one becomes the primary. The others will be absorbed — their photos move into the primary, and the source clusters disappear.")
+            Text("Choose the card to keep. Photos from the other cards move into it, and those cards go away.")
                 .font(Theme.Font.body(13.5))
                 .foregroundStyle(Theme.text3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1516,7 +1474,7 @@ private struct MergeTargetPickerSheet: View {
 private struct FaceModelInstallPanel: View {
     let engine: EngineClient
     let detectedFaces: Int
-    @State private var installer = ArcFaceModelInstaller.shared
+    @State private var installer = ModelInstaller.face
     private let kind = FaceEmbedderKind.defaultFor(ramGB: Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824)
 
     var body: some View {
@@ -1525,14 +1483,14 @@ private struct FaceModelInstallPanel: View {
                 MetaText(detectedFaces > 0 ? "\(detectedFaces.formatted()) faces detected" : "No faces yet", size: 11)
             }
             VStack(alignment: .leading, spacing: 10) {
-                Text("Install the face model to group these faces into people").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
-                Text("\(kind.displayName) finds and groups faces on this Mac. Once people are grouped you can name them, merge them, mark unknowns and tag every photo they appear in.")
+                Text("Download the Faces model to sort photos by person").font(Theme.Font.body(15, .semibold)).foregroundStyle(Theme.text1)
+                Text("It finds the same person across your photos. Then you can name people, combine duplicates and tag every photo they appear in.")
                     .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2).fixedSize(horizontal: false, vertical: true)
                 statusRow
             }
             .padding(14)
             PanelFooter {
-                MetaText("Downloads from Hugging Face only when you click. Runs on this Mac.", size: 11)
+                MetaText("Downloads once from Hugging Face. It runs on this Mac; your photos never leave it.", size: 11)
                 Spacer()
                 actions
             }
@@ -1542,7 +1500,7 @@ private struct FaceModelInstallPanel: View {
 
     @ViewBuilder
     private var statusRow: some View {
-        switch installer.status[kind] ?? .unknown {
+        switch installer.status {
         case .downloading(let fraction, let message, _, _):
             VStack(alignment: .leading, spacing: 6) {
                 GrainProgressBar(progress: fraction, tone: .gold)
@@ -1551,7 +1509,7 @@ private struct FaceModelInstallPanel: View {
         case .installFailed(let reason):
             MetaText(reason, color: Theme.danger, size: 11)
         case .installed:
-            MetaText("Installed. Group faces to see people here.", color: Theme.delight, size: 11)
+            MetaText("Ready. Press Group faces to see people here.", color: Theme.delight, size: 11)
         default:
             MetaText("\(kind.displayName) · about \(ByteCountFormatter.string(fromByteCount: Int64(kind.approxBytes), countStyle: .file))", size: 11)
         }
@@ -1559,17 +1517,17 @@ private struct FaceModelInstallPanel: View {
 
     @ViewBuilder
     private var actions: some View {
-        switch installer.status[kind] ?? .unknown {
+        switch installer.status {
         case .downloading:
-            Button("Cancel") { installer.cancel(kind) }.buttonStyle(DSSecondaryButtonStyle(height: 28))
+            Button("Cancel") { installer.cancel() }.buttonStyle(DSSecondaryButtonStyle(height: 28))
         case .installed:
             Button { engine.runFaceClustering() } label: { Label("Group faces", systemImage: "person.2") }
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
                 .disabled(engine.faceClusteringInFlight)
         case .installFailed:
-            Button("Retry") { installer.install(kind) }.buttonStyle(DSPrimaryButtonStyle(height: 28))
+            Button("Retry") { installer.install() }.buttonStyle(DSPrimaryButtonStyle(height: 28))
         default:
-            Button { installer.install(kind) } label: { Label("Install face model", systemImage: "arrow.down") }
+            Button { installer.install() } label: { Label("Download Faces model", systemImage: "arrow.down") }
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
         }
     }

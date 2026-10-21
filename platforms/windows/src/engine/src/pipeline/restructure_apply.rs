@@ -1768,10 +1768,6 @@ impl RestructureApply {
     /// Apply every proposed move. Stops on first hard error; returns the
     /// applied + failed counts. A privilege error in symlink mode short-
     /// circuits with a friendly message instead of partial writes.
-    // The engine package compiles this module once for the library and again
-    // for the binary. External library callers and unit tests use the slice
-    // convenience method; the binary uses `apply_iter` directly.
-    #[allow(dead_code)]
     pub fn apply(&self, moves: &[RestructureMove]) -> Result<RestructureApplyResult> {
         self.apply_iter_with(
             moves.iter().cloned().map(Ok),
@@ -4115,8 +4111,7 @@ mod tests {
         let src = root.join("a.jpg");
         std::fs::write(&src, b"data").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
 
@@ -4155,8 +4150,7 @@ mod tests {
         let src = root.join("a.jpg");
         std::fs::write(&src, b"data").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
 
@@ -4183,8 +4177,7 @@ mod tests {
     /// after a transient earlier update failure desyncs a row.
     #[test]
     fn update_path_in_db_aborts_instead_of_clobbering_a_live_row() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, "C:/lib/A.jpg"); // row to be moved
         insert_file_row(&conn, 2, "C:/lib/B.jpg"); // LIVE row occupying the target
         // Give row 2 a user tag so a cascade would be observable.
@@ -4214,8 +4207,7 @@ mod tests {
 
     #[test]
     fn update_path_in_db_rejects_a_disappeared_row() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let db = Arc::new(Mutex::new(conn));
 
         let error = update_path_in_db(&db, 404, Path::new("C:/lib/moved.jpg")).unwrap_err();
@@ -4230,8 +4222,7 @@ mod tests {
         let destination = root.join("Sorted").join("source.jpg");
         std::fs::write(&source, b"source").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &source.to_string_lossy());
         insert_file_row(&conn, 2, &destination.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
@@ -4275,8 +4266,7 @@ mod tests {
         let destination = root.join("Sorted").join("source.jpg");
         std::fs::write(&source, b"source").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &source.to_string_lossy());
         // A live row already occupies the destination path → apply's
         // update_path_in_db(1, destination) aborts on the UNIQUE conflict.
@@ -4470,8 +4460,7 @@ mod tests {
         let source = incoming.join("photo.jpg");
         let destination = sorted.join("photo.jpg");
         std::fs::write(&source, b"planned").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &source.to_string_lossy());
         let journal_path = root.join("undo.json");
         let apply = RestructureApply::new(
@@ -4515,8 +4504,7 @@ mod tests {
         std::fs::write(&original, b"photo").unwrap();
         let already_vacated = root.join("Photos").join("photo.jpg");
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &original.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let apply = RestructureApply::new(db, root.clone(), false);
@@ -4552,8 +4540,7 @@ mod tests {
         let sorted = root.join("Photos").join("photo.jpg");
         std::fs::write(&original, b"photo").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &original.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -4638,8 +4625,7 @@ mod tests {
         std::fs::write(&b, b"BBBB").unwrap();
         let a_new = root.join("Albums").join("X.txt");
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &a.to_string_lossy());
         insert_file_row(&conn, 2, &b.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
@@ -4680,8 +4666,7 @@ mod tests {
         std::fs::write(&src, b"PIC").unwrap();
         let dst = root.join("Sorted").join("photo.jpg");
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -4717,8 +4702,7 @@ mod tests {
         std::fs::write(&src, b"DOC").unwrap();
         let dst = root.join("Docs").join("doc.txt");
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         // A DIRECTORY at the journal path makes the file open fail.
@@ -4747,8 +4731,7 @@ mod tests {
         let dst_missing = root.join("Sorted").join("ghost.txt");
         let dst_real = root.join("Sorted").join("real.txt");
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &missing.to_string_lossy());
         insert_file_row(&conn, 2, &real.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
@@ -4785,8 +4768,7 @@ mod tests {
         let dst = root.join("Sorted").join("photo.jpg");
         std::fs::write(&src, b"PIC").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -4824,8 +4806,7 @@ mod tests {
         let dst = root.join("Photos").join("photo.jpg");
         std::fs::write(&src, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -4869,8 +4850,7 @@ mod tests {
         let current_destination = root.join("Photos").join("current.jpg");
         std::fs::write(&prior_source, b"PRIOR").unwrap();
         std::fs::write(&current_source, b"CURRENT").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &prior_source.to_string_lossy());
         let journal = root.join("undo.ndjson");
         let apply = RestructureApply::new(
@@ -4931,8 +4911,7 @@ mod tests {
         let current_destination = root.join("Photos").join("current.jpg");
         std::fs::write(&prior_source, b"PRIOR").unwrap();
         std::fs::write(&current_source, b"CURRENT").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &prior_source.to_string_lossy());
         let journal = root.join("undo.ndjson");
         let apply = RestructureApply::new(
@@ -4983,8 +4962,7 @@ mod tests {
         let dst = root.join("Photos").join("photo.jpg");
         std::fs::write(&src, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -5024,8 +5002,7 @@ mod tests {
         let journal = root_a.join("undo.ndjson");
         drop(UndoJournal::open_replacing(Some(journal.clone()), &root_a).unwrap());
         drop(UndoJournal::open_replacing(Some(journal.clone()), &root_b).unwrap());
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let wrong_root = RestructureApply::new(
             Arc::new(Mutex::new(conn)),
             root_b.clone(),
@@ -5052,8 +5029,7 @@ mod tests {
         std::fs::write(&second_source, b"SECOND").unwrap();
         let first_destination = root.join("Sorted").join("first.txt");
         let second_destination = root.join("Sorted").join("second.txt");
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &first_source.to_string_lossy());
         insert_file_row(&conn, 2, &second_source.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
@@ -5104,8 +5080,7 @@ mod tests {
         std::fs::write(&src, b"MP3").unwrap();
         let dst = root.join("Music").join("song.mp3");
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -5147,8 +5122,7 @@ mod tests {
         let dst = root_a.join("Photos").join("photo.jpg");
         std::fs::write(&src, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root_a.join("undo.ndjson");
@@ -5182,8 +5156,7 @@ mod tests {
         let dst = child.join("Photos").join("photo.jpg");
         std::fs::write(&src, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = parent.join("undo.ndjson");
@@ -5216,8 +5189,7 @@ mod tests {
         std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
         std::fs::write(&dst, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &dst.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -5243,8 +5215,7 @@ mod tests {
     fn header_only_owned_undo_journal_is_removed_as_no_work() {
         let root = undo_fixture_root("undo-header-only");
         std::fs::create_dir_all(&root).unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
         drop(UndoJournal::open_replacing(Some(journal.clone()), &root).unwrap());
@@ -5266,8 +5237,7 @@ mod tests {
         let dst = root.join("Photos").join("photo.jpg");
         std::fs::write(&src, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -5300,8 +5270,7 @@ mod tests {
         let dst = root.join("Photos").join("photo.jpg");
         std::fs::write(&src, b"JPEG").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
         let journal = root.join("undo.ndjson");
@@ -5347,8 +5316,7 @@ mod tests {
         std::fs::write(&src_a, b"AAAA").unwrap();
         std::fs::write(&src_b, b"BBBB").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &src_a.to_string_lossy());
         insert_file_row(&conn, 2, &src_b.to_string_lossy());
         let db = Arc::new(Mutex::new(conn));
@@ -5427,8 +5395,7 @@ mod tests {
         let real = root.join("real.jpg");
         std::fs::write(&real, b"data").unwrap();
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         // The DB says file 1 lives at `real`, but the (stale) plan claims a
         // different source path.
         insert_file_row(&conn, 1, &real.to_string_lossy());
@@ -5477,8 +5444,7 @@ mod tests {
             return;
         };
 
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         // DB row names the SAME path but a DIFFERENT file_ref — the file we planned to
         // move, since replaced on disk by another. `real_ref ^ 1` is guaranteed != real.
         conn.execute(
@@ -5509,8 +5475,7 @@ mod tests {
         let edited = root.join("edited.txt");
         std::fs::write(&kept, b"planned bytes").unwrap();
         std::fs::write(&edited, b"planned bytes").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         for (id, path, hash) in [(1, &kept, vec![1u8; 32]), (2, &edited, vec![2u8; 32])] {
             conn.execute(
                 "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension, failed, content_hash) \
@@ -5667,8 +5632,7 @@ mod tests {
         std::fs::write(&outside, b"outside").unwrap();
 
         for (index, use_symlinks) in [false, true].into_iter().enumerate() {
-            let conn = Connection::open_in_memory().unwrap();
-            crate::db::migrations::apply(&conn).unwrap();
+            let conn = crate::db::test_support::memory_db();
             insert_file_row(&conn, 1, &outside.to_string_lossy());
             let db = Arc::new(Mutex::new(conn));
             let destination = root.join(format!("mode-{index}.jpg"));
@@ -5695,8 +5659,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let journal = root.join("undo.ndjson");
         std::fs::write(&journal, b"prior-real-move-journal\n").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let apply = RestructureApply::new(
             Arc::new(Mutex::new(conn)),
             root.clone(),
@@ -5909,8 +5872,7 @@ mod tests {
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::fs::write(&source, b"ORIGINAL").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         insert_file_row(&conn, 1, &source.to_string_lossy());
         let manifest_dir = root.join("shortcut-undo");
         let apply = RestructureApply::new(Arc::new(Mutex::new(conn)), root.clone(), true)
@@ -6498,8 +6460,7 @@ mod tests {
 
     #[test]
     fn apply_requires_an_existing_absolute_library_root() {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         let apply =
             RestructureApply::new(Arc::new(Mutex::new(conn)), PathBuf::from("relative"), false);
         assert!(apply.apply(&[]).is_err());

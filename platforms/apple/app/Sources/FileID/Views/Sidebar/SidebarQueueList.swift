@@ -13,7 +13,7 @@ struct QueueListView: View {
                     .font(Theme.Font.body(12, .semibold))
                 Spacer()
                 if let eta = state.totalEtaSeconds, eta > 0 {
-                    Text(formatETA(eta))
+                    Text(DurationText.short(eta))
                         .font(Theme.Font.body(11).monospacedDigit())
                         .foregroundStyle(Theme.gold)
                 }
@@ -30,7 +30,7 @@ struct QueueListView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         if let eta = job.etaSeconds, eta > 0 {
-                            Text("ETA \(formatETA(eta))")
+                            Text("ETA \(DurationText.short(eta))")
                                 .font(Theme.Font.body(11).monospacedDigit())
                                 .foregroundStyle(Theme.text3)
                         }
@@ -47,15 +47,5 @@ struct QueueListView: View {
         case .faceCluster:  return "person.2.crop.square.stack"
         case .deepAnalyze:  return "sparkles"
         }
-    }
-
-    private func formatETA(_ seconds: Double) -> String {
-        let s = max(0, Int(seconds.rounded()))
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
     }
 }

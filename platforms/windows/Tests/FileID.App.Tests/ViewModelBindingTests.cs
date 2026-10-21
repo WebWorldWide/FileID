@@ -587,6 +587,61 @@ public class LibraryMergeTests
     }
 
     [Fact]
+    public void MergeById_DropsStaleDuplicateInstances()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3), Tile(2), Tile(3) };
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(3) });
+        Assert.Equal(new long[] { 1, 2, 3 }, items.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void WithoutKnownIds_SkipsTilesAlreadyShownAndRepeatsInPage()
+    {
+        var items = new ObservableCollection<FileTile> { Tile(1), Tile(2), Tile(3) };
+        var fresh = LibraryViewModel.WithoutKnownIds(items, new[] { Tile(2), Tile(3), Tile(4), Tile(4), Tile(5) });
+        Assert.Equal(new long[] { 4, 5 }, fresh.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void ShownCount_ReadsXOfYOrResults()
+    {
+        var previous = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
+        try
+        {
+            Assert.Equal("300 of 3,412 shown", FileID.Views.Library.LibraryView.ShownCount(300, 3412));
+            Assert.Equal("12 results", FileID.Views.Library.LibraryView.ShownCount(12, null));
+            Assert.Equal("1 result", FileID.Views.Library.LibraryView.ShownCount(1, null));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    [Fact]
+    public void CountForKind_SumsAllOrPicksOneKind()
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase) { ["image"] = 10, ["video"] = 3 };
+        Assert.Equal(13, LibraryViewModel.CountForKind(counts, null));
+        Assert.Equal(3, LibraryViewModel.CountForKind(counts, "video"));
+        Assert.Equal(0, LibraryViewModel.CountForKind(counts, "pdf"));
+    }
+
+    [Fact]
+    public void AppendRange_RaisesOneAddAtTheOldEnd()
+    {
+        var items = new BatchObservableCollection<FileTile> { Tile(1) };
+        var events = new List<NotifyCollectionChangedEventArgs>();
+        items.CollectionChanged += (_, e) => events.Add(e);
+        items.AppendRange(new[] { Tile(2), Tile(3) });
+        var only = Assert.Single(events);
+        Assert.Equal(NotifyCollectionChangedAction.Add, only.Action);
+        Assert.Equal(1, only.NewStartingIndex);
+        Assert.Equal(2, only.NewItems!.Count);
+    }
+
+    [Fact]
     public void MergeById_InsertsNewRows_AtTargetIndex()
     {
         var a = Tile(1);

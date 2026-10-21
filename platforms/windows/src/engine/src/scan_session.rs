@@ -239,6 +239,10 @@ impl ScanSession {
             // CLIP ships by default, so always keep an embeddingless `.obj` in the pipeline
             // to backfill its rendered-shape CLIP vector (lockstep with macOS).
             let model_clip_gate = SKIP_SET_MODEL_CLIP_GATE;
+            // Images catalogued while CLIP was missing stay in the pipeline once
+            // it is installed so a rescan backfills their embeddings (and faces,
+            // which run in the same pass) — lockstep with macOS Discovery.
+            let image_clip_gate = if clip_installed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
@@ -248,13 +252,13 @@ impl ScanSession {
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{text_embed_gate}"
                 )
             } else {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{text_embed_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
@@ -467,8 +471,10 @@ impl ScanSession {
 
         on_phase(SessionPhase::Tagging);
         emit_phase(SessionPhase::Tagging);
+        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
         let tagger = Tagger::new(self.coordinator.clone(), self.worker_count, self.models.clone())
-            .with_scan_root(root.to_path_buf());
+            .with_scan_root(root.to_path_buf())
+            .with_legacy_hashes(writer.rename_heal_enabled());
         let (tagged_rx, mut decoder_join): (
             mpsc::Receiver<TaggedFile>,
             tokio::task::JoinHandle<()>,
@@ -478,7 +484,6 @@ impl ScanSession {
         // every 1000 files (whichever first). Without throttling, a fast
         // scan floods the IPC channel and the app dispatcher.
         let progress_state = Arc::new(Mutex::new(ProgressState::new()));
-        let writer = DbWriter::new(self.db_conn.clone(), self.coordinator.clone());
 
         let sink_for_batch = sink.clone();
         let session_id_for_batch = session_id.clone();
@@ -589,16 +594,14 @@ impl ScanSession {
                 zero_byte_rejected,
                 "[SCAN] files changed after zero-byte discovery; preserving catalog rows"
             );
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                crate::ipc::EngineError {
-                    kind: "discovery_partial".into(),
-                    message: format!(
+            sink.send(crate::ipc::EngineError::new(
+                "discovery_partial",
+                format!(
                         "{zero_byte_rejected} file(s) changed after zero-byte discovery; their catalog rows were preserved for the next scan."
                     ),
-                    path: Some(root.to_string_lossy().into_owned()),
-                    model_kind: None,
-                },
-            ))))
+            )
+            .with_path(root.to_string_lossy().into_owned())
+            .into_event())
             .await;
         }
 
@@ -693,14 +696,10 @@ impl ScanSession {
             // "GPU device suspended — restart the app to recover" banner
             // instead of the generic cancelled state. Emit BEFORE
             // PhaseChanged(Failed) so IPC consumers see the cause first.
-            sink.send(IpcEvent::now(EventPayload::Error(Wrap::new(
-                crate::ipc::EngineError {
-                    kind: "gpu_device_removed".into(),
-                    message: crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE.into(),
-                    path: None,
-                    model_kind: None,
-                },
-            ))))
+            sink.send(crate::ipc::EngineError::event(
+                "gpu_device_removed",
+                crate::coordinator::GPU_DEVICE_REMOVED_MESSAGE,
+            ))
             .await;
             on_phase(SessionPhase::Failed);
             // Terminal Failed phase via the guaranteed (backpressuring)
@@ -895,12 +894,7 @@ fn discovery_notice(
     } else {
         return None;
     };
-    Some(crate::ipc::EngineError {
-        kind: kind.into(),
-        message,
-        path: Some(root.to_string()),
-        model_kind: None,
-    })
+    Some(crate::ipc::EngineError::new(kind, message).with_path(root.to_string()))
 }
 
 fn should_emit_batch_summary(batch_index: u32, processed_total: u64, last_emitted: u64) -> bool {
@@ -1030,6 +1024,17 @@ pub(crate) const SKIP_SET_MODEL_CLIP_GATE: &str =
     " AND NOT (kind = 'model' AND extension = 'obj' AND text_stage_done = 0 \
       AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                       WHERE clip_embeddings.file_id = files.id))";
+
+/// macOS `DBWriter.skipSetClipBackfillExclusionSQL`: keep an image that still
+/// LACKS a `clip_embeddings` row OUT of the skip set while CLIP is installed, so a
+/// scan run before the model was installed is backfilled by the next rescan.
+pub(crate) const SKIP_SET_IMAGE_CLIP_GATE: &str =
+    " AND NOT (kind = 'image' AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
+                                            WHERE clip_embeddings.file_id = files.id))";
+
+fn clip_installed() -> bool {
+    crate::models::mobileclip::default_weights_path().is_ok_and(|p| p.exists())
+}
 
 /// True once the BGE document embedder's weights are on disk — the same probe the
 /// tagger uses to decide whether to build the embedder (tagging.rs). Gates

@@ -64,9 +64,6 @@ struct LibraryView: View {
     @State private var listedQuery: (String, String?)? = nil
     private static let pageSize = 300
     private static let refreshCap = 3_000
-    /// The tile about two screens before the end; the grid creates it lazily,
-    /// so its appearance means the user is approaching the last loaded row.
-    private var loadTriggerID: Int64? { rows.isEmpty ? nil : rows[max(0, rows.count - 24)].id }
     private var paneRow: FileRow? { selectMode ? nil : rows.first { $0.id == paneSelectedID } }
     /// Siblings frozen at preview-open time so live-scan updates to
     /// `rows` don't yank the file the user is looking at out of the
@@ -88,10 +85,6 @@ struct LibraryView: View {
     // bulk-tag then targets every checked file, not just those still on screen.
     @State private var checkedFiles: [Int64: FileRow] = [:]
     @State private var bulkTagSheetOpen: Bool = false
-
-    private let columns = [
-        GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 12)
-    ]
 
     private var scanActive: Bool {
         guard let p = engine.lastProgress else { return false }
@@ -121,7 +114,7 @@ struct LibraryView: View {
                 postScanBanner(
                     icon: "person.2.crop.square.stack",
                     title: "Grouping faces…",
-                    detail: "On-device AI is matching faces to people. Cards will appear in the People tab."
+                    detail: "Finding the same person across photos. They will appear on the People page."
                 )
             }
             if engine.deepAnalyzeInFlight {
@@ -277,8 +270,8 @@ struct LibraryView: View {
                 Text(similarSeed == nil ? "Showing keyword matches." : "Finding similar files.")
                     .font(Theme.Font.body(13.5, .semibold))
                 Text(hint == .preparing
-                     ? "Preparing semantic search… results will refresh automatically."
-                     : "Install CLIP in Settings → AI Models for visual semantic search (\"sunset at the beach\", \"red car\", etc.).")
+                     ? "Getting search by description ready… results update on their own."
+                     : "To search by what's in a photo (\"sunset at the beach\", \"red car\"), download the Search by description model in Settings.")
                     .font(Theme.Font.body(11))
                     .foregroundStyle(Theme.text3)
             }
@@ -303,7 +296,7 @@ struct LibraryView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Photos similar to \(seed.url.lastPathComponent)")
                     .font(Theme.Font.body(13.5, .semibold))
-                Text("Ranked by visual similarity using on-device CLIP embeddings.")
+                Text("Most similar first. Clear to see every file again.")
                     .font(Theme.Font.body(11))
                     .foregroundStyle(Theme.text3)
             }
@@ -328,17 +321,17 @@ struct LibraryView: View {
                     .foregroundStyle(Theme.gold)
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(p.phase == .discovering ? "Discovering files…"
-                         : p.phase == .tagging ? "Tagging files…" : "Post-scan…")
+                    Text(p.phase == .discovering ? "Finding files…"
+                         : p.phase == .tagging ? "Reading files…" : "Grouping faces…")
                         .font(Theme.Font.body(14, .semibold))
-                    Text("Tags + face detection. Smart names come later via Deep Analyze.")
+                    Text("Tagging photos and finding faces. You can browse while this runs.")
                         .font(Theme.Font.body(11))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 Text(p.total > 0
-                     ? "\(p.processed) / \(p.total)  ·  \(p.discovered) found"
-                     : "\(p.processed) processed  ·  \(p.discovered) found")
+                     ? "\(p.processed.formatted()) of \(p.total.formatted()) files"
+                     : "\(p.discovered.formatted()) found so far")
                     .font(Theme.Font.body(13.5).monospacedDigit())
                     .foregroundStyle(Theme.text3)
             }
@@ -355,7 +348,7 @@ struct LibraryView: View {
                 Text(String(format: "%.0f files per second", p.filesPerSecond))
                     .foregroundStyle(Theme.gold)
                 if let eta = p.etaSeconds, eta > 0 {
-                    Text("about \(formatETA(eta)) left")
+                    Text("about \(DurationText.short(eta)) left")
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
@@ -379,14 +372,6 @@ struct LibraryView: View {
         .padding(.top, 16)
     }
 
-    private func formatETA(_ seconds: Double) -> String {
-        let s = Int(seconds.rounded())
-        let h = s / 3600; let m = (s % 3600) / 60; let sec = s % 60
-        if h > 0 { return String(format: "%dh %dm", h, m) }
-        if m > 0 { return String(format: "%dm %ds", m, sec) }
-        return "\(sec)s"
-    }
-
     // MARK: - Deep Analyze live headline
 
     @ViewBuilder
@@ -399,15 +384,15 @@ struct LibraryView: View {
                     .foregroundStyle(Theme.ai)
                     .font(Theme.Font.body(16, .semibold))
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Deep Analyze running…")
+                    Text("Describing files…")
                         .font(Theme.Font.body(14, .semibold))
-                    Text("On-device AI is captioning images and proposing smart filenames.")
+                    Text("Writing a description and a suggested name for each file. Nothing is renamed until you approve it.")
                         .font(Theme.Font.body(11))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
                 if let p {
-                    Text("\(p.processed) / \(p.total)")
+                    Text("\(p.processed.formatted()) of \(p.total.formatted()) files")
                         .font(Theme.Font.body(13.5).monospacedDigit())
                         .foregroundStyle(Theme.text3)
                 }
@@ -424,7 +409,7 @@ struct LibraryView: View {
             if let p {
                 HStack(spacing: 16) {
                     if let eta = p.etaSeconds, eta > 0 {
-                        Text("ETA \(formatETA(eta))")
+                        Text("about \(DurationText.short(eta)) left")
                     }
                     if let cur = p.currentPath {
                         Text("Now: \((cur as NSString).lastPathComponent)")
@@ -477,7 +462,7 @@ struct LibraryView: View {
             HStack(alignment: .center, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "line.3.horizontal.decrease").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
-                    TextField("Filter by name, tag, caption or person", text: $searchText)
+                    TextField("Filter by name, tag, description or person", text: $searchText)
                         .textFieldStyle(.plain)
                         .font(Theme.Font.body(13.5))
                         .focused($searchFocused)
@@ -516,6 +501,7 @@ struct LibraryView: View {
                 } label: { Label("Tag selected", systemImage: "tag.fill") }
                 .buttonStyle(DSPrimaryButtonStyle(height: 28))
                 .disabled(checkedFiles.isEmpty)
+                .help(checkedFiles.isEmpty ? "Click files to choose them first" : "Add tags to the chosen files")
                 Button("Done") {
                     selectMode = false
                     checkedFiles.removeAll()
@@ -526,7 +512,7 @@ struct LibraryView: View {
                 Button { selectMode = true } label: { Label("Select", systemImage: "checkmark.square").fixedSize() }
                 .buttonStyle(DSSecondaryButtonStyle(height: 28))
                 .fixedSize()
-                .help("Enter multi-select mode to apply tags to many files at once")
+                .help("Choose several files, then tag them all at once")
             }
 
             // Bulk-rename trigger lives in the Deep Analyze tab now —
@@ -695,14 +681,14 @@ struct LibraryView: View {
         if store.totalFiles == 0 {
             EmptyStateView(
                 icon: "arrow.left.circle",
-                title: "Ready when you are",
-                message: "Click Start Scan in the sidebar to begin."
+                title: "No files yet",
+                message: "Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar."
             )
         } else {
             EmptyStateView(
                 icon: "magnifyingglass",
                 title: "No matches",
-                message: "Try a different search or clear the filter."
+                message: "Nothing matches this filter. Try other words, or choose All to see every file."
             )
         }
     }
@@ -1013,12 +999,7 @@ private struct FilePreviewSheet: View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 20) {
                 infoSection("Details") {
-                    detail("Kind", file.kind.capitalized + " · " + file.extension.uppercased())
-                    if let date = file.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
-                    detail("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
-                    if let camera = file.cameraModel, !camera.isEmpty { detail("Camera", camera) }
-                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
-                    if let lat = file.locationLat, let lon = file.locationLon { detail("Location", String(format: "%.4f, %.4f", lat, lon)) }
+                    FileDetailRows(file: file, people: people)
                 }
                 if let caption = file.vlmDescription, !caption.isEmpty {
                     infoSection("Description") {
@@ -1031,12 +1012,12 @@ private struct FilePreviewSheet: View {
                             HStack(spacing: 10) {
                                 Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Smart name").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+                                    Text("Suggested name").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                                     Text("\(proposed).\(file.extension)").font(Theme.Font.mono(11.5)).foregroundStyle(Theme.gold)
                                         .lineLimit(2).textSelection(.enabled)
                                 }
                                 Spacer(minLength: 6)
-                                Button("Apply") {
+                                Button("Rename") {
                                     let oldPath = file.pathText
                                     if let newURL = store.applyProposedName(file: file),
                                        newURL.path != oldPath {
@@ -1055,7 +1036,7 @@ private struct FilePreviewSheet: View {
                                     dismiss()
                                 }
                                 .buttonStyle(.dsSecondary)
-                                .help("Renames the file on disk and updates the library row. Undo from the Library header if you change your mind.")
+                                .help("Renames the file to the suggested name. Undo last rename at the top of Library puts the old name back.")
                             }
                             .padding(10)
                             .background(Theme.gold.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
@@ -1076,10 +1057,10 @@ private struct FilePreviewSheet: View {
                 FinderTagsEditor(file: file, store: store, isFocused: $tagFieldFocused, onEdit: onEdit)
                 DisclosureGroup {
                     VStack(spacing: 0) {
-                        detail("Path", file.pathText)
-                        if file.hasText { detail("Text", "Detected (OCR)") }
-                        if let phash = file.phash { detail("pHash", String(phash, radix: 16)) }
-                        if let aesthetic = file.aesthetic { detail("Aesthetic", String(format: "%.2f", aesthetic)) }
+                        DetailRow("Path", file.pathText)
+                        if file.hasText { DetailRow("Text", "Found in this file") }
+                        if let phash = file.phash { DetailRow("pHash", String(phash, radix: 16)) }
+                        if let aesthetic = file.aesthetic { DetailRow("Aesthetic", String(format: "%.2f", aesthetic)) }
                     }
                     .padding(.top, 6)
                 } label: {
@@ -1098,7 +1079,13 @@ private struct FilePreviewSheet: View {
         }
     }
 
-    private func detail(_ key: String, _ value: String) -> some View {
+}
+
+private struct DetailRow: View {
+    let key: String
+    let value: String
+    init(_ key: String, _ value: String) { self.key = key; self.value = value }
+    var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 70, alignment: .leading)
             Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(3).textSelection(.enabled)
@@ -1106,6 +1093,19 @@ private struct FilePreviewSheet: View {
         }
         .padding(.vertical, 5)
         .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
+    }
+}
+
+private struct FileDetailRows: View {
+    let file: FileRow
+    let people: [String]
+    var body: some View {
+        DetailRow("Kind", file.kind.capitalized + " · " + file.extension.uppercased())
+        if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
+        DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
+        if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }
+        if !people.isEmpty { DetailRow("People", people.joined(separator: ", ")) }
+        if let lat = file.locationLat, let lon = file.locationLon { DetailRow("Location", String(format: "%.4f, %.4f", lat, lon)) }
     }
 }
 
@@ -1182,7 +1182,7 @@ private struct FinderTagsEditor: View {
             // The detached read doesn't inherit `.task` cancellation; if the
             // user arrowed to another file mid-read, a slow stale read on a
             // network volume could land after the newer one and overwrite it.
-            // Mirror FileTile: drop it once `.task(id:)` is superseded.
+            // Drop it once `.task(id:)` is superseded.
             guard !Task.isCancelled else { return }
             tags = result
             error = nil
@@ -1311,10 +1311,9 @@ private struct InlineMediaPlayer: View {
             player?.pause()
             player = nil
             failed = false
-            let asset = AVURLAsset(url: url)
-            let playable = (try? await asset.load(.isPlayable)) ?? false
+            let asset = await MediaPlayback.playableAsset(url)
             guard !Task.isCancelled else { return }
-            if playable { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) } else { failed = true }
+            if let asset { player = AVPlayer(playerItem: AVPlayerItem(asset: asset)) } else { failed = true }
         }
         .onDisappear { player?.pause() }
     }
@@ -1372,19 +1371,13 @@ private struct PDFPreview: View {
 /// Toolbar's "Open with default app" covers full-fidelity preview.
 private struct UniversalPreview: View {
     let url: URL
-    @State private var img: NSImage?
 
     var body: some View {
         ZStack {
             Color.black.opacity(0.3)
-            if let img {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(20)
-            } else {
+            AsyncThumbnail(url: url, size: 1024, contentMode: .fit) {
                 VStack(spacing: 10) {
-                    Image(systemName: iconForExtension(url.pathExtension))
+                    Image(systemName: FileTypes.symbolName(forExtension: url.pathExtension))
                         .font(.system(size: 96, weight: .light))
                         .foregroundStyle(Theme.text3)
                     Text(url.lastPathComponent)
@@ -1395,22 +1388,7 @@ private struct UniversalPreview: View {
                         .foregroundStyle(Theme.text3)
                 }
             }
-        }
-        .task(id: url) {
-            img = await ThumbnailService.shared.thumbnail(for: url, size: 1024)
-        }
-    }
-
-    private func iconForExtension(_ ext: String) -> String {
-        switch ext.lowercased() {
-        case "zip", "tar", "gz", "rar", "7z": return "doc.zipper"
-        case "txt", "md", "rtf":                return "doc.text"
-        case "html", "htm":                     return "doc.richtext"
-        case "swift", "py", "js", "ts", "rs", "go", "java", "c", "cpp", "h":
-            return "chevron.left.forwardslash.chevron.right"
-        case "json", "yaml", "yml", "toml", "xml":
-            return "curlybraces.square"
-        default:                                return "doc"
+            .padding(20)
         }
     }
 }
@@ -1484,7 +1462,7 @@ private struct LibrarySelectedPane: View {
                     if let thumbnail {
                         Image(nsImage: thumbnail).resizable().aspectRatio(contentMode: .fit)
                     } else {
-                        Image(systemName: icon).font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
+                        Image(systemName: FileKind.symbolName(forKind: row.kind)).font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
                     }
                 }
                 .aspectRatio(16.0 / 10.0, contentMode: .fit)
@@ -1502,11 +1480,7 @@ private struct LibrarySelectedPane: View {
                 }
 
                 VStack(spacing: 0) {
-                    detail("Kind", row.kind.capitalized + " · " + row.extension.uppercased())
-                    if let date = row.displayDate { detail("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
-                    detail("Size", ByteCountFormatter.string(fromByteCount: row.sizeBytes, countStyle: .file))
-                    if let camera = row.cameraModel, !camera.isEmpty { detail("Camera", camera) }
-                    if !people.isEmpty { detail("People", people.joined(separator: ", ")) }
+                    FileDetailRows(file: row, people: people)
                 }
 
                 if let caption = row.vlmDescription, !caption.isEmpty {
@@ -1563,24 +1537,5 @@ private struct LibrarySelectedPane: View {
             guard !Task.isCancelled else { return }
             thumbnail = image
         }
-    }
-
-    private var icon: String {
-        switch row.kind {
-        case "video": return "film"
-        case "audio": return "waveform"
-        case "pdf": return "doc.richtext"
-        default: return "doc"
-        }
-    }
-
-    private func detail(_ key: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 64, alignment: .leading)
-            Text(value).font(Theme.Font.body(12.5)).foregroundStyle(Theme.text1).lineLimit(2).textSelection(.enabled)
-            Spacer(minLength: 0)
-        }
-        .padding(.vertical, 6)
-        .overlay(alignment: .bottom) { Hairline(color: Theme.hairlineSoft) }
     }
 }

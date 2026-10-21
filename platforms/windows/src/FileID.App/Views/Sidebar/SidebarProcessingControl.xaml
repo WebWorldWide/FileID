@@ -49,7 +49,7 @@
                        x:Name="WarningBannerText"
                        FontFamily="{StaticResource BodyFontFamily}"
                        FontSize="12"
-                       Foreground="{StaticResource Text1Brush}"
+                       Foreground="{ThemeResource Text1Brush}"
                        TextWrapping="Wrap"
                        VerticalAlignment="Center" />
             <Button Grid.Column="2"
@@ -71,7 +71,7 @@
                        FontFamily="{StaticResource BodyFontFamily}"
                        FontSize="13"
                        FontWeight="SemiBold"
-                       Foreground="{StaticResource Text1Brush}"
+                       Foreground="{ThemeResource Text1Brush}"
                        TextTrimming="CharacterEllipsis"
                        AutomationProperties.HeadingLevel="Level2" />
             <TextBlock x:Name="CardPercentText"
@@ -80,7 +80,7 @@
                        FontFamily="{StaticResource BodyFontFamily}"
                        FontSize="12.5"
                        FontWeight="SemiBold"
-                       Foreground="{StaticResource Text2Brush}" />
+                       Foreground="{ThemeResource Text2Brush}" />
         </Grid>
 
         <ProgressBar x:Name="ScanProgressBar"
@@ -110,7 +110,7 @@
                 <FontIcon x:Name="DetailsToggleGlyph"
                           Glyph="&#xE70D;"
                           FontSize="10"
-                          Foreground="{StaticResource Text3Brush}" />
+                          Foreground="{ThemeResource Text3Brush}" />
             </Button>
         </Grid>
 
@@ -118,7 +118,7 @@
                    Text="Pick a folder to start."
                    FontFamily="{StaticResource BodyFontFamily}"
                    FontSize="12"
-                   Foreground="{StaticResource Text3Brush}"
+                   Foreground="{ThemeResource Text3Brush}"
                    TextWrapping="Wrap"
                    MaxLines="3"
                    TextTrimming="CharacterEllipsis" />
@@ -128,7 +128,7 @@
                     Visibility="Collapsed"
                     Spacing="4"
                     Padding="0,6"
-                    BorderBrush="{StaticResource HairlineSoftBrush}"
+                    BorderBrush="{ThemeResource HairlineSoftBrush}"
                     BorderThickness="0,1,0,1">
             <Grid x:Name="DiscoveredStatBorder" ColumnSpacing="6" AutomationProperties.Name="Discovered">
                 <Grid.ColumnDefinitions>
@@ -136,9 +136,9 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="Found" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
-                <TextBlock x:Name="StatDiscovered" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource Text1Brush}" />
-                <TextBlock x:Name="EtaText" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock Text="Found" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{ThemeResource Text3Brush}" />
+                <TextBlock x:Name="StatDiscovered" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{ThemeResource Text1Brush}" />
+                <TextBlock x:Name="EtaText" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{ThemeResource Text3Brush}" />
             </Grid>
             <Grid x:Name="TaggedStatBorder" ColumnSpacing="6" AutomationProperties.Name="Tagged">
                 <Grid.ColumnDefinitions>
@@ -146,9 +146,9 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="Tagged" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
-                <TextBlock x:Name="StatTagged" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource Text1Brush}" />
-                <TextBlock x:Name="StatRate" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock Text="Tagged" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{ThemeResource Text3Brush}" />
+                <TextBlock x:Name="StatTagged" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{ThemeResource Text1Brush}" />
+                <TextBlock x:Name="StatRate" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{ThemeResource Text3Brush}" />
             </Grid>
             <Grid x:Name="MemoryStatBorder" ColumnSpacing="6" AutomationProperties.Name="Memory">
                 <Grid.ColumnDefinitions>
@@ -156,16 +156,16 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="Memory" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock Text="Memory" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{ThemeResource Text3Brush}" />
                 <TextBlock x:Name="StatMemory" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" />
-                <TextBlock x:Name="StatAvailable" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock x:Name="StatAvailable" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{ThemeResource Text3Brush}" />
             </Grid>
             <Grid x:Name="FailuresStatBorder" ColumnSpacing="6" AutomationProperties.Name="Failures">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="62" />
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="Failed" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{StaticResource Text3Brush}" />
+                <TextBlock Text="Failed" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{ThemeResource Text3Brush}" />
                 <TextBlock x:Name="StatFailures" Grid.Column="1" Text="0" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" />
             </Grid>
         </StackPanel>
@@ -230,7 +230,7 @@
                 <TextBlock Text="Open engine log"
                            FontFamily="{StaticResource BodyFontFamily}"
                            FontSize="12"
-                           Foreground="{StaticResource Text3Brush}" />
+                           Foreground="{ThemeResource Text3Brush}" />
             </HyperlinkButton>
         </StackPanel>
 

@@ -1524,8 +1524,7 @@ mod tests {
         let path = base.join("restored.bin");
         std::fs::write(&path, b"payload").unwrap();
         let identity = crate::platform::file_identity(&path).unwrap();
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let mut conn = crate::db::test_support::memory_db();
         let item = trash_log::TrashLogItem {
             file_id: 42,
             original_path: path.to_string_lossy().into_owned(),

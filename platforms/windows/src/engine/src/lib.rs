@@ -1,17 +1,9 @@
-//! `fileid-engine` library surface — re-declares the same submodules as
-//! `main.rs` so external test/bench harnesses can depend on the engine's
-//! internals without going through stdin/stdout.
-//!
-//! Each module is compiled twice (once for the bin, once for the lib);
-//! ~30 % dev-compile-time cost, zero runtime cost (the bin still links
-//! its own LTO copy). Standard Cargo workaround for bin-only crates
-//! wanting bench/test scaffolding.
+//! `fileid-engine` library: the engine internals shared by the `FileIDEngine`
+//! binary, the GTK app, the CLI, the TUI, tests and benches.
 
 #![allow(clippy::needless_return)]
-// Modules are compiled independently for the engine binary, where these paths
-// are live; the library duplicate intentionally exposes only selected helpers.
-#![allow(dead_code)]
 
+pub mod client;
 pub mod commands;
 pub mod catalog_index;
 pub mod coordinator;
@@ -27,6 +19,9 @@ pub mod paths;
 pub mod pipeline;
 pub mod platform;
 pub mod scan_session;
+pub mod server;
 pub mod resource_scheduler;
 pub mod shell;
 pub mod util;
+
+pub use db::read;

@@ -36,7 +36,7 @@ struct Detail: View {
     }
 
     private var crumb: String {
-        activeTab == .settings ? "FileID / Settings" : "\(activeTab.area?.rawValue ?? "FileID") / \(activeTab.rawValue)"
+        activeTab == .settings ? "FileID / Settings" : "\(activeTab.area?.rawValue ?? "FileID") / \(activeTab.title)"
     }
 
     private var pageMeta: String {
@@ -45,7 +45,7 @@ struct Detail: View {
         case .deep:
             if let d = engine.deepAnalyzeProgress, engine.deepAnalyzeInFlight { return "\(d.processed.formatted()) / \(d.total.formatted())" }
             return ""
-        case .settings: return "macOS"
+        case .settings: return ""
         case .restructure: return pickedURL?.lastPathComponent ?? ""
         default: return ""
         }
@@ -55,7 +55,7 @@ struct Detail: View {
         HStack(alignment: .bottom, spacing: 16) {
             VStack(alignment: .leading, spacing: 7) {
                 SectionLabel(crumb)
-                Text(activeTab.rawValue).font(Theme.Font.pageTitle).foregroundStyle(Theme.text1).lineLimit(1)
+                Text(activeTab.title).font(Theme.Font.pageTitle).foregroundStyle(Theme.text1).lineLimit(1)
             }
             Spacer(minLength: 0)
             MetaText(pageMeta, color: Theme.text2, size: 12)
@@ -92,11 +92,11 @@ private struct EmptyState: View {
     let onPickFolder: () -> Void
 
     private let steps: [(String, String, String)] = [
-        ("Browse", "Scan the folder", "Reads your files, finds faces, indexes text in photos."),
-        ("Browse", "Confirm faces", "Group faces by person and name the ones you recognize."),
-        ("Analyze", "Captions and names", "Deep Analyze writes captions and proposes specific file names."),
-        ("Analyze", "Review moments", "Chapters, searchable evidence and the best take of each attempt."),
-        ("Act", "Clean up and restructure", "Trash extra copies, preview a folder layout, try it with shortcuts, then move.")
+        ("Library", "Scan a folder", "FileID reads each file, tags what's in your photos and finds faces. Nothing is moved or changed."),
+        ("People", "Name the people", "Faces are grouped by person. Type a name once and FileID finds that person everywhere."),
+        ("Describe Files", "Describe files (optional)", "A local AI writes a sentence about each file and suggests a clearer name. You approve every rename."),
+        ("Search & Moments · Chat", "Search and ask", "Find a photo, video or document by what's in it, or ask a question in Chat."),
+        ("Duplicates · Organize Folders", "Tidy up", "Move extra copies to Trash and preview a tidier folder layout before anything moves.")
     ]
 
     var body: some View {
@@ -105,13 +105,13 @@ private struct EmptyState: View {
                 VStack(alignment: .leading, spacing: 8) {
                     SectionLabel("FileID / Get started")
                     Text("FileID").font(Theme.Font.display(56)).foregroundStyle(Theme.text1)
-                    Text("Local-first file organizer. Every model runs on this Mac. Files never leave it.")
+                    Text("Organizes your photos, videos and documents. Everything runs on this Mac, and your files never leave it.")
                         .font(Theme.Font.body(15)).foregroundStyle(Theme.text2)
                 }
                 .padding(.bottom, 26)
 
                 Panel {
-                    PanelHeader("What happens next")
+                    PanelHeader("How it works")
                     ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                         HStack(alignment: .firstTextBaseline, spacing: 14) {
                             Text(String(index + 1)).font(Theme.Font.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
@@ -132,10 +132,10 @@ private struct EmptyState: View {
                 .padding(.bottom, 20)
 
                 HStack(spacing: 12) {
-                    Button { onPickFolder() } label: { Label("Pick a folder", systemImage: "folder.badge.plus") }
+                    Button { onPickFolder() } label: { Label("Choose a folder to scan", systemImage: "folder.badge.plus") }
                         .buttonStyle(.dsPrimary)
                         .keyboardShortcut("o", modifiers: .command)
-                    MetaText("…or drag a folder into this window. ⌘O at any time.")
+                    MetaText("Or drag a folder onto this window (⌘O).")
                 }
             }
             .frame(maxWidth: 720, alignment: .leading)

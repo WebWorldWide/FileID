@@ -75,7 +75,6 @@ struct RestructureView: View {
     /// Shared hover state used by the Sankey, recommendation rows,
     /// tree, and staysPut disclosure to drive cross-highlight.
     @State private var hoverBus = RestructureHoverBus()
-    @State private var hasPulsed = false
     @State private var captionedFraction: Double = 0
     @State private var totalAnalyzableFiles = 0
     @AppStorage("restructure.dismissedDeepAnalyzeHint") private var dismissedDeepAnalyzeHint = false
@@ -193,7 +192,7 @@ struct RestructureView: View {
                         }
                         Button("Cancel", role: .cancel) { }
                     } message: {
-                        Text("FileID will move the selected files into the new structure on disk and update its library. You can put everything back with Undo move right afterward, but review the structure first.")
+                        Text("The files move into the new folders. Nothing is deleted, and Undo move puts every file back where it was.")
                     }
                 Hairline()
             }
@@ -290,7 +289,7 @@ struct RestructureView: View {
         .onChange(of: engine.engineResetSignal) { _, _ in
             if applying {
                 applying = false
-                status = "Engine restarted — apply interrupted. Recheck your library and try again."
+                status = "FileID restarted in the middle of the move. Files already moved can be put back with Undo move; try again for the rest."
                 statusIsError = true
             }
             loading = false
@@ -311,18 +310,18 @@ struct RestructureView: View {
             // mirroring the engineResetSignal handler above.
             if applying, kind == "db_unavailable" {
                 applying = false
-                status = "The engine isn't ready — try again in a moment."
+                status = "FileID is still getting ready. Try again in a moment."
                 statusIsError = true
             }
             guard loading else { return }
             switch kind {
             case "plan_restructure_failed", "db_unavailable":
                 loading = false
-                status = "Couldn't compute a plan. Please try again."
+                status = "FileID couldn't work out a plan. Try again."
                 statusIsError = true
             case "ipc_frame_too_large":
                 loading = false
-                status = "This library's plan is too large to display. Try restructuring a smaller folder."
+                status = "This folder has too many files to show a plan. Try a smaller folder."
                 statusIsError = true
             default:
                 break
@@ -372,7 +371,7 @@ struct RestructureView: View {
         // A failed send never gets a result event, so release the guard here.
         if !engine.undoRestructure(libraryRoot: root.path) {
             applying = false
-            status = "The engine is unavailable. Try again in a moment."
+            status = "FileID is still getting ready. Try again in a moment."
             statusIsError = true
         }
     }
@@ -384,15 +383,15 @@ struct RestructureView: View {
         let moveState: RestructureStepState = applying ? .current : (moved ? .done : (planReady && applyCount > 0 ? .current : .upcoming))
         return HStack(spacing: 0) {
             RestructureStepCell(number: 1, title: "Preview", state: previewState,
-                                detail: loading ? "Reading every folder and picking a home for each file…"
-                                    : (planReady ? "\(plannedMoveCount.formatted()) move\(plannedMoveCount == 1 ? "" : "s") planned · \(sankeyHeaderStat)" : "Plan a tidier layout for this folder. Nothing moves yet.")) {
+                                detail: loading ? "Reading every folder and choosing a home for each file…"
+                                    : (planReady ? "\(plannedMoveCount.formatted()) file\(plannedMoveCount == 1 ? "" : "s") to move · \(sankeyHeaderStat)" : "FileID suggests a tidier layout for this folder. Nothing moves yet.")) {
                 if loading {
                     IndeterminateBar().frame(maxWidth: 160)
                 } else {
-                    Button(planReady ? "Plan again" : "Plan") { requestPlan() }
+                    Button(planReady ? "Suggest again" : "Suggest a layout") { requestPlan() }
                         .buttonStyle(planReady ? AnyButtonStyle(DSGhostButtonStyle()) : AnyButtonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget)))
                         .disabled(applying)
-                        .help("Compute a fresh plan from the current library")
+                        .help(applying ? "Wait for the move to finish" : "Work out a new plan from the files as they are now")
                 }
             }
             VHairline()
@@ -410,7 +409,7 @@ struct RestructureView: View {
             VHairline()
             RestructureStepCell(number: 3, title: "Move", state: moveState,
                                 detail: applying ? (cancelRequested ? "Stopping after the current file…" : "Moving files on disk…")
-                                    : (moved ? "Files were moved on disk. You can put them back." : "Moves the selected files on disk and updates the library.")) {
+                                    : (moved ? "Files were moved. Undo move puts them back." : "Moves the chosen files into their new folders.")) {
                 if applying {
                     IndeterminateBar().frame(maxWidth: 120)
                     Button(cancelRequested ? "Stopping…" : "Cancel") {
@@ -425,7 +424,7 @@ struct RestructureView: View {
                     if planReady && applyCount > 0 {
                         Button("Move \(applyCount.formatted()) file\(applyCount == 1 ? "" : "s")") { beginApply() }
                             .buttonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget))
-                            .help("Moves the selected files into the new structure on disk. You confirm first.")
+                            .help("Move the chosen files into their new folders. You confirm first, and you can undo.")
                     }
                     if moved {
                         Button { undoLastMove() } label: { Label("Undo move", systemImage: "arrow.uturn.backward") }
@@ -488,10 +487,10 @@ struct RestructureView: View {
 
     private var missingContentModelsBanner: some View {
         notice(tone: Theme.warning,
-               title: clipModelInstalled ? "Rescan so Restructure can see what's in your photos" : "Sorting by date only: the image model isn't installed",
+               title: clipModelInstalled ? "Rescan so FileID can see what's in your photos" : "Sorting by date only",
                body: clipModelInstalled
-                ? "The image model is installed, but this library was scanned before it was. A rescan reads the photos; files already up to date are skipped."
-                : "Without the image (CLIP) and document (BGE) models FileID can't see what files contain, so loose files fall back to year and month folders. Install them in Settings, then rescan.") {
+                ? "This folder was scanned before the Search by description model was downloaded. A rescan looks at the photos again; files already up to date are skipped."
+                : "Without the Search by description and Documents models, FileID can't see what files contain, so loose files go into year and month folders. Download them in Settings, then rescan.") {
             Button {
                 if clipModelInstalled, let root = libraryRoot {
                     engine.startScan(rootURL: root)
@@ -510,16 +509,16 @@ struct RestructureView: View {
         let captioned = Int((captionedFraction * Double(totalAnalyzableFiles)).rounded())
         let pct = Int((captionedFraction * 100).rounded())
         notice(tone: Theme.ai,
-               title: "Sharper proposals with Deep Analyze",
+               title: "Better suggestions with descriptions",
                body: captioned == 0
-                ? "Right now files are sorted by folder name and people. Deep Analyze reads what each file shows (captions, text, scene tags), so receipts go to Documents and screenshots to Photos."
-                : "Captioned \(captioned.formatted()) of \(totalAnalyzableFiles.formatted()) (\(pct)%). Analyzing the rest gives the plan more to work with.") {
+                ? "Right now files are sorted by folder name and people. Describing files lets FileID see what each one shows, so receipts go to Documents and screenshots to Photos."
+                : "\(captioned.formatted()) of \(totalAnalyzableFiles.formatted()) files are described (\(pct)%). Describing the rest gives the plan more to work with.") {
             HStack(spacing: 6) {
                 Button("Not now") { dismissedDeepAnalyzeHint = true }
                     .buttonStyle(.dsGhost)
                 Button {
                     engine.deepAnalyzeAll(modelKind: DeepAnalyzeSettings.shared.activeKind.rawValue, skipExisting: true)
-                } label: { Label("Run Deep Analyze", systemImage: "sparkles") }
+                } label: { Label("Describe files", systemImage: "sparkles") }
                     .buttonStyle(DSAccentOutlineButtonStyle(color: Theme.ai, height: Theme.Metrics.hitTarget))
             }
         }
@@ -569,7 +568,7 @@ struct RestructureView: View {
 
     private var recommendationsPanel: some View {
         Panel {
-            PanelHeader("Recommendations") {
+            PanelHeader("Suggestions") {
                 MetaText("Skip a group to leave it out of the move", size: 12)
             }
             VStack(spacing: 0) {
@@ -633,7 +632,7 @@ struct RestructureView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("FileID keeps your well-named folders and proposes a tidier home for the rest. Nothing moves until you choose Move.")
+            Text("FileID keeps your well-named folders and suggests a tidier home for everything else. Nothing moves until you press Move.")
                 .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
             if let root = libraryRoot {
@@ -720,15 +719,15 @@ struct RestructureView: View {
         if libraryRoot == nil {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
-                title: "Pick a folder to scan",
-                message: "Choose a library folder in the sidebar and scan it first. Restructure proposes a cleaner layout inside that same folder, and nothing moves until you review it and choose Move."
+                title: "Choose a folder first",
+                message: "Choose and scan a folder. FileID then suggests a tidier layout inside that same folder, and nothing moves until you check it and press Move."
             )
         } else if loading {
             Panel {
                 VStack(spacing: 10) {
                     IndeterminateBar().frame(width: 220)
                     Text("Planning…").font(Theme.Font.display(28)).foregroundStyle(Theme.text1)
-                    Text("Looking at every folder, deciding which to keep, and picking a home for every other file.")
+                    Text("Looking at every folder, deciding which to keep, and choosing a home for every other file.")
                         .font(Theme.Font.body(12.5)).foregroundStyle(Theme.text3)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 380)
@@ -740,8 +739,8 @@ struct RestructureView: View {
         } else {
             EmptyStateView(
                 icon: "rectangle.3.offgrid",
-                title: "Nothing to restructure yet",
-                message: "Scan this folder first. Once files are tagged, Restructure proposes a clean layout you can review and move."
+                title: "Scan this folder first",
+                message: "Once the scan finishes, FileID suggests a tidier layout you can check before anything moves."
             )
         }
     }
@@ -758,7 +757,7 @@ struct RestructureView: View {
         let hiddenCount = unlimited ? 0 : max(0, g.proposals.count - cap)
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: bucketIcon(g.bucket))
+                Image(systemName: bucketIconName(g.bucket))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.gold)
                     .frame(width: 20, alignment: .center)
@@ -805,7 +804,7 @@ struct RestructureView: View {
         } label: {
             HStack(spacing: 10) {
                 DSCheck(on: on)
-                Image(systemName: Self.fileIcon(forFilename: filename))
+                Image(systemName: FileTypes.symbolName(forExtension: (filename as NSString).pathExtension))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.text3)
                     .frame(width: 14, alignment: .center)
@@ -846,49 +845,24 @@ struct RestructureView: View {
             Image(systemName: "checkmark.seal.fill")
                 .foregroundStyle(Theme.gold)
                 .font(Theme.Font.body(12))
-                .help("High confidence — safe to apply.")
+                .help("FileID is sure about this one")
                 .accessibilityLabel("High confidence")
         case "review":
             Image(systemName: "questionmark.circle")
                 .foregroundStyle(Theme.warning)
                 .font(Theme.Font.body(12))
-                .help("Medium confidence — worth a look.")
+                .help("Fairly sure; worth a look")
                 .accessibilityLabel("Medium confidence — review")
         case "ask":
             Image(systemName: "hand.raised")
                 .foregroundStyle(Theme.text3)
                 .font(Theme.Font.body(12))
-                .help("Low confidence — review before applying.")
+                .help("Not sure; check before moving")
                 .accessibilityLabel("Low confidence — ask")
         default:
             EmptyView()
         }
     }
-
-    /// SF Symbol for a filename based on its extension. Helps the user
-    /// scan a long file list — photos vs videos vs PDFs are visually
-    /// distinct without reading the extension.
-    private static func fileIcon(forFilename name: String) -> String {
-        let ext = (name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "jpg", "jpeg", "png", "heic", "heif", "gif", "tiff", "tif", "bmp", "webp", "raw", "dng":
-            return "photo"
-        case "mp4", "mov", "m4v", "avi", "mkv", "webm":
-            return "video"
-        case "pdf":
-            return "doc.richtext"
-        case "doc", "docx", "pages", "rtf", "txt", "md":
-            return "doc.text"
-        case "mp3", "m4a", "wav", "flac", "aac", "ogg":
-            return "waveform"
-        case "zip", "tar", "gz", "7z":
-            return "archivebox"
-        default:
-            return "doc"
-        }
-    }
-
-    private func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
     // MARK: - Engine-routed plan + apply
 
@@ -908,7 +882,7 @@ struct RestructureView: View {
         status = nil
         if !engine.planRestructure(libraryRoot: root.path) {
             loading = false
-            status = "Engine is starting — reopen the tab to load your plan."
+            status = "FileID is still getting ready. Open this page again in a moment to see your plan."
             statusIsError = true
         }
     }
@@ -926,7 +900,7 @@ struct RestructureView: View {
             guard let planID = plan.planID,
                   let totalMoves = plan.totalMoves, totalMoves > 0 else {
                 loading = false
-                status = "The stored plan is unavailable. Generate it again."
+                status = "The saved plan couldn't be opened. Press Suggest a layout to make a new one."
                 statusIsError = true
                 return
             }
@@ -1026,7 +1000,7 @@ struct RestructureView: View {
     private func applyViaEngine() {
         guard !applying else { return }
         guard let root = libraryRoot else {
-            status = "Pick a library folder before applying."
+            status = "Choose a folder first."
             statusIsError = true
             return
         }
@@ -1044,7 +1018,7 @@ struct RestructureView: View {
             libraryRoot: root.path, moves: moves, planID: pendingPlanID)
         {
             applying = false
-            status = "Engine is unavailable — try again in a moment."
+            status = "FileID is still getting ready. Try again in a moment."
             statusIsError = true
         }
     }
@@ -1136,7 +1110,7 @@ struct RestructureView: View {
     private var sankeyHeaderStat: String {
         let srcCount = Set(proposals.map(\.sourceFolder)).count
         let dstCount = Set(proposals.map(\.bucket)).count
-        return "\(srcCount) source\(srcCount == 1 ? "" : "s") → \(dstCount) destination\(dstCount == 1 ? "" : "s")"
+        return "\(srcCount) folder\(srcCount == 1 ? "" : "s") → \(dstCount) folder\(dstCount == 1 ? "" : "s")"
     }
 
     private func toggleExpand(_ outcome: RestructureOutcome) {
@@ -1217,7 +1191,7 @@ struct RestructureView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    SectionLabel("Restructure / Review")
+                    SectionLabel("Organize Folders / Review")
                     Text(title).font(Theme.Font.display(28)).foregroundStyle(Theme.text1).lineLimit(1)
                     MetaText("\(matchedCount.formatted()) file\(matchedCount == 1 ? "" : "s"). Click a row, or press Space on it, to include or skip it.")
                 }
@@ -1289,7 +1263,7 @@ struct RestructureView: View {
         case .sourceFolders(let fs):
             return "From \(fs.count) smaller folder\(fs.count == 1 ? "" : "s")"
         case .destBuckets(let bs):
-            return "Going to \(bs.count) smaller bucket\(bs.count == 1 ? "" : "s")"
+            return "Going to \(bs.count) smaller folder\(bs.count == 1 ? "" : "s")"
         }
     }
 }

@@ -27,8 +27,6 @@
         <StackPanel Padding="32,32,32,32" Spacing="20" MaxWidth="820" HorizontalAlignment="Center">
 
             <StackPanel Spacing="4">
-                <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" Visibility="Collapsed"
-                           AutomationProperties.HeadingLevel="Level1"/>
                 <TextBlock Text="Models, GPU acceleration, storage."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -574,11 +572,24 @@
                     <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}"
                                AutomationProperties.HeadingLevel="Level2"/>
 
-                    <ToggleSwitch x:Name="CleanupAutoTagToggle"
-                                  Header="Tag kept files after Cleanup auto-trash"
-                                  OffContent="Don't change tags on the keeper"
-                                  OnContent="Add a 'kept' tag to the keeper"
-                                  Toggled="OnCleanupAutoTagToggled" />
+                    <Grid ColumnSpacing="12" MinHeight="28">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Tag kept files after Cleanup auto-trash"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap" />
+                        <ToggleSwitch x:Name="CleanupAutoTagToggle"
+                                      Grid.Column="1"
+                                      OnContent=""
+                                      OffContent=""
+                                      MinWidth="0"
+                                      VerticalAlignment="Center"
+                                      AutomationProperties.Name="Tag kept files after Cleanup auto-trash"
+                                      AutomationProperties.HelpText="Adds a 'kept' tag to the copy you keep."
+                                      Toggled="OnCleanupAutoTagToggled" />
+                    </Grid>
                 </StackPanel>
             </Border>
 

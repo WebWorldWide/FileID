@@ -1,4 +1,3 @@
-#![allow(dead_code)] // CLI consumer
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -238,8 +237,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("file.txt");
         std::fs::write(&path, b"").unwrap();
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::apply(&conn).unwrap();
+        let conn = crate::db::test_support::memory_db();
         (root, path, conn)
     }
 

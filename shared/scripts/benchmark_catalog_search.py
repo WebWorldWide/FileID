@@ -12,7 +12,7 @@ import statistics
 import tempfile
 import time
 
-from check_catalog_roundtrip import Engine
+from conformance import Engine
 
 
 QUERIES = ("Family", "Alex baseball", "Grandma present", "Roof estimate", "Bucket42 baseball")
@@ -161,7 +161,7 @@ def parse_args(argv=None):
 def benchmark(args):
     binary_hash = sha256_file(args.engine)
     harness = Path(__file__).resolve()
-    identity = dict(sha256=sha256_file(harness), engine_helper_sha256=sha256_file(harness.with_name("check_catalog_roundtrip.py")))
+    identity = dict(sha256=sha256_file(harness), engine_helper_sha256=sha256_file(harness.with_name("conformance.py")))
     manifest = fixture_manifest(args.files)
     root = Path(tempfile.gettempdir()).resolve()
     if str(root).casefold() == "/volumes/adlon" or str(root).casefold().startswith("/volumes/adlon/"):

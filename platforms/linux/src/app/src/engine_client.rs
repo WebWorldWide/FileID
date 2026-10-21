@@ -20,14 +20,16 @@
 use anyhow::{Context, Result};
 use async_channel::{Receiver, Sender};
 use fileid_engine::ipc::{
-    CancelPrewarmPayload, CommandPayload, EventPayload, HealthCheckPayload, IpcCommand, IpcEvent,
+    CancelPrewarmPayload, CommandPayload, EventPayload, HealthCheckPayload, IpcCommand,
     ModelDownloadProgress, PrewarmModelPayload, StartScanPayload,
 };
+use fileid_engine::client::{self, BoundedLine, Frame};
+use fileid_engine::read::text::{escape_like, fts_phrase_query};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Stdio};
 use std::rc::Rc;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -274,7 +276,6 @@ const THUMB_QUEUE_CAP: usize = 64;
 const THUMB_WORKERS: usize = 4;
 const RAW_EVENT_CAP: usize = 8;
 const SUBSCRIBER_EVENT_CAP: usize = 4;
-const MAX_ENGINE_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ENGINE_LOG_BYTES: usize = 1024 * 1024;
 /// A stray multi-GB file must not balloon memory; larger files keep the icon.
 const THUMB_MAX_BYTES: u64 = 48 * 1024 * 1024;
@@ -644,23 +645,20 @@ fn deliver_from_main(subscriber: &Sender<EngineState>, event: EngineState) {
 fn spawn_process(this: &Rc<RefCell<EngineClient>>) {
     let raw_tx = this.borrow().raw_tx.clone();
     emit_from_main(&raw_tx, RawEvent::State(EngineState::Spawning));
-    let exe = match locate_engine_binary() {
-        Ok(path) => path,
-        Err(err) => {
+    let exe = match fileid_engine::client::locate_engine() {
+        Some(path) => path,
+        None => {
             emit_from_main(
                 &raw_tx,
-                RawEvent::State(EngineState::Failed(format!("engine binary not found: {err}"))),
+                RawEvent::State(EngineState::Failed(
+                    "engine binary not found: set FILEID_ENGINE or place the engine beside the app binary".into(),
+                )),
             );
             schedule_respawn(this);
             return;
         }
     };
-    match Command::new(&exe)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    match fileid_engine::client::spawn(&exe, &[], Stdio::piped()) {
         Ok(mut child) => {
             let stdin = child.stdin.take().expect("piped stdin present");
             let stdout = child.stdout.take().expect("piped stdout present");
@@ -720,126 +718,31 @@ fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
     });
 }
 
-/// Locate the engine binary. Search order:
-///   1. `$FILEID_ENGINE`
-///   2. `FileIDEngine` or `fileid-engine` alongside the app executable
-///   3. system install dirs (.deb / Flatpak)
-fn locate_engine_binary() -> Result<PathBuf> {
-    if let Some(value) = std::env::var_os("FILEID_ENGINE").filter(|value| !value.is_empty()) {
-        let path = PathBuf::from(value);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for candidate in ["FileIDEngine", "fileid-engine"] {
-                let path = dir.join(candidate);
-                if path.is_file() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-    for system in [
-        "/usr/lib/FileID/FileIDEngine",
-        "/usr/libexec/FileID/FileIDEngine",
-        "/usr/lib/FileID/fileid-engine",
-    ] {
-        let path = PathBuf::from(system);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    anyhow::bail!("set FILEID_ENGINE or place the engine beside the app binary")
-}
-
-enum BoundedLine {
-    Eof,
-    Line,
-    Oversize,
-}
-
-fn read_bounded_line<R: BufRead>(
-    reader: &mut R,
-    buffer: &mut Vec<u8>,
-    max_bytes: usize,
-) -> std::io::Result<BoundedLine> {
-    buffer.clear();
-    let mut draining = false;
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            return Ok(if draining {
-                BoundedLine::Oversize
-            } else if buffer.is_empty() {
-                BoundedLine::Eof
-            } else {
-                BoundedLine::Line
-            });
-        }
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let take = newline.unwrap_or(available.len());
-        if draining || buffer.len().saturating_add(take) > max_bytes {
-            draining = true;
-        } else {
-            buffer.extend_from_slice(&available[..take]);
-        }
-        reader.consume(take + usize::from(newline.is_some()));
-        if newline.is_some() {
-            if draining {
-                buffer.clear();
-                return Ok(BoundedLine::Oversize);
-            }
-            if buffer.last() == Some(&b'\r') {
-                buffer.pop();
-            }
-            return Ok(BoundedLine::Line);
-        }
-    }
-}
-
-fn drain_engine_stdout(mut reader: impl BufRead, tx: Sender<RawEvent>) {
-    let mut frame = Vec::with_capacity(8 * 1024);
-    loop {
-        match read_bounded_line(&mut reader, &mut frame, MAX_ENGINE_FRAME_BYTES) {
-            Ok(BoundedLine::Eof) => break,
-            Err(err) => {
-                let _ = tx.send_blocking(RawEvent::State(EngineState::Failed(format!(
-                    "engine output error: {err}"
-                ))));
-                break;
-            }
-            Ok(BoundedLine::Oversize) => {
-                let message = format!(
+fn drain_engine_stdout(reader: impl BufRead, tx: Sender<RawEvent>) {
+    let mut receiver_open = true;
+    let read = client::read_frames(reader, client::MAX_FRAME_BYTES, |frame| {
+        let raw = match frame {
+            Frame::Event(event) => map_engine_payload(event.payload),
+            Frame::Oversize => Some(RawEvent::State(EngineState::Error {
+                kind: "oversized_frame".into(),
+                message: format!(
                     "engine response exceeded the {} MiB safety limit and was discarded",
-                    MAX_ENGINE_FRAME_BYTES / (1024 * 1024)
-                );
-                if tx
-                    .send_blocking(RawEvent::State(EngineState::Error {
-                        kind: "oversized_frame".into(),
-                        message,
-                        model_kind: None,
-                    }))
-                    .is_err()
-                {
-                    return;
-                }
-                continue;
-            }
-            Ok(BoundedLine::Line) => {}
-        }
-        if frame.iter().all(u8::is_ascii_whitespace) {
-            continue;
-        }
-        let Ok(event) = serde_json::from_slice::<IpcEvent>(&frame) else {
-            continue;
+                    client::MAX_FRAME_BYTES / (1024 * 1024)
+                ),
+                model_kind: None,
+            })),
         };
-        if let Some(raw) = map_engine_payload(event.payload) {
-            if tx.send_blocking(raw).is_err() {
-                return;
-            }
-        }
+        receiver_open = raw.map_or(true, |raw| tx.send_blocking(raw).is_ok());
+        receiver_open
+    });
+    if !receiver_open {
+        return;
+    }
+    if let Err(err) = read {
+        let _ = tx.send_blocking(RawEvent::State(EngineState::Failed(format!(
+            "engine output error: {err}"
+        ))));
+        return;
     }
     let _ = tx.send_blocking(RawEvent::State(EngineState::Exited));
 }
@@ -893,7 +796,7 @@ fn drain_stderr(stderr: std::process::ChildStderr) {
     let mut reader = BufReader::new(stderr);
     let mut frame = Vec::with_capacity(4 * 1024);
     loop {
-        match read_bounded_line(&mut reader, &mut frame, MAX_ENGINE_LOG_BYTES) {
+        match client::read_bounded_line(&mut reader, &mut frame, MAX_ENGINE_LOG_BYTES) {
             Ok(BoundedLine::Eof) | Err(_) => break,
             Ok(BoundedLine::Oversize) => {
                 tracing::warn!(target: "engine_stderr", "oversized engine log line discarded");
@@ -949,26 +852,36 @@ fn file_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
-fn file_row_at_path(path: &Path, id: i64) -> Result<Option<FileRow>> {
+fn file_row_on(conn: &rusqlite::Connection, id: i64) -> Result<Option<FileRow>> {
     use rusqlite::OptionalExtension;
-    let conn = fileid_engine::db::open_read(path)?;
     Ok(conn
         .query_row(&format!("SELECT {FILE_COLUMNS} FROM files f WHERE f.id = ?1 AND f.failed = 0"), [id], file_row)
         .optional()?)
 }
 
-/// One file's current row, read off the main loop (the preview refreshes
-/// what it shows after a scan).
-pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
+/// Runs `read` on a fresh read-only connection off the main loop; the
+/// default value when no library database exists yet or it can't be opened.
+pub fn read_db<T, F>(read: F) -> Receiver<T>
+where
+    T: Default + Send + 'static,
+    F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
+{
     let (tx, rx) = async_channel::bounded(1);
     thread::spawn(move || {
-        let row = fileid_engine::paths::db_path()
+        let value = fileid_engine::paths::db_path()
             .ok()
             .filter(|path| path.exists())
-            .and_then(|path| file_row_at_path(&path, id).ok().flatten());
-        let _ = tx.send_blocking(row);
+            .and_then(|path| fileid_engine::db::open_read(&path).ok())
+            .map(|conn| read(&conn))
+            .unwrap_or_default();
+        let _ = tx.send_blocking(value);
     });
     rx
+}
+
+/// One file's current row (the preview refreshes what it shows after a scan).
+pub fn read_file_row(id: i64) -> Receiver<Option<FileRow>> {
+    read_db(move |conn| file_row_on(conn, id).ok().flatten())
 }
 
 fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i64)> {
@@ -976,7 +889,7 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
     let search = spec.search.trim();
     let has_search = !search.is_empty();
     let like = format!("%{}%", escape_like(search));
-    let fts = fts_match(search);
+    let fts = fts_phrase_query(search);
     let has_fts = !fts.is_empty();
     let kind = spec.kind.as_deref().filter(|kind| !kind.is_empty());
     let limit = if spec.limit > 0 { spec.limit.min(QUERY_MAX_ROWS) } else { 500 };
@@ -1016,28 +929,6 @@ fn query_files_at_path(path: &Path, spec: &QuerySpec) -> Result<(Vec<FileRow>, i
         )?
     };
     Ok((rows, total))
-}
-
-fn escape_like(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if matches!(ch, '%' | '_' | '\\') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
-}
-
-/// Quote each alphanumeric token so user punctuation cannot produce a
-/// malformed MATCH expression. Empty when nothing usable remains.
-fn fts_match(text: &str) -> String {
-    text.split_whitespace()
-        .map(|token| token.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
-        .filter(|token| !token.is_empty())
-        .map(|token| format!("\"{token}\""))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 pub type CancelToken = Arc<AtomicBool>;
@@ -1274,6 +1165,8 @@ fn video_thumbnail(path: &Path, dim: i32) -> Option<DecodedImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fileid_engine::ipc::IpcEvent;
+    use std::process::Command;
     use fileid_engine::ipc::{EngineError, EngineInfo, ScanComplete, Wrap};
     use std::io::Cursor;
     use std::sync::atomic::AtomicUsize;
@@ -1537,23 +1430,6 @@ mod tests {
     }
 
     #[test]
-    fn engine_frame_reader_rejects_oversize_and_resynchronizes() {
-        let mut reader = Cursor::new(b"123456\nok\n");
-        let mut frame = Vec::new();
-        assert!(matches!(read_bounded_line(&mut reader, &mut frame, 4).unwrap(), BoundedLine::Oversize));
-        assert!(matches!(read_bounded_line(&mut reader, &mut frame, 4).unwrap(), BoundedLine::Line));
-        assert_eq!(frame, b"ok");
-    }
-
-    #[test]
-    fn engine_frame_reader_bounds_unterminated_input() {
-        let mut reader = Cursor::new(vec![b'x'; 128]);
-        let mut frame = Vec::new();
-        assert!(matches!(read_bounded_line(&mut reader, &mut frame, 16).unwrap(), BoundedLine::Oversize));
-        assert!(frame.is_empty());
-    }
-
-    #[test]
     fn query_queue_is_bounded_and_latest_request_wins() {
         let state = QueryWorkerState::new();
         let (first_reply, first_rx) = async_channel::bounded(1);
@@ -1762,9 +1638,11 @@ mod tests {
         assert_eq!(query("needle", None, 10).0[0].kind, "pdf");
         assert_eq!(query("", Some("image"), 10).1, 1);
         assert!(query_files_at_path(&fixture.join("missing.sqlite"), &QuerySpec { limit: 10, ..QuerySpec::default() }).is_err());
-        assert_eq!(file_row_at_path(&db_path, 2).unwrap().unwrap().name, "image.png");
-        assert!(file_row_at_path(&db_path, 4).unwrap().is_none());
-        assert!(file_row_at_path(&db_path, 99).unwrap().is_none());
+        let conn = fileid_engine::db::open_read(&db_path).unwrap();
+        assert_eq!(file_row_on(&conn, 2).unwrap().unwrap().name, "image.png");
+        assert!(file_row_on(&conn, 4).unwrap().is_none());
+        assert!(file_row_on(&conn, 99).unwrap().is_none());
+        drop(conn);
         std::fs::remove_dir_all(fixture).unwrap();
     }
 }

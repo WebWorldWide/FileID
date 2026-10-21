@@ -58,6 +58,7 @@ public sealed partial class RestructureView : UserControl
     private static int _applyingGeneration;
     private static RestructureApplyResult? _lastSurfacedApplyResult;
     private RestructurePlan? _renderedPlan;
+    private int _libraryFileCount;
     private bool _deepAnalyzeHintDismissed;
     private RestructureOutcome? _hovered;
     private static EngineError? _lastHandledError;
@@ -152,6 +153,7 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
+            RefreshStepStrip();
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
             try
@@ -351,10 +353,8 @@ public sealed partial class RestructureView : UserControl
 
         if (keepFolders > 0)
         {
-            AddRec(RestructureOutcome.Keep,
-                $"Keep {Count(keepFolders, "folder")} untouched",
-                "These folders already have clear names and matching contents - nothing about them changes.",
-                fileCount: 0, folderCount: keepFolders, informational: true);
+            _recommendations.Add(BuildKeepRec(keepFolders, StaysPutFiles(plan)));
+            _recByOutcome[RestructureOutcome.Keep] = _recommendations[^1];
         }
         if (tidyFiles > 0)
         {
@@ -371,8 +371,6 @@ public sealed partial class RestructureView : UserControl
                 reorgFiles, reorgFolders, informational: false);
         }
 
-        KeepValue.Text = keepFolders.ToString("N0");
-        KeepHint.Text = keepFolders == 1 ? "folder kept intact" : "folders kept intact";
         TidyValue.Text = tidyFiles.ToString("N0");
         TidyHint.Text = tidyFolders == 1 ? "from 1 mixed folder" : $"from {tidyFolders:N0} mixed folders";
         ReorgValue.Text = reorgFiles.ToString("N0");
@@ -380,7 +378,6 @@ public sealed partial class RestructureView : UserControl
 
         // Stat-tile accessible names combine the value + its label so a screen
         // reader announces the whole stat (e.g. "Staying put: 12 folders kept intact").
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(KeepTile, $"Staying put: {KeepValue.Text} {KeepHint.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(TidyTile, $"Tidying: {TidyValue.Text} files {TidyHint.Text}");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ReorgTile, $"Reorganizing: {ReorgValue.Text} files {ReorgHint.Text}");
 
@@ -390,7 +387,7 @@ public sealed partial class RestructureView : UserControl
         int dstCount = plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
         SankeyHeroStat.Text = $"{srcCount} source{(srcCount == 1 ? "" : "s")} -> {dstCount} destination{(dstCount == 1 ? "" : "s")}";
 
-        bool hasContent = moveCount > 0 || keepFolders > 0;
+        bool hasContent = moveCount > 0 || keepFolders > 0 || StaysPutFiles(plan) > 0;
         bool hasMoves = moveCount > 0;
         PlanStatusText.Text = moveCount == 0
             ? "Your library is already organized - nothing to move."
@@ -399,7 +396,7 @@ public sealed partial class RestructureView : UserControl
         ViewModeToggle.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
         UnifiedSurface.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
         NothingToMoveCard.Visibility = hasMoves ? Visibility.Collapsed : Visibility.Visible;
-        UpdateStayingPut(keepFolders);
+        UpdateStayingPut(plan, keepFolders);
 
         // Re-apply the selections the user made before navigating away (see
         // _deselectedFileIds). Suppressed so RecomputeSelection runs once below,
@@ -451,10 +448,44 @@ public sealed partial class RestructureView : UserControl
         => plan.Moves.Select(m => System.IO.Path.GetDirectoryName(m.Source) ?? "")
                      .Distinct(StringComparer.OrdinalIgnoreCase).Count();
 
-    private void UpdateStayingPut(int keepFolders)
+    /// <summary>Files under the library root the plan leaves where they are
+    /// (macOS staysPutFiles = max(0, library files - moves)).</summary>
+    private int StaysPutFiles(RestructurePlan plan)
+        => StaysPutFiles(_libraryFileCount, RestructurePlanPresentation.TotalMoves(plan));
+
+    internal static int StaysPutFiles(int libraryFiles, ulong moves)
+        => (int)Math.Max(0L, libraryFiles - (long)Math.Min(moves, (ulong)int.MaxValue));
+
+    private static RestructureRecommendationVm BuildKeepRec(int keepFolders, int staysPut) => new()
     {
-        StayingPutCard.Visibility = keepFolders > 0 ? Visibility.Visible : Visibility.Collapsed;
-        StayingPutSubtitle.Text = keepFolders == 1 ? "1 folder kept intact" : $"{keepFolders:N0} folders kept intact";
+        Outcome = RestructureOutcome.Keep,
+        Headline = $"Keep {Count(keepFolders, "folder")} as they are",
+        BodyText = $"Clear names and matching contents. {staysPut:N0} file{(staysPut == 1 ? "" : "s")} stay exactly where they are.",
+        FileCount = staysPut,
+        FolderCount = keepFolders,
+        IsInformational = true,
+        MatchedCount = 0,
+    };
+
+    private void UpdateStayingPut(RestructurePlan plan, int keepFolders)
+    {
+        int staysPut = StaysPutFiles(plan);
+        KeepValue.Text = staysPut.ToString("N0");
+        KeepHint.Text = $"{keepFolders:N0} kept {(keepFolders == 1 ? "folder" : "folders")}";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(KeepTile, $"Staying put: {KeepValue.Text} files, {KeepHint.Text}");
+        StayingPutCard.Visibility = staysPut > 0 || keepFolders > 0 ? Visibility.Visible : Visibility.Collapsed;
+        StayingPutSubtitle.Text = $"{keepFolders:N0} folder{(keepFolders == 1 ? "" : "s")} · {staysPut:N0} file{(staysPut == 1 ? "" : "s")}";
+
+        if (keepFolders > 0 && _recByOutcome.TryGetValue(RestructureOutcome.Keep, out var keep) && keep.FileCount != staysPut)
+        {
+            int index = _recommendations.IndexOf(keep);
+            if (index >= 0)
+            {
+                var updated = BuildKeepRec(keepFolders, staysPut);
+                _recommendations[index] = updated;
+                _recByOutcome[RestructureOutcome.Keep] = updated;
+            }
+        }
     }
 
     // ---- Selection ------------------------------------------------------
@@ -509,7 +540,110 @@ public sealed partial class RestructureView : UserControl
         StepChip1Bg.Background = hasWork
             ? FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush")
             : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
+        SyncStepStrip(plan, selected, total);
     }
+
+    internal enum StepState { Upcoming, Current, Done }
+
+    private void RefreshStepStrip()
+    {
+        var plan = EngineClient.Instance.LastRestructurePlan;
+        int selected = 0;
+        foreach (var row in _allFileRows.Values) if (row.IsSelected) selected++;
+        SyncStepStrip(plan, selected, plan?.Moves.Count ?? 0);
+    }
+
+    /// <summary>macOS step strip: Preview is current until a plan exists,
+    /// Review is current while nothing is selected, Move is current with a
+    /// selected plan or while moving, and everything is done after a move.</summary>
+    internal static (StepState Preview, StepState Review, StepState Move) StepStates(
+        bool hasPlan, bool planning, int selected, bool moving, bool moved)
+    {
+        var preview = planning || !hasPlan ? (moved ? StepState.Done : StepState.Current) : StepState.Done;
+        var review = moved || (hasPlan && selected > 0)
+            ? StepState.Done
+            : hasPlan && !planning ? StepState.Current : StepState.Upcoming;
+        var move = moved && !moving
+            ? StepState.Done
+            : moving || (hasPlan && !planning && selected > 0) ? StepState.Current : StepState.Upcoming;
+        return (preview, review, move);
+    }
+
+    private void SyncStepStrip(RestructurePlan? plan, int selected, int total)
+    {
+        bool planning = PlanStatusText.Text.StartsWith("Computing plan", StringComparison.Ordinal);
+        bool moved = EngineClient.Instance.CanUndoRestructure;
+        var states = StepStates(plan is not null, planning, selected, _applying, moved);
+
+        int sources = plan is null ? 0 : DistinctAllSourceFolders(plan);
+        int destinations = plan is null ? 0 : plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        PreviewStepDetail.Text = plan is null
+            ? "FileID proposes a tidier home for loose files. Nothing moves yet."
+            : $"{total:N0} move{(total == 1 ? "" : "s")} planned · {sources:N0} source{(sources == 1 ? "" : "s")} → {destinations:N0} destination{(destinations == 1 ? "" : "s")}";
+        PreviewStepPlanButton.Content = plan is null ? "Plan" : "Plan again";
+        if (ThemeHelper.GetStyleSafe(plan is null ? "ShellPrimaryButtonStyle" : "ShellGhostButtonStyle") is { } planStyle)
+        {
+            PreviewStepPlanButton.Style = planStyle;
+        }
+        PreviewStepProgress.Visibility = planning ? Visibility.Visible : Visibility.Collapsed;
+        ReviewStepDetail.Text = plan is null
+            ? "Check each group below; skip any you want left alone."
+            : $"{selected:N0} of {total:N0} move{(total == 1 ? "" : "s")} selected";
+        MoveStepDetail.Text = moved && !_applying
+            ? "Files moved. Undo puts every file back."
+            : _applying ? "Moving files…" : "Moves the selected files on disk. You confirm first.";
+        MoveStepButton.Content = selected > 0 ? $"Move {selected:N0} file{(selected == 1 ? "" : "s")}" : "Move files";
+        MoveStepButton.IsEnabled = selected > 0 && !_applying;
+        MoveStepUndoButton.Visibility = moved && !_applying ? Visibility.Visible : Visibility.Collapsed;
+
+        PaintStep(PreviewStepCell, PreviewStepRail, PreviewStepBadgeRing, PreviewStepBadgeText, PreviewStepTitle, 1, "Preview", PreviewStepDetail.Text, states.Preview);
+        PaintStep(ReviewStepCell, ReviewStepRail, ReviewStepBadgeRing, ReviewStepBadgeText, ReviewStepTitle, 2, "Review", ReviewStepDetail.Text, states.Review);
+        PaintStep(MoveStepCell, MoveStepRail, MoveStepBadgeRing, MoveStepBadgeText, MoveStepTitle, 3, "Move", MoveStepDetail.Text, states.Move);
+    }
+
+    private void PaintStep(Grid cell, Border rail, Microsoft.UI.Xaml.Shapes.Ellipse ring, TextBlock badge, TextBlock title,
+                           int number, string name, string detail, StepState state)
+    {
+        _stepBrushes ??= new StepBrushes(
+            ThemeHelper.GetBrushSafe("GoldBrush"),
+            ThemeHelper.GetBrushSafe("DelightBrush"),
+            ThemeHelper.GetBrushSafe("OnGoldBrush"),
+            ThemeHelper.GetBrushSafe("Text1Brush"),
+            ThemeHelper.GetBrushSafe("Text3Brush"),
+            ThemeHelper.GetBrushSafe("HairlineStrongBrush"),
+            ThemeHelper.GetBrushSafe("GoldWashBrush"),
+            new SolidColorBrush(Microsoft.UI.Colors.Transparent));
+        var b = _stepBrushes;
+        cell.Background = state == StepState.Current ? b.Wash : b.Clear;
+        rail.Visibility = state == StepState.Current ? Visibility.Visible : Visibility.Collapsed;
+        ring.Fill = state == StepState.Done ? b.Delight : b.Clear;
+        ring.Stroke = state switch
+        {
+            StepState.Done => b.Delight,
+            StepState.Current => b.Gold,
+            _ => b.HairlineStrong,
+        };
+        badge.Text = state == StepState.Done ? "\u2713" : number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        badge.Foreground = state switch
+        {
+            StepState.Done => b.OnGold,
+            StepState.Current => b.Gold,
+            _ => b.Text3,
+        };
+        title.Foreground = state == StepState.Upcoming ? b.Text3 : b.Text1;
+        var spoken = state switch
+        {
+            StepState.Done => "done",
+            StepState.Current => "current",
+            _ => "not started",
+        };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cell, $"Step {number} of 3, {name}, {spoken}");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(cell, detail);
+    }
+
+    private sealed record StepBrushes(Brush Gold, Brush Delight, Brush OnGold, Brush Text1, Brush Text3, Brush HairlineStrong, Brush Wash, Brush Clear);
+
+    private StepBrushes? _stepBrushes;
 
     private void OnRecommendationElementPrepared(
         ItemsRepeater sender,
@@ -672,27 +806,77 @@ public sealed partial class RestructureView : UserControl
     {
         if (EngineClient.Instance.DeepAnalyzeProgress != null) return; // running: handled by UpdateDeepAnalyzeBanner
         var libraryRoot = AppViewModel.Instance.FolderPath;
-        int captioned = 0, total = 0;
+        RestructureQualityStats stats = default;
         try
         {
-            (captioned, total) = await Task.Run(() => QueryCaptionedFraction(libraryRoot)).ConfigureAwait(true);
+            stats = await Task.Run(() => QueryLibraryQuality(libraryRoot)).ConfigureAwait(true);
         }
-        catch { /* keep zeros -> banner hidden */ }
+        catch { /* keep zeros -> banners hidden */ }
 
         if (_unloaded) return;
-        bool show = !_deepAnalyzeHintDismissed
+        int captioned = stats.Captioned, total = stats.Total;
+        bool missingModels = ShouldShowMissingContentModels(stats);
+        bool show = !missingModels
+            && !_deepAnalyzeHintDismissed
             && total > 0
             && (double)captioned / total < 0.4
             && EngineClient.Instance.DeepAnalyzeProgress == null;
         try
         {
+            ApplyMissingContentModelsBanner(missingModels);
             DeepAnalyzeHintBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            if (stats.Available && stats.AllFiles != _libraryFileCount)
+            {
+                _libraryFileCount = stats.AllFiles;
+                if (_renderedPlan is { } plan)
+                {
+                    UpdateStayingPut(plan, (int)(plan.FolderClassifications?.AnchorFolders ?? 0));
+                }
+            }
         }
         catch (Exception ex)
         {
             DebugLog.Warn("Deep Analyze hint update threw (view unloaded?): " + ex.Message);
         }
     }
+
+    private static bool ShouldShowMissingContentModels(RestructureQualityStats stats)
+        => stats.Available
+           && RestructurePlanPresentation.ShouldShowMissingContentModels(
+               stats.Total, stats.AllClipEmbeddings, stats.AllTextEmbeddings);
+
+    private static bool ClipModelInstalled
+        => ModelInstallerService.Instance.Clip.Status == ModelInstallStatus.Installed;
+
+    private void ApplyMissingContentModelsBanner(bool show)
+    {
+        MissingContentModelsBanner.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (!show) return;
+        bool installed = ClipModelInstalled;
+        MissingContentModelsTitle.Text = installed
+            ? "Rescan so Restructure can see what's in your photos"
+            : "Sorting by date only: the image model isn't installed";
+        MissingContentModelsBody.Text = installed
+            ? "The image model is installed, but this library was scanned before it was. A rescan reads the photos; files already up to date are skipped."
+            : "Without the image (CLIP) and document (BGE) models FileID can't see what files contain, so loose files fall back to year and month folders. Install them in Settings, then rescan.";
+        MissingContentModelsActionText.Text = installed ? "Rescan" : "Open Settings";
+        MissingContentModelsActionGlyph.Glyph = installed ? "\uE72C" : "\uE713";
+    }
+
+    private async void OnMissingContentModelsActionClicked(object sender, RoutedEventArgs e)
+        => await DebugLog.SafeRunAsync(nameof(OnMissingContentModelsActionClicked), async () =>
+        {
+            var vm = AppViewModel.Instance;
+            if (ClipModelInstalled && vm.HasFolder)
+            {
+                MissingContentModelsBanner.Visibility = Visibility.Collapsed;
+                await EngineClient.Instance.StartScanAsync(vm.FolderPath!, vm.FolderDisplay);
+            }
+            else
+            {
+                vm.ActiveTab = SidebarTab.Settings;
+            }
+        });
 
     private void UpdateDeepAnalyzeBanner()
     {
@@ -719,7 +903,10 @@ public sealed partial class RestructureView : UserControl
         int Captioned,
         int ContentEligible,
         int ClipEmbeddings,
-        int TextEmbeddings);
+        int TextEmbeddings,
+        int AllFiles = 0,
+        int AllClipEmbeddings = 0,
+        int AllTextEmbeddings = 0);
 
     internal static RestructureQualityStats QueryRestructureQuality(
         Microsoft.Data.Sqlite.SqliteConnection connection, string? libraryRoot)
@@ -749,7 +936,10 @@ public sealed partial class RestructureView : UserControl
                 COALESCE(SUM(CASE WHEN kind IN ('image', 'video', 'audio', 'model') AND captioned = 1 THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN captioned = 0 AND (has_clip = 1 OR has_text = 1 OR has_document = 1) THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN captioned = 0 AND has_clip = 1 THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN captioned = 0 AND has_text = 1 THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN captioned = 0 AND has_text = 1 THEN 1 ELSE 0 END), 0),
+                COUNT(*),
+                COALESCE(SUM(has_clip), 0),
+                COALESCE(SUM(has_text), 0)
             FROM scoped
             """;
         command.Parameters.AddWithValue("$root", rootPrefix);
@@ -761,14 +951,17 @@ public sealed partial class RestructureView : UserControl
             reader.GetInt32(1),
             reader.GetInt32(2),
             reader.GetInt32(3),
-            reader.GetInt32(4));
+            reader.GetInt32(4),
+            reader.GetInt32(5),
+            reader.GetInt32(6),
+            reader.GetInt32(7));
     }
 
-    private static (int captioned, int total) QueryCaptionedFraction(string? libraryRoot)
+    private static RestructureQualityStats QueryLibraryQuality(string? libraryRoot)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(libraryRoot) || !System.IO.File.Exists(AppPaths.DbPath)) return (0, 0);
+            if (string.IsNullOrWhiteSpace(libraryRoot) || !System.IO.File.Exists(AppPaths.DbPath)) return default;
             using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                 new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                 {
@@ -776,10 +969,9 @@ public sealed partial class RestructureView : UserControl
                     Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly,
                 }.ToString());
             conn.Open();
-            var stats = QueryRestructureQuality(conn, libraryRoot);
-            return (stats.Captioned, stats.Total);
+            return QueryRestructureQuality(conn, libraryRoot);
         }
-        catch { return (0, 0); }
+        catch { return default; }
     }
 
     private async void OnRunDeepAnalyzeClicked(object sender, RoutedEventArgs e)
@@ -812,6 +1004,7 @@ public sealed partial class RestructureView : UserControl
                 return;
             }
             PlanStatusText.Text = "Computing plan...";
+            RefreshStepStrip();
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
             try
@@ -845,6 +1038,7 @@ public sealed partial class RestructureView : UserControl
         }
         if (sel.Count == 0) return;
         _applying = true;
+        RefreshStepStrip();
         _applyingPlan = plan;   // Record the in-flight plan (see SyncPlan)
         _applyRequestInFlight = true;
         _awaitingFreshPlan = false;
@@ -918,6 +1112,7 @@ public sealed partial class RestructureView : UserControl
         UndoButton.IsEnabled = CanStartRestructureUndo(
             canUndo, ChangeLog.Instance.IsUndoInFlight,
             _undoRequestInFlight || EngineClient.Instance.UndoRestructureInFlight);
+        RefreshStepStrip();
     }
 
     internal static bool CanStartRestructureUndo(

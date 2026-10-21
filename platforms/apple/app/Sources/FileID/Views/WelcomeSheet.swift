@@ -9,9 +9,9 @@ struct WelcomeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var clip = CLIPModelInstaller.shared
-    @State private var ramplus = RamPlusModelInstaller.shared
-    @State private var arcface = ArcFaceModelInstaller.shared
-    @State private var bge = BGEModelInstaller.shared
+    @State private var ramplus = ModelInstaller.ramPlus
+    @State private var arcface = ModelInstaller.face
+    @State private var bge = ModelInstaller.bge
 
     private let recommendedFace: FaceEmbedderKind
     private let hardwareRecommendedVLM: AIModelKind
@@ -54,55 +54,43 @@ struct WelcomeSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            SectionLabel("1 · Install models").padding(.horizontal, 22).padding(.top, 12).padding(.bottom, 4)
+            SectionLabel("1 · Download the AI models").padding(.horizontal, 22).padding(.top, 12).padding(.bottom, 4)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
             modelRow(
-                title: "CLIP ViT-B/32",
-                detail: "Search by description · Required",
+                title: "Search by description",
+                detail: "Find photos by typing what's in them",
+                technical: "CLIP ViT-B/32",
                 size: "~\(ByteCountFormatter.string(fromByteCount: Int64(CLIPModelInstaller.approxDownloadBytes), countStyle: .file))",
-                installed: clipInstalled,
-                inProgress: clipInProgress,
-                progressLabel: clipProgressLabel,
-                progressFrac: clipProgressFrac,
-                rateETA: clipRateETA,
+                status: clip.status,
                 action: { clip.install() },
                 cancel: { clip.cancel() }
             )
             modelRow(
-                title: "RAM++",
-                detail: "Tags images (4,585 labels) · Required",
-                size: "~926 MB",
-                installed: ramplusInstalled,
-                inProgress: ramplusInProgress,
-                progressLabel: ramplusProgressLabel,
-                progressFrac: ramplusProgressFrac,
-                rateETA: ramplusRateETA,
+                title: "Photo tags",
+                detail: "Labels what's in each photo",
+                technical: "RAM++",
+                size: "~\(ByteCountFormatter.string(fromByteCount: ramplus.spec.approxBytes, countStyle: .file))",
+                status: ramplus.status,
                 action: { ramplus.install() },
                 cancel: { ramplus.cancel() }
             )
             modelRow(
-                title: recommendedFace.displayName,
-                detail: "Finds and groups faces · Required",
+                title: "Faces",
+                detail: "Groups photos by person",
+                technical: recommendedFace.displayName,
                 size: "~\(ByteCountFormatter.string(fromByteCount: Int64(recommendedFace.approxBytes), countStyle: .file))",
-                installed: arcfaceInstalled,
-                inProgress: arcfaceInProgress,
-                progressLabel: arcfaceProgressLabel,
-                progressFrac: arcfaceProgressFrac,
-                rateETA: arcfaceRateETA,
-                action: { arcface.install(recommendedFace) },
-                cancel: { arcface.cancel(recommendedFace) }
+                status: arcface.status,
+                action: { arcface.install() },
+                cancel: { arcface.cancel() }
             )
             modelRow(
-                title: "BGE-small",
-                detail: "Reads documents for search and Restructure · Required",
-                size: "~129 MB",
-                installed: bgeInstalled,
-                inProgress: bgeInProgress,
-                progressLabel: bgeProgressLabel,
-                progressFrac: bgeProgressFrac,
-                rateETA: bgeRateETA,
+                title: "Documents",
+                detail: "Understands what documents are about",
+                technical: "BGE-small",
+                size: "~\(ByteCountFormatter.string(fromByteCount: bge.spec.approxBytes, countStyle: .file))",
+                status: bge.status,
                 action: { bge.install() },
                 cancel: { bge.cancel() }
             )
@@ -123,7 +111,7 @@ struct WelcomeSheet: View {
                 }
             } label: {
                 HStack {
-                    Text("Deep Analyze model")
+                    Text("Description model")
                     Spacer()
                     Text(selectedVLM.displayName)
                     Image(systemName: "chevron.up.chevron.down")
@@ -133,17 +121,18 @@ struct WelcomeSheet: View {
             .menuStyle(.borderlessButton)
             .font(Theme.Font.body(13.5))
             .padding(.horizontal, 22).padding(.top, 12)
-            .accessibilityLabel("Deep Analyze model")
+            .accessibilityLabel("Description model")
             .accessibilityValue(selectedVLM.displayName)
             Text(selectedVLM == hardwareRecommendedVLM
-                 ? "Recommended for this Mac's \(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB unified memory."
-                 : "Custom model choice. FileID will keep this selection for Deep Analyze.")
+                 ? "Recommended for this Mac (\(systemRAMGB.formatted(.number.precision(.fractionLength(0...1)))) GB memory)."
+                 : "Your choice. FileID uses it to describe files and answer Chat.")
                 .font(Theme.Font.meta)
                 .foregroundStyle(Theme.text3)
                 .padding(.horizontal, 22).padding(.bottom, 4)
             modelRow(
-                title: selectedVLM.displayName,
-                detail: "Deep Analyze, Chat, Moments · Optional",
+                title: "Descriptions and Chat",
+                detail: "Writes descriptions and answers questions · Optional",
+                technical: selectedVLM.displayName,
                 size: vlmSizeLabel,
                 installed: vlmInstalled,
                 inProgress: vlmInProgress,
@@ -246,7 +235,7 @@ struct WelcomeSheet: View {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Welcome to FileID").font(Theme.Font.display(34)).foregroundStyle(Theme.text1)
-                MetaText("Models run on this Mac. Files never leave it. Every model downloads from its upstream repository on Hugging Face; FileID never redistributes weights.", color: Theme.text2)
+                MetaText("FileID sorts your files with AI that runs on this Mac. The models download once from Hugging Face; after that, nothing leaves your Mac.", color: Theme.text2)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -257,16 +246,16 @@ struct WelcomeSheet: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            MetaText("Skip and install later from Settings → Models.")
+            MetaText(allInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.")
             Spacer()
-            Button(allInstalled ? "Done" : "Later") { dismiss() }
+            Button(allInstalled ? "Continue" : "Later") { dismiss() }
                 .buttonStyle(DSSecondaryButtonStyle(height: 32))
                 .keyboardShortcut(.cancelAction)
-            Button(installAllRequested && !allInstalled ? "Installing…" : "Install all") {
+            Button(allInstalled ? "All downloaded" : installAllRequested ? "Downloading…" : "Download all · \(totalDownloadLabel)") {
                 installAllRequested = true
                 if !clipInstalled, !clipInProgress { clip.install() }
                 if !ramplusInstalled, !ramplusInProgress { ramplus.install() }
-                if !arcfaceInstalled, !arcfaceInProgress { arcface.install(recommendedFace) }
+                if !arcfaceInstalled, !arcfaceInProgress { arcface.install() }
                 if !bgeInstalled, !bgeInProgress { bge.install() }
                 if !vlmInstalled, !vlmInProgress { triggerVLMInstall() }
             }
@@ -279,8 +268,18 @@ struct WelcomeSheet: View {
         .overlay(alignment: .top) { Hairline() }
     }
 
+    private func modelRow(title: String, detail: String, technical: String, size: String,
+                          status: ModelInstaller.Status,
+                          action: @escaping () -> Void,
+                          cancel: @escaping () -> Void) -> some View {
+        modelRow(title: title, detail: detail, technical: technical, size: size,
+                 installed: status.isInstalled, inProgress: status.inProgress,
+                 progressLabel: status.progressLabel, progressFrac: status.fraction,
+                 rateETA: status.rateAndETA, action: action, cancel: cancel)
+    }
+
     @ViewBuilder
-    private func modelRow(title: String, detail: String, size: String,
+    private func modelRow(title: String, detail: String, technical: String, size: String,
                           installed: Bool, inProgress: Bool,
                           progressLabel: String?, progressFrac: Double?,
                           rateETA: String?,
@@ -291,16 +290,18 @@ struct WelcomeSheet: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(title).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
+                    .help(technical)
                 Text(detail).font(Theme.Font.body(13)).foregroundStyle(Theme.text2).lineLimit(1).truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if installed {
-                    MetaText("Installed", color: Theme.delight, size: 11)
+                    MetaText("Ready", color: Theme.delight, size: 11)
                 } else if inProgress {
                     MetaText(progressLabel ?? "\(Int(frac * 100))%", color: Theme.gold, size: 11).lineLimit(1)
                     Button("Cancel", action: cancel).buttonStyle(.dsGhost)
                 } else {
                     MetaText(size, size: 11)
-                    Button("Install", action: action).buttonStyle(DSSecondaryButtonStyle(height: 24))
+                    Button("Download", action: action).buttonStyle(DSSecondaryButtonStyle(height: 24))
+                        .help("Download \(technical) (\(size))")
                 }
             }
             GrainProgressBar(progress: inProgress && frac == 0 ? 0.03 : frac, tone: installed ? .done : .gold)
@@ -364,122 +365,14 @@ struct WelcomeSheet: View {
         }
     }
 
-    private var clipInstalled: Bool {
-        if case .installed = clip.status { return true }
-        return false
-    }
-    private var clipInProgress: Bool {
-        switch clip.status {
-        case .downloading, .extracting: return true
-        default: return false
-        }
-    }
-    private var clipProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = clip.status { return frac }
-        return nil
-    }
-    private var clipProgressLabel: String? {
-        switch clip.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .extracting:                    return "Extracting…"
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var clipRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = clip.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
-    private var ramplusInstalled: Bool {
-        if case .installed = ramplus.status { return true }
-        return false
-    }
-    private var ramplusInProgress: Bool {
-        if case .downloading = ramplus.status { return true }
-        return false
-    }
-    private var ramplusProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = ramplus.status { return frac }
-        return nil
-    }
-    private var ramplusProgressLabel: String? {
-        switch ramplus.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var ramplusRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = ramplus.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
-    private var bgeInstalled: Bool {
-        if case .installed = bge.status { return true }
-        return false
-    }
-    private var bgeInProgress: Bool {
-        if case .downloading = bge.status { return true }
-        return false
-    }
-    private var bgeProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = bge.status { return frac }
-        return nil
-    }
-    private var bgeProgressLabel: String? {
-        switch bge.status {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var bgeRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = bge.status {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
-
-    private var arcfaceInstalled: Bool {
-        if case .installed = arcface.status[recommendedFace] { return true }
-        return false
-    }
-    private var arcfaceInProgress: Bool {
-        switch arcface.status[recommendedFace] {
-        case .downloading: return true
-        default:           return false
-        }
-    }
-    private var arcfaceProgressFrac: Double? {
-        if case .downloading(let frac, _, _, _) = arcface.status[recommendedFace] { return frac }
-        return nil
-    }
-    private var arcfaceProgressLabel: String? {
-        switch arcface.status[recommendedFace] {
-        case .downloading(_, let msg, _, _): return msg
-        case .installFailed(let why):        return "Failed: \(why)"
-        default:                             return nil
-        }
-    }
-    private var arcfaceRateETA: String? {
-        if case .downloading(_, _, let bps, let eta) = arcface.status[recommendedFace] {
-            return DownloadFormat.rateAndETA(DownloadTick(written: 0, total: 0,
-                                                           bytesPerSecond: bps,
-                                                           etaSeconds: eta))
-        }
-        return nil
-    }
+    private var clipInstalled: Bool { clip.status.isInstalled }
+    private var clipInProgress: Bool { clip.status.inProgress }
+    private var ramplusInstalled: Bool { ramplus.status.isInstalled }
+    private var ramplusInProgress: Bool { ramplus.status.inProgress }
+    private var bgeInstalled: Bool { bge.status.isInstalled }
+    private var bgeInProgress: Bool { bge.status.inProgress }
+    private var arcfaceInstalled: Bool { arcface.status.isInstalled }
+    private var arcfaceInProgress: Bool { arcface.status.inProgress }
 
     private var vlmInstalled: Bool {
         ModelInstallStatus.isInstalled(kind: selectedVLM)
@@ -608,6 +501,16 @@ struct WelcomeSheet: View {
         vlmLockedTotalBytes = nil
         vlmLastProgressAt = nil
         vlmLastError = nil
+    }
+
+    private var totalDownloadLabel: String {
+        var bytes: Int64 = 0
+        if !clipInstalled { bytes += Int64(CLIPModelInstaller.approxDownloadBytes) }
+        if !ramplusInstalled { bytes += ramplus.spec.approxBytes }
+        if !arcfaceInstalled { bytes += Int64(recommendedFace.approxBytes) }
+        if !bgeInstalled { bytes += bge.spec.approxBytes }
+        if !vlmInstalled { bytes += resolvedVLMTotalBytes }
+        return "~" + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private var allInstalled: Bool {

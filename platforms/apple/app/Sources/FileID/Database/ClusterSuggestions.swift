@@ -141,7 +141,7 @@ public enum ClusterSuggestions {
         centroids.reserveCapacity(vectors.count)
         var dimension: Int?
         for row in vectors {
-            var vector = blobToFloats(row.blob)
+            var vector = FloatBlob.decode(row.blob)
             guard !vector.isEmpty else { continue }
             let dim = dimension ?? vector.count
             guard vector.count == dim else { continue }
@@ -209,12 +209,4 @@ public enum ClusterSuggestions {
         return lhs.personB < rhs.personB
     }
 
-    private static func blobToFloats(_ data: Data) -> [Float] {
-        let count = data.count / MemoryLayout<Float>.stride
-        guard count > 0 else { return [] }
-        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Float] in
-            let base = raw.baseAddress!.assumingMemoryBound(to: Float.self)
-            return Array(UnsafeBufferPointer(start: base, count: count))
-        }
-    }
 }

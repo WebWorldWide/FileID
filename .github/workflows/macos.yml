@@ -8,9 +8,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
-      - 'shared/scripts/check_people_merge_roundtrip.py'
-      - 'shared/scripts/check_health_roundtrip.py'
-      - 'shared/scripts/check_catalog_roundtrip.py'
+      - 'shared/scripts/conformance.py'
+      - 'shared/test-corpus/conformance/**'
       - 'shared/scripts/check_catalog_index_jobs.py'
       - '.github/workflows/macos.yml'
   pull_request:
@@ -19,9 +18,8 @@ on:
       - 'shared/ipc-schema/**'
       - 'shared/scripts/check_binary_privacy.py'
       - 'shared/scripts/test_check_binary_privacy.py'
-      - 'shared/scripts/check_people_merge_roundtrip.py'
-      - 'shared/scripts/check_health_roundtrip.py'
-      - 'shared/scripts/check_catalog_roundtrip.py'
+      - 'shared/scripts/conformance.py'
+      - 'shared/test-corpus/conformance/**'
       - 'shared/scripts/check_catalog_index_jobs.py'
       - '.github/workflows/macos.yml'
   workflow_dispatch:
@@ -70,7 +68,11 @@ jobs:
         run: swift package resolve
 
       - name: Build engine (release)
-        run: swift build -c release --product FileIDEngine
+        run: |
+          swift build -c release --product FileIDEngine
+          # The App Store variant below rebuilds the same product path; keep the
+          # Developer ID engine (no bookmark requirement) for the conformance run.
+          cp .build/release/FileIDEngine "$RUNNER_TEMP/FileIDEngine-swift"
 
       - name: Build app (release)
         run: swift build -c release --product FileID
@@ -124,21 +126,24 @@ jobs:
             exit "$status"
           fi
 
-      - name: Verify explicit People merges across engines
+      - name: Build Rust engine for conformance
         working-directory: platforms/windows/src/engine
-        run: |
-          cargo build --locked --jobs 4 --target-dir "$RUNNER_TEMP/fileid-merge-engine"
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_people_merge_roundtrip.py" --swift-engine "$GITHUB_WORKSPACE/platforms/apple/.build/release/FileIDEngine" --rust-engine "$RUNNER_TEMP/fileid-merge-engine/debug/FileIDEngine"
+        run: cargo build --locked --jobs 4 --target-dir "$RUNNER_TEMP/fileid-conformance-engine"
 
-      - name: Verify health probes across engines
-        run: |
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_health_roundtrip.py" --engine "$PWD/.build/release/FileIDEngine" --swift
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_health_roundtrip.py" --engine "$RUNNER_TEMP/fileid-merge-engine/debug/FileIDEngine"
+      # Shared engine conformance suite (shared/test-corpus/conformance): the
+      # Swift engine with the Rust engine as peer for the cross-engine cases,
+      # then the Rust engine alone. Known divergences are tracked per case and
+      # fail the run when they stop reproducing.
+      - name: Engine conformance — Swift
+        timeout-minutes: 15
+        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/FileIDEngine-swift" --peer-engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
 
-      - name: Verify catalog and index recovery
-        run: |
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_roundtrip.py" --swift-engine "$PWD/.build/release/FileIDEngine" --rust-engine "$RUNNER_TEMP/fileid-merge-engine/debug/FileIDEngine"
-          python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$PWD/.build/release/FileIDEngine"
+      - name: Engine conformance — Rust
+        timeout-minutes: 15
+        run: python3 "$GITHUB_WORKSPACE/shared/scripts/conformance.py" --engine "$RUNNER_TEMP/fileid-conformance-engine/debug/FileIDEngine"
+
+      - name: Verify catalog index recovery
+        run: python3 "$GITHUB_WORKSPACE/shared/scripts/check_catalog_index_jobs.py" --engine "$PWD/.build/release/FileIDEngine"
 
       - name: Verify binaries exist
         run: |

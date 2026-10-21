@@ -7,10 +7,11 @@ struct PipelineBlock: View {
     let engine: EngineClient
     let store: ReadStore
     let pickedURL: URL
+    var openPage: (MainWindow.Tab) -> Void = { _ in }
     @State private var startRequested = false
 
     private enum Stage: Int, CaseIterable { case scan, tag, faces, captions, done
-        var label: String { ["Scan", "Tag", "Faces", "Captions", "Done"][rawValue] }
+        var label: String { ["Find files", "Tag", "Faces", "Describe (optional)", "Done"][rawValue] }
     }
 
     private var progress: ScanProgress? { engine.lastProgress }
@@ -43,32 +44,38 @@ struct PipelineBlock: View {
                 return ("Scan paused", frac, .paused, Theme.text3, "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files")
             }
             let title = p.phase == .discovering ? "Counting files" : p.phase == .postScan ? "Grouping faces" : "Scanning"
-            let sub = p.phase == .discovering ? "\(p.discovered.formatted()) found" : "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" + (p.filesPerSecond > 0 ? String(format: " · %.0f/s", p.filesPerSecond) : "")
+            let left = p.etaSeconds.flatMap { $0 > 0 ? " · about \(DurationText.short($0)) left" : nil } ?? ""
+            let sub = p.phase == .discovering ? "\(p.discovered.formatted()) files found so far" : p.phase == .postScan ? "Finding the same person across photos" : "\(p.processed.formatted()) of \(max(p.total, p.discovered).formatted()) files" + left
             return (title, p.phase == .discovering ? 0.02 : frac, .gold, Theme.gold, sub)
         }
         if captionsRunning, let d = engine.deepAnalyzeProgress {
             let frac = d.total > 0 ? Double(d.processed) / Double(d.total) : 0
-            return ("Writing captions", frac, .ai, Theme.ai, "\(d.processed.formatted()) of \(d.total.formatted()) captioned")
+            return ("Describing files", frac, .ai, Theme.ai, "\(d.processed.formatted()) of \(d.total.formatted()) files described")
         }
         if engine.faceClusteringInFlight {
-            return ("Grouping faces", 0.5, .ai, Theme.ai, "Comparing face prints")
+            return ("Grouping faces", 0.5, .ai, Theme.ai, "Finding the same person across photos")
         }
         if let done = engine.deepAnalyzeComplete, done.processed > 0 {
-            return ("Everything analyzed", 1, .done, Theme.delight, "\(done.processed.formatted()) files captioned")
+            return ("All done", 1, .done, Theme.delight, "\(done.processed.formatted()) files described")
         }
         if let p = progress, p.phase == .cancelled {
-            return ("Scan cancelled", p.total > 0 ? Double(p.processed) / Double(p.total) : 0, .paused, Theme.text3, "\(p.processed.formatted()) of \(p.total.formatted()) tagged")
+            return ("Scan stopped", p.total > 0 ? Double(p.processed) / Double(p.total) : 0, .paused, Theme.text3, "\(p.processed.formatted()) of \(p.total.formatted()) files read. Scan again to finish; finished files are skipped.")
         }
         if let p = progress, p.phase == .failed {
-            return ("Scan failed", 0, .paused, Theme.danger, "Check the engine log in Settings")
+            return ("Scan failed", 0, .paused, Theme.danger, "Try Scan again. Details are in Settings › Advanced.")
         }
         if store.totalFiles > 0 || progress?.phase == .completed {
-            return ("Scan complete", 1, .gold, Theme.gold, "\(store.totalFiles.formatted()) files · captions not started")
+            return ("Scan complete", 1, .done, Theme.delight, "\(store.totalFiles.formatted()) files ready to browse")
         }
-        return (startRequested ? "Starting" : "Not scanned yet", 0, .gold, Theme.text2, "\(pickedURL.lastPathComponent) is ready to scan")
+        return (startRequested ? "Starting…" : "Ready to scan", 0, .gold, Theme.text2, "FileID reads every file in \(pickedURL.lastPathComponent). Nothing is moved or changed.")
     }
 
     @State private var showDetails = false
+
+    private var showsNextStep: Bool {
+        !scanRunning && stage == .captions && !captionsRunning && !engine.faceClusteringInFlight
+            && (engine.deepAnalyzeComplete?.processed ?? 0) == 0 && store.totalFiles > 0
+    }
 
     var body: some View {
         let s = state
@@ -76,14 +83,14 @@ struct PipelineBlock: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(s.title).font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
                 Spacer()
-                Text("\(Int(s.fraction * 100))%").font(Theme.Font.body(12.5, .semibold)).monospacedDigit().foregroundStyle(s.color)
+                if s.fraction > 0 { Text("\(Int(s.fraction * 100))%").font(Theme.Font.body(12.5, .semibold)).monospacedDigit().foregroundStyle(s.color) }
             }
             GrainProgressBar(progress: s.fraction, tone: s.tone, height: 6)
             HStack(spacing: 4) {
                 ForEach(Stage.allCases, id: \.rawValue) { st in
                     Capsule()
                         .fill(st.rawValue < stage.rawValue ? Theme.text2.opacity(0.7)
-                              : st == stage ? (stage == .captions && captionsRunning ? Theme.ai : s.color) : Color.white.opacity(0.12))
+                              : st == stage ? (stage == .captions ? (captionsRunning ? Theme.ai : Color.white.opacity(0.3)) : s.color) : Color.white.opacity(0.12))
                         .frame(height: 3)
                 }
             }
@@ -103,6 +110,20 @@ struct PipelineBlock: View {
                 }
             }
             Text(s.sub).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            if showsNextStep {
+                Button { openPage(.deep) } label: {
+                    HStack(spacing: 4) {
+                        Text("Next: describe files")
+                        Image(systemName: "arrow.right").font(.system(size: 10, weight: .semibold))
+                    }
+                    .font(Theme.Font.body(12, .medium))
+                    .foregroundStyle(Theme.gold)
+                    .frame(minHeight: 22)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Optional: write a description and a clearer name for each file")
+            }
             if showDetails, let p = progress, p.phase != .idle {
                 stats(p).transition(.opacity)
             }
@@ -118,8 +139,8 @@ struct PipelineBlock: View {
     @ViewBuilder
     private func stats(_ p: ScanProgress) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            statRow("Found", p.discovered.formatted(), trailing: p.etaSeconds.flatMap { $0 > 0 && scanRunning ? ProcessingControl.formatETA($0) + " left" : nil })
-            statRow("Tagged", p.processed.formatted(), trailing: p.filesPerSecond > 0 ? String(format: "%.1f/s", p.filesPerSecond) : nil)
+            statRow("Found", p.discovered.formatted(), trailing: p.etaSeconds.flatMap { $0 > 0 && scanRunning ? DurationText.short($0) + " left" : nil })
+            statRow("Read", p.processed.formatted(), trailing: p.filesPerSecond > 0 ? String(format: "%.0f files a second", p.filesPerSecond) : nil)
             statRow("Memory", "\(p.residentMB) MB", trailing: "\(p.availableMB) MB free", warn: p.residentMB > 1200)
             if p.failed > 0 { statRow("Failed", p.failed.formatted(), trailing: nil, danger: true) }
         }
@@ -146,17 +167,19 @@ struct PipelineBlock: View {
                 } else {
                     Button { engine.pause() } label: { Label("Pause", systemImage: "pause.fill") }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 }
-                Button("Cancel") { engine.cancel() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3))
+                Button("Stop") { engine.cancel() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3)).help("Stop scanning. Scan again later to pick up where it left off.")
             } else if store.totalFiles > 0 || progress != nil {
-                Button { engine.startScan(rootURL: pickedURL) } label: { Label("Rescan", systemImage: "arrow.counterclockwise") }
+                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(startRequested || captionsRunning || engine.faceClusteringInFlight)
+                    .help(captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
-                Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill") }
+                Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(startRequested)
+                    .help("Read every file in this folder (⌘R). Nothing is moved or changed.")
             }
             Spacer(minLength: 0)
         }

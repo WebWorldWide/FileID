@@ -23,7 +23,8 @@ use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
 use super::library_pane::SelectedPane;
-use super::util::{fmt_date, format_bytes, icon_for_kind, icon_paintable};
+use super::util::{fmt_date, icon_for_kind, icon_paintable};
+use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
     texture_from_decoded, CancelToken, EngineClient, EngineEvent, FileRow, QueryChannel, QuerySpec, ThumbReply,
     QUERY_MAX_ROWS,
@@ -643,7 +644,7 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     caption.set_text(&format!(
         "{} · {}",
         row.kind.to_uppercase(),
-        format_bytes(row.size_bytes)
+        file_size_i64(row.size_bytes)
     ));
 
     let is_video = row.kind == "video";
@@ -840,7 +841,7 @@ fn open_preview(
         current,
         move |button| {
             if let Some(row) = current() {
-                open_default(button, &row.path);
+                crate::v3::open_file(button, &row.path);
             }
         }
     ));
@@ -849,7 +850,7 @@ fn open_preview(
         current,
         move |button| {
             if let Some(row) = current() {
-                show_in_files(button, &row.path);
+                crate::v3::show_in_files(button, &row.path);
             }
         }
     ));
@@ -1045,32 +1046,6 @@ fn snapshot_rows(model: &impl IsA<gio::ListModel>) -> Vec<FileRow> {
     (0..model.n_items()).filter_map(|pos| row_at(model, pos)).collect()
 }
 
-pub(super) fn open_default(widget: &impl IsA<gtk::Widget>, path: &str) {
-    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
-    let window = widget.root().and_downcast::<gtk::Window>();
-    launcher.launch(window.as_ref(), gio::Cancellable::NONE, |_| {});
-}
-
-/// Show the file selected in the file manager (FileManager1.ShowItems through
-/// the portal-aware launcher), falling back to opening its folder.
-pub(super) fn show_in_files(widget: &impl IsA<gtk::Widget>, path: &str) {
-    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
-    let window = widget.root().and_downcast::<gtk::Window>();
-    let folder = std::path::Path::new(path).parent().map(gio::File::for_path);
-    let fallback_window = window.clone();
-    launcher.open_containing_folder(window.as_ref(), gio::Cancellable::NONE, move |result| {
-        if result.is_err() {
-            if let Some(folder) = folder {
-                gtk::FileLauncher::new(Some(&folder)).launch(
-                    fallback_window.as_ref(),
-                    gio::Cancellable::NONE,
-                    |_| {},
-                );
-            }
-        }
-    });
-}
-
 /// Build the metadata glass-card for one row (rebuilt on each navigation).
 fn build_meta(row: &FileRow) -> gtk::Box {
     let meta = gtk::Box::builder()
@@ -1084,7 +1059,7 @@ fn build_meta(row: &FileRow) -> gtk::Box {
         .build();
     meta.append(&meta_row("Path", &row.path));
     meta.append(&meta_row("Kind", &row.kind));
-    meta.append(&meta_row("Size", &format_bytes(row.size_bytes)));
+    meta.append(&meta_row("Size", &file_size_i64(row.size_bytes)));
     if let Some(d) = fmt_date(row.modified_at) {
         meta.append(&meta_row("Modified", &d));
     }

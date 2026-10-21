@@ -668,7 +668,7 @@ struct SankeyFlowView: View {
                 label: entry.bucket,
                 identityKey: entry.bucket,
                 count: entry.count,
-                icon: bucketIcon(entry.bucket),
+                icon: bucketIconName(entry.bucket),
                 tint: Self.okabeIto[idx % Self.okabeIto.count],
                 isSource: false
             )
@@ -930,8 +930,6 @@ struct SankeyFlowView: View {
         }
         return result
     }
-
-    private static func bucketIcon(_ bucket: String) -> String { bucketIconName(bucket) }
 
     private var sankeyHeight: CGFloat {
         let maxNodes = max(layout.sources.count, layout.destinations.count, 4)

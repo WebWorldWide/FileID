@@ -154,6 +154,7 @@ struct Candidate {
 struct Snapshot {
     all_with_faces: Vec<PersonRow>,
     total_faces: i64,
+    total_images: i64,
 }
 
 struct BoundedLru<K, V> {
@@ -468,13 +469,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     let empty_page = adw::StatusPage::builder()
         .icon_name("system-users-symbolic")
-        .title("No people yet")
-        .description(
-            "Pick a folder and Start Scan. As the scan runs, faces in your photos get \
-             detected — they'll appear here as cards you can name.",
-        )
         .vexpand(true)
         .build();
+    set_empty_text(&empty_page, 0);
 
     let group_btn = gtk::Button::builder()
         .label("Group photos by face")
@@ -779,6 +776,31 @@ fn refresh_view(ui: &Rc<Ui>) {
     if has_persons {
         rebuild_grid(ui);
     }
+}
+
+/// Same wording as macOS PeopleView: once photos are scanned, an empty page
+/// means no faces were found, not that the user still has to scan.
+fn empty_text(images: i64) -> (&'static str, String) {
+    if images > 0 {
+        (
+            "No faces found",
+            format!(
+                "FileID looked at {images} photo{} in this library and didn't find any faces. People appear here when a scanned photo has one.",
+                plural(images)
+            ),
+        )
+    } else {
+        (
+            "No people yet",
+            "Scan a folder with photos. Faces are detected as the scan runs and grouped into people you can name.".to_owned(),
+        )
+    }
+}
+
+fn set_empty_text(page: &adw::StatusPage, images: i64) {
+    let (title, description) = empty_text(images);
+    page.set_title(title);
+    page.set_description(Some(&description));
 }
 
 fn count_line(persons: &[PersonRow], total_faces: i64, clustering: bool) -> String {
@@ -1153,6 +1175,7 @@ fn reload(ui: &Rc<Ui>) {
             return;
         }
         ui.total_faces.set(snap.total_faces);
+        set_empty_text(&ui.empty_page, snap.total_images);
         let with_faces: Vec<PersonRow> = snap
             .all_with_faces
             .into_iter()
@@ -1790,7 +1813,7 @@ fn bind_photo_tile(engine: &Rc<RefCell<EngineClient>>, item: &gtk::ListItem) {
         return;
     };
     let Some((pic, name)) = photo_tile_parts(item) else { return };
-    name.set_text(&basename(&face.path));
+    name.set_text(&crate::v3::file_name(&face.path));
     name.set_tooltip_text(Some(&format!("File #{}, face #{}", face.file_id, face.face_id)));
     pic.set_paintable(None::<&gtk::gdk::Texture>);
     let cancel = CancelToken::default();
@@ -2277,6 +2300,13 @@ fn read_snapshot_at_path(db_path: &std::path::Path) -> anyhow::Result<Snapshot> 
             |r| r.get(0),
         )
         .unwrap_or(0);
+    let total_images: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
     let mut stmt = conn.prepare(PERSON_SNAPSHOT_SQL)?;
     let rows = stmt
@@ -2306,6 +2336,7 @@ fn read_snapshot_at_path(db_path: &std::path::Path) -> anyhow::Result<Snapshot> 
     Ok(Snapshot {
         all_with_faces: rows,
         total_faces,
+        total_images,
     })
 }
 fn read_person_files(pid: i64) -> anyhow::Result<Vec<PersonFace>> {
@@ -2511,13 +2542,6 @@ fn plural(n: i64) -> &'static str {
     } else {
         "s"
     }
-}
-
-fn basename(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn sim_markup(s: f32) -> String {

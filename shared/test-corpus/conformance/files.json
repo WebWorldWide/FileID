@@ -1,0 +1,64 @@
+[
+  {
+    "name": "files-rename-updates-path-identity",
+    "description": "renameFiles renames on disk and rewrites path_text, path_hash (per-OS rule) and NFC path_search; collisions, separators and missing rows fail without touching anything.",
+    "tree": [
+      {"path": "docs/old name.txt", "content": "keep me\n", "row": {"id": 1, "kind": "doc"}},
+      {"path": "docs/taken.txt", "content": "occupant\n", "row": {"id": 2, "kind": "doc"}}
+    ],
+    "steps": [
+      {"label": "rename", "command": {"renameFiles": {"renames": [{"fileID": 1, "newName": "Café Notes.MD"}]}}, "await": "bulkActionResult", "expect": {"action": "renameFiles", "succeeded": 1, "failed": 0}},
+      {"label": "on disk", "fs": {"exists": ["docs/Café Notes.MD"], "absent": ["docs/old name.txt"], "contents": {"docs/Café Notes.MD": "keep me\n"}}},
+      {"label": "catalog", "db": "SELECT path_text,path_hash,path_search FROM files WHERE id=1", "expect": [["{path:docs/Café Notes.MD}", "{path_hash:docs/Café Notes.MD}", "{nfc_path:docs/Café Notes.MD}"]]},
+      {"label": "collision", "command": {"renameFiles": {"renames": [{"fileID": 1, "newName": "taken.txt"}]}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1, "messages": [{"fileID": 1, "ok": false}]}},
+      {"label": "separator", "command": {"renameFiles": {"renames": [{"fileID": 1, "newName": "../escape.txt"}]}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "missing row", "command": {"renameFiles": {"renames": [{"fileID": 99, "newName": "ghost.txt"}]}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1, "messages": [{"fileID": 99, "ok": false}]}},
+      {"label": "unchanged", "fs": {"exists": ["docs/Café Notes.MD", "docs/taken.txt"], "absent": ["escape.txt", "docs/ghost.txt"], "contents": {"docs/taken.txt": "occupant\n"}}},
+      {"label": "catalog unchanged", "db": "SELECT id,path_text FROM files ORDER BY id", "expect": [[1, "{path:docs/Café Notes.MD}"], [2, "{path:docs/taken.txt}"]]}
+    ]
+  },
+  {
+    "name": "files-rename-updates-extension",
+    "description": "Renaming to a new extension updates the lowercased extension column used by kind filters.",
+    "extends": "files-rename-updates-path-identity",
+    "steps": [
+      {"label": "rename", "command": {"renameFiles": {"renames": [{"fileID": 1, "newName": "notes.MD"}]}}, "await": "bulkActionResult", "expect": {"succeeded": 1, "failed": 0}},
+      {"label": "extension", "db": "SELECT path_text,extension FROM files WHERE id=1", "expect": [["{path:docs/notes.MD}", "md"]]}
+    ]
+  },
+  {
+    "name": "files-rename-refuses-row-without-identity",
+    "description": "A catalog row without a file_ref cannot prove the file on disk is the one indexed, so renameFiles refuses it.",
+    "extends": "files-rename-updates-path-identity",
+    "sql": [
+      "UPDATE files SET file_ref=NULL"
+    ],
+    "steps": [
+      {"label": "rename", "command": {"renameFiles": {"renames": [{"fileID": 1, "newName": "renamed.txt"}]}}, "await": "bulkActionResult", "expect": {"succeeded": 0, "failed": 1}},
+      {"label": "unchanged", "fs": {"exists": ["docs/old name.txt"], "absent": ["docs/renamed.txt"]}}
+    ]
+  },
+  {
+    "name": "files-trash-and-restore-round-trip",
+    "description": "trashFiles moves the file to the platform Trash, drops its row and returns the undo batch id; restoreFromTrash with that id puts the file back byte for byte and re-catalogs it.",
+    "knownDivergences": [
+      {"engine": "swift", "run": false, "reason": "restoreFromTrash is not implemented (not_implemented_yet), and trashFiles would write to the real user Trash"},
+      {"engine": "rust", "os": ["darwin"], "reason": "shell::trash::trash_path_as is not implemented on macOS, so trashFiles fails"}
+    ],
+    "tree": [
+      {"path": "docs/trash me.txt", "content": "recoverable\n", "row": {"id": 1, "kind": "doc"}},
+      {"path": "docs/stay.txt", "content": "stays\n", "row": {"id": 2, "kind": "doc"}}
+    ],
+    "sql": [
+      "INSERT INTO scan_sessions(id,root_path,started_at,completed_at,status) VALUES('conformance','{root}',1,2,'completed')"
+    ],
+    "steps": [
+      {"label": "trash", "command": {"trashFiles": {"fileIDs": [1]}}, "await": "bulkActionResult", "save": {"name": "batch", "path": "action", "after": ":"}, "expect": {"succeeded": 1, "failed": 0, "messages": [{"fileID": 1, "ok": true}]}},
+      {"label": "trashed", "fs": {"absent": ["docs/trash me.txt"], "exists": ["docs/stay.txt"]}},
+      {"label": "row dropped", "db": "SELECT id FROM files ORDER BY id", "expect": [[2]]},
+      {"label": "restore", "command": {"restoreFromTrash": {"batchID": {"$var": "batch"}}}, "await": "bulkActionResult", "expect": {"action": "restoreFromTrash", "succeeded": 1, "failed": 0}},
+      {"label": "restored", "fs": {"contents": {"docs/trash me.txt": "recoverable\n", "docs/stay.txt": "stays\n"}}},
+      {"label": "row restored", "db": "SELECT id,path_text FROM files ORDER BY id", "expect": [[1, "{path:docs/trash me.txt}"], [2, "{path:docs/stay.txt}"]]}
+    ]
+  }
+]

@@ -21,6 +21,7 @@
 pub mod bge_text;
 pub mod catalog;
 pub mod launch_tuning;
+pub mod license;
 pub mod benchmark;
 pub mod clip_text;
 pub mod clip_space;
@@ -30,6 +31,7 @@ pub mod mobileclip;
 pub mod ram_plus;
 pub mod ram_plus_batch;
 pub mod registry;
+pub mod required;
 pub mod runtime;
 pub mod scene_vocab;
 pub mod face_align;
