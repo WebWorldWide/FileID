@@ -30,6 +30,7 @@ stays honest.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -430,8 +431,20 @@ def build_tree(ctx, entries):
     return rows
 
 
+@contextlib.contextmanager
+def connect(path, **options):
+    """sqlite3's own context manager commits but never closes, and an open
+    handle stops Windows from deleting the fixture directory afterwards."""
+    connection = sqlite3.connect(path, **options)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def insert_rows(ctx, rows):
-    with sqlite3.connect(ctx.database) as database:
+    with connect(ctx.database) as database:
         for target, row in rows:
             stat = target.stat()
             values = {
@@ -449,7 +462,7 @@ def insert_rows(ctx, rows):
 
 def db_rows(ctx, sql):
     uri = "file:" + str(ctx.database) + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as database:
+    with connect(uri, uri=True) as database:
         rows = database.execute(ctx.expand(sql)).fetchall()
     return [[value.hex() if isinstance(value, bytes) else value for value in row] for row in rows]
 
@@ -580,7 +593,7 @@ def run_case(case, flavor, binaries, os_name, parent):
         if rows:
             insert_rows(ctx, rows)
         if case.get("sql"):
-            with sqlite3.connect(ctx.database) as database:
+            with connect(ctx.database) as database:
                 for statement in case["sql"]:
                     database.execute(ctx.expand(statement))
         engine = start(binaries, first, ctx)
