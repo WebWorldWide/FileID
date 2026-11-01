@@ -52,7 +52,7 @@
     <PackageVersion Include="Microsoft.CodeCoverage" Version="$(MicrosoftCodeCoverageVersion)" />
     <PackageVersion Include="xunit" Version="2.9.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
-    <PackageVersion Include="coverlet.collector" Version="6.0.2" />
+    <PackageVersion Include="coverlet.collector" Version="10.1.0" />
 
     <!-- WiX v4 extensions used by installer/. -->
     <PackageVersion Include="WixToolset.Heat" Version="4.0.5" />
