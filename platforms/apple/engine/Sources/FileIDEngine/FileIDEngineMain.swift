@@ -1491,6 +1491,10 @@ struct FileIDEngineMain {
                     INSERT INTO scan_sessions (id, root_path, started_at, status)
                     VALUES (?, ?, ?, 'running')
                     """, arguments: [session.id, url.path, Date().timeIntervalSince1970])
+                let kind = url.path.hasPrefix("/Volumes/") ? "external" : "internal"
+                try db.execute(sql: """
+                    INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?,?,?,?,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'
+                    """, arguments: [url.path, url.path, kind, Date().timeIntervalSince1970])
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_insert_failed", sess: session.id, error: "\(error)")
@@ -2108,6 +2112,9 @@ struct FileIDEngineMain {
                     UPDATE scan_sessions SET status = ?, completed_at = ?
                     WHERE id = ?
                     """, arguments: [status, completedAt, sessionID])
+                try db.execute(sql: """
+                    UPDATE library_roots SET last_scan_at=?,last_status=? WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?)
+                    """, arguments: [completedAt, status, sessionID])
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_update_failed",

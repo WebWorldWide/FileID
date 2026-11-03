@@ -162,6 +162,12 @@ impl ScanSession {
                     started_unix,
                 ],
             );
+            let root_text = root.to_string_lossy();
+            let kind = if root_text.starts_with("\\\\") { "network" } else if root_text.starts_with("/Volumes/") { "external" } else { "internal" };
+            let _ = conn.execute(
+                "INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,?1,?2,?3,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'",
+                rusqlite::params![root_text, kind, started_unix],
+            );
         }
 
         // Resolve user exclusions against this root, then purge already-
@@ -688,6 +694,10 @@ impl ScanSession {
             let _ = conn.execute(
                 "UPDATE scan_sessions SET completed_at = ?1, total_files = ?2, status = ?3 WHERE id = ?4",
                 rusqlite::params![completed_unix, total as i64, final_status, session_id],
+            );
+            let _ = conn.execute(
+                "UPDATE library_roots SET last_scan_at=?1,last_status=?2 WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?3)",
+                rusqlite::params![completed_unix, final_status, session_id],
             );
         }
 

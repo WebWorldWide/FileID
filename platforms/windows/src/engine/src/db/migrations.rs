@@ -490,6 +490,21 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn library_roots_are_upserted_once_per_path_and_stamped_on_finish() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn).unwrap();
+        for (session, started) in [("s1", 10.0), ("s2", 20.0)] {
+            conn.execute("INSERT INTO scan_sessions (id, root_path, started_at, status) VALUES (?1, '/Volumes/Adlon', ?2, 'running')", rusqlite::params![session, started]).unwrap();
+            conn.execute("INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?1,?1,'external',?2,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'", rusqlite::params!["/Volumes/Adlon", started]).unwrap();
+        }
+        conn.execute("UPDATE library_roots SET last_scan_at=?1,last_status=?2 WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?3)", rusqlite::params![30.0, "completed", "s2"]).unwrap();
+        let (count, added, status): (i64, f64, String) = conn
+            .query_row("SELECT COUNT(*), MIN(added_at), MIN(last_status) FROM library_roots", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!((count, added, status.as_str()), (1, 10.0, "completed"));
+    }
+
+    #[test]
     fn fresh_database_applies_all_migrations() {
         let conn = Connection::open_in_memory().unwrap();
         for pragma in crate::db::SETUP_PRAGMAS {
