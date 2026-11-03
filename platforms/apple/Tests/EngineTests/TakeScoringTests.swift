@@ -95,6 +95,28 @@ struct TakeScoringTests {
         try db.execute(sql: "INSERT INTO clip_embeddings(file_id,embedding,model) VALUES(?,?,?)", arguments: [id, blob, CLIPEmbeddingSpace.modelID])
     }
 
+    @Test func derivedFilesAndEventMembersAreLeftOutOfSuggestions() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for (id, name, time) in [(1, "A1", 100.0), (2, "A2", 101.0), (11, "B1", 9000.0), (12, "B2", 9001.0), (21, "C1", 20000.0), (22, "C2", 20001.0)] {
+                try insert(db, Int64(id), "/c/\(name).JPG", time, 0)
+            }
+            try db.execute(sql: "INSERT INTO catalog_events(id,title) VALUES('e','Event')")
+            try db.execute(sql: "INSERT INTO catalog_event_files(event_id,file_id) VALUES('e',11)")
+            try db.execute(sql: "INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(1,22,'export','{}')")
+        }
+        let response = await CatalogStore.handle(CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups"), database: database)
+        let groups = try #require(response.takeGroups)
+        #expect(groups.count == 1)
+        #expect(groups[0].fileIDs == [1, 2])
+        let plan = try await database.pool.read { db in
+            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN SELECT f.id FROM files f WHERE f.kind IN ('image','video') AND f.id NOT IN (SELECT derived_id FROM catalog_assets) AND f.id NOT IN (SELECT file_id FROM catalog_event_files)").map { $0["detail"] as String }.joined(separator: "\n")
+        }
+        #expect(!plan.contains("CORRELATED"))
+    }
+
     @Test func burstsGroupIntoShotsWithRawTwinsAndChoicesHideThem() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

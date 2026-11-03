@@ -30,8 +30,8 @@ pub fn discover(conn: &Connection, limit: usize) -> Result<Vec<CatalogTakeAutoGr
     let mut statement = conn.prepare(
         "SELECT f.id, f.path_text, f.created_at, f.phash, f.kind FROM files f
          WHERE f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM catalog_assets a WHERE a.derived_id=f.id)
-           AND NOT EXISTS (SELECT 1 FROM catalog_event_files ef WHERE ef.file_id=f.id)
+           AND f.id NOT IN (SELECT derived_id FROM catalog_assets)
+           AND f.id NOT IN (SELECT file_id FROM catalog_event_files)
          ORDER BY f.created_at, f.id",
     )?;
     let rows: Vec<Row1> = statement
@@ -513,6 +513,28 @@ mod tests {
             params![id, blob(angle.cos(), angle.sin())],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn derived_files_and_event_members_are_left_out_of_suggestions() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, name, time) in [(1, "A1", 100.0), (2, "A2", 101.0), (11, "B1", 9000.0), (12, "B2", 9001.0), (21, "C1", 20000.0), (22, "C2", 20001.0)] {
+            insert(&conn, id, &format!("/c/{name}.JPG"), time, 0.0);
+        }
+        conn.execute("INSERT INTO catalog_events(id,title) VALUES('e','Event')", []).unwrap();
+        conn.execute("INSERT INTO catalog_event_files(event_id,file_id) VALUES('e',11)", []).unwrap();
+        conn.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(1,22,'export','{}')", []).unwrap();
+        let groups = discover(&conn, 100).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].file_ids(), vec![1, 2]);
+        let plan: Vec<String> = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT f.id FROM files f WHERE f.id NOT IN (SELECT derived_id FROM catalog_assets) AND f.id NOT IN (SELECT file_id FROM catalog_event_files)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(plan.iter().all(|line| !line.contains("CORRELATED")), "{plan:?}");
     }
 
     #[test]

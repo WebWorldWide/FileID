@@ -27,8 +27,8 @@ enum CatalogTakeSuggestions {
             JOIN clip_embeddings e ON e.file_id=f.id AND e.model=?
             WHERE f.id IN (SELECT value FROM json_each(?))
               AND f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM catalog_assets a WHERE a.derived_id=f.id)
-              AND NOT EXISTS (SELECT 1 FROM catalog_event_files ef WHERE ef.file_id=f.id)
+              AND f.id NOT IN (SELECT derived_id FROM catalog_assets)
+              AND f.id NOT IN (SELECT file_id FROM catalog_event_files)
             ORDER BY f.created_at, f.id
             """, arguments: [CLIPEmbeddingSpace.modelID, scope])
 

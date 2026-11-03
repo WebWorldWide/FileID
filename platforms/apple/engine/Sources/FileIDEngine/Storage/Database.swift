@@ -543,6 +543,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v29_library_roots") { db in
             try db.execute(sql: CatalogSchema.v29)
         }
+        m.registerMigration("v30_files_dir_index") { db in
+            try db.execute(sql: CatalogSchema.v30)
+        }
         return m
     }
 
