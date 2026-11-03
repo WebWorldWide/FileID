@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.17.0",
+  "version": "1.18.0",
 
   "$defs": {
     "IPCCommand": {
@@ -91,6 +91,10 @@
             "description": "Lightweight command-channel probe. Echoes the opaque nonce and actual engine PID without starting work, touching the catalog or re-emitting ready. Clients correlate replies with their captured process generation; this does not establish model or storage health.",
             "required": ["requestID"], "properties": { "requestID": { "$ref": "#/$defs/HealthRequestID" } }
           } } },
+        { "type": "object", "required": ["listRoots"], "additionalProperties": false,
+          "properties": { "listRoots": { "type": "object", "additionalProperties": false,
+            "description": "List the library locations (folders and drives) the catalog has scanned, with online state and file counts. Read-only: never scans, never touches the files. Replies `rootsList`.",
+            "required": ["requestID"], "properties": { "requestID": { "$ref": "#/$defs/HealthRequestID" } } } } },
         { "type": "object", "required": ["listModels"], "additionalProperties": false,
           "properties": { "listModels": { "type": "object", "additionalProperties": false,
             "description": "List the curated and extended local model catalog for this platform with install state, hardware fit and any local benchmark. Read-only: never downloads, loads or benchmarks a model. Replies with `modelCatalog`.",
@@ -484,6 +488,7 @@
           "properties": { "benchmarkResult": { "type": "object", "additionalProperties": false,
             "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/BenchmarkResult" } }
           } } },
+        { "type": "object", "required": ["rootsList"], "additionalProperties": false, "properties": { "rootsList": { "type": "object", "additionalProperties": false, "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/RootsList" } } } } },
         { "type": "object", "required": ["modelCatalog"], "additionalProperties": false,
           "properties": { "modelCatalog": { "type": "object", "additionalProperties": false,
             "required": ["_0"], "properties": { "_0": { "$ref": "#/$defs/ModelCatalog" } }
@@ -597,6 +602,32 @@
     "HealthRequestID": {
       "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$",
       "description": "Client-generated correlation nonce, never a file path, document text or secret. Invalid nonces receive invalid_health_request and no success reply. Use a fresh nonce for each probe."
+    },
+    "LibraryRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "display", "kind", "enabled", "online", "fileCount", "totalBytes"],
+      "properties": {
+        "id": { "type": "integer" },
+        "path": { "type": "string" },
+        "display": { "type": "string" },
+        "kind": { "type": "string", "enum": ["internal", "external", "network"] },
+        "enabled": { "type": "boolean" },
+        "online": { "type": "boolean", "description": "True when the folder exists and is not empty right now. An unplugged drive reads as offline, and its catalog rows are kept." },
+        "fileCount": { "type": "integer", "minimum": 0, "description": "Cataloged files (failed=0) under this location." },
+        "totalBytes": { "type": "integer", "minimum": 0 },
+        "lastScanAt": { "type": ["number", "null"], "description": "Unix seconds of the last finished scan." },
+        "lastStatus": { "type": ["string", "null"] }
+      }
+    },
+    "RootsList": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestID", "roots"],
+      "properties": {
+        "requestID": { "$ref": "#/$defs/HealthRequestID" },
+        "roots": { "type": "array", "items": { "$ref": "#/$defs/LibraryRoot" } }
+      }
     },
     "ModelCatalog": {
       "type": "object", "additionalProperties": false,

@@ -374,6 +374,21 @@ struct FileIDEngineMain {
                 requestID: requestID,
                 pid: ProcessInfo.processInfo.processIdentifier
             )))
+        case .listRoots(let requestID):
+            guard HealthCheckResult.isValidRequestID(requestID) else {
+                await sink.emit(.error(EngineError(
+                    kind: "invalid_list_roots_request",
+                    message: "listRoots needs a 1–128 character ASCII request ID."
+                )))
+                return
+            }
+            guard let database else { await sink.emit(.rootsList(RootsList(requestID: requestID, roots: []))); return }
+            do {
+                let roots = try await database.pool.read { try LibraryRoots.list($0) }
+                await sink.emit(.rootsList(RootsList(requestID: requestID, roots: roots)))
+            } catch {
+                await sink.emit(.error(EngineError(kind: "list_roots_failed", message: error.localizedDescription)))
+            }
         case .listModels(let requestID, let role):
             let roles: Set<String> = ["vision", "text", "embedding", "reranker", "speech"]
             guard HealthCheckResult.isValidRequestID(requestID), role.map(roles.contains) ?? true else {

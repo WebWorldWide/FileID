@@ -31,6 +31,7 @@ mod chat_facts;
 mod chat_actions;
 pub mod tools;
 pub mod models;
+pub mod roots;
 pub mod benchmark;
 pub mod timeline;
 pub(crate) mod video_export;

@@ -1351,6 +1351,10 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let index = catalog_index.cloned();
             spawn_guarded(&sink.clone(), commands::catalog::handle(sink, database, index, payload.request));
         }
+        CommandPayload::ListRoots(payload) => {
+            let database = db.cloned();
+            spawn_guarded(sink, commands::roots::handle(sink.clone(), database, payload));
+        }
         CommandPayload::ListModels(payload) => {
             spawn_guarded(sink, commands::models::handle(sink.clone(), payload));
         }

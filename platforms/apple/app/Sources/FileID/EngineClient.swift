@@ -85,6 +85,7 @@ public final class EngineClient {
     public private(set) var deepAnalyzeComplete: DeepAnalyzeComplete?
     public private(set) var modelDownloadProgress: ModelDownloadProgress?
     public private(set) var benchmarkProgress: BenchmarkProgress?
+    public private(set) var libraryRoots: [LibraryRoot] = []
     public private(set) var benchmarkResults: [String: ModelBenchmark] = [:]
     public private(set) var benchmarkMessage: (modelKind: String, text: String)?
     public private(set) var benchmarkModelKind: String?
@@ -789,6 +790,9 @@ public final class EngineClient {
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
+        case .rootsList(let list):
+            guard list.requestID.hasPrefix("roots-") else { break }
+            libraryRoots = list.roots
         case .modelCatalog(let catalog):
             for model in catalog.models { if let result = model.benchmark { benchmarkResults[model.id] = result } }
         case .benchmarkProgress(let progress):
@@ -1339,6 +1343,11 @@ public final class EngineClient {
 
     public func cancelBenchmark() {
         send(.cancelBenchmark)
+    }
+
+    /// Asks the engine for the scanned locations; the answer lands in `libraryRoots`.
+    public func refreshLibraryRoots() {
+        send(.listRoots(requestID: "roots-" + UUID().uuidString.prefix(8).lowercased()))
     }
 
     /// Pulls stored benchmark results for this Mac.
