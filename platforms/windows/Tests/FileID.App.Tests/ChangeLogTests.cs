@@ -76,7 +76,7 @@ public class ChangeLogTests
         var second = Log.Push("reorganize 4 files", ChangeKind.Restructure, () => Task.FromResult(true));
 
         Assert.Equal(ChangeStatus.NotUndoable, first.Status);
-        Assert.Contains("Superseded", first.StatusDetail);
+        Assert.Contains("Replaced by a newer move", first.StatusDetail);
         Assert.Equal(ChangeStatus.Undoable, rename.Status);   // untouched
         Assert.Equal(ChangeStatus.Undoable, second.Status);
         Log.Clear();
@@ -99,7 +99,7 @@ public class ChangeLogTests
             () => Task.FromResult(true));
 
         Assert.Equal(ChangeStatus.NotUndoable, failed.Status);
-        Assert.Contains("Superseded", failed.StatusDetail);
+        Assert.Contains("Replaced by a newer move", failed.StatusDetail);
         Assert.Equal(ChangeStatus.Undoable, current.Status);
         Log.Clear();
     }

@@ -40,7 +40,7 @@
                     <TextBlock Text="Welcome to FileID"
                                Style="{StaticResource TitleLargeTextBlockStyle}"
                                AutomationProperties.HeadingLevel="Level1" />
-                    <TextBlock Text="Install the AI models below to enable semantic search, face clustering, and Deep Analyze. Each model downloads once from HuggingFace and runs locally on your hardware."
+                    <TextBlock Text="FileID sorts your files with AI that runs on this PC. The models download once from Hugging Face; after that, nothing leaves your PC."
                                Style="{StaticResource BodyTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                TextWrapping="Wrap" />
@@ -73,7 +73,8 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="Semantic search (CLIP ViT-B/32)"
+                                       Text="Search by description"
+                                       ToolTipService.ToolTip="CLIP ViT-B/32"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Grid.Column="1"
                                        Text="{x:Bind VlmSize(Svc.Clip.ApproxBytes), Mode=OneWay}"
@@ -81,7 +82,7 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </Grid>
-                        <TextBlock Text="Type queries like 'sunset at the beach' — FileID ranks every photo by visual relevance."
+                        <TextBlock Text="Find photos by typing what's in them"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
@@ -109,7 +110,7 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                     <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
+                        <TextBlock Text="Ready"
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
@@ -117,7 +118,7 @@
                         <Button Click="OnClipActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Clip.Status), Mode=OneWay}"
                                 MinWidth="86"
-                                AutomationProperties.HelpText="Semantic search (CLIP) model"
+                                AutomationProperties.HelpText="Search by description model (CLIP ViT-B/32)"
                                 Visibility="{x:Bind ShowActionButton(Svc.Clip.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -143,7 +144,8 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="Auto-tagging (RAM++)"
+                                       Text="Photo tags"
+                                       ToolTipService.ToolTip="RAM++"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Grid.Column="1"
                                        Text="{x:Bind VlmSize(Svc.RamPlus.ApproxBytes), Mode=OneWay}"
@@ -151,7 +153,7 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </Grid>
-                        <TextBlock Text="Tags every image with thousands of everyday concepts so search and filters work the moment a scan finishes."
+                        <TextBlock Text="Labels what's in each photo"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
@@ -179,7 +181,7 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                     <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
+                        <TextBlock Text="Ready"
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
@@ -187,7 +189,7 @@
                         <Button Click="OnRamPlusActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.RamPlus.Status), Mode=OneWay}"
                                 MinWidth="86"
-                                AutomationProperties.HelpText="Auto-tagging (RAM++) model"
+                                AutomationProperties.HelpText="Photo tags model (RAM++)"
                                 Visibility="{x:Bind ShowActionButton(Svc.RamPlus.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -212,7 +214,8 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="Face recognition (YuNet + SFace)"
+                                       Text="Faces"
+                                       ToolTipService.ToolTip="YuNet + SFace"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Grid.Column="1"
                                        Text="{x:Bind VlmSize(Svc.Arcface.ApproxBytes), Mode=OneWay}"
@@ -220,7 +223,7 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </Grid>
-                        <TextBlock Text="On-device face detection (YuNet) + recognition (SFace), Apache-2.0. Clusters faces into named people."
+                        <TextBlock Text="Groups photos by person"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
@@ -248,7 +251,7 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                     <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
+                        <TextBlock Text="Ready"
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
@@ -256,7 +259,7 @@
                         <Button Click="OnArcfaceActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.Arcface.Status), Mode=OneWay}"
                                 MinWidth="86"
-                                AutomationProperties.HelpText="Face recognition (YuNet + SFace) model"
+                                AutomationProperties.HelpText="Faces model (YuNet + SFace)"
                                 Visibility="{x:Bind ShowActionButton(Svc.Arcface.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -282,7 +285,8 @@
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
-                                       Text="{x:Bind VlmTitle(Svc.DeepVlm.DisplayLabel, Svc.DeepVlm.Status), Mode=OneWay}"
+                                       Text="Descriptions and Chat"
+                                       ToolTipService.ToolTip="{x:Bind VlmTitle(Svc.DeepVlm.DisplayLabel, Svc.DeepVlm.Status), Mode=OneWay}"
                                        Style="{StaticResource BodyStrongTextBlockStyle}" />
                             <TextBlock Grid.Column="1"
                                        Text="{x:Bind VlmInstallSize(Svc.DeepVlm.ApproxBytes, Svc.DeepVlm.Status), Mode=OneWay}"
@@ -290,7 +294,7 @@
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </Grid>
-                        <TextBlock Text="On-device vision model for Deep Analyze — captions photos, PDFs, and video keyframes and writes smart filenames. More options are on the Deep Analyze tab."
+                        <TextBlock Text="Writes descriptions and answers questions · Optional. More models are on the Describe Files page."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                    TextWrapping="Wrap" />
@@ -318,7 +322,7 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                     <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
+                        <TextBlock Text="Ready"
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
@@ -326,7 +330,7 @@
                         <Button Click="OnDeepVlmActionClicked"
                                 Content="{x:Bind ButtonLabel(Svc.DeepVlm.Status), Mode=OneWay}"
                                 MinWidth="86"
-                                AutomationProperties.HelpText="Deep Analyze vision model"
+                                AutomationProperties.HelpText="Descriptions and Chat model"
                                 Visibility="{x:Bind ShowActionButton(Svc.DeepVlm.Status), Mode=OneWay}" />
                     </Grid>
                 </Grid>
@@ -383,7 +387,7 @@
                                    TextWrapping="Wrap" />
                     </StackPanel>
                     <Grid Grid.Column="2" Margin="14,0,0,0" VerticalAlignment="Top">
-                        <TextBlock Text="Installed"
+                        <TextBlock Text="Ready"
                                    Foreground="{ThemeResource SystemFillColorSuccessBrush}"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    VerticalAlignment="Center"
@@ -398,7 +402,7 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- Footer: caption text + Install all + Skip/Done. macOS:
+        <!-- Footer: caption text + Download all + Later/Continue. macOS:
              HStack { Text(caption2 tertiary); Spacer; "Install all"
              borderedProminent goldTint disabled(allInstalled||installAllRequested);
              "Skip for now"/"Done" bordered }. -->
@@ -410,7 +414,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0"
-                       Text="Skip and install later from Settings → AI Models."
+                       Text="{x:Bind FooterHint(Svc.AllInstalled), Mode=OneWay}"
                        FontSize="11"
                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                        VerticalAlignment="Center"
@@ -422,7 +426,7 @@
                     IsEnabled="{x:Bind InstallAllEnabled(Svc.AllInstalled, Svc.IsBusy), Mode=OneWay}"
                     Height="32"
                     MinWidth="100">
-                <TextBlock Text="Install all" FontWeight="SemiBold" />
+                <TextBlock Text="{x:Bind InstallAllLabel(Svc.AllInstalled, Svc.IsBusy, Svc.Clip.Status, Svc.RamPlus.Status, Svc.Arcface.Status, Svc.DeepVlm.Status, Svc.DeepVlm.ApproxBytes), Mode=OneWay}" FontWeight="SemiBold" />
             </Button>
             <Button Grid.Column="2"
                     Click="OnSkipClicked"

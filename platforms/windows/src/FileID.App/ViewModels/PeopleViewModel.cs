@@ -234,7 +234,7 @@ internal sealed class PeopleViewModel : INotifyPropertyChanged, IDisposable
     }
 
     internal static string DeferredFaceStatus(ulong? deferredFaces) => deferredFaces is > 0
-        ? $"{deferredFaces} face{(deferredFaces == 1 ? string.Empty : "s")} {(deferredFaces == 1 ? "awaits" : "await")} analysis; existing assignments were kept."
+        ? $"{deferredFaces} more face{(deferredFaces == 1 ? " is" : "s are")} waiting to be grouped; existing groups were kept."
         : string.Empty;
 
     private void ApplyOnUi(IReadOnlyList<PersonCluster> rows, long gen)
@@ -479,7 +479,7 @@ internal sealed class MergeSuggestionVm : INotifyPropertyChanged
 
     public string Title => $"Person #{Model.SourcePersonId} ({Model.SourceMemberCount} faces) & Person #{Model.DestinationPersonId} ({Model.DestinationMemberCount} faces)";
 
-    public string SimilarityText => $"{Math.Min(100, Math.Max(0, (int)Math.Round(Model.Similarity * 100)))}% similarity match";
+    public string SimilarityText => $"{Math.Min(100, Math.Max(0, (int)Math.Round(Model.Similarity * 100)))}% alike";
 
     private Microsoft.UI.Xaml.Media.Imaging.BitmapImage? _sourceFaceImage;
     private bool _sourceFaceResolved;

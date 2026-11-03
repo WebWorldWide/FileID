@@ -27,6 +27,8 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
     public let vlmModel: String?
     public let vlmFullModel: String?
     public let vlmAnalyzedAt: Date?
+    /// Files.id of the near-identical shot whose caption and tags this file shares.
+    public let vlmInheritedFrom: Int64?
     public let tags: [String]?
 
     public init(
@@ -38,7 +40,8 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         failed: Bool, errorMessage: String?,
         vlmDescription: String? = nil, vlmProposedName: String? = nil,
         vlmModel: String? = nil, vlmFullModel: String? = nil,
-        vlmAnalyzedAt: Date? = nil, tags: [String]? = nil
+        vlmAnalyzedAt: Date? = nil, tags: [String]? = nil,
+        vlmInheritedFrom: Int64? = nil
     ) {
         self.id = id
         self.pathText = pathText
@@ -62,6 +65,7 @@ public struct FileRow: Sendable, Hashable, Identifiable, Codable {
         self.vlmModel = vlmModel
         self.vlmFullModel = vlmFullModel
         self.vlmAnalyzedAt = vlmAnalyzedAt
+        self.vlmInheritedFrom = vlmInheritedFrom
         self.tags = tags
     }
 

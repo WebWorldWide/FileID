@@ -200,8 +200,8 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                 ? string.Empty
                 : System.IO.Path.GetFileName(dap.CurrentPath!);
             DeepAnalyzeBannerText.Text = string.IsNullOrEmpty(current)
-                ? $"Deep Analyze running… ({dap.Processed}/{dap.Total})"
-                : $"Deep Analyze: {current} ({dap.Processed}/{dap.Total})";
+                ? $"Describing files… {dap.Processed:N0} of {dap.Total:N0} files"
+                : $"Describing files… {current} · {dap.Processed:N0} of {dap.Total:N0} files";
         }
         else
         {
@@ -428,7 +428,9 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             if (ViewModel.Items.Count == 0)
             {
-                return "No files match. Pick a folder via the sidebar to start a scan.";
+                return string.IsNullOrWhiteSpace(ViewModel.Query)
+                    ? "No files yet. Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar."
+                    : "Nothing matches this filter. Try other words, or choose All kinds to see every file.";
             }
             return $"{ViewModel.Items.Count} files";
         }
@@ -1149,7 +1151,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = "Tag selected files",
+            Title = "Tag the chosen files",
             Content = sheet,
             PrimaryButtonText = "Apply",
             CloseButtonText = "Cancel",
@@ -1188,7 +1190,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = "Rename selected files",
+            Title = "Rename the chosen files",
             Content = sheet,
             PrimaryButtonText = "Rename",
             CloseButtonText = "Cancel",

@@ -119,7 +119,7 @@ impl MapView {
         tree.append(&tree_head);
         let panes = gtk::Box::builder().homogeneous(true).spacing(12).build();
         let (today_pane, today) = tree_pane("Today", "Where files live now");
-        let (proposed_pane, proposed) = tree_pane("Proposed", "Where they'll live");
+        let (proposed_pane, proposed) = tree_pane("After", "Where they'll live");
         panes.append(&today_pane);
         panes.append(&proposed_pane);
         tree.append(&panes);
@@ -232,8 +232,8 @@ impl MapView {
         let dests: BTreeSet<&str> = items.iter().map(|i| i.bucket.as_str()).collect();
         self.meta.set_text(&format!(
             "{} → {}",
-            super::restructure_model::plural(sources.len(), "source"),
-            super::restructure_model::plural(dests.len(), "destination")
+            super::restructure_model::plural(sources.len(), "folder"),
+            super::restructure_model::plural(dests.len(), "folder")
         ));
         self.from_count.set_text(&format!("FROM  {}", layout.sources.len()));
         self.to_count.set_text(&format!("{}  TO", layout.dests.len()));

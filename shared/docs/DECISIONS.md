@@ -3973,3 +3973,7 @@ Ctrl+1–9 jump to pages in the macOS order and Alt+1–9 still work for existin
 ## 2026-10-20 — zip 2 → 9 for RUSTSEC-2026-0367/0368/0369
 
 Three advisories against `zip` (SUID bits, symlink targets and permissions applied during `ZipArchive::extract`) failed `cargo-deny`. FileID's extractor (`util/zip.rs`) never calls `extract`, skips symlinks and special entries and never applies Unix modes, so it was not exposed; the crate was upgraded anyway rather than ignored, since 9.0.5 supports Rust 1.88 (inside the 1.90 pin) and the only API change touching FileID is that `file_names()` now yields fallible names. New transitive crates: `zlib-rs` (Zlib), `nix` (MIT), `typed-path` (MIT/Apache-2.0), all on the license allowlist. Engine, CLI, TUI and GTK lockfiles move together.
+
+## 2026-10-21 — Two v25 migrations: handwriting keeps v25, shared captions become v26
+
+`agent/handwriting` and `agent/vlm-speed` each added a v25 migration. Handwriting (`v25_ocr_text_source`: `ocr_text.source`, `ocr_text.handwritten` and the `ocr_text_vlm_invalidate` trigger) merged first and keeps v25; `files.vlm_inherited_from` is `v26_vlm_inherited_from` in `shared/catalog/v26.sql`. Neither migration had shipped, so renumbering edits no released history. The WinUI preview sheet shows no caption, so only the Describe Files card and the Library selected pane gained "Same as a similar photo" there; GTK shows it in both Library previews and the Describe Files card.

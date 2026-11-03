@@ -65,6 +65,7 @@ public sealed partial class LibrarySelectedPane : UserControl
         RenderDetails(tile, null);
         RenderTags(tile.Tags);
         CaptionText.Visibility = Visibility.Collapsed;
+        CaptionInheritedText.Visibility = Visibility.Collapsed;
 
         _ = DebugLog.SafeRunAsync("LibrarySelectedPane.Load", () => LoadAsync(tile, revision));
     }
@@ -83,6 +84,9 @@ public sealed partial class LibrarySelectedPane : UserControl
                 var caption = details?.Caption;
                 CaptionText.Text = caption ?? string.Empty;
                 CaptionText.Visibility = string.IsNullOrWhiteSpace(caption) ? Visibility.Collapsed : Visibility.Visible;
+                CaptionInheritedText.Visibility = !string.IsNullOrWhiteSpace(caption) && details!.CaptionInherited
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
             });
         }
 

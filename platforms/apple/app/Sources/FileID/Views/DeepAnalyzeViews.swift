@@ -790,6 +790,9 @@ struct DeepAnalyzeView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Latest description").font(Theme.Font.body(14, .semibold))
                 Text(d.description).font(Theme.Font.body(13.5))
+                if d.inheritedFromFileID != nil {
+                    MetaText("Same as a similar photo", size: 11)
+                }
                 if let n = d.proposedName {
                     HStack {
                         Image(systemName: "wand.and.rays").foregroundStyle(Theme.gold)

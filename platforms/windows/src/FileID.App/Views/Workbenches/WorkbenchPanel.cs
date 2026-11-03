@@ -189,7 +189,7 @@ internal abstract class WorkbenchPanel : UserControl
         if (Busy || Lifetime.IsCancellationRequested) return;
         Busy = true;
         _inputHost.IsEnabled = false;
-        Status.Text = "Waiting for the local engine…";
+        Status.Text = "Working…";
         _ = RunCoreAsync(action, Lifetime);
     }
     private async Task RunCoreAsync(Func<CancellationToken, Task> action, CancellationToken ct)

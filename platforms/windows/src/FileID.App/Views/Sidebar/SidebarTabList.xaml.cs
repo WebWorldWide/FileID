@@ -103,7 +103,7 @@ public sealed partial class SidebarTabList : UserControl
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 Background = _transparent,
             };
-            ToolTipService.SetToolTip(button, $"{area} pages (Ctrl+{first}–{last})");
+            ToolTipService.SetToolTip(button, $"{area}: {string.Join(", ", pages.Select(p => p.Label))} (Ctrl+{first}–{last})");
             AutomationProperties.SetName(button, $"{area} pages");
             button.Click += (_, _) => DebugLog.SafeRun("SidebarTabList.AreaClick", () => ShowArea(area, navigate: true));
             Grid.SetColumn(button, i);
@@ -161,9 +161,9 @@ public sealed partial class SidebarTabList : UserControl
                 Background = _transparent,
                 Tag = tab.Id,
             };
-            ToolTipService.SetToolTip(button, $"{tab.Label} (Ctrl+{tab.ShortcutNumber})");
+            ToolTipService.SetToolTip(button, $"{tab.Summary} (Ctrl+{tab.ShortcutNumber})");
             AutomationProperties.SetName(button, $"{tab.Label} page");
-            AutomationProperties.SetHelpText(button, $"Switch to the {tab.Label} page (Ctrl+{tab.ShortcutNumber})");
+            AutomationProperties.SetHelpText(button, tab.Summary);
             var target = tab;
             button.Click += (_, _) => DebugLog.SafeRun("SidebarTabList.RowClick", () => AppViewModel.Instance.ActiveTab = target);
 
@@ -329,7 +329,7 @@ public sealed partial class SidebarTabList : UserControl
             deep is { Total: > 0UL } ? $"{(int)Math.Round(100.0 * deep.Processed / deep.Total)}%" : null,
             _ai);
 
-        SetBadge("restructure", engine.LastRestructurePlan is not null ? "Plan" : null, _gold);
+        SetBadge("restructure", engine.LastRestructurePlan is not null ? "Ready" : null, _gold);
     }
 
     private void SetBadge(string id, string? text, Brush color)

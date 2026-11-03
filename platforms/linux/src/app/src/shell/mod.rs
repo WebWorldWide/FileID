@@ -67,6 +67,16 @@ impl Area {
         }
     }
 
+    pub fn tooltip(self) -> String {
+        let titles = self.pages().map(|page| page.title).collect::<Vec<_>>();
+        format!(
+            "{}: {} ({})",
+            self.name(),
+            titles.join(", "),
+            self.shortcut_hint()
+        )
+    }
+
     /// Switching areas returns to the page last used in that area.
     pub fn remembered(self, current: &str, stored: Option<&str>) -> &'static Page {
         self.pages()
@@ -81,6 +91,7 @@ impl Area {
 pub struct Page {
     pub id: &'static str,
     pub title: &'static str,
+    pub summary: &'static str,
     pub icon: &'static str,
     pub area: Option<Area>,
     /// Ctrl+N, numbered like macOS ⌘1–9 (6 is Best Takes, not on Linux yet).
@@ -91,6 +102,7 @@ pub const PAGES: [Page; 9] = [
     Page {
         id: "library",
         title: "Library",
+        summary: "Every scanned file, with search and preview",
         icon: "view-grid-symbolic",
         area: Some(Area::Browse),
         shortcut: Some(1),
@@ -98,6 +110,7 @@ pub const PAGES: [Page; 9] = [
     Page {
         id: "people",
         title: "People",
+        summary: "Faces grouped by person; name them here",
         icon: "system-users-symbolic",
         area: Some(Area::Browse),
         shortcut: Some(2),
@@ -105,13 +118,15 @@ pub const PAGES: [Page; 9] = [
     Page {
         id: "moments",
         title: "Search & Moments",
+        summary: "Search inside videos and documents",
         icon: "system-search-symbolic",
         area: Some(Area::Browse),
         shortcut: Some(3),
     },
     Page {
         id: "deep-analyze",
-        title: "Deep Analyze",
+        title: "Describe Files",
+        summary: "Write a description and a better file name for each file",
         icon: "starred-symbolic",
         area: Some(Area::Analyze),
         shortcut: Some(4),
@@ -119,20 +134,23 @@ pub const PAGES: [Page; 9] = [
     Page {
         id: "chat",
         title: "Chat",
+        summary: "Ask questions about your files",
         icon: "chat-symbolic",
         area: Some(Area::Analyze),
         shortcut: Some(5),
     },
     Page {
         id: "cleanup",
-        title: "Cleanup",
+        title: "Duplicates",
+        summary: "Find extra copies and move them to Trash",
         icon: "user-trash-symbolic",
         area: Some(Area::Act),
         shortcut: Some(7),
     },
     Page {
         id: "restructure",
-        title: "Restructure",
+        title: "Organize Folders",
+        summary: "Suggest a tidier folder layout, then move files",
         icon: "view-list-symbolic",
         area: Some(Area::Act),
         shortcut: Some(8),
@@ -140,6 +158,7 @@ pub const PAGES: [Page; 9] = [
     Page {
         id: "tools",
         title: "File Tools",
+        summary: "Convert, resize or reframe photos and videos",
         icon: "applications-utilities-symbolic",
         area: Some(Area::Act),
         shortcut: Some(9),
@@ -147,6 +166,7 @@ pub const PAGES: [Page; 9] = [
     Page {
         id: "settings",
         title: "Settings",
+        summary: "Appearance, AI models and storage",
         icon: "emblem-system-symbolic",
         area: None,
         shortcut: None,
@@ -172,9 +192,9 @@ impl Page {
 
     pub fn tooltip(&self) -> String {
         match self.shortcut {
-            Some(n) => format!("{} (Ctrl+{n})", self.title),
-            None if self.id == "settings" => format!("{} (Ctrl+,)", self.title),
-            None => self.title.to_owned(),
+            Some(n) => format!("{} (Ctrl+{n})", self.summary),
+            None if self.id == "settings" => format!("{} (Ctrl+,)", self.summary),
+            None => self.summary.to_owned(),
         }
     }
 
@@ -187,12 +207,17 @@ impl Page {
     }
 }
 
-/// Pages whose name matches `query`, in sidebar order (all ten when empty).
+/// Pages whose title, id or summary matches `query`, in sidebar order (all when empty).
 pub fn matching_pages(query: &str) -> Vec<&'static Page> {
     let q = query.trim().to_lowercase();
     PAGES
         .iter()
-        .filter(|page| q.is_empty() || page.title.to_lowercase().contains(&q))
+        .filter(|page| {
+            q.is_empty()
+                || page.title.to_lowercase().contains(&q)
+                || page.id.to_lowercase().contains(&q)
+                || page.summary.to_lowercase().contains(&q)
+        })
         .take(if q.is_empty() { PAGES.len() } else { 4 })
         .collect()
 }
@@ -286,7 +311,19 @@ mod tests {
         assert_eq!(page_for_shortcut(9).unwrap().id, "tools");
         assert!(page_for_shortcut(6).is_none());
         assert_eq!(page("cleanup").unwrap().search_hint(), "Act · Ctrl+7");
-        assert_eq!(page("settings").unwrap().tooltip(), "Settings (Ctrl+,)");
+        assert_eq!(
+            page("settings").unwrap().tooltip(),
+            "Appearance, AI models and storage (Ctrl+,)"
+        );
+        assert_eq!(page("deep-analyze").unwrap().crumb(), "Analyze / Describe Files");
+        assert_eq!(
+            page("cleanup").unwrap().tooltip(),
+            "Find extra copies and move them to Trash (Ctrl+7)"
+        );
+        assert_eq!(
+            Area::Act.tooltip(),
+            "Act: Duplicates, Organize Folders, File Tools (Ctrl+7–9)"
+        );
     }
 
     #[test]
@@ -307,11 +344,14 @@ mod tests {
     }
 
     #[test]
-    fn page_search_matches_names_case_insensitively() {
+    fn page_search_matches_titles_ids_and_summaries() {
         assert_eq!(matching_pages("").len(), PAGES.len());
-        let ids: Vec<_> = matching_pages("re").iter().map(|page| page.id).collect();
+        let ids: Vec<_> = matching_pages("organize").iter().map(|page| page.id).collect();
         assert_eq!(ids, ["restructure"]);
         assert_eq!(matching_pages("CHAT")[0].id, "chat");
+        assert_eq!(matching_pages("restructure")[0].id, "restructure");
+        assert_eq!(matching_pages("trash")[0].id, "cleanup");
+        assert_eq!(matching_pages("duplicates")[0].id, "cleanup");
     }
 
     #[test]

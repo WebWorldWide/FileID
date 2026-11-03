@@ -38,13 +38,14 @@ public sealed class ByteFormatTests
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
         try
         {
-            Assert.Equal("No verified duplicate groups", CleanupView.FormatHeadline(0, 0, 0));
-            Assert.Equal("No verified duplicate groups · 3 skipped", CleanupView.FormatHeadline(0, 0, 3));
+            Assert.Equal("No extra copies found", CleanupView.FormatHeadline(0, 0, 0));
+            Assert.Equal("No extra copies found · 3 skipped", CleanupView.FormatHeadline(0, 0, 3));
             Assert.Equal(
-                "1,204 verified duplicate groups · 1.23 GB to reclaim · 2 skipped",
+                "1,204 files with extra copies · 1.23 GB can be freed · 2 skipped",
                 CleanupView.FormatHeadline(1204, 1_234_567_890, 2));
-            Assert.Equal("Delete selected", CleanupView.FormatDeleteButton(0, 0));
-            Assert.Equal("Delete 3 selected · 43 KB", CleanupView.FormatDeleteButton(3, 43_000));
+            Assert.Equal("Move to Recycle Bin", CleanupView.FormatDeleteButton(0, 0));
+            Assert.Equal("Move 3 to Recycle Bin · 43 KB", CleanupView.FormatDeleteButton(3, 43_000));
+            Assert.Equal("Moved 3 files to the Recycle Bin · freed 43 KB", CleanupView.FormatTrashResult(3, 43_000));
         }
         finally
         {

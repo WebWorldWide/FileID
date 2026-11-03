@@ -160,9 +160,9 @@ public sealed partial class TitleBar : UserControl
     private void SyncFolder()
     {
         var vm = AppViewModel.Instance;
-        FolderNameText.Text = vm.HasFolder ? vm.FolderDisplay ?? vm.FolderPath ?? string.Empty : "No folder";
+        FolderNameText.Text = vm.HasFolder ? vm.FolderDisplay ?? vm.FolderPath ?? string.Empty : "Choose a folder";
         FolderNameText.Foreground = vm.HasFolder ? _text1 : _text3;
-        AutomationProperties.SetName(FolderButton, vm.HasFolder ? $"Switch folder, current {FolderNameText.Text}" : "Switch folder");
+        AutomationProperties.SetName(FolderButton, vm.HasFolder ? $"Folder {FolderNameText.Text}" : "Choose a folder");
     }
 
     private void SyncPageButtons()
@@ -205,7 +205,7 @@ public sealed partial class TitleBar : UserControl
         }
         else if (deepRunning)
         {
-            label = "Captions";
+            label = "Describing";
             color = _ai;
             bar = _aiBar;
             fraction = DeepFraction(deep);
@@ -269,7 +269,7 @@ public sealed partial class TitleBar : UserControl
             ? "DONE"
             : scanning
                 ? (paused ? "PAUSED " : string.Empty) + (fraction is { } f ? Percent(f) : "…")
-                : phase?.ToString().ToUpperInvariant() ?? string.Empty;
+                : PhaseLabel(phase);
         ScanRowState.Foreground = completed ? _delight : paused || !scanning ? _text3 : _gold;
         ScanRowBar.Foreground = completed ? _doneBar : paused || !scanning ? _pausedBar : _goldBar;
         SetBar(ScanRowBar, fraction);
@@ -284,7 +284,7 @@ public sealed partial class TitleBar : UserControl
             var fraction = DeepFraction(deep);
             DeepRow.Visibility = Visibility.Visible;
             DeepRowSub.Text = deep is not null
-                ? $"{deep.Processed:N0} of {deep.Total:N0} · {deep.ModelKind}"
+                ? $"{deep.Processed:N0} of {deep.Total:N0} files"
                 : engine.DeepAnalyzeStarting?.Message ?? "Starting";
             DeepRowState.Text = fraction is { } f ? Percent(f) : "STARTING";
             DeepRowState.Foreground = _ai;
@@ -298,7 +298,7 @@ public sealed partial class TitleBar : UserControl
         {
             DeepRow.Visibility = Visibility.Visible;
             DeepRowSub.Text = $"{done.Processed:N0} files";
-            DeepRowState.Text = done.Cancelled ? "CANCELLED" : "DONE";
+            DeepRowState.Text = done.Cancelled ? "STOPPED" : "DONE";
             DeepRowState.Foreground = done.Cancelled ? _text3 : _delight;
             DeepRowBar.Foreground = done.Cancelled ? _pausedBar : _doneBar;
             SetBar(DeepRowBar, 1);
@@ -308,6 +308,13 @@ public sealed partial class TitleBar : UserControl
 
         DeepRow.Visibility = Visibility.Collapsed;
     }
+
+    private static string PhaseLabel(ScanPhase? phase) => phase switch
+    {
+        ScanPhase.Cancelled => "STOPPED",
+        ScanPhase.Failed => "FAILED",
+        _ => phase?.ToString().ToUpperInvariant() ?? string.Empty,
+    };
 
     private static double? ScanFraction(ScanProgress? progress) =>
         progress is { Total: > 0UL } p ? Math.Clamp((double)p.Processed / p.Total, 0, 1) : null;
@@ -421,7 +428,13 @@ public sealed partial class TitleBar : UserControl
         foreach (var page in SidebarTab.All)
         {
             if (limit == 0) break;
-            if (query.Length > 0 && !page.Label.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
+            if (query.Length > 0
+                && !page.Label.Contains(query, StringComparison.OrdinalIgnoreCase)
+                && !page.Id.Contains(query, StringComparison.OrdinalIgnoreCase)
+                && !page.Summary.Contains(query, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
             var target = page;
             _suggestions.Add(new SearchItem(page.Label, PageHint(page), _text1,
                 () => AppViewModel.Instance.ActiveTab = target));

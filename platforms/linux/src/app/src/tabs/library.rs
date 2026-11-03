@@ -196,7 +196,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     }
 
     let search = gtk::SearchEntry::builder()
-        .placeholder_text("Search filenames, tags, text in images…")
+        .placeholder_text("Search by name, tag or text in files")
         .hexpand(true)
         .css_classes(["fileid-search"])
         .build();
@@ -412,8 +412,8 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
             Ok(Ok(data)) => data,
             Ok(Err(error)) => {
                 ctx.model.remove_all();
-                ctx.count_label.set_text("Library unavailable");
-                ctx.empty_page.set_title("Could not read library");
+                ctx.count_label.set_text("Library not ready");
+                ctx.empty_page.set_title("Couldn't open the library");
                 ctx.empty_page.set_description(Some(&error.to_string()));
                 ctx.content_stack.set_visible_child_name("empty");
                 return;
@@ -446,16 +446,16 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
                 ctx.empty_page.set_icon_name(Some("edit-find-symbolic"));
                 ctx.empty_page.set_title("No matches");
                 let description = if searched.is_empty() {
-                    "Nothing of this kind in the library yet — try another filter.".to_string()
+                    "Nothing matches this filter. Try another kind, or choose All to see every file.".to_string()
                 } else {
-                    format!("Nothing matches “{searched}” — try a different search or filter.")
+                    format!("Nothing matches “{searched}”. Try other words, or choose All to see every file.")
                 };
                 ctx.empty_page.set_description(Some(&description));
             } else {
                 ctx.empty_page.set_icon_name(Some("view-grid-symbolic"));
                 ctx.empty_page.set_title("No files yet");
                 ctx.empty_page.set_description(Some(
-                    "Choose a folder above and select Start scan. First install the two required scan models in Settings; downloads begin only when you press Install. Already indexed files can be searched here by name, tags, and text.",
+                    "Files appear here as the scan reads them. If nothing is happening, press Scan in the sidebar. Scanning needs the two models in Settings; nothing downloads until you ask.",
                 ));
             }
             ctx.content_stack.set_visible_child_name("empty");
@@ -632,7 +632,7 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
         return;
     };
 
-    // Filename — the Deep Analyze smart-name in gold when present (macOS parity).
+    // Filename — the suggested name in gold when present (macOS parity).
     name.remove_css_class("gold-accent");
     match row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
         Some(p) => {
@@ -1067,19 +1067,32 @@ fn build_meta(row: &FileRow) -> gtk::Box {
         meta.append(&meta_row("Created", &d));
     }
     if row.has_faces {
-        meta.append(&meta_row("Faces", "Detected"));
+        meta.append(&meta_row("Faces", "Found in this file"));
     }
     if row.has_text {
-        meta.append(&meta_row("Text", "Detected (OCR)"));
+        meta.append(&meta_row("Text", "Found in this file"));
     }
     if let Some(desc) = row.description.as_ref().filter(|s| !s.is_empty()) {
-        meta.append(&meta_row("Caption", desc));
+        meta.append(&meta_row("Description", desc));
+        if row.caption_inherited {
+            meta.append(&inherited_caption_note());
+        }
     }
     if let Some(p) = row.proposed_name.as_ref().filter(|s| !s.is_empty()) {
-        meta.append(&meta_row("Smart name", &format!("{}.{}", p, row.extension)));
+        meta.append(&meta_row("Suggested name", &format!("{}.{}", p, row.extension)));
     }
     super::library_pane::append_details(&meta, row.id);
     meta
+}
+
+pub(super) const INHERITED_CAPTION: &str = "Same as a similar photo";
+
+pub(super) fn inherited_caption_note() -> gtk::Label {
+    gtk::Label::builder()
+        .label(INHERITED_CAPTION)
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .build()
 }
 
 /// Load one row's image (or a kind icon) into the preview `Picture`, off-thread.

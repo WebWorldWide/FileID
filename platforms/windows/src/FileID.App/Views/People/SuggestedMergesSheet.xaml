@@ -32,7 +32,7 @@
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        TextWrapping="Wrap"
-                       Text="Pairs of clusters that look similar. Confirm a merge if they're the same person, or mark them different so we don't ask again." />
+                       Text="Pairs of cards that might be the same person. Combine them if they are, or mark them as different people so FileID doesn't ask again." />
             <StackPanel x:Name="BusyPanel"
                         Orientation="Horizontal"
                         Spacing="8"
@@ -106,10 +106,10 @@
                                     AutomationProperties.HelpText="Mark this pair as different people so it isn't suggested again."
                                     Click="OnDifferentClicked" />
                             <Button Grid.Column="3"
-                                    Content="Merge"
+                                    Content="Combine"
                                     Style="{StaticResource AccentButtonStyle}"
                                     IsEnabled="{x:Bind ActionsEnabled, Mode=OneWay}"
-                                    AutomationProperties.HelpText="Merge this pair of clusters into one person."
+                                    AutomationProperties.HelpText="Combine these two cards into one person."
                                     Click="OnMergeClicked" />
                         </Grid>
                     </DataTemplate>

@@ -195,10 +195,20 @@ impl<'a> Tiff<'a> {
     }
 
     fn collect(&self, out: &mut Vec<(usize, usize)>) {
+        const MAX_IFDS: usize = 64;
         let mut queue = vec![self.u32(4).unwrap_or(0) as usize];
         let mut seen = std::collections::HashSet::new();
+        // Pushes are bounded too: one crafted IFD can name a million children.
+        let push = |queue: &mut Vec<usize>, ifd: usize| {
+            if queue.len() < MAX_IFDS {
+                queue.push(ifd);
+            }
+        };
         while let Some(ifd) = queue.pop() {
-            if ifd == 0 || !seen.insert(ifd) || seen.len() > 64 {
+            if seen.len() >= MAX_IFDS {
+                break;
+            }
+            if ifd == 0 || !seen.insert(ifd) {
                 continue;
             }
             let Some(count) = self.u16(ifd) else { continue };
@@ -231,13 +241,13 @@ impl<'a> Tiff<'a> {
                     0x014A | 0x8769 => {
                         if n == 1 {
                             if let Some(v) = value {
-                                queue.push(v as usize);
+                                push(&mut queue, v as usize);
                             }
                         } else if kind == 4 || kind == 13 {
                             let at = self.u32(entry + 8).unwrap_or(0) as usize;
                             for k in 0..n.min(16) as usize {
-                                if let Some(v) = self.u32(at + k * 4) {
-                                    queue.push(v as usize);
+                                if let Some(v) = self.u32(at.saturating_add(k * 4)) {
+                                    push(&mut queue, v as usize);
                                 }
                             }
                         }
@@ -254,7 +264,7 @@ impl<'a> Tiff<'a> {
                 }
             }
             if let Some(next) = self.u32(ifd + 2 + count as usize * 12) {
-                queue.push(next as usize);
+                push(&mut queue, next as usize);
             }
         }
     }

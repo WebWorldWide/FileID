@@ -60,6 +60,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             FolderDisplayPanel.Visibility = Visibility.Visible;
             ActionsPanel.Visibility = Visibility.Visible;
             RescanButton.Visibility = Visibility.Visible;
+            PickButton.Content = "Choose another folder…";
 
             var path = vm.FolderPath ?? "";
             var leaf = vm.FolderDisplay ?? path;
@@ -78,6 +79,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             FolderDisplayPanel.Visibility = Visibility.Collapsed;
             ActionsPanel.Visibility = Visibility.Collapsed;
             RescanButton.Visibility = Visibility.Collapsed;
+            PickButton.Content = "Choose folder…";
         }
     }
 
@@ -100,7 +102,7 @@ public sealed partial class SidebarFolderHeader : UserControl
             var hwnd = (XamlRoot?.ContentIslandEnvironment?.AppWindowId is { Value: not 0 })
                 ? GetParentHwnd()
                 : GetParentHwnd();
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
 
             if (result.FailureReason is not null)
             {
@@ -113,8 +115,8 @@ public sealed partial class SidebarFolderHeader : UserControl
                 return;
             }
 
-            AppViewModel.Instance.FolderPath = result.Path;
             DebugLog.Info($"FolderPicker: chose {PathRedactor.Redact(result.Path)}");
+            await AppViewModel.Instance.ChooseFolderAsync(result.Path);
         }
         catch (Exception ex)
         {
@@ -178,9 +180,9 @@ public sealed partial class SidebarFolderHeader : UserControl
             var dialog = new ContentDialog
             {
                 XamlRoot = DialogRoot,
-                Title = "Wipe everything?",
-                Content = "This deletes everything FileID has learned — tags, face clusters, captions, smart names — and returns the app to a clean slate. Your actual files are never touched, and your downloaded AI models are kept.\n\nThis can't be undone.",
-                PrimaryButtonText = "Wipe",
+                Title = "Start over?",
+                Content = "Forgets everything FileID learned (tags, descriptions, people and search data) and returns to a clean slate. Your files are not changed, and downloaded AI models are kept.\n\nThis can't be undone.",
+                PrimaryButtonText = "Start over",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Close,
             };
@@ -268,8 +270,8 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DebugLog.Error("[WIPE] stage 2 timed out; refusing to delete a live engine's database.");
             await ShowAlertAsync(
-                "Wipe cancelled",
-                "FileID couldn't confirm that the engine stopped, so no library files were deleted. Restart the engine from Settings after it exits.");
+                "Start over stopped",
+                "FileID couldn't confirm its background helper stopped, so nothing was deleted. Restart it from Settings › Engine, then try again.");
             return;
         }
         DebugLog.Info("[WIPE] stage 2 complete");
@@ -355,13 +357,13 @@ public sealed partial class SidebarFolderHeader : UserControl
         {
             DebugLog.Info("[WIPE] complete — reset to clean state");
             await ShowAlertAsync(
-                "Library wiped",
-                "FileID is back to a clean slate. Your files and downloaded models are untouched — pick a folder whenever you want to start a fresh scan.");
+                "Starting over",
+                "FileID is back to a clean slate. Your files and downloaded models are not changed. Choose a folder to scan it again.");
         }
         else
         {
             await ShowAlertAsync(
-                "Wipe partially failed",
+                "Start over didn't finish",
                 $"Couldn't delete some database files: {failureDetail}\n\n" +
                 "The engine has been restarted and the folder cleared, but old library data may still be present. " +
                 "If a later scan surfaces old data, close FileID, delete " +

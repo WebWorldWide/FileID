@@ -65,10 +65,20 @@ fn prewarm_cancel_flag(model_kind: &str) -> Arc<AtomicBool> {
 /// dropped. Resets ONLY this kind; a different kind's pending cancel is untouched.
 pub fn reset_prewarm_cancel(model_kind: &str) {
     let map = PREWARM_CANCELS.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    map.lock()
+    let mut guard = map.lock();
+    prune_idle(&mut guard);
+    guard
         .entry(model_kind.to_string())
         .or_insert_with(|| Arc::new(AtomicBool::new(false)))
         .store(false, Ordering::Relaxed);
+}
+
+/// Each distinct modelKind leaves an entry; once there are many, drop the ones
+/// no download holds so a stream of unknown kinds can't grow the map forever.
+fn prune_idle(map: &mut std::collections::HashMap<String, Arc<AtomicBool>>) {
+    if map.len() >= 256 {
+        map.retain(|_, flag| Arc::strong_count(flag) > 1);
+    }
 }
 
 /// Signal cancellation for one model kind (create-or-set, so a cancel is never
@@ -80,6 +90,7 @@ pub fn cancel_prewarm(model_kind: Option<&str>) {
     let mut guard = map.lock();
     match model_kind {
         Some(kind) => {
+            prune_idle(&mut guard);
             guard
                 .entry(kind.to_string())
                 .or_insert_with(|| Arc::new(AtomicBool::new(false)))

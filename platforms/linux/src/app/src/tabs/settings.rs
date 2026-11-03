@@ -13,18 +13,18 @@ use fileid_engine::models::registry::{self, LookupResult, Model};
 const LOCAL_MODELS: [(&str, &str, &str); 3] = [
     (
         "mobileclip_s2",
-        "CLIP image encoder",
-        "Indexes image content for local search. The engine downloads its pinned ONNX bundle only when you select Install.",
+        "Search by description",
+        "Lets you search photos by what's in them, like \"sunset at the beach\". Model: CLIP image encoder, runs on this computer. Its pinned files download only when you press Download.",
     ),
     (
         "arcface",
-        "Face detection + recognition",
-        "YuNet and SFace models needed by the scan pipeline. Face browsing uses the local indexed library.",
+        "Faces",
+        "Recognizes the same person across your photos so People can group them. Models: YuNet and SFace (Apache-2.0), run on this computer.",
     ),
     (
         "qwen2_5_vl_7b",
-        "Qwen2.5-VL-7B · optional weights; needs a llama.cpp runtime",
-        "Approved Apache-2.0 visual weights. Install pinned GGUF + projector on request only. Deep Analyze and timeline analysis use them when a llama-server runtime is available; downloading weights alone does not provide one.",
+        "Descriptions and Chat · optional",
+        "Writes descriptions and suggested names on the Describe Files page, and finds moments in videos. Model: Qwen2.5-VL-7B (Apache-2.0). It also needs a llama.cpp runtime (llama-server); downloading the model alone does not provide one.",
     ),
 ];
 
@@ -57,46 +57,46 @@ impl ModelRow {
         let (status, action, can_install, show_progress, fraction, show_cancel) = match &*transfer {
             Transfer::Checking { after_download } => (
                 if *after_download {
-                    "Verifying SHA-256 and pinned revision…"
+                    "Checking the downloaded files (SHA-256)…"
                 } else {
-                    "Checking installed files…"
+                    "Checking downloaded files…"
                 }
                 .to_owned(),
-                "Install",
+                "Download",
                 false,
                 *after_download,
                 1.0,
                 false,
             ),
             Transfer::Missing => (
-                "Not installed".to_owned(),
-                "Install",
+                "Not downloaded".to_owned(),
+                "Download",
                 self.engine_ready.get(),
                 false,
                 0.0,
                 false,
             ),
             Transfer::Downloading { fraction, message } => {
-                (message.clone(), "Install", false, true, *fraction, true)
+                (message.clone(), "Download", false, true, *fraction, true)
             }
             Transfer::Cancelling => (
-                "Cancelling download…".to_owned(),
-                "Install",
+                "Stopping download…".to_owned(),
+                "Download",
                 false,
                 true,
                 self.progress.fraction(),
                 true,
             ),
             Transfer::Installed => (
-                "Installed · SHA-256 verified against pinned files".to_owned(),
-                "Verify again",
+                "Ready · files checked against the pinned SHA-256 sums".to_owned(),
+                "Check again",
                 true,
                 false,
                 1.0,
                 false,
             ),
             Transfer::Cancelled => (
-                "Download cancelled; partial files can be resumed.".to_owned(),
+                "Download stopped. Retry picks up where it left off.".to_owned(),
                 "Retry",
                 self.engine_ready.get(),
                 false,
@@ -119,10 +119,10 @@ impl ModelRow {
                 .progress
                 .set_text(Some(&format!("{:.0}%", fraction * 100.0))),
             Transfer::Downloading { .. } => self.progress.set_text(Some("Queued")),
-            Transfer::Cancelling => self.progress.set_text(Some("Cancelling")),
+            Transfer::Cancelling => self.progress.set_text(Some("Stopping")),
             Transfer::Checking {
                 after_download: true,
-            } => self.progress.set_text(Some("Verifying")),
+            } => self.progress.set_text(Some("Checking")),
             _ => self.progress.set_text(None),
         }
         self.progress.set_show_text(show_progress);
@@ -131,6 +131,10 @@ impl ModelRow {
         self.install.set_label(action);
         self.install.set_visible(!show_progress);
         self.install.set_sensitive(can_install);
+        self.install.set_tooltip_text(
+            (!can_install && !self.engine_ready.get())
+                .then_some("FileID is still getting ready. Try again in a moment."),
+        );
         self.cancel.set_visible(show_cancel);
         self.cancel
             .set_sensitive(!matches!(&*transfer, Transfer::Cancelling));
@@ -159,7 +163,7 @@ impl ModelRow {
             *row.transfer.borrow_mut() = if installed {
                 Transfer::Installed
             } else if after_download {
-                Transfer::Failed("Engine reported completion, but the pinned model files did not pass SHA-256 verification. Retry to repair the bundle.".to_owned())
+                Transfer::Failed("The download finished, but the files did not pass the SHA-256 check. Retry to repair them.".to_owned())
             } else {
                 Transfer::Missing
             };
@@ -184,7 +188,7 @@ impl ModelRow {
         let result = self
             .engine
             .upgrade()
-            .ok_or_else(|| "Engine is no longer available.".to_owned())
+            .ok_or_else(|| "FileID is still getting ready. Try again in a moment.".to_owned())
             .and_then(|engine| {
                 engine
                     .borrow_mut()
@@ -195,7 +199,7 @@ impl ModelRow {
         *self.transfer.borrow_mut() = match result {
             Ok(()) => Transfer::Downloading {
                 fraction: 0.0,
-                message: "Queued — waiting for engine…".to_owned(),
+                message: "Queued. Waiting for FileID to get ready…".to_owned(),
             },
             Err(err) => Transfer::Failed(format!("Could not start download: {err}")),
         };
@@ -209,7 +213,7 @@ impl ModelRow {
         let result = self
             .engine
             .upgrade()
-            .ok_or_else(|| "Engine is no longer available.".to_owned())
+            .ok_or_else(|| "FileID is still getting ready. Try again in a moment.".to_owned())
             .and_then(|engine| {
                 engine
                     .borrow_mut()
@@ -322,7 +326,7 @@ fn build_model_row(
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .build();
-    let install = gtk::Button::with_label("Install");
+    let install = gtk::Button::with_label("Download");
     install.add_css_class("suggested-action");
     actions.append(&install);
     let cancel = gtk::Button::with_label("Cancel");
@@ -372,19 +376,19 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         .build();
     root.append(
         &gtk::Label::builder()
-            .label("Local models and runtimes")
+            .label("AI models")
             .xalign(0.0)
             .css_classes(["title-3"])
             .build(),
     );
     root.append(&gtk::Label::builder()
-        .label("Library uses CLIP and face models. Deep Analyze and timeline analysis need a llama.cpp runtime (llama-server), which Linux packages do not bundle yet; point FILEID_LLAMA_SERVER at a local build to use them. Model-backed Chat remains unavailable. Nothing is downloaded unless you press Install. Installed means pinned SHA-256 verified weights, not a ready inference runtime.")
+        .label("Search and Faces work on their own. Describe Files and finding moments in videos also need a llama.cpp runtime (llama-server), which Linux packages do not include yet; point FILEID_LLAMA_SERVER at a local build to use them. Chat can't write answers with a model yet. Nothing downloads until you press Download. Ready means the files are downloaded and checked against pinned SHA-256 sums, not that a runtime is installed.")
         .xalign(0.0).wrap(true).css_classes(["dim-label"]).build());
     let connection = gtk::Label::builder()
         .label(if engine.borrow().is_ready() {
-            "Engine: ready"
+            "Ready"
         } else {
-            "Engine: starting…"
+            "Getting ready…"
         })
         .xalign(0.0)
         .css_classes(["dim-label"])
@@ -404,7 +408,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         while let Ok(event) = rx.recv().await {
             match &event {
                 EngineState::Ready => {
-                    connection.set_label("Engine: ready");
+                    connection.set_label("Ready");
                     for row in &rows { row.engine_ready.set(true); row.render(); }
                 }
                 EngineState::ModelDownloadProgress(progress) => {
@@ -416,18 +420,18 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     }
                 }
                 EngineState::Failed(message) => {
-                    connection.set_label(&format!("Engine unavailable: {message}"));
+                    connection.set_label(&format!("FileID's background helper stopped: {message}"));
                     for row in &rows {
                         row.engine_ready.set(false);
                         if matches!(*row.transfer.borrow(), Transfer::Downloading { .. } | Transfer::Cancelling) {
-                            row.on_error("engine_disconnected", "Engine disconnected during the download. Restart FileID and Retry.");
+                            row.on_error("engine_disconnected", "FileID's background helper stopped during the download. Quit and reopen FileID, then Retry.");
                         } else {
                             row.render();
                         }
                     }
                 }
                 EngineState::Exited => {
-                    connection.set_label("Engine exited. Restart FileID before installing models.");
+                    connection.set_label("FileID's background helper stopped. Quit and reopen FileID before downloading models.");
                     for row in &rows { row.engine_ready.set(false); row.render(); }
                 }
                 _ => {}

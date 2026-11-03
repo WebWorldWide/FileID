@@ -160,6 +160,7 @@ struct CatalogWorkbench: View {
         case "person": parts.append("Person")
         case "documentText": parts.append("Text in document")
         case "ocrText": parts.append("Text in image")
+        case "handwrittenText": parts.append("Handwritten text")
         default: parts.append(hit.kind.capitalized)
         }
         return parts.joined(separator: " · ")

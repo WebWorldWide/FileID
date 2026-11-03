@@ -6,7 +6,7 @@
 
     Usage:
         <theme:SettingToggleRow
-            Title="Tag kept files after Cleanup"
+            Title="Tag kept files after removing duplicates"
             Subtitle="Adds a 'kept' tag to the file you keep after a duplicate trash."
             IsOn="{x:Bind ViewModel.AutoTagKept, Mode=TwoWay}" />
 -->

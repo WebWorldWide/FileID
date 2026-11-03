@@ -1,4 +1,4 @@
-// File Tools (DESIGN_V3_PORT "File Tools"): 01 · Recipe (kind, file
+// File Tools (DESIGN_V3_PORT "File Tools"): 01 · Pick files (kind, file
 // checklist), 02 · Output (format, size, frame, folder) and a 380 px
 // 03 · Preview pane with the gold-framed preview, outputs and actions.
 
@@ -156,6 +156,22 @@ impl ToolsUi {
             .set_sensitive(LINUX_TOOL_UNDO_SAFETY_ACCEPTED && s.history.is_some() && !busy);
         self.preview
             .set_sensitive(s.supports(&recipe) && !busy && ready);
+        self.preview.set_tooltip_text(Some(if !s.supports(&recipe) {
+            "This kind of export isn't available on this computer"
+        } else if self.selected.borrow().is_empty() {
+            "Tick at least one file first"
+        } else if self.destination.borrow().is_none() {
+            "Choose a folder to save to first"
+        } else {
+            "Show the files this export will create, before writing anything"
+        }));
+        self.execute.set_tooltip_text(Some(if s.preview.is_none() {
+            "Press Preview first to check what will be created"
+        } else if s.preview_revision != s.revision {
+            "Something changed. Press Preview again first."
+        } else {
+            "Create the new files in the chosen folder (Return)"
+        }));
         let exporting = busy && self.running.borrow().is_some();
         self.undo.set_visible(!exporting);
         self.cancel.set_visible(exporting && recipe.kind == "video");
@@ -166,17 +182,23 @@ impl ToolsUi {
             .find(|c| c.id == recipe.kind)
             .map(|c| {
                 if c.available {
-                    c.detail.clone()
+                    plain_kind_detail(&recipe.kind).to_owned()
                 } else {
                     format!("Unavailable here. {}", c.detail)
                 }
             })
             .unwrap_or_else(|| "Checking what this computer can export…".into());
         self.capability.set_text(&detail);
+        self.capability.set_tooltip_text(
+            s.capabilities
+                .iter()
+                .find(|c| c.id == recipe.kind)
+                .map(|c| c.detail.as_str()),
+        );
         self.summary
             .set_text(&self.choice.borrow().summary(self.selected.borrow().len()));
         self.files_count.set_text(&format!(
-            "{} of {} selected",
+            "{} of {} chosen",
             self.selected.borrow().len(),
             self.rows.borrow().len()
         ));
@@ -214,7 +236,7 @@ impl ToolsUi {
         if action == "preview" {
             let ids = self.selected.borrow().clone();
             let Some(destination) = self.destination.borrow().clone() else {
-                self.status.set_label("Choose an output folder first.");
+                self.status.set_label("Choose a folder to save to first.");
                 return;
             };
             if ids.is_empty() || ids.len() > MAX_FILES {
@@ -248,10 +270,11 @@ impl ToolsUi {
             .send(CommandPayload::ToolRequest(ToolRequestPayload {
                 request: r,
             }));
-        if let Err(e) = sent {
+        if sent.is_err() {
             self.state.borrow_mut().requests.clear();
             self.running.replace(None);
-            self.status.set_label(&e.to_string());
+            self.status
+                .set_label("FileID is still getting ready. Try again in a moment.");
         } else if !matches!(action, "capabilities" | "history") {
             self.status.set_label("");
         }
@@ -477,13 +500,13 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let left = v3::vbox(16);
     left.add_css_class("v3-page-pad");
 
-    // ── 01 · Recipe ────────────────────────────────────────────────────────
-    let recipe_panel = v3::panel("01 · Recipe");
+    // ── 01 · Pick files ────────────────────────────────────────────────────────
+    let recipe_panel = v3::panel("01 · Pick files");
     let kind = v3::Segmented::new(&["Photo", "Video", "Chapters"], 0);
     recipe_panel.trailing.append(&kind.root);
     let search_row = v3::hbox(8);
     search_row.add_css_class("v3-panel-pad");
-    let query = v3::text_field("Search indexed files");
+    let query = v3::text_field("Search by name or what's in it");
     query.set_primary_icon_name(Some("system-search-symbolic"));
     search_row.append(&query);
     let find = v3::secondary("Find", true);
@@ -499,7 +522,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         .build();
     recipe_panel.body.append(&files_scroll);
     let recipe_footer = recipe_panel.show_footer();
-    let files_count = v3::meta("0 of 0 selected");
+    let files_count = v3::meta("0 of 0 chosen");
     files_count.add_css_class("numeric");
     files_count.set_hexpand(true);
     recipe_footer.append(&files_count);
@@ -585,7 +608,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     destination_label.set_hexpand(true);
     output_footer.append(&destination_label);
     let choose = v3::secondary("Choose…", false);
-    choose.set_tooltip_text(Some("Choose output folder"));
+    choose.set_tooltip_text(Some("Choose a folder to save to"));
     output_footer.append(&choose);
     left.append(&output_panel.root);
     let status = v3::wrapped("", &["v3-meta"]);
@@ -654,7 +677,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let last = v3::ghost("Show last export");
     history_row.append(&last);
     history_row.append(&v3::wrapped(
-        "Exports never change the originals.",
+        "Exports are new files; your originals stay as they are.",
         &["v3-meta"],
     ));
     actions.append(&history_row);
@@ -796,7 +819,7 @@ fn wire(
     let weak = Rc::downgrade(ui);
     choose.connect_clicked(move |button| {
         let dialog = gtk::FileDialog::builder()
-            .title("Choose output folder")
+            .title("Choose a folder to save to")
             .build();
         let window = button.root().and_downcast::<gtk::Window>();
         let weak = weak.clone();
@@ -891,7 +914,7 @@ fn wire(
                     u.state.borrow_mut().preview = None;
                     u.running.replace(None);
                     u.status.set_label(
-                        "Engine exited. Show the last export before retrying an interrupted one.",
+                        "FileID's background helper stopped. Show the last export before trying an interrupted one again.",
                     );
                     u.update();
                 }
@@ -952,6 +975,14 @@ fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
         u.render_outputs(&title, &r.outputs);
     }
     u.update();
+}
+
+fn plain_kind_detail(kind: &str) -> &'static str {
+    match kind {
+        "video" => "Makes a new MP4 at the size and shape you choose. Your original video stays as it is.",
+        "chapters" => "Saves a video's chapters as a file other apps can read.",
+        _ => "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is.",
+    }
 }
 
 #[cfg(test)]

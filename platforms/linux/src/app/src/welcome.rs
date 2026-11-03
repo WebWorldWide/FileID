@@ -1,7 +1,7 @@
 // Welcome sheet — the Linux port of the Windows/macOS first-launch onboarding
 // modal. Presents the five core on-device models with live install state, a
 // one-click "Install everything" that fans out `prewarmModel` for whatever is
-// missing, and the machine-sized Deep Analyze VLM recommendation.
+// missing, and the machine-sized description model recommendation.
 //
 // Shown when any core model is missing, or on the very first launch
 // (`welcomeSheetSeen`, same key as Windows). Dismissable at any time — the
@@ -19,14 +19,22 @@ use crate::engine_client::{EngineClient, EngineState};
 use fileid_engine::ipc::{CommandPayload, PrewarmModelPayload};
 use fileid_engine::models::registry::{self, LookupResult};
 
-/// The always-on scan stack, in install order. VLMs are opt-in via Deep
-/// Analyze and deliberately not part of the welcome install.
-const CORE_MODELS: &[(&str, &str)] = &[
-    ("mobileclip_s2", "Search photos by what's in them"),
-    ("clip_text", "Understands your typed searches"),
-    ("ram_plus", "Recognizes 4585 everyday tags"),
-    ("bge_text", "Reads documents for Restructure"),
-    ("arcface", "Finds and groups the people in photos"),
+/// The always-on scan stack, in install order. VLMs are opt-in via Describe
+/// Files and deliberately not part of the welcome install.
+const CORE_MODELS: &[(&str, &str, &str)] = &[
+    (
+        "mobileclip_s2",
+        "Search by description",
+        "Find photos by typing what's in them",
+    ),
+    (
+        "clip_text",
+        "Search by description · words",
+        "Understands what you type",
+    ),
+    ("ram_plus", "Photo tags", "Labels what's in each photo"),
+    ("bge_text", "Documents", "Understands what documents are about"),
+    ("arcface", "Faces", "Groups photos by person"),
 ];
 
 struct WelcomeRow {
@@ -49,8 +57,8 @@ fn model_info(kind: &str) -> Option<(String, u64, bool)> {
 fn missing_core_models() -> Vec<&'static str> {
     CORE_MODELS
         .iter()
-        .filter(|(kind, _)| matches!(model_info(kind), Some((_, _, false))))
-        .map(|(kind, _)| *kind)
+        .filter(|(kind, _, _)| matches!(model_info(kind), Some((_, _, false))))
+        .map(|(kind, _, _)| *kind)
         .collect()
 }
 
@@ -85,8 +93,8 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
     body.append(
         &gtk::Label::builder()
             .label(
-                "Your files never leave this machine. FileID's AI runs entirely on-device — \
-                 the only download is the models themselves, once, from huggingface.co.",
+                "FileID sorts your files with AI that runs on this computer. The models \
+                 download once from Hugging Face; after that, nothing leaves your computer.",
             )
             .xalign(0.0)
             .wrap(true)
@@ -94,6 +102,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
             .build(),
     );
 
+    body.append(&crate::v3::section("1 · Download the AI models"));
     let list = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(8)
@@ -101,7 +110,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
         .build();
     let mut rows: Vec<WelcomeRow> = Vec::new();
     let mut missing_bytes = 0u64;
-    for (kind, blurb) in CORE_MODELS {
+    for (kind, title, blurb) in CORE_MODELS {
         let Some((display, bytes, installed)) = model_info(kind) else {
             continue;
         };
@@ -110,7 +119,8 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
         }
 
         let name = gtk::Label::builder()
-            .label(&display)
+            .label(*title)
+            .tooltip_text(&display)
             .xalign(0.0)
             .css_classes(["heading"])
             .build();
@@ -129,9 +139,9 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
 
         let state = gtk::Label::builder()
             .label(if installed {
-                "✓ Installed".to_string()
+                "Ready".to_string()
             } else {
-                fmt_gb(bytes)
+                format!("~{}", fmt_gb(bytes))
             })
             .xalign(1.0)
             .valign(gtk::Align::Center)
@@ -162,15 +172,15 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
     }
     body.append(&list);
 
-    // Machine-sized Deep Analyze recommendation (display-only pointer; VLMs
-    // stay opt-in from the Deep Analyze tab, exactly like Windows).
+    // Machine-sized description model recommendation (display-only pointer;
+    // VLMs stay opt-in from the Describe Files page, exactly like Windows).
     let recommended = crate::tabs::deep_analyze::recommended_vlm_display();
     body.append(
         &gtk::Label::builder()
             .label(format!(
-                "Optional later: Deep Analyze writes full captions and smart filenames. \
-                 For this machine we recommend {recommended} — install it any time from the \
-                 Deep Analyze tab."
+                "Optional: Descriptions and Chat writes descriptions and suggested names, \
+                 and answers questions. For this computer we suggest {recommended}; download \
+                 it any time from the Describe Files page."
             ))
             .xalign(0.0)
             .wrap(true)
@@ -187,22 +197,25 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
     body.append(&status);
 
     let install_btn = gtk::Button::builder()
-        .label(format!("Install everything ({})", fmt_gb(missing_bytes)))
+        .label(format!("Download all · ~{}", fmt_gb(missing_bytes)))
         .visible(missing_bytes > 0)
         .css_classes(["gold-button"])
         .build();
     let later_btn = gtk::Button::builder()
-        .label(if missing_bytes > 0 {
-            "Not now"
-        } else {
-            "Start exploring"
-        })
+        .label(if missing_bytes > 0 { "Later" } else { "Continue" })
         .build();
+    let footer_note = crate::v3::meta(if missing_bytes > 0 {
+        "You can also download them later in Settings."
+    } else {
+        "Next: choose a folder to scan."
+    });
+    footer_note.set_hexpand(true);
+    footer_note.set_wrap(true);
     let buttons = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(10)
-        .halign(gtk::Align::End)
         .build();
+    buttons.append(&footer_note);
     buttons.append(&later_btn);
     buttons.append(&install_btn);
     body.append(&buttons);
@@ -249,14 +262,14 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
                 }
             }
             if sent == 0 {
-                status.set_text("Engine is still starting — try again in a moment.");
+                status.set_text("FileID is still getting ready. Try again in a moment.");
                 status.set_visible(true);
                 return;
             }
             btn.set_sensitive(false);
-            btn.set_label("Installing…");
+            btn.set_label("Downloading…");
             status.set_text(
-                "Downloading from huggingface.co. You can close this window — installs \
+                "Downloading from Hugging Face. You can close this window; downloads \
                  continue and Settings shows the same progress.",
             );
             status.set_visible(true);
@@ -271,7 +284,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
     }
 
     // Live progress: engine events drive the per-model rows; a bounded disk
-    // re-check flips rows to Installed even if a terminal event is missed.
+    // re-check flips rows to Ready even if a terminal event is missed.
     let by_kind: Rc<HashMap<&'static str, usize>> = Rc::new(
         rows.iter()
             .enumerate()
@@ -338,7 +351,7 @@ pub fn present(parent: &adw::ApplicationWindow, engine: Rc<RefCell<EngineClient>
 fn mark_row(row: &WelcomeRow, installed: bool) {
     if installed {
         row.bar.set_visible(false);
-        row.state.set_text("✓ Installed");
+        row.state.set_text("Ready");
         row.state.set_css_classes(&["gold-accent"]);
     }
 }

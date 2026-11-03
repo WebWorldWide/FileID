@@ -25,7 +25,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Spacing="4">
-                <TextBlock Text="Review duplicate groups. FileID verifies complete file bytes before trashing; trashed items stay recoverable."
+                <TextBlock Text="Each group is the same file saved more than once, checked byte by byte. FileID marks one copy KEEP; the other copies go to the Recycle Bin when you press Move to Recycle Bin. You can put files back from the Recycle Bin."
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                            TextWrapping="Wrap" />
@@ -39,6 +39,12 @@
                            AutomationProperties.HelpText="Duplicate cleanup summary"
                            FontSize="12"
                            Foreground="{ThemeResource GoldBrush}" />
+                <TextBlock x:Name="TrashResultText"
+                           Visibility="Collapsed"
+                           TextWrapping="Wrap"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           ToolTipService.ToolTip="To undo, open the Recycle Bin, right-click a file and choose Restore." />
             </StackPanel>
             <ScrollViewer Grid.Column="1"
                           HorizontalScrollMode="Auto"
@@ -47,27 +53,28 @@
                           VerticalScrollBarVisibility="Disabled">
                 <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                     <Button Click="OnResetKeepersClicked"
-                            AutomationProperties.Name="Select extra copies"
-                            AutomationProperties.HelpText="Keep the first copy in every group and select every other copy for deletion."
-                            ToolTipService.ToolTip="Keep the first copy in every group and select every other copy for deletion.">
+                            AutomationProperties.Name="Select all extra copies"
+                            AutomationProperties.HelpText="Choose every copy except the one marked KEEP in each group"
+                            ToolTipService.ToolTip="Choose every copy except the one marked KEEP in each group">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE762;" />
-                            <TextBlock Text="Select extra copies" TextWrapping="NoWrap" />
+                            <TextBlock Text="Select all extra copies" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                     <Button Click="OnTrashNonKeepersClicked"
+                            IsEnabled="{x:Bind DeleteButtonEnabled, Mode=OneWay}"
                             AutomationProperties.Name="{x:Bind DeleteButtonText, Mode=OneWay}"
-                            AutomationProperties.HelpText="Move the selected extra copies to the Recycle Bin."
-                            ToolTipService.ToolTip="Move the selected extra copies to the Recycle Bin. They stay recoverable from there.">
+                            AutomationProperties.HelpText="{x:Bind DeleteButtonTip, Mode=OneWay}"
+                            ToolTipService.ToolTip="{x:Bind DeleteButtonTip, Mode=OneWay}">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE74D;" />
                             <TextBlock Text="{x:Bind DeleteButtonText, Mode=OneWay}" TextWrapping="NoWrap" />
                         </StackPanel>
                     </Button>
                     <Button Click="OnRefreshClicked"
-                            AutomationProperties.Name="Refresh duplicates"
-                            AutomationProperties.HelpText="Re-scan the database for byte-identical duplicate files."
-                            ToolTipService.ToolTip="Re-scan the database for byte-identical duplicate files.">
+                            AutomationProperties.Name="Check again"
+                            AutomationProperties.HelpText="Look for extra copies again in the files FileID has scanned"
+                            ToolTipService.ToolTip="Look for extra copies again in the files FileID has scanned">
                         <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                             <FontIcon FontSize="13" Glyph="&#xE72C;" />
                             <TextBlock Text="Refresh" TextWrapping="NoWrap" />
@@ -93,26 +100,26 @@
                               Padding="16"
                               Tag="{x:Bind ContentHash}"
                               AutomationProperties.Name="{x:Bind Caption, Mode=OneWay}"
-                              AutomationProperties.HelpText="Duplicate group. Right-click for keeper and trash actions.">
+                              AutomationProperties.HelpText="Copies of the same file. Right-click to choose which copy to keep or to skip the group.">
                             <Grid.ContextFlyout>
                                 <MenuFlyout Opening="OnGroupFlyoutOpening">
-                                    <MenuFlyoutItem Text="Keep first"
+                                    <MenuFlyoutItem Text="Keep the first copy"
                                                     Click="OnGroupKeepFirst"
-                                                    ToolTipService.ToolTip="Mark only the first member as keeper.">
+                                                    ToolTipService.ToolTip="Mark the first copy KEEP">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE73E;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Keep shallowest path"
+                                    <MenuFlyoutItem Text="Keep the copy nearest the top"
                                                     Click="OnGroupKeepShallowest"
-                                                    ToolTipService.ToolTip="Mark the copy in the least-nested folder as keeper.">
+                                                    ToolTipService.ToolTip="Mark KEEP on the copy in the fewest nested folders">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE8AB;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Invert keeper"
+                                    <MenuFlyoutItem Text="Keep the next copy"
                                                     Click="OnGroupInvert"
-                                                    ToolTipService.ToolTip="Pick the next member as keeper.">
+                                                    ToolTipService.ToolTip="Move KEEP to the next copy">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE72C;" />
                                         </MenuFlyoutItem.Icon>
@@ -120,22 +127,22 @@
                                     <MenuFlyoutSeparator />
                                     <MenuFlyoutItem Text="Skip group"
                                                     Click="OnGroupSkip"
-                                                    ToolTipService.ToolTip="Exclude this group from 'Trash non-keepers'.">
+                                                    ToolTipService.ToolTip="Hide this group if these aren't really copies. Nothing is deleted.">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE894;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Unskip group"
+                                    <MenuFlyoutItem Text="Show group again"
                                                     Click="OnGroupUnskip"
-                                                    ToolTipService.ToolTip="Re-include this group in 'Trash non-keepers'.">
+                                                    ToolTipService.ToolTip="Include this group in Move to Recycle Bin again">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE73E;" />
                                         </MenuFlyoutItem.Icon>
                                     </MenuFlyoutItem>
                                     <MenuFlyoutSeparator />
-                                    <MenuFlyoutItem Text="Trash this group only"
+                                    <MenuFlyoutItem Text="Move this group's extra copies to Recycle Bin"
                                                     Click="OnGroupTrashNow"
-                                                    ToolTipService.ToolTip="Move every non-keeper member to the Recycle Bin.">
+                                                    ToolTipService.ToolTip="Move every copy in this group except KEEP to the Recycle Bin">
                                         <MenuFlyoutItem.Icon>
                                             <FontIcon Glyph="&#xE74D;" />
                                         </MenuFlyoutItem.Icon>
@@ -182,7 +189,8 @@
                                                                     HorizontalAlignment="Left"
                                                                     VerticalAlignment="Top"
                                                                     Visibility="{x:Bind IsKeeper, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
-                                                                <TextBlock Text="KEEPER"
+                                                                <TextBlock Text="KEEP"
+                                                                           ToolTipService.ToolTip="FileID suggests keeping this copy. The others are copies of it."
                                                                            FontFamily="{StaticResource BodyFontFamily}"
                                                                            FontSize="10"
                                                                            FontWeight="SemiBold"
@@ -206,7 +214,7 @@
                                                                  IsChecked="{x:Bind IsKeeper, Mode=TwoWay}"
                                                                  Content="Keep"
                                                                  AutomationProperties.Name="{x:Bind FileName}"
-                                                                 AutomationProperties.HelpText="Keep this copy; trash the other duplicates in the group."
+                                                                 AutomationProperties.HelpText="Keep this copy. The other copies in the group go to the Recycle Bin."
                                                                  HorizontalAlignment="Center" />
                                                 </StackPanel>
                                             </DataTemplate>
@@ -225,7 +233,7 @@
                     Spacing="12"
                     Visibility="{x:Bind FooterVisibility, Mode=OneWay}">
             <ProgressRing IsActive="{x:Bind ViewModel.IsLoading, Mode=OneWay}"
-                          AutomationProperties.Name="Scanning for duplicates"
+                          AutomationProperties.Name="Looking for extra copies"
                           Width="16" Height="16"/>
             <TextBlock Text="{x:Bind StatusText, Mode=OneWay}"
                        AutomationProperties.Name="{x:Bind StatusText, Mode=OneWay}"

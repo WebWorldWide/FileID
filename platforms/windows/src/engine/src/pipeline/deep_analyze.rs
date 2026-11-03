@@ -11,6 +11,7 @@
 use anyhow::Context;
 
 use super::deep_analyze_naming as naming;
+use super::text_reading;
 
 /// Per-file Deep Analyze outcome — whatever the engine writes back to
 /// the DB after a successful caption + smart-rename round-trip.
@@ -102,7 +103,7 @@ pub(crate) async fn analyze_file_scoped(
     }
     let weights_installed = naming::vlm_weights_installed(model_kind);
     if let Some(outcome) =
-        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, &cancel, scope).await?
+        analyze_metadata_named_file(&db, file_id, model_kind, mode, weights_installed, true, &cancel, scope).await?
     {
         return Ok(outcome);
     }
@@ -116,7 +117,7 @@ pub(crate) async fn analyze_file_scoped(
         Ok(r) => r,
         Err(e) => {
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel, scope).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, true, &cancel, scope).await?
             {
                 return Ok(outcome);
             }
@@ -171,9 +172,9 @@ pub(crate) async fn analyze_file_scoped(
             anyhow::bail!("cancelled");
         }
         let req = CaptionRequest {
-            gguf_path: gguf,
-            mmproj_path: mmproj,
-            image_path: rasterized,
+            gguf_path: gguf.clone(),
+            mmproj_path: mmproj.clone(),
+            image_path: rasterized.clone(),
             prompt: vlm::rename_prompt_with_faces(face_names),
             max_tokens: 30,
             greedy: true,
@@ -195,6 +196,20 @@ pub(crate) async fn analyze_file_scoped(
             proposed_name.as_deref(),
             &tags,
         )?;
+    }
+    if mode.requests_caption() && transcription_wanted(&db, file_id) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        let req = CaptionRequest {
+            gguf_path: gguf,
+            mmproj_path: mmproj,
+            image_path: rasterized,
+            prompt: text_reading::TRANSCRIPTION_PROMPT.to_string(),
+            max_tokens: TRANSCRIPTION_MAX_TOKENS,
+            greedy: true,
+        };
+        match vlm::caption(runner, &req, cancel.clone(), |_| {}).await {
+            Ok(result) => store_transcription_output(&db, file_id, &result.text),
+            Err(error) => tracing::warn!(?error, "[DEEP] transcription failed"),
+        }
     }
 
     // (temp frame removed by `_temp_guard` on drop — #24)
@@ -405,7 +420,7 @@ fn persist_vlm_results(
         tx.execute(
             "UPDATE files SET vlm_description=COALESCE(?2, vlm_description), \
                               vlm_proposed_name=COALESCE(?3, vlm_proposed_name), \
-                              vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4 WHERE id=?5",
+                              vlm_model=?1, vlm_full_model=?1, vlm_analyzed_at=?4, vlm_inherited_from=NULL WHERE id=?5",
             rusqlite::params![model_kind, description, proposed_name, now, file_id],
         )?;
     } else {
@@ -417,7 +432,7 @@ fn persist_vlm_results(
         if completed_with_model {
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
-                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name) \
+                                  vlm_proposed_name=COALESCE(?2, vlm_proposed_name), vlm_inherited_from=NULL \
                  WHERE id=?3",
                 rusqlite::params![description, proposed_name, file_id],
             )?;
@@ -425,7 +440,7 @@ fn persist_vlm_results(
             tx.execute(
                 "UPDATE files SET vlm_description=COALESCE(?1, vlm_description), \
                                   vlm_proposed_name=COALESCE(?2, vlm_proposed_name), \
-                                  vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL \
+                                  vlm_model=NULL, vlm_full_model=NULL, vlm_analyzed_at=NULL, vlm_inherited_from=NULL \
                  WHERE id=?3",
                 rusqlite::params![description, proposed_name, file_id],
             )?;
@@ -445,6 +460,34 @@ fn persist_vlm_results(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Copy a near-duplicate's persisted caption and VLM tags onto `file_id`, flagged
+/// with `vlm_inherited_from`, instead of running the model again (burst frames and
+/// RAW+JPEG pairs). `proposed_name` is the member's own sequence-suffixed name.
+pub(crate) fn inherit_vlm_results(
+    conn: &rusqlite::Connection,
+    file_id: i64,
+    from_id: i64,
+    model_kind: &str,
+    mode: AnalyzeMode,
+    proposed_name: Option<&str>,
+) -> anyhow::Result<AnalyzeOutcome> {
+    let (description, source_name): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT vlm_description, vlm_proposed_name FROM files WHERE id=?1",
+        rusqlite::params![from_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let tags: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT tag FROM tags WHERE file_id=?1 AND source='vlm' ORDER BY rowid")?;
+        let rows = stmt.query_map(rusqlite::params![from_id], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let description = if mode.requests_caption() { description } else { None };
+    let proposed_name = if mode.requests_rename() { proposed_name.map(str::to_owned).or(source_name) } else { None };
+    persist_vlm_results(conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+    conn.execute("UPDATE files SET vlm_inherited_from=?1 WHERE id=?2", rusqlite::params![from_id, file_id])?;
+    Ok(AnalyzeOutcome { file_id, description, proposed_name })
 }
 
 /// one-shot probe that the persistent llama-server actually accepts our
@@ -474,6 +517,24 @@ pub(crate) async fn vlm_server_payload_ok(
     let result = server.complete_with_cancel(&test_img, "Reply with: ok", 1, cancel.clone()).await;
     let _ = std::fs::remove_file(&test_img);
     result.map(|_| ())
+}
+
+const TRANSCRIPTION_MAX_TOKENS: u32 = 320;
+
+/// Text-bearing image (or image-only PDF) whose OCR is missing or mangled — see
+/// `text_reading::needs_transcription`. Mirrors macOS `DeepAnalyzeRunner.transcriptionCandidate`.
+fn transcription_wanted(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>, file_id: i64) -> bool {
+    text_reading::transcription_candidate(&db.lock(), file_id).unwrap_or(false)
+}
+
+/// The caption already persisted, so a failed transcription only logs; the next
+/// Deep Analyze run retries it.
+fn store_transcription_output(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>, file_id: i64, raw: &str) {
+    if let Some((text, handwritten)) = text_reading::parse_transcription(raw) {
+        if let Err(error) = text_reading::store_transcription(&db.lock(), file_id, &text, handwritten) {
+            tracing::warn!(?error, "[DEEP] transcription persist failed");
+        }
+    }
 }
 
 async fn complete_cancellable(
@@ -511,7 +572,9 @@ pub(crate) async fn analyze_file_via_server(
     {
         return Ok(outcome);
     }
-    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, &cancel, scope).await? {
+    // The caller holds a resident lease; transcribing would acquire another
+    // and wait on that same lock until the user cancels.
+    if let Some(outcome) = analyze_metadata_named_file(&db, file_id, model_kind, mode, true, false, &cancel, scope).await? {
         return Ok(outcome);
     }
     let (rasterized, temp_to_clean) = match rasterize_for_vlm(&db, file_id, scope).await {
@@ -519,7 +582,7 @@ pub(crate) async fn analyze_file_via_server(
         Err(e) => {
             // A 3D model we couldn't render falls back to its embedded names.
             if let Some(outcome) =
-                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, &cancel, scope).await?
+                analyze_metadata_named_file(&db, file_id, model_kind, mode, false, false, &cancel, scope).await?
             {
                 return Ok(outcome);
             }
@@ -591,6 +654,14 @@ pub(crate) async fn analyze_file_via_server(
         let conn = db.lock();
         proposed_name = naming::vetted_generated_proposed_name(&conn, file_id, proposed_name)?;
         persist_vlm_results(&conn, file_id, model_kind, mode, description.as_deref(), proposed_name.as_deref(), &tags)?;
+    }
+    if mode.requests_caption() && transcription_wanted(&db, file_id) && !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        match complete_cancellable(server, &rasterized, text_reading::TRANSCRIPTION_PROMPT, TRANSCRIPTION_MAX_TOKENS, &cancel)
+            .await
+        {
+            Ok(raw) => store_transcription_output(&db, file_id, &raw),
+            Err(error) => tracing::warn!(?error, "[DEEP] transcription failed"),
+        }
     }
     // (temp frame removed by `_temp_guard` on drop — #24)
 
@@ -667,7 +738,7 @@ async fn analyze_document_via_server(
         }
     };
     let Some(text) = naming::bounded_document_text(&text) else {
-        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, cancel, scope).await;
+        return analyze_metadata_named_file(db, file_id, model_kind, mode, false, false, cancel, scope).await;
     };
     let (_, fallback_name, deterministic_tags) = naming::document_metadata_from_text(&text);
     let extension = path.extension().and_then(|value| value.to_str()).unwrap_or_default();
@@ -717,6 +788,7 @@ async fn analyze_metadata_named_file(
     model_kind: &str,
     mode: AnalyzeMode,
     model_to_vlm: bool,
+    may_transcribe: bool,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     scope: Option<&crate::commands::deep_scope::DeepScope>,
 ) -> anyhow::Result<Option<AnalyzeOutcome>> {
@@ -737,7 +809,7 @@ async fn analyze_metadata_named_file(
         tokio::task::spawn_blocking(move || metadata_naming_blocking(&source, &task_kind))
             .await
             .context("metadata naming task failed")??;
-    if kind == "audio" && proposed_name.is_none() && mode.requests_rename() {
+    if may_transcribe && kind == "audio" && proposed_name.is_none() && mode.requests_rename() {
         if let Some((name, transcript)) = transcribe_audio_name(&path, cancel).await {
             proposed_name = Some(name);
             description = description.or(Some(transcript));

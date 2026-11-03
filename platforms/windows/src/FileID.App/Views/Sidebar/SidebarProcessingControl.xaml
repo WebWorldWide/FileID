@@ -4,12 +4,12 @@
     sidebar (macOS Views/Shell/PipelineBlock.swift). Title + percent, a 6 px
     capsule bar, the five-step indicator (SidebarPipelineProgress), one sub
     line, collapsible counters (found, tagged, memory, failures) and the scan
-    controls (Scan / Pause / Resume / Cancel / Rescan).
+    controls (Scan / Pause / Resume / Stop / Rescan).
 
     Three control states:
-      • Pre-scan: "Scan <folder>" gold button (Ctrl+R), or Pick a folder.
-      • In-flight: Pause / Resume + Cancel.
-      • Completed: Rescan.
+      • Pre-scan: "Scan <folder>" gold button (Ctrl+R), or Choose folder.
+      • In-flight: Pause / Resume + Stop.
+      • Completed: Rescan, or Scan again after a stop.
 
     All FontIcon glyphs use numeric XML escapes so the bytes survive
     encoding pipelines.
@@ -67,7 +67,7 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="CardTitleText"
-                       Text="Not scanned yet"
+                       Text="Ready to scan"
                        FontFamily="{StaticResource BodyFontFamily}"
                        FontSize="13"
                        FontWeight="SemiBold"
@@ -115,7 +115,7 @@
         </Grid>
 
         <TextBlock x:Name="IdleStatusText"
-                   Text="Pick a folder to start."
+                   Text="Or drag a folder onto this window."
                    FontFamily="{StaticResource BodyFontFamily}"
                    FontSize="12"
                    Foreground="{ThemeResource Text3Brush}"
@@ -146,7 +146,7 @@
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <TextBlock Text="Tagged" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{ThemeResource Text3Brush}" />
+                <TextBlock Text="Read" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" Foreground="{ThemeResource Text3Brush}" />
                 <TextBlock x:Name="StatTagged" Grid.Column="1" Text="—" FontFamily="{StaticResource BodyFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{ThemeResource Text1Brush}" />
                 <TextBlock x:Name="StatRate" Grid.Column="2" Text="" FontFamily="{StaticResource BodyFontFamily}" FontSize="11.5" Foreground="{ThemeResource Text3Brush}" />
             </Grid>
@@ -170,7 +170,22 @@
             </Grid>
         </StackPanel>
 
-        <!-- Pre-scan: Scan <folder> / Pick a folder / Restart Engine -->
+        <HyperlinkButton x:Name="NextStepButton"
+                         Click="OnNextStepClicked"
+                         Padding="0"
+                         MinHeight="22"
+                         HorizontalAlignment="Left"
+                         Visibility="Collapsed"
+                         ToolTipService.ToolTip="Optional: write a description and a clearer name for each file"
+                         AutomationProperties.Name="Next: describe files">
+            <TextBlock Text="Next: describe files &#x2192;"
+                       FontFamily="{StaticResource BodyFontFamily}"
+                       FontSize="12"
+                       FontWeight="Medium"
+                       Foreground="{StaticResource GoldBrush}" />
+        </HyperlinkButton>
+
+        <!-- Pre-scan: Scan <folder> / Choose folder / Restart Engine -->
         <StackPanel x:Name="IdlePanel" Spacing="6">
             <StackPanel Orientation="Horizontal" Spacing="6">
                 <Button x:Name="StartScanButton"
@@ -179,13 +194,13 @@
                         MinHeight="28"
                         Click="OnStartScanClicked"
                         AccessKey="R"
-                        ToolTipService.ToolTip="Start scan (Ctrl+R)"
-                        AutomationProperties.Name="Start Scan"
-                        AutomationProperties.HelpText="Start scanning the selected folder (Ctrl+R)">
+                        ToolTipService.ToolTip="Read every file in this folder (Ctrl+R). Nothing is moved or changed."
+                        AutomationProperties.Name="Scan"
+                        AutomationProperties.HelpText="Read every file in this folder (Ctrl+R). Nothing is moved or changed.">
                     <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                         <FontIcon FontSize="11" Glyph="&#xE768;" />
                         <TextBlock x:Name="StartScanText"
-                                   Text="Start Scan"
+                                   Text="Scan"
                                    MaxWidth="150"
                                    TextTrimming="CharacterEllipsis" />
                     </StackPanel>
@@ -196,11 +211,11 @@
                         MinHeight="30"
                         Visibility="Collapsed"
                         Click="OnPickFolderClicked"
-                        ToolTipService.ToolTip="Pick a folder (Ctrl+O)"
-                        AutomationProperties.Name="Pick a folder">
+                        ToolTipService.ToolTip="Choose a folder for FileID to scan (Ctrl+O)"
+                        AutomationProperties.Name="Choose folder">
                     <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                         <FontIcon FontSize="12" Glyph="&#xE8F4;" />
-                        <TextBlock Text="Pick a folder…" />
+                        <TextBlock Text="Choose folder…" />
                     </StackPanel>
                 </Button>
             </StackPanel>
@@ -234,7 +249,7 @@
             </HyperlinkButton>
         </StackPanel>
 
-        <!-- In-flight: Pause / Resume + Cancel -->
+        <!-- In-flight: Pause / Resume + Stop -->
         <StackPanel x:Name="ScanningPanel"
                     Orientation="Horizontal"
                     Spacing="6"
@@ -252,9 +267,10 @@
             <Button Style="{StaticResource ShellGhostButtonStyle}"
                     Height="28"
                     MinHeight="28"
-                    Content="Cancel"
+                    Content="Stop"
                     Click="OnCancelClicked"
-                    AutomationProperties.Name="Cancel scan" />
+                    ToolTipService.ToolTip="Stop scanning. Scan again later to pick up where it left off."
+                    AutomationProperties.Name="Stop scan" />
         </StackPanel>
 
         <!-- Completed: Rescan -->
@@ -267,11 +283,11 @@
                     Height="28"
                     MinHeight="28"
                     Click="OnStartScanClicked"
-                    ToolTipService.ToolTip="Rescan (Ctrl+R)"
+                    ToolTipService.ToolTip="Look for new or changed files. Files already read are skipped. (Ctrl+R)"
                     AutomationProperties.Name="Rescan">
                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                     <FontIcon FontSize="11" Glyph="&#xE72C;" />
-                    <TextBlock Text="Rescan" />
+                    <TextBlock x:Name="RescanText" Text="Rescan" />
                 </StackPanel>
             </Button>
         </StackPanel>

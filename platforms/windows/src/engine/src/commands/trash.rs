@@ -43,14 +43,7 @@ enum RestoreOutcome {
 }
 
 #[cfg(windows)]
-fn windows_io_error(error: windows::core::Error) -> std::io::Error {
-    let code = error.code().0 as u32;
-    if code & 0xffff_0000 == 0x8007_0000 {
-        std::io::Error::from_raw_os_error((code & 0xffff) as i32)
-    } else {
-        std::io::Error::other(error)
-    }
-}
+use crate::util::path_safety::windows_io_error;
 
 #[cfg(windows)]
 struct WindowsRestoreSentinel {

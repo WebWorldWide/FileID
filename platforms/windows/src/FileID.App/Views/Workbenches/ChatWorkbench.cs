@@ -10,14 +10,16 @@ namespace FileID.Views.Workbenches;
 
 internal sealed class ChatWorkbench : WorkbenchPanel
 {
-    private readonly TextBox _input = new() { PlaceholderText = "Ask about your local catalog (up to 2000 characters)", MaxLength = 2000, MinWidth = 400 };
-    private readonly CheckBox _useModel = new() { Content = "Model summaries are unavailable on this adapter", IsChecked = false, IsEnabled = ChatFrontendPolicy.SupportsModelGeneration };
+    private readonly TextBox _input = new() { PlaceholderText = "Ask about your files (up to 2,000 characters)", MaxLength = 2000, MinWidth = 400 };
+    private readonly CheckBox _useModel = new() { Content = "Written answers from local AI (not available on Windows yet)", IsChecked = false, IsEnabled = ChatFrontendPolicy.SupportsModelGeneration };
     private readonly ListView _messages = new() { Height = 260, SelectionMode = ListViewSelectionMode.None };
     private readonly ListView _citations = new() { Height = 180 };
     private readonly EvidencePanel _evidence;
     private readonly ChatRequestState _request = new();
     private readonly ChatPresentationRevision _presentation = new();
     private readonly Button _stop;
+    private readonly Button _send;
+    private readonly Button _clear;
     private CancellationTokenSource? _sendObservation;
     private string? _conversationID;
     private readonly TextBlock _sourcesCount = Meta("");
@@ -28,17 +30,18 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         var lookingIn = new StackPanel { Spacing = 6 };
         lookingIn.Children.Add(SectionLabel("Looking in"));
         var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        foreach (var source in new[] { "Names", "Tags", "Captions", "Chapters", "Text in files" }) chips.Children.Add(Chip(source));
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chips, "Looking in names, tags, captions, chapters and text in files");
+        foreach (var source in new[] { "Names", "Tags", "Descriptions", "Chapters", "Text in files" }) chips.Children.Add(Chip(source));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chips, "Looking in names, tags, descriptions, chapters and text in files");
         lookingIn.Children.Add(chips);
         var header = new Grid { ColumnSpacing = 8 };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var clear = Ghost(ActionButton("Clear", ClearAsync));
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(clear, "Delete conversation");
-        Grid.SetColumn(clear, 1);
+        _clear = Ghost(ActionButton("Clear", ClearAsync));
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_clear, "Delete conversation");
+        Grid.SetColumn(_clear, 1);
         header.Children.Add(lookingIn);
-        header.Children.Add(clear);
+        header.Children.Add(_clear);
+        SyncClear(hasContent: false);
         Inputs.Children.Add(header);
         _messages.Height = 420;
         _messages.MaxWidth = 760;
@@ -46,9 +49,13 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         Inputs.Children.Add(_messages);
         _input.AcceptsReturn = false;
         _input.MinHeight = 30;
-        Inputs.Children.Add(Row(_input, Primary(ActionButton("Send", SendAsync))));
+        _send = Primary(ActionButton("Send", SendAsync));
+        _input.TextChanged += (_, _) => SyncSend();
+        SyncSend();
+        Inputs.Children.Add(Row(_input, _send));
+        ToolTipService.SetToolTip(_useModel, "Written answers need a local AI chat model, which isn't available on Windows yet");
         Inputs.Children.Add(Row(_useModel, Ghost(ActionButton("Refresh history", HistoryAsync))));
-        Inputs.Children.Add(Meta("Local keyword retrieval only. Model summaries and stopping a running request are unavailable on this adapter. Answers are suggestions; sparse analysis can miss events. Wait for the current request's own completion before sending or deleting."));
+        Inputs.Children.Add(Meta("Answers list matching files only. Written answers from local AI and stopping a running answer aren't available on Windows yet. Check the sources, since FileID can miss things. Wait for an answer to finish before sending again or clearing."));
 
         var sources = new Grid { Padding = new Thickness(0) };
         sources.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -64,7 +71,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         _citations.Padding = new Thickness(6, 0, 6, 0);
         Grid.SetRow(_citations, 1);
         var evidenceHost = new StackPanel { Spacing = 6, Padding = new Thickness(14, 10, 14, 14) };
-        evidenceHost.Children.Add(Meta("Sampled frames are unverified, not identified events."));
+        evidenceHost.Children.Add(Meta("Video frames are not checked, so they may not show the exact moment."));
         evidenceHost.Children.Add(_evidence);
         Grid.SetRow(evidenceHost, 2);
         sources.Children.Add(sourcesHeader);
@@ -104,6 +111,19 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     {
         if (AppViewModel.Instance.TakeChatDraft() is { } draft) _input.Text = draft;
     }
+    private void SyncSend()
+    {
+        var text = _input.Text.Trim();
+        _send.IsEnabled = text.Length > 0 && _input.Text.Length <= 2000;
+        ToolTipService.SetToolTip(_send, text.Length == 0
+            ? "Type a question first"
+            : _input.Text.Length > 2000 ? "Shorten the question to 2,000 characters" : "Send");
+    }
+    private void SyncClear(bool hasContent)
+    {
+        _clear.IsEnabled = hasContent;
+        ToolTipService.SetToolTip(_clear, hasContent ? "Start a new conversation. This one is deleted." : "Nothing to clear yet");
+    }
     protected override void UpdateControls() => _stop.IsEnabled = ChatFrontendPolicy.SupportsCancellation && _request.CanStop && _request.Generation == Engine.SpawnGeneration;
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -122,7 +142,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
                     _presentation.Invalidate();
                     _request.Reset();
                     _sendObservation?.Cancel();
-                    Status.Text = "The engine changed. Refresh saved history before sending again.";
+                    Status.Text = "FileID restarted. Press Refresh history before sending again.";
                     UpdateControls();
                 }
                 else if (e.PropertyName == nameof(EngineClient.ChatSend))
@@ -156,19 +176,19 @@ internal sealed class ChatWorkbench : WorkbenchPanel
 
         UpdateControls();
     }
-    private string RequireConversation() => _conversationID ?? throw new InvalidOperationException("The saved conversation is not ready. Reopen Chat to retry loading it.");
+    private string RequireConversation() => _conversationID ?? throw new InvalidOperationException("The saved conversation isn't loaded yet. Reopen Chat to try again.");
     private Task HistoryAsync(CancellationToken ct) => RequestAsync("history", null, ct);
     private async Task ClearAsync(CancellationToken ct)
     {
-        if (_request.HasActiveSend || Engine.ChatSend.IsActive) throw new InvalidOperationException("Wait for the current request's own completion before deleting the conversation.");
-        if (!await ConfirmAsync("Delete this conversation?", "Permanently clear the saved local messages? Catalog files and evidence are unchanged.")) return;
+        if (_request.HasActiveSend || Engine.ChatSend.IsActive) throw new InvalidOperationException("Wait for the answer to finish before clearing.");
+        if (!await ConfirmAsync("Start a new conversation?", "This conversation is deleted. Your files are not changed.")) return;
         ct.ThrowIfCancellationRequested();
         await RequestAsync("clear", null, ct);
     }
     private Task SendAsync(CancellationToken ct)
     {
         var text = _input.Text.Trim();
-        if (string.IsNullOrWhiteSpace(text) || text.Length > 2000) throw new InvalidOperationException("Enter a query of 1–2000 characters.");
+        if (string.IsNullOrWhiteSpace(text) || text.Length > 2000) throw new InvalidOperationException("Type a question of up to 2,000 characters.");
         return RequestAsync("send", text, ct);
     }
     private async Task RequestAsync(string action, string? text, CancellationToken ct)
@@ -209,7 +229,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     }
     private async Task StopAsync(CancellationToken ct)
     {
-        if (!ChatFrontendPolicy.SupportsCancellation) throw new InvalidOperationException("Stopping a request is unavailable on this adapter. Wait for its own completion.");
+        if (!ChatFrontendPolicy.SupportsCancellation) throw new InvalidOperationException("Stopping an answer isn't available on Windows yet. Wait for it to finish.");
         SynchronizeSend();
         var generation = Engine.SpawnGeneration;
         var cancel = _request.Cancel(generation);
@@ -252,6 +272,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     {
         if (response.Status == "error") return;
         _messages.ItemsSource = response.Messages.Select(message => $"{(message.Role == "user" ? "You" : "FileID")}\n{message.Text}").ToArray();
+        SyncClear(response.Messages.Count > 0 || response.Hits.Count > 0);
         if (ChatFrontendPolicy.ShouldReplaceCitations(action, response))
         {
             _citations.ItemsSource = response.Hits.Select((hit, index) => new CitationItem(index + 1, hit)).ToArray();

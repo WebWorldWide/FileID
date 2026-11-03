@@ -650,7 +650,7 @@ public sealed class EngineLifecycleSafetyContractTests
         Assert.Contains("if (EngineClient.Instance.GpuDeviceRemoved)", deepAnalyze, StringComparison.Ordinal);
         Assert.Contains("reason = EngineClient.GpuRestartRequiredMessage;", deepAnalyze, StringComparison.Ordinal);
         Assert.Contains("SyncDeepAnalyzeControls();", deepAnalyze, StringComparison.Ordinal);
-        Assert.Contains("await ShowAlertAsync(\"Deep Analyze stopped\", ex.Message);", deepAnalyze, StringComparison.Ordinal);
+        Assert.Contains("await ShowAlertAsync(\"Describing stopped\", ex.Message);", deepAnalyze, StringComparison.Ordinal);
     }
 
     [Fact]

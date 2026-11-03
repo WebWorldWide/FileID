@@ -96,6 +96,17 @@ jobs:
           cargo fmt --manifest-path platforms/cli/Cargo.toml --all -- --check
           cargo fmt --manifest-path platforms/tui/Cargo.toml --all -- --check
 
+      # Windows engine clippy/tests run in windows-engine.yml (x64, ARM64
+      # native and ARM64 cross). These steps cover the macOS and Linux cfg
+      # paths, which a single-OS build can't lint.
+      - name: Clippy — engine
+        if: runner.os != 'Windows'
+        run: cargo clippy --locked --manifest-path platforms/windows/src/engine/Cargo.toml --all-targets -- -D warnings
+
+      - name: Tests — engine
+        if: runner.os != 'Windows'
+        run: cargo test --locked --manifest-path platforms/windows/src/engine/Cargo.toml
+
       - name: Clippy — CLI
         run: cargo clippy --locked --manifest-path platforms/cli/Cargo.toml --all-targets -- -D warnings
 

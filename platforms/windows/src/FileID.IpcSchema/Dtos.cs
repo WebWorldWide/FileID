@@ -253,7 +253,8 @@ public sealed record DeepAnalyzeFileDone(
     [property: JsonPropertyName("fileID")] long FileId,
     string Description,
     string? ProposedName,
-    string ModelKind);
+    string ModelKind,
+    [property: JsonPropertyName("inheritedFromFileID")] long? InheritedFromFileId = null);
 
 public sealed record DeepAnalyzeComplete(
     ulong Processed,

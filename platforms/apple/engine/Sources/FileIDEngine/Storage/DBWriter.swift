@@ -67,6 +67,9 @@ public struct TaggedFile: Sendable {
     public var clipMs: Double = 0
     public var ramMs: Double = 0
     public var ocrMs: Double = 0
+    public var ocrCarefulMs: Double = 0
+    /// The OCR text came from Vision's accurate tier reading handwriting.
+    public var ocrHandwritten = false
 
     // CLIP image embedding (raw float32 little-endian bytes). nil for
     // non-images, files where the model isn't loaded, or inference failures.
@@ -377,6 +380,7 @@ public actor DBWriter {
         let clipTimes = batchFiles.map(\.clipMs).filter { $0 > 0 }.sorted()
         let ramTimes = batchFiles.map(\.ramMs).filter { $0 > 0 }.sorted()
         let ocrTimes = batchFiles.map(\.ocrMs).filter { $0 > 0 }.sorted()
+        let carefulOcrTimes = batchFiles.map(\.ocrCarefulMs).filter { $0 > 0 }.sorted()
         // Worker utilization: what fraction of the 14-worker × wall time was
         // actually spent doing per-file work. <50% = workers idle (we have
         // headroom for more parallelism); >80% = ANE/IO bound.
@@ -416,6 +420,10 @@ public actor DBWriter {
                 "ramP95Ms":      AnyCodable(percentile(ramTimes, 0.95)),
                 "ocrP50Ms":      AnyCodable(percentile(ocrTimes, 0.50)),
                 "ocrP95Ms":      AnyCodable(percentile(ocrTimes, 0.95)),
+                "ocrRuns":       AnyCodable(ocrTimes.count),
+                "ocrAccurateRuns": AnyCodable(carefulOcrTimes.count),
+                "ocrAccurateP50Ms": AnyCodable(percentile(carefulOcrTimes, 0.50)),
+                "ocrAccurateP95Ms": AnyCodable(percentile(carefulOcrTimes, 0.95)),
                 "imagesInBatch": AnyCodable(visionTimes.count)
             ]
         )
@@ -719,12 +727,15 @@ public actor DBWriter {
         // now-empty text (covering a changed file that no longer yields OCR).
         // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs).
         if file.ocrStageRan {
-            try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ?")
+            // A Deep Analyze transcription (source 'vlm') outlives rescans of an
+            // unchanged file; the v25 trigger drops it when the file changes.
+            try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ? AND source = 'ocr'")
                 .execute(arguments: [fileID])
             if let text = file.ocrText, !text.isEmpty {
                 try db.cachedStatement(sql: """
-                    INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
-                    """).execute(arguments: [fileID, text])
+                    INSERT INTO ocr_text (file_id, text, handwritten)
+                    SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?)
+                    """).execute(arguments: [fileID, text, file.ocrHandwritten ? 1 : 0, fileID])
             }
         }
 

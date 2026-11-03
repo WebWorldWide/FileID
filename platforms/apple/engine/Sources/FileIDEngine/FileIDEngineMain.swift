@@ -35,6 +35,9 @@ struct FileIDEngineMain {
         if CommandLine.arguments.dropFirst().first == "--sample-video-sequence" {
             exit(await VideoFrameWorker.runSequence(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
+        if CommandLine.arguments.dropFirst().first == "--sample-video-pool" {
+            exit(await VideoFramePool.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         if CommandLine.arguments.dropFirst().first == "--scan-video-signals" {
             exit(await VideoFrameWorker.runSignals(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
@@ -128,6 +131,7 @@ struct FileIDEngineMain {
         JSONLog.shared.info(ev: "engine_ready",
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),
                                     "workers": AnyCodable(Hardware.workerCap)])
+        AccurateOCRWarmup.shared.start()
 
         // Capability check: Deep Analyze needs mlx.metallib next to the
         // engine binary (run.sh copies it in from .build/cache). Without

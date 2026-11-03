@@ -192,10 +192,32 @@ public sealed partial class WelcomeSheet : UserControl
     {
         ModelInstallStatus.Downloading => "Cancel",
         ModelInstallStatus.Failed => "Retry",
-        _ => "Install",
+        _ => "Download",
     };
 
-    internal string SkipLabel(bool allInstalled) => allInstalled ? "Done" : "Skip for now";
+    internal string SkipLabel(bool allInstalled) => allInstalled ? "Continue" : "Later";
+
+    internal string FooterHint(bool allInstalled) =>
+        allInstalled ? "Next: choose a folder to scan." : "You can also download them later in Settings.";
+
+    internal string InstallAllLabel(
+        bool allInstalled,
+        bool isBusy,
+        ModelInstallStatus clip,
+        ModelInstallStatus ramPlus,
+        ModelInstallStatus faces,
+        ModelInstallStatus vlm,
+        ulong vlmBytes)
+    {
+        if (allInstalled) return "All downloaded";
+        if (isBusy) return "Downloading…";
+        ulong bytes = 0;
+        if (clip != ModelInstallStatus.Installed) bytes += Svc.Clip.ApproxBytes;
+        if (ramPlus != ModelInstallStatus.Installed) bytes += Svc.RamPlus.ApproxBytes;
+        if (faces != ModelInstallStatus.Installed) bytes += Svc.Arcface.ApproxBytes;
+        if (vlm != ModelInstallStatus.Installed) bytes += vlmBytes;
+        return bytes > 0 ? $"Download all · ~{Services.ByteFormat.File(bytes)}" : "Download all";
+    }
 
     internal bool InstallAllEnabled(bool allInstalled, bool isBusy) => !allInstalled && !isBusy;
 
@@ -257,8 +279,8 @@ public sealed partial class WelcomeSheet : UserControl
     /// naming a recommended model that might not be the one on disk.</summary>
     internal string VlmTitle(string displayLabel, ModelInstallStatus status) =>
         status == ModelInstallStatus.Installed
-            ? "Deep Analyze (vision model installed)"
-            : $"Deep Analyze ({displayLabel})";
+            ? "Description model downloaded"
+            : displayLabel;
 
     internal string VlmInstallSize(ulong approxBytes, ModelInstallStatus status) =>
         status == ModelInstallStatus.Installed ? string.Empty : VlmSize(approxBytes);
@@ -420,7 +442,7 @@ public sealed partial class WelcomeSheet : UserControl
 
     private void OnInstallAllClicked(object sender, RoutedEventArgs e)
     {
-        DebugLog.Info("[INSTALL] 'Install all' button clicked.");
+        DebugLog.Info("[INSTALL] 'Download all' button clicked.");
         _ = SafeRunAsync(() => Svc.InstallAllAsync(), "Install all");
     }
 
