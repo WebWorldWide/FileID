@@ -84,7 +84,7 @@ public sealed partial class SidebarTabList : UserControl
             var area = SidebarTab.Areas[i];
             var pages = SidebarTab.InArea(area);
             var first = pages.Count > 0 ? pages[0].ShortcutNumber : 0;
-            var last = pages.Count > 0 ? pages[^1].ShortcutNumber : 0;
+            var last = pages.Count > 0 ? pages.Max(page => page.ShortcutNumber) : 0;
             var label = new TextBlock
             {
                 Text = area,

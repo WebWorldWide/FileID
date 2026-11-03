@@ -17,23 +17,30 @@ internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
     public static SidebarTab Chat => new("chat", "Chat", "\uE8F2");
     public static SidebarTab Models => new("models", "Models", "\uE950");
     public static SidebarTab Tools => new("tools", "File Tools", "\uE90F");
+    public static SidebarTab Takes => new("takes", "Best Takes", "\uE734"); // FavoriteStar
 
     public static IReadOnlyList<string> Areas { get; } = new[] { "Browse", "Analyze", "Act" };
 
     public static IReadOnlyList<SidebarTab> Order { get; } = new[]
     {
-        Library, People, Moments, DeepAnalyze, Chat, Models, Cleanup, Restructure, Tools,
+        Library, People, Moments, DeepAnalyze, Chat, Takes, Models, Cleanup, Restructure, Tools,
+    };
+
+    /// <summary>The pages Ctrl+1..9 reach, numbered like macOS Cmd+1..9. Models has no number.</summary>
+    public static IReadOnlyList<SidebarTab> ShortcutOrder { get; } = new[]
+    {
+        Library, People, Moments, DeepAnalyze, Chat, Takes, Cleanup, Restructure, Tools,
     };
 
     public static IReadOnlyList<SidebarTab> All { get; } = new[]
     {
-        Library, People, Moments, DeepAnalyze, Chat, Models, Cleanup, Restructure, Tools, Settings,
+        Library, People, Moments, DeepAnalyze, Chat, Takes, Models, Cleanup, Restructure, Tools, Settings,
     };
 
     public string? Area => Id switch
     {
         "library" or "people" or "moments" => "Browse",
-        "deepanalyze" or "chat" or "models" => "Analyze",
+        "deepanalyze" or "chat" or "takes" or "models" => "Analyze",
         "cleanup" or "restructure" or "tools" => "Act",
         _ => null,
     };
@@ -45,6 +52,7 @@ internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
         "moments" => "Search inside videos and documents",
         "deepanalyze" => "Write a description and a better file name for each file",
         "chat" => "Ask questions about your files",
+        "takes" => "Compare several tries of the same shot and pick the best",
         "models" => "Download and manage the local AI models",
         "cleanup" => "Find extra copies and move them to Trash",
         "restructure" => "Suggest a tidier folder layout, then move files",
@@ -59,9 +67,9 @@ internal sealed record SidebarTab(string Id, string Label, string IconGlyph)
     {
         get
         {
-            for (int i = 0; i < Order.Count; i++)
+            for (int i = 0; i < ShortcutOrder.Count; i++)
             {
-                if (Order[i].Id == Id) return i + 1;
+                if (ShortcutOrder[i].Id == Id) return i + 1;
             }
             return 0;
         }

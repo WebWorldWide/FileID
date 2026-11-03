@@ -147,7 +147,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/linux/src/app/src/engine_client.rs": "2b54662432238cacc20f198f97caabce056682818f6076ea4729a692f7c1a544",
   "platforms/linux/src/app/src/tabs/settings.rs": "6dc00a62f4e9e59fc481b3cc378b134f4f04f4c7949c1af6a60580e315b22e24",
   "platforms/windows/src/FileID.App/App.xaml.cs": "fec87e4fc50ba035defeb6ff7517859cd3f162e3a1dd7728696637abb487b4c5",
-  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "844fa4b744f7612bebe17d5b55bca4d472d6210e8bdc1eedc7d0eede53ec19a5",
+  "platforms/windows/src/FileID.App/MainWindow.xaml.cs": "771e0a1e5a9c776faf8d5237b067c8bc4a8f1ee2b46f1a0db412bd741af2d01e",
   "platforms/windows/src/FileID.App/Program.cs": "e013f7f02ad596093072b50200555b1c63ce89f6e41dddd28a2f57e01dc28e47",
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "b23698d76e9f5bf37117477b9d541fb8577e54c1e1bb59a709225064ce78c7c0",
   "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "48373698174ed4c43575b05e85a563fd7485207819d9737c4fed9f92e0b2dd44",
