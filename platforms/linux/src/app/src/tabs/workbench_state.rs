@@ -91,6 +91,8 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         query_vector: None,
         embedding_model: None,
         limit: Some(100),
+        captured_from: None,
+        captured_to: None,
         result_scope: None,
         event: None,
         event_id: None,

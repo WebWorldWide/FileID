@@ -160,6 +160,41 @@ impl CatalogIndex {
         Ok(())
     }
     pub fn search(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
+        if request.captured_from.is_none() && request.captured_to.is_none() {
+            return self.search_unfiltered(request);
+        }
+        let from = request.captured_from.unwrap_or(0.0);
+        let to = request.captured_to.unwrap_or(f64::MAX);
+        if !from.is_finite() || from < 0.0 || to < from || to.is_nan() {
+            bail!("Invalid catalog search")
+        }
+        let limit = request.limit.unwrap_or(100);
+        if !(1..=100).contains(&limit) {
+            bail!("Invalid catalog search")
+        }
+        let mut wide = request.clone();
+        wide.limit = Some(100);
+        let mut response = self.search_unfiltered(&wide)?;
+        if response.hits.is_empty() {
+            return Ok(response);
+        }
+        let conn = db::open_read(&self.database)?;
+        let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
+        let mut inside = std::collections::HashSet::new();
+        for hit in &response.hits {
+            if inside.contains(&hit.file_id) {
+                continue;
+            }
+            if statement.exists(rusqlite::params![hit.file_id, from, to])? {
+                inside.insert(hit.file_id);
+            }
+        }
+        response.hits.retain(|hit| inside.contains(&hit.file_id));
+        response.hits.truncate(limit);
+        Ok(response)
+    }
+
+    fn search_unfiltered(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
         let (mode, query, limit, files_only) = crate::commands::catalog_search::validate(request)?;
         let retrieval_lease = if mode == "semantic" {
             None

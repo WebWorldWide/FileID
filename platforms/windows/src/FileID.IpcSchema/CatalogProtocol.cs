@@ -134,7 +134,9 @@ public sealed record CatalogRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogEvent? Event = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EventID = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeFeedback? TakeFeedback = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeDecision? TakeDecision = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeDecision? TakeDecision = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedFrom = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedTo = null);
 
 public sealed record CatalogResponse(
     string RequestID,

@@ -1477,6 +1477,8 @@
         "queryVector": { "type": "array", "items": { "type": "number" }, "minItems": 512, "maxItems": 512 },
         "embeddingModel": { "type": "string", "maxLength": 200 },
         "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "capturedFrom": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time (created_at, else modified_at) is at or after this Unix time in seconds. Applied to the top 100 candidates." },
+        "capturedTo": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time is at or before this Unix time in seconds. Must be >= capturedFrom." },
         "requestID": {
           "type": "string"
         },

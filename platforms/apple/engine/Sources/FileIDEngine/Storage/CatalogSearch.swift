@@ -7,6 +7,25 @@ enum CatalogSearch {
     enum RequestError: Error { case invalid }
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+        guard request.capturedFrom != nil || request.capturedTo != nil else { return try await run(request, database: database) }
+        let from = request.capturedFrom ?? 0
+        let to = request.capturedTo ?? Double.greatestFiniteMagnitude
+        guard from.isFinite, from >= 0, to >= from, request.capturedTo.map({ $0.isFinite }) ?? true else { throw RequestError.invalid }
+        let limit = request.limit ?? 100
+        guard (1...100).contains(limit) else { throw RequestError.invalid }
+        var wide = request
+        wide.limit = 100
+        var response = try await run(wide, database: database)
+        guard !response.hits.isEmpty else { return response }
+        let ids = String(decoding: try JSONEncoder().encode(Set(response.hits.map(\.fileID)).sorted()), as: UTF8.self)
+        let inside = try await database.pool.read { db in
+            Set(try Int64.fetchAll(db, sql: "SELECT id FROM files WHERE id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?", arguments: [ids, from, to]))
+        }
+        response.hits = Array(response.hits.filter { inside.contains($0.fileID) }.prefix(limit))
+        return response
+    }
+
+    private static func run(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
         let mode = request.searchMode ?? "keyword"
         let limit = request.limit ?? 100
         let scope = request.resultScope ?? "all"

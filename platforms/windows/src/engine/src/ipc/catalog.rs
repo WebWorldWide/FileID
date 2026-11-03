@@ -248,6 +248,10 @@ pub struct CatalogRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_from: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_to: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<CatalogEvent>,
     #[serde(rename = "eventID", default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
