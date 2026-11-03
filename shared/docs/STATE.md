@@ -6,7 +6,9 @@ All ten `agent/*` branches and `integrate/owner-review` were merged with `main` 
 
 New: Mac orphan sweep is skipped when the scan root is missing, empty or an unmounted `/Volumes` mount point (`ScanRootGuard`); csv/tsv/log/markdown/text/json/yaml/yml/toml/xml are indexed as documents on both engines; the Mac size cap no longer drops large video/audio; Chat sends the last four turns to the model on both engines.
 
-Verified: Rust engine 1072 tests; Swift suites 163 + 41 + 460 pass. Not verified: .NET build, Windows/Linux CI, on-device behavior. The runtime egress gate still lists changed reviewed digests (EngineClient.swift, RamPlusService.swift, DeepAnalyze.swift, linux engine_client.rs, DocText.swift, doc_extract.rs); none of the diffs adds a network call, but the digests need an owner-approved refresh.
+Later the same day: catalog v29 `library_roots` (scans register and stamp their root on both engines); `capturedFrom`/`capturedTo` search window (schema, Swift, Rust, C#, Linux request literal); Rust chat retrieval on a read-only connection; a queued chat summary no longer blocks Describe on macOS; clearer Chat wait/loading messages; macOS stores up to 32k characters of document text (BGE input unchanged); html/htm indexed on both engines; egress digests refreshed with the owner's go-ahead.
+
+Verified: Rust engine 1076 tests; Swift suites 163 + 41 + 463 pass. Not verified: .NET build, Windows/Linux CI, on-device behavior. The runtime egress gate still lists changed reviewed digests (EngineClient.swift, RamPlusService.swift, DeepAnalyze.swift, linux engine_client.rs, DocText.swift, doc_extract.rs); none of the diffs adds a network call, but the digests need an owner-approved refresh.
 
 ## 2026-10-21 — Chat answers at 100k files and controls FileID (IPC v1.17, catalog v27)
 

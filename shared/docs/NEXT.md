@@ -4,7 +4,10 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## Backlog plan (2026-11-03, from four read-only gap analyses)
 
-Done: Mac orphan-sweep mount guard; text-data indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines).
+Done: Mac orphan-sweep mount guard; text-data and html indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines); catalog v29 `library_roots` registry fed by scans; `capturedFrom`/`capturedTo` search window (engines + schema, no UI yet); Rust chat retrieval off the writer lock; chat summary no longer blocks Describe on macOS; Mac document text cap 32k.
+
+Open and needs the Windows GPU PC (blind edit refused): the Rust Describe batch holds the resident-model lease for the whole run, so a chat summary waits unbounded (`commands/deep_analyze.rs` ~677, `models/resident_service.rs`). Add a waiter count and release/reacquire the lease between files.
+Open UI wiring: date pickers in Search & Moments for the capture window; Locations panel, "All locations" scope and OFFLINE badge on top of `library_roots`.
 
 Safety and quick wins:
 - [ ] Chat gets its own job category so a queued summary no longer blocks Describe (`deep_analyze_already_running`); schema first (`JobCategory`, ipc.schema.json:1174), then Swift, Rust, C# DTOs.
