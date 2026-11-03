@@ -101,6 +101,7 @@ impl TitleBar {
             .tooltip_text("Toggle sidebar (F9)")
             .valign(gtk::Align::Center)
             .build();
+        toggle.update_property(&[gtk::accessible::Property::Label("Toggle sidebar")]);
         let act_toggle = act.clone();
         toggle.connect_clicked(move |_| act_toggle(Action::ToggleSidebar));
         header.pack_start(&toggle);
