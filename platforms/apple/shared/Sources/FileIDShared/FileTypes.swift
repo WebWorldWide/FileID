@@ -11,17 +11,20 @@ public enum FileTypes {
     // Conservative starting set; expand in M3 as we test more formats.
     public static let images: Set<String> = [
         "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "webp", "gif", "bmp",
-        "raw", "cr2", "nef", "arw", "dng", "orf", "rw2", "raf"
+        "raw", "cr2", "nef", "arw", "dng", "orf", "rw2", "raf",
+        "avif", "cr3", "srw", "pef", "3fr", "erf", "kdc", "mef", "mos", "mrw", "rwl", "srf", "x3f"
     ]
     public static let videos: Set<String> = [
-        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "mts", "m2ts", "3gp"
+        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "mts", "m2ts", "3gp",
+        "3g2", "mxf", "ogv", "vob", "f4v", "asf", "divx"
     ]
     public static let pdfs: Set<String> = ["pdf"]
     public static let documents: Set<String> = [
         "pdf", "doc", "docx", "odt", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "pages", "numbers", "key"
     ]
     public static let audio: Set<String> = [
-        "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff"
+        "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff",
+        "mp2", "mp1", "oga", "m4b", "aif", "aifc", "caf", "mka", "spx", "wma", "amr", "ape", "wv"
     ]
     /// Source code + prose markup — read as UTF-8 text and clustered by content (BGE),
     /// classified as `.doc`. Lockstep with the Rust engine's FileKind::from_extension.
