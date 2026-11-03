@@ -440,19 +440,127 @@ fn bge_hits(conn: &Connection, query: &str) -> Result<Vec<CatalogHit>> {
     let Some(model) = guard.as_mut() else { return Ok(vec![]) };
     let wanted = model.embed(&format!("{BGE_QUERY_PREFIX}{query}"))?;
     drop(guard);
-    let mut statement = conn.prepare("SELECT e.file_id,e.embedding,f.path_text,COALESCE(substr(d.text,1,200),'') FROM text_embeddings e JOIN files f ON f.id=e.file_id LEFT JOIN doc_text d ON d.file_id=e.file_id WHERE f.failed=0 AND e.model='bge_small_en_v1_5' AND length(e.embedding)=?1")?;
+    match conn.path().filter(|path| !path.is_empty()) {
+        Some(path) => document_hits_cached(conn, Path::new(path), &wanted),
+        None => document_hits_scan(conn, &wanted),
+    }
+}
+
+const BGE_MODEL: &str = "bge_small_en_v1_5";
+const BGE_RESULTS: usize = 20;
+/// Largest library kept resident (~77 MB of 384-d vectors); beyond this every
+/// question streams the table instead.
+const BGE_CACHE_MAX_ROWS: usize = 50_000;
+
+fn bge_score(stored: &[f32], wanted: &[f32]) -> f32 {
+    stored.iter().zip(wanted).map(|(stored, value)| stored * value).sum::<f32>()
+}
+
+fn document_hit(id: i64, path: String, text: String) -> CatalogHit {
+    CatalogHit { file_id: id, path, kind: "documentText".into(), text, evidence_id: Some(format!("documentText:{id}")), start_seconds: None, page: None }
+}
+
+/// Reference implementation: streams every stored vector for each question.
+/// Used for in-memory databases and libraries too large to keep resident.
+fn document_hits_scan(conn: &Connection, wanted: &[f32]) -> Result<Vec<CatalogHit>> {
+    let mut statement = conn.prepare("SELECT e.file_id,e.embedding,f.path_text,COALESCE(substr(d.text,1,200),'') FROM text_embeddings e JOIN files f ON f.id=e.file_id LEFT JOIN doc_text d ON d.file_id=e.file_id WHERE f.failed=0 AND e.model=?2 AND length(e.embedding)=?1")?;
     let mut scored: Vec<(f32, CatalogHit)> = statement
-        .query_map([wanted.len() as i64 * 4], |row| {
+        .query_map(params![wanted.len() as i64 * 4, BGE_MODEL], |row| {
             let blob: Vec<u8> = row.get(1)?;
-            let score = blob.chunks_exact(4).zip(&wanted).map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value).sum::<f32>();
+            let score = blob.chunks_exact(4).zip(wanted).map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value).sum::<f32>();
             let id: i64 = row.get(0)?;
-            Ok((score, CatalogHit { file_id: id, path: row.get(2)?, kind: "documentText".into(), text: row.get(3)?, evidence_id: Some(format!("documentText:{id}")), start_seconds: None, page: None }))
+            Ok((score, document_hit(id, row.get(2)?, row.get(3)?)))
         })?
         .filter_map(std::result::Result::ok)
         .filter(|(score, _)| score.is_finite() && *score >= BGE_FLOOR)
         .collect();
     scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.file_id.cmp(&b.1.file_id)));
-    Ok(scored.into_iter().take(20).map(|(_, hit)| hit).collect())
+    Ok(scored.into_iter().take(BGE_RESULTS).map(|(_, hit)| hit).collect())
+}
+
+/// Stored document vectors as one row-major matrix, valid while the database
+/// is unchanged. `watcher` is a long-lived read-only connection whose
+/// `PRAGMA data_version` moves whenever any other connection (the writer, or
+/// another process) commits, so a stale matrix is never served.
+struct DocumentMatrix {
+    path: std::path::PathBuf,
+    watcher: Connection,
+    version: i64,
+    dim: usize,
+    ids: Vec<i64>,
+    values: Vec<f32>,
+}
+
+fn data_version(watcher: &Connection) -> Result<i64> {
+    Ok(watcher.query_row("PRAGMA data_version", [], |row| row.get(0))?)
+}
+
+impl DocumentMatrix {
+    /// `None` when the library is too large to keep resident.
+    fn load(path: &Path, dim: usize) -> Result<Option<Self>> {
+        let watcher = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        watcher.busy_timeout(std::time::Duration::from_secs(5))?;
+        watcher.execute_batch("PRAGMA query_only = ON; PRAGMA cache_size = -2048; PRAGMA mmap_size = 0;")?;
+        let version = data_version(&watcher)?;
+        let mut ids = Vec::new();
+        let mut values: Vec<f32> = Vec::new();
+        {
+            let mut statement = watcher.prepare("SELECT file_id,embedding FROM text_embeddings WHERE model=?2 AND length(embedding)=?1 ORDER BY file_id")?;
+            let mut rows = statement.query(params![dim as i64 * 4, BGE_MODEL])?;
+            while let Some(row) = rows.next()? {
+                if ids.len() >= BGE_CACHE_MAX_ROWS {
+                    return Ok(None);
+                }
+                let blob = row.get_ref(1)?.as_blob()?;
+                ids.push(row.get(0)?);
+                values.extend(blob.chunks_exact(4).map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])));
+            }
+        }
+        Ok(Some(Self { path: path.to_path_buf(), watcher, version, dim, ids, values }))
+    }
+
+    fn is_current(&self, path: &Path, dim: usize) -> bool {
+        self.path == path && self.dim == dim && data_version(&self.watcher).is_ok_and(|version| version == self.version)
+    }
+
+    /// File ids at or above the floor, best first, ties by ascending id.
+    fn ranked(&self, wanted: &[f32]) -> Vec<(f32, i64)> {
+        let mut scored: Vec<(f32, i64)> = self
+            .values
+            .chunks_exact(self.dim)
+            .zip(&self.ids)
+            .map(|(stored, id)| (bge_score(stored, wanted), *id))
+            .filter(|(score, _)| score.is_finite() && *score >= BGE_FLOOR)
+            .collect();
+        scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored
+    }
+}
+
+fn document_hits_cached(conn: &Connection, path: &Path, wanted: &[f32]) -> Result<Vec<CatalogHit>> {
+    static MATRIX: OnceLock<Mutex<Option<DocumentMatrix>>> = OnceLock::new();
+    let mut guard = MATRIX.get_or_init(Default::default).lock();
+    if !guard.as_ref().is_some_and(|matrix| matrix.is_current(path, wanted.len())) {
+        *guard = None;
+        match DocumentMatrix::load(path, wanted.len())? {
+            Some(matrix) => *guard = Some(matrix),
+            None => return document_hits_scan(conn, wanted),
+        }
+    }
+    let ranked = guard.as_ref().map(|matrix| matrix.ranked(wanted)).unwrap_or_default();
+    drop(guard);
+    let mut statement = conn.prepare_cached("SELECT f.path_text,COALESCE(substr(d.text,1,200),'') FROM files f LEFT JOIN doc_text d ON d.file_id=f.id WHERE f.id=?1 AND f.failed=0")?;
+    let mut hits = Vec::with_capacity(BGE_RESULTS);
+    for (_, id) in ranked {
+        let found = statement.query_row([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).ok();
+        if let Some((path, text)) = found {
+            hits.push(document_hit(id, path, text));
+            if hits.len() == BGE_RESULTS {
+                break;
+            }
+        }
+    }
+    Ok(hits)
 }
 
 /// Weighted reciprocal-rank fusion. Hits share a key per evidence item or
@@ -854,6 +962,139 @@ mod tests {
         assert!(prepared.hits.iter().any(|hit| hit.file_id == 1));
         assert!(prepare_unlocked(&database, &request).unwrap().hits.iter().any(|hit| hit.file_id == 1));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn document_fixture(name: &str) -> (std::path::PathBuf, Connection) {
+        let dir = std::env::temp_dir().join(format!("fileid-bge-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("catalog.db");
+        let _ = std::fs::remove_file(&path);
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+        crate::db::migrations::apply(&writer).unwrap();
+        (path, writer)
+    }
+
+    fn put_document(writer: &Connection, id: i64, failed: i64, vector: &[f32; 4]) {
+        writer.execute("INSERT OR REPLACE INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,failed) VALUES(?1,?2,?1,10,0,'doc','txt',?3)", params![id, format!("/lib/doc-{id}.txt"), failed]).unwrap();
+        writer.execute("INSERT OR REPLACE INTO doc_text(file_id,text) VALUES(?1,?2)", params![id, format!("passage {id}")]).unwrap();
+        let bytes: Vec<u8> = vector.iter().flat_map(|value| value.to_le_bytes()).collect();
+        writer.execute("INSERT OR REPLACE INTO text_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)", params![id, bytes, BGE_MODEL]).unwrap();
+    }
+
+    fn same_hits(a: &[CatalogHit], b: &[CatalogHit]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.file_id == b.file_id && a.path == b.path && a.text == b.text && a.evidence_id == b.evidence_id && a.kind == b.kind)
+    }
+
+    #[test]
+    fn cached_document_similarity_matches_the_scan_and_follows_every_change() {
+        let (path, writer) = document_fixture("cache");
+        let wanted = [1.0_f32, 0.0, 0.0, 0.0];
+        for id in 1..=30 {
+            let tilt = 0.05 * (id % 7) as f32;
+            put_document(&writer, id, 0, &[1.0 - tilt, tilt, 0.0, 0.0]);
+        }
+        put_document(&writer, 31, 0, &[0.0, 1.0, 0.0, 0.0]);
+        put_document(&writer, 32, 1, &[1.0, 0.0, 0.0, 0.0]);
+        let reader = crate::db::open_read(&path).unwrap();
+        let check = |reader: &Connection| {
+            let cached = document_hits_cached(reader, &path, &wanted).unwrap();
+            let scan = document_hits_scan(reader, &wanted).unwrap();
+            assert!(same_hits(&cached, &scan), "cached {:?} != scan {:?}", cached.iter().map(|h| h.file_id).collect::<Vec<_>>(), scan.iter().map(|h| h.file_id).collect::<Vec<_>>());
+            cached
+        };
+        let first = check(&reader);
+        assert_eq!(first.len(), BGE_RESULTS);
+        assert!(first.iter().all(|hit| hit.file_id != 31 && hit.file_id != 32));
+        assert_eq!(check(&reader).len(), BGE_RESULTS);
+
+        put_document(&writer, 33, 0, &[1.0, 0.0, 0.0, 0.0]);
+        let reader = crate::db::open_read(&path).unwrap();
+        assert!(check(&reader).iter().any(|hit| hit.file_id == 33));
+
+        writer.execute("UPDATE files SET failed=1 WHERE id=33", []).unwrap();
+        let reader = crate::db::open_read(&path).unwrap();
+        assert!(check(&reader).iter().all(|hit| hit.file_id != 33));
+
+        put_document(&writer, 1, 0, &[0.0, 0.0, 1.0, 0.0]);
+        let reader = crate::db::open_read(&path).unwrap();
+        assert!(check(&reader).iter().all(|hit| hit.file_id != 1));
+
+        writer.execute("DELETE FROM text_embeddings WHERE file_id<=10", []).unwrap();
+        writer.execute("DELETE FROM files WHERE id BETWEEN 11 AND 12", []).unwrap();
+        let reader = crate::db::open_read(&path).unwrap();
+        assert!(check(&reader).iter().all(|hit| hit.file_id > 12));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn document_similarity_rebuilds_when_the_database_or_dimension_changes() {
+        let (first_path, first_writer) = document_fixture("first");
+        put_document(&first_writer, 1, 0, &[1.0, 0.0, 0.0, 0.0]);
+        let (second_path, second_writer) = document_fixture("second");
+        put_document(&second_writer, 2, 0, &[1.0, 0.0, 0.0, 0.0]);
+        let wanted = [1.0_f32, 0.0, 0.0, 0.0];
+        let ids = |path: &Path| {
+            let reader = crate::db::open_read(path).unwrap();
+            document_hits_cached(&reader, path, &wanted).unwrap().iter().map(|hit| hit.file_id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&first_path), vec![1]);
+        assert_eq!(ids(&second_path), vec![2]);
+        let reader = crate::db::open_read(&first_path).unwrap();
+        assert!(document_hits_cached(&reader, &first_path, &[1.0, 0.0]).unwrap().is_empty());
+        assert_eq!(ids(&first_path), vec![1]);
+        let _ = std::fs::remove_dir_all(first_path.parent().unwrap());
+        let _ = std::fs::remove_dir_all(second_path.parent().unwrap());
+    }
+
+    #[test]
+    #[ignore = "timing only: cargo test --release bge_cache_timing -- --ignored --nocapture"]
+    fn bge_cache_timing() {
+        let (path, writer) = document_fixture("timing");
+        let rows: i64 = std::env::var("BGE_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000);
+        let dim = 384usize;
+        writer.execute_batch("BEGIN").unwrap();
+        let mut state = 0x9E3779B97F4A7C15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let mut wanted: Vec<f32> = (0..dim).map(|_| next()).collect();
+        let norm = wanted.iter().map(|v| v * v).sum::<f32>().sqrt();
+        for v in &mut wanted {
+            *v /= norm;
+        }
+        for id in 1..=rows {
+            writer.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,10,0,'doc','txt')", params![id, format!("/lib/doc-{id}.txt")]).unwrap();
+            writer.execute("INSERT INTO doc_text(file_id,text) VALUES(?1,'passage')", params![id]).unwrap();
+            let mut vector: Vec<f32> = (0..dim).map(|d| if id % 50 == 0 { wanted[d] * 0.9 + next() * 0.05 } else { next() }).collect();
+            let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+            for v in &mut vector {
+                *v /= norm;
+            }
+            let bytes: Vec<u8> = vector.iter().flat_map(|value| value.to_le_bytes()).collect();
+            writer.execute("INSERT INTO text_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)", params![id, bytes, BGE_MODEL]).unwrap();
+        }
+        writer.execute_batch("COMMIT").unwrap();
+        let reader = crate::db::open_read(&path).unwrap();
+        let time = |label: &str, run: &dyn Fn() -> Vec<CatalogHit>| {
+            let mut samples = Vec::new();
+            let mut last = Vec::new();
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                last = run();
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!("{label}: rows={rows} first={:.1} ms, rest min={:.1} ms hits={}", samples[0], samples[1..].iter().copied().fold(f64::MAX, f64::min), last.len());
+            last
+        };
+        let scan = time("scan  ", &|| document_hits_scan(&reader, &wanted).unwrap());
+        let cached = time("cached", &|| document_hits_cached(&reader, &path, &wanted).unwrap());
+        assert!(same_hits(&scan, &cached));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

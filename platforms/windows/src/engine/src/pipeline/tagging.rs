@@ -1602,9 +1602,8 @@ fn predecode_one(
         } else {
             match file.kind {
                 FileKind::Image => {
-                    let reservation = file_bytes
-                        .as_deref()
-                        .and_then(probe_image_decode_reservation_bytes)
+                    let reservation = scaled_jpeg_reservation_for(&file.path, file_bytes.as_deref())
+                        .or_else(|| file_bytes.as_deref().and_then(probe_image_decode_reservation_bytes))
                         .unwrap_or_else(|| budget.capacity());
                     let (result, guard) = decode_reserved(
                         budget,
@@ -1901,6 +1900,57 @@ pub(crate) fn probe_image_decode_reservation_bytes(bytes: &[u8]) -> Option<usize
     usize::try_from(decoder.total_bytes().checked_add(final_rgb)?).ok()
 }
 
+/// Budget charge for a sequential JPEG that `decode_jpeg_scaled_to` will
+/// decode at a DCT-reduced scale: component planes plus the interleaved RGB
+/// frame plus an orientation copy, all at the scaled size, i.e. 3x the scaled
+/// RGB frame. Without this a 33 MP file that is too large to pre-read (> 16 MB)
+/// took the whole byte budget and decoded one at a time. Mirrors the
+/// eligibility checks of `decode_jpeg_scaled_to`; `None` keeps the
+/// conservative full-frame reservation (progressive JPEGs hold full-size
+/// coefficients, unusual pixel formats, small images, scaling disabled).
+fn scaled_jpeg_reservation(bytes: &[u8]) -> Option<usize> {
+    if !jpeg_scaled_decode_enabled() || !bytes.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let floor = JPEG_SCALED_DECODE_FLOOR_EDGE;
+    let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    dec.read_info().ok()?;
+    let info = dec.info()?;
+    if info.coding_process != jpeg_decoder::CodingProcess::DctSequential
+        || !matches!(info.pixel_format, jpeg_decoder::PixelFormat::RGB24 | jpeg_decoder::PixelFormat::L8)
+    {
+        return None;
+    }
+    let (pw, ph) = (u32::from(info.width), u32::from(info.height));
+    if u64::from(pw) * u64::from(ph) > MAX_DECODED_PIXELS || pw.max(ph) < floor.saturating_mul(2) {
+        return None;
+    }
+    let long = pw.max(ph);
+    let req = |d: u32| -> u16 { ((u64::from(d) * u64::from(floor)) / u64::from(long)).clamp(1, u64::from(u16::MAX)) as u16 };
+    let (ow, oh) = dec.scale(req(pw), req(ph)).ok()?;
+    (usize::from(ow)).checked_mul(usize::from(oh))?.checked_mul(9)
+}
+
+/// [`scaled_jpeg_reservation`] over pre-read bytes, or over a read-only map of
+/// the file when it was too large to pre-read (only the headers are touched).
+fn scaled_jpeg_reservation_for(path: &std::path::Path, bytes: Option<&[u8]>) -> Option<usize> {
+    if let Some(bytes) = bytes {
+        return scaled_jpeg_reservation(bytes);
+    }
+    if !jpeg_scaled_decode_enabled() {
+        return None;
+    }
+    let file = open_image_file(path).ok()?;
+    // SAFETY: read-only map of a file opened for reading, dropped before returning.
+    let map = unsafe { memmap2::Mmap::map(&file).ok()? };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scaled_jpeg_reservation(&map))).ok().flatten()
+}
+
+fn jpeg_scaled_decode_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FILEID_JPEG_SCALED_DECODE").map_or(true, |v| v.trim() != "0"))
+}
+
 /// Keep at least this many pixels on the long edge when DCT-scaling a JPEG.
 /// Detection (640² letterbox), tagging (384²) and CLIP (224²) all downsample
 /// far below it; only SFace's 112² face crops read decode resolution, and a
@@ -1923,11 +1973,7 @@ pub(crate) fn decode_jpeg_scaled_to(bytes: &[u8], floor: u32) -> Option<(Vec<u8>
     let floor = floor.max(1);
     // Diagnostic / bail-out switch: FILEID_JPEG_SCALED_DECODE=0 restores
     // full-resolution decode for every file (also the A/B control lever).
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let enabled = *ENABLED.get_or_init(|| {
-        std::env::var("FILEID_JPEG_SCALED_DECODE").map_or(true, |v| v.trim() != "0")
-    });
-    if !enabled {
+    if !jpeg_scaled_decode_enabled() {
         return None;
     }
     let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
@@ -3580,6 +3626,36 @@ mod tests {
         out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
         out.extend_from_slice(&encoded[2..]);
         out
+    }
+
+    #[test]
+    fn scaled_jpeg_reservation_tracks_the_reduced_frame_not_the_full_one() {
+        let big = jpeg_with_orientation(4400, 3000, None);
+        let reserved = scaled_jpeg_reservation(&big).expect("sequential JPEG above twice the floor is scaled");
+        let (rgb, w, h) = decode_jpeg_scaled(&big).expect("scaled decode");
+        assert!((w as usize) * (h as usize) * 9 == reserved, "{w}x{h} vs {reserved}");
+        assert!(reserved >= rgb.len() * 3);
+        let full = probe_image_decode_reservation_bytes(&big).unwrap();
+        assert!(reserved * 2 < full, "scaled {reserved} should be far below full {full}");
+
+        let dir = std::env::temp_dir().join(format!("fileid-jpeg-reservation-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jpg");
+        std::fs::write(&path, &big).unwrap();
+        assert_eq!(scaled_jpeg_reservation_for(&path, None), Some(reserved));
+        assert_eq!(scaled_jpeg_reservation_for(&path, Some(&big)), Some(reserved));
+        std::fs::write(dir.join("not.jpg"), b"not a jpeg at all").unwrap();
+        assert_eq!(scaled_jpeg_reservation_for(&dir.join("not.jpg"), None), None);
+        assert_eq!(scaled_jpeg_reservation_for(&dir.join("missing.jpg"), None), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scaled_jpeg_reservation_defers_to_the_full_reservation_when_no_scaling_happens() {
+        assert_eq!(scaled_jpeg_reservation(&jpeg_with_orientation(800, 600, None)), None);
+        assert_eq!(scaled_jpeg_reservation(&jpeg_with_orientation(4000, 3000, None)), None, "long edge below twice the floor");
+        assert_eq!(scaled_jpeg_reservation(&[0x89, b'P', b'N', b'G']), None);
+        assert_eq!(scaled_jpeg_reservation(&[]), None);
     }
 
     #[test]
