@@ -307,11 +307,26 @@ final class AccurateOCRWarmup: @unchecked Sendable {
         return ready
     }
 
+    /// The compile shares the Neural Engine with the scan's own model loads: on a cold engine an
+    /// audio-only scan of 323 files took 115 s with the warmup running and 3.2 s without it.
+    /// So wait a moment, and keep waiting while a scan is queued or running; a scan that starts
+    /// first simply keeps its fast reads, and the warmup runs when the engine is idle.
+    func startWhenIdle(after delay: Duration = .seconds(3)) {
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(for: delay)
+            while await JobQueue.shared.hasActive(category: .scan) {
+                try? await Task.sleep(for: .seconds(1))
+            }
+            Self.shared.start()
+        }
+    }
+
     func start() {
         lock.lock()
         guard !started else { lock.unlock(); return }
         started = true
         lock.unlock()
+        if ProcessInfo.processInfo.environment["FILEID_OCR_WARMUP"] == "0" { return }
         DispatchQueue.global(qos: .utility).async {
             let began = CFAbsoluteTimeGetCurrent()
             // Real text, so the recognizers compile too, not just the detector

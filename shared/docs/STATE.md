@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-03 (late) — Cold-start scan stall fixed (accurate-OCR warmup)
+
+On a freshly launched engine the first scan could sit for 25-115 s before doing any work: the Vision accurate-OCR compile (`AccurateOCRWarmup`, started at engine launch "off the scan path") shares the Neural Engine with the scan's own model loads. Measured on the Adlon Audio folder (323 audio files, no Vision work at all): 115 s with the warmup, 3.2 s with `FILEID_OCR_WARMUP=0`. The warmup now starts after a 3 s idle delay and keeps waiting while a scan is queued or running (`startWhenIdle`); a scan that begins first keeps its fast OCR reads, as the original comment already promised. After the change: cold Audio scans 6.1 s and 2.9 s; the baseball folder (721 photos) 41 s at load average ~100 (was 138 s and 97 s), with identical stored text detection (168 files, 168 OCR rows). With the engine left idle the warmup still runs (262 s while the machine was saturated). `FILEID_OCR_WARMUP=0` stays as a debug switch. The scan-stall agent's other suggestions (parallel CLIP/ArcFace pre-warms, avoiding the second full read for the content hash) were not tested.
+
 ## 2026-11-03 (later) — Rerun with CLIP and SFace installed; UI token audit
 
 CLIP ViT-B/32 (image + text + BPE) and SFace were installed from the pinned, sha256-verified manifest URLs into `~/Library/Application Support/FileID/Models` (about 650 MB, all permissive licences). Rescans of the Adlon folders: baseball 721 files in 97 s with 721 CLIP embeddings, 439 faces; Audio + Jeff 11,368 files in two registered locations with 7,936 CLIP embeddings, 4,537 faces and 66,101 tags.
