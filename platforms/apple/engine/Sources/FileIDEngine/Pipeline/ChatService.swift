@@ -102,7 +102,7 @@ actor ChatService {
     }
 
     /// The search plan a message implies, with its structured part.
-    private static func plan(_ text: String, previous: ChatSearchPlan?, people: [ChatSearchPlan.KnownPerson], events: [ChatSearchPlan.KnownEvent]) -> (ChatIntent.Question, ChatSearchPlan) {
+    private static func searchPlan(_ text: String, previous: ChatSearchPlan?, people: [ChatSearchPlan.KnownPerson], events: [ChatSearchPlan.KnownEvent]) -> (ChatIntent.Question, ChatSearchPlan) {
         let question = ChatIntent.question(text)
         return (question, ChatSearchPlan.resolve(question.reduced, previous: previous, knownPeople: people, knownEvents: events))
     }
@@ -120,8 +120,8 @@ actor ChatService {
             }
             let previousTexts = try String.fetchAll(db, sql: "SELECT text FROM (SELECT rowid,text FROM catalog_chat WHERE conversation_id=? AND role='user' ORDER BY rowid DESC LIMIT 21) ORDER BY rowid", arguments: [request.conversationID]).dropLast()
             let previous = previousTexts.filter { ChatIntent.parse($0) == nil }
-                .reduce(nil as ChatSearchPlan?) { plan($1, previous: $0, people: knownPeople, events: knownEvents).1 }
-            let (question, plan) = plan(text, previous: previous, people: knownPeople, events: knownEvents)
+                .reduce(nil as ChatSearchPlan?) { searchPlan($1, previous: $0, people: knownPeople, events: knownEvents).1 }
+            let (question, plan) = searchPlan(text, previous: previous, people: knownPeople, events: knownEvents)
             let structured = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, personNames: plan.personNames,
                                               date: question.date, folder: question.folder, undescribed: question.undescribed)
             if question.structured, plan.query.isEmpty, plan.eventIDs.isEmpty, plan.timeSeconds == nil {

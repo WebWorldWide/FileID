@@ -414,26 +414,26 @@ enum ChatActions {
     /// proposal that would skip confirmation or carry malformed fields is dropped.
     static func valid(_ action: ChatAction) -> Bool {
         func idsOK(_ ids: [Int64]?) -> Bool { ids.map { $0.count <= maxIDs && $0.allSatisfy { $0 > 0 } } ?? true }
-        let basics = ChatAction.kinds.contains(action.kind)
-            && !action.id.isEmpty && action.id.count <= 300
+        let textOK: Bool = !action.id.isEmpty && action.id.count <= 300
             && !action.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && action.title.count <= 200
             && action.detail.count <= 2000
-            && ["parser", "model"].contains(action.source)
+        let gateOK: Bool = ["parser", "model"].contains(action.source)
             && action.requiresConfirmation == requiresConfirmation(action.kind)
-            && (action.undo.map { $0.count <= 500 } ?? true)
+        let countsOK: Bool = (action.undo.map { $0.count <= 500 } ?? true)
             && (action.examples.map { $0.count <= 5 } ?? true)
             && (action.fileCount.map { $0 >= 0 } ?? true)
             && (action.byteCount.map { $0 >= 0 } ?? true)
-            && idsOK(action.fileIDs) && idsOK(action.keeperFileIDs)
+        let idsAllOK: Bool = idsOK(action.fileIDs) && idsOK(action.keeperFileIDs)
             && (action.personIDs.map { $0.count <= 50 && $0.allSatisfy { $0 > 0 } } ?? true)
             && (action.personID.map { $0 > 0 } ?? true)
-            && (action.page.map(ChatAction.pages.contains) ?? true)
+        let enumsOK: Bool = (action.page.map(ChatAction.pages.contains) ?? true)
             && (action.job.map(ChatAction.jobs.contains) ?? true)
             && (action.setting.map(ChatAction.settings.contains) ?? true)
-            && (action.name.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 200 } ?? true)
+        let nameOK: Bool = (action.name.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 200 } ?? true)
             && (action.path.map { !$0.isEmpty && $0.count <= 32_768 } ?? true)
             && (action.query.map { $0.count <= 2000 } ?? true)
-            && (action.renames.map { $0.count <= maxIDs && $0.allSatisfy { $0.fileID > 0 && validName($0.newName) } } ?? true)
+        let renamesOK: Bool = action.renames.map { $0.count <= maxIDs && $0.allSatisfy { $0.fileID > 0 && validName($0.newName) } } ?? true
+        let basics = ChatAction.kinds.contains(action.kind) && textOK && gateOK && countsOK && idsAllOK && enumsOK && nameOK && renamesOK
         guard basics else { return false }
         switch action.kind {
         case "scanFolder", "rescan", "suggestFolderLayout", "applyFolderLayout", "undoLastMove": return action.path != nil

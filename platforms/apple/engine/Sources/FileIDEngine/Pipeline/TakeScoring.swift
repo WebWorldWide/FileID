@@ -23,7 +23,10 @@ enum TakeScoring {
                 let row = y * bytesPerRow
                 for x in 0..<width {
                     let p = row + x * bytesPerPixel
-                    out[y * width + x] = UInt8((77 * Int(bytes[p]) + 150 * Int(bytes[p + 1]) + 29 * Int(bytes[p + 2])) >> 8)
+                    let r = 77 * Int(bytes[p])
+                    let g = 150 * Int(bytes[p + 1])
+                    let b = 29 * Int(bytes[p + 2])
+                    out[y * width + x] = UInt8((r + g + b) >> 8)
                 }
             }
             return Luma(width: width, height: height, pixels: out)
