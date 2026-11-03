@@ -70,6 +70,52 @@ public sealed record CatalogTakeGroupSuggestion(
     IReadOnlyList<CatalogTakeGroupMember> Members,
     double Similarity,
     string Reason);
+public sealed record CatalogTakeBox(double X, double Y, double Width, double Height);
+
+public sealed record CatalogTakeShot(
+    long PrimaryFileID,
+    IReadOnlyList<long> FileIDs,
+    string Path,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedAt = null);
+
+public sealed record CatalogTakeAutoGroup(
+    string GroupKey,
+    string Kind,
+    string Status,
+    double CapturedAt,
+    double Similarity,
+    IReadOnlyList<CatalogTakeShot> Shots);
+
+public sealed record CatalogTakeQuality(
+    long PrimaryFileID,
+    IReadOnlyList<long> FileIDs,
+    string Path,
+    double Score,
+    int Rank,
+    bool Recommended,
+    IReadOnlyList<string> Reasons,
+    IReadOnlyList<CatalogTakeBox> Faces,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Sharpness = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Exposure = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? MotionBlur = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? FaceCount = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? EyesClosed = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? FaceCutOff = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Stability = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? Action = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? PeakSeconds = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeBox? Subject = null);
+
+public sealed record CatalogTakeGoalRanking(
+    string Goal,
+    string Status,
+    IReadOnlyList<long> Order,
+    IReadOnlyList<long> MetFileIDs,
+    string Summary,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Model = null);
+
+public sealed record CatalogTakeDecision(string GroupKey, string Decision, IReadOnlyList<long> FileIDs);
+
 public sealed record CatalogRequest(
     string RequestID,
     string Action,
@@ -87,7 +133,8 @@ public sealed record CatalogRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TimelineMode = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogEvent? Event = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? EventID = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeFeedback? TakeFeedback = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeFeedback? TakeFeedback = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeDecision? TakeDecision = null);
 
 public sealed record CatalogResponse(
     string RequestID,
@@ -99,5 +146,8 @@ public sealed record CatalogResponse(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogEvent>? Events = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTake>? Takes = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeRecommendation? Recommendation = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTakeGroupSuggestion>? SuggestedTakeGroups = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTakeGroupSuggestion>? SuggestedTakeGroups = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTakeAutoGroup>? TakeGroups = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CatalogTakeQuality>? TakeQualities = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeGoalRanking? TakeGoalRanking = null);
 

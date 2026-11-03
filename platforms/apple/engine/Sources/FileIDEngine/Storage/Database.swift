@@ -537,6 +537,9 @@ public final class Database: @unchecked Sendable {
         m.registerMigration("v27_chat_retrieval") { db in
             try db.execute(sql: CatalogSchema.v27)
         }
+        m.registerMigration("v28_take_quality") { db in
+            try db.execute(sql: CatalogSchema.v28)
+        }
         return m
     }
 

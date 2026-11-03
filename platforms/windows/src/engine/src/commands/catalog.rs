@@ -18,6 +18,12 @@ pub async fn handle(
     let job_id = request.job_id.clone();
     let scheduler = database.clone();
     let result = tokio::task::spawn_blocking(move || {
+        if request.action == "scoreTakes" {
+            let Some(database) = database else {
+                bail!("The catalog database is unavailable")
+            };
+            return score_takes(&database, &request).map(|response| (response, None));
+        }
         if request.action == "enqueueTimeline" {
             let Some(database) = database else {
                 bail!("The catalog database is unavailable")
@@ -87,6 +93,25 @@ fn execute_with_index(
     execute(&mut conn, &request)
 }
 
+/// Scores outside the database lock: the lock is held only to read the files
+/// and their cached signals, and again to store new signals.
+fn score_takes(database: &Mutex<Connection>, request: &CatalogRequest) -> Result<CatalogResponse> {
+    use super::catalog_take_auto::{compute, prepare, store, TakeFaceAnalyzer, YuNetFaces};
+    if request.request_id.is_empty() || request.request_id.chars().count() > 200 {
+        bail!("Invalid catalog request")
+    }
+    let ids = request.file_ids.as_deref().ok_or_else(|| anyhow::anyhow!("File IDs required"))?;
+    let mut faces = YuNetFaces::load();
+    let job = prepare(&database.lock(), ids, faces.id())?;
+    let scored = compute(job, &mut faces);
+    if let Err(error) = store(&database.lock(), &scored) {
+        tracing::warn!(%error, "take scores were not cached");
+    }
+    let mut result = response(&request.request_id, "ok", None);
+    result.take_qualities = Some(scored.qualities);
+    Ok(result)
+}
+
 pub(crate) fn response(id: &str, status: &str, message: Option<String>) -> CatalogResponse {
     CatalogResponse {
         request_id: id.into(),
@@ -99,6 +124,9 @@ pub(crate) fn response(id: &str, status: &str, message: Option<String>) -> Catal
         takes: None,
         recommendation: None,
         suggested_take_groups: None,
+        take_groups: None,
+        take_qualities: None,
+        take_goal_ranking: None,
     }
 }
 
@@ -262,6 +290,22 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             let (model, ffmpeg) = (super::timeline::installed_model(), super::video_export::available());
             return Ok(super::timeline::enqueue(conn, request, model, ffmpeg)?.1);
         }
+        "autoTakeGroups" => {
+            result.take_groups = Some(super::catalog_take_auto::discover(conn, request.limit.unwrap_or(100))?);
+        }
+        "decideTakeGroup" => {
+            let decision = request.take_decision.as_ref().ok_or_else(|| anyhow::anyhow!("Decision required"))?;
+            super::catalog_take_auto::decide(conn, decision)?;
+        }
+        "rankTakesWithGoal" => {
+            let goal = request.query.as_deref().unwrap_or("").trim();
+            let ids = request.file_ids.as_deref().unwrap_or(&[]);
+            if goal.is_empty() || goal.chars().count() > 500 || !(2..=100).contains(&ids.len()) {
+                bail!("Invalid goal ranking request")
+            }
+            result.take_goal_ranking = Some(Box::new(super::catalog_take_auto::goal_unavailable(goal, ids)));
+        }
+        "scoreTakes" => bail!("Scoring runs outside the catalog lock"),
         "listEvents" | "suggestTakeGroups" | "saveEvent" | "deleteEvent" | "undoEventEdit" | "takeGroup"
         | "setTakeFeedback" | "undoTakeFeedback" => {
             crate::commands::catalog_takes::execute(conn, request, &mut result)?;

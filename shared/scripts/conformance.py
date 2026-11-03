@@ -232,6 +232,22 @@ def png_bytes(width=2, height=2):
             + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 
 
+def checker_png(width, height, blur=0):
+    """Grey 4-pixel checkerboard, optionally softened by `blur` passes of a
+    5-tap average: a sharp and a soft try of the same picture for Best Takes."""
+    pixels = [[40 if ((x // 4) + (y // 4)) % 2 == 0 else 200 for x in range(width)] for y in range(height)]
+    for _ in range(blur):
+        src = [row[:] for row in pixels]
+        for y in range(1, height - 1):
+            for x in range(1, width - 1):
+                pixels[y][x] = (src[y][x] * 4 + src[y][x - 1] + src[y][x + 1] + src[y - 1][x] + src[y + 1][x]) // 8
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    rows = b"".join(b"\x00" + bytes(v for value in row for v in (value, value, value)) for row in pixels)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
 def wav_bytes(path):
     with wave.open(str(path), "wb") as out:
         out.setnchannels(1)
@@ -413,6 +429,8 @@ def build_tree(ctx, entries):
         generator = entry.get("generate")
         if generator == "png":
             target.write_bytes(png_bytes(*entry.get("dimensions", (2, 2))))
+        elif generator == "checker":
+            target.write_bytes(checker_png(*entry.get("dimensions", (96, 64)), entry.get("blur", 0)))
         elif generator == "wav":
             wav_bytes(target)
         elif generator == "pdf":

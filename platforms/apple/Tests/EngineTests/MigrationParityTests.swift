@@ -44,6 +44,7 @@ struct MigrationParityTests {
         "v25_ocr_text_source",
         "v26_vlm_inherited_from",
         "v27_chat_retrieval",
+        "v28_take_quality",
     ]
 
     @Test("Registered migration identifiers match the canonical cross-platform list")

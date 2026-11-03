@@ -29,6 +29,13 @@ struct TakeWorkbench: View {
     @State private var goalEventID: String?
     @State private var goalRequestedIDs: Set<Int64> = []
     @State private var previousJobIDs: Set<String> = []
+    @State private var autoGroups: [CatalogTakeAutoGroup] = []
+    @State private var autoLoading = false
+    @State private var autoLoaded = false
+    @State private var selectedAutoKey: String?
+    @State private var manual = false
+
+    private var selectedAuto: CatalogTakeAutoGroup? { autoGroups.first { $0.groupKey == selectedAutoKey } }
 
     private var goalJob: CatalogJob? {
         engine.catalogJobs.first { $0.id == goalJobID && selectedEvent?.id == goalEventID }
@@ -64,29 +71,39 @@ struct TakeWorkbench: View {
             }
             HStack(spacing: 0) {
                 groupsPane
-                    .frame(width: 260)
+                    .frame(width: 280)
                     .background(Theme.pane, ignoresSafeAreaEdges: [])
                     .focusSection()
                 VHairline()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        groupPanel
-                        if let job = goalJob { goalJobRow(job) }
-                        if let recommendation { recommendationRow(recommendation) }
-                        if !takes.isEmpty { takeGrid }
-                        else if selectedEvent == nil {
-                            DashedNotice(title: "Pick the best take", subtitle: "1. Search for your clips on the left.  2. Put two or more tries of the same shot in a group and say what should happen.  3. FileID scores each try so you can pick the best.")
+                Group {
+                    if let group = selectedAuto {
+                        TakeReview(engine: engine, group: group) { reloadAuto(after: group.groupKey) }
+                            .id(group.groupKey)
+                    } else if selectedEvent != nil || manual {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 16) {
+                                groupPanel
+                                if let job = goalJob { goalJobRow(job) }
+                                if let recommendation { recommendationRow(recommendation) }
+                                if !takes.isEmpty { takeGrid }
+                                else if selectedEvent == nil {
+                                    DashedNotice(title: "Make a group by hand", subtitle: "1. Search for your clips on the left.  2. Tick two or more tries of the same shot and say what should happen.  3. Save, then score each try against that goal.")
+                                }
+                            }
+                            .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                    } else {
+                        emptyDetail
                     }
-                    .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .focusSection()
             }
         }
         .frame(minWidth: inline ? nil : 960, minHeight: inline ? nil : 680)
         .tint(Theme.gold)
-        .task { send("listEvents") }
+        .task { send("listEvents"); reloadAuto(after: nil) }
+        .onChange(of: engine.lastTerminalEventAt) { _, _ in reloadAuto(after: nil) }
         .onChange(of: engine.catalogResponses) { _, _ in consume() }
         .onChange(of: engine.catalogJobs) { _, _ in refreshGoalJob() }
         .onDisappear { player?.pause() }
@@ -96,43 +113,31 @@ struct TakeWorkbench: View {
 
     private var groupsPane: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                DSTextField(placeholder: "Search your videos", text: $clipQuery, icon: "magnifyingglass") {
-                    guard !clipQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-                    send("search", query: clipQuery)
-                }
-                HStack(spacing: 6) {
-                    Button("Find related") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
-                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
-                        .disabled(pool.count < 2)
-                        .help(pool.count < 2 ? "Search for at least two videos first" : "Suggest groups of clips that look alike and were filmed close together")
-                    Button { newGroup() } label: { Label("New group", systemImage: "plus") }
-                        .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
-                }
-            }
-            .padding(14)
-            Hairline()
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    if !suggestedGroups.isEmpty {
-                        SectionLabel("Possible groups", color: Theme.ai).padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
-                        ForEach(suggestedGroups.indices, id: \.self) { index in
-                            SuggestionRow(suggestion: suggestedGroups[index]) {
-                                newGroup()
-                                foundClips.append(contentsOf: suggestedGroups[index].members.map {
-                                    CatalogHit(fileID: $0.fileID, path: $0.path, kind: "video", text: "")
-                                })
-                                selectedIDs = Set(suggestedGroups[index].members.map(\.fileID))
-                                ToastCenter.shared.show("Name the group and describe the outcome, then save")
-                            }
-                        }
-                        MetaText("Based on how the clips look and when they were filmed. Check them before saving.", size: 11.5)
-                            .padding(.horizontal, 14).padding(.vertical, 6)
-                        Hairline(color: Theme.hairlineSoft).padding(.vertical, 4)
+                    HStack(spacing: 6) {
+                        SectionLabel("Possible groups · \(autoGroups.filter { $0.status == "open" }.count)", color: Theme.ai)
+                        Spacer(minLength: 4)
+                        if autoLoading { IndeterminateBar().frame(width: 40) }
+                        DSIconButton("Look again", systemImage: "arrow.clockwise", tint: Theme.text3) { reloadAuto(after: nil) }
+                            .disabled(autoLoading)
                     }
-                    SectionLabel("Groups · \(events.count)").padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
+                    .padding(.leading, 14).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
+                    MetaText("Bursts and repeated clips from your scans. Biggest and newest first.", size: 11.5)
+                        .padding(.horizontal, 14).padding(.bottom, 6)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if autoLoaded && autoGroups.isEmpty {
+                        MetaText("None yet. Scan a folder with photo bursts or several tries of a clip.", size: 12)
+                            .padding(.horizontal, 14).padding(.vertical, 6)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(autoGroups) { group in
+                        AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
+                    }
+                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
+                    SectionLabel("Your groups · \(events.count)").padding(.horizontal, 14).padding(.bottom, 4)
                     ForEach(events, id: \.id) { event in
-                        RailRow(selected: selectedEvent?.id == event.id, action: { open(event) }) {
+                        RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil, action: { open(event) }) {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(event.title).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1).lineLimit(1)
                                 Text("\(event.fileIDs.count) clips · \(event.goal)").font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2)
@@ -142,8 +147,11 @@ struct TakeWorkbench: View {
                         .accessibilityLabel("\(event.title), \(event.fileIDs.count) clips, goal: \(event.goal)")
                     }
                     if events.isEmpty {
-                        MetaText("No groups yet. Search for videos above, then press New group.").padding(.horizontal, 14).padding(.vertical, 8)
+                        MetaText("Groups you make by hand, with a goal, show up here.", size: 12).padding(.horizontal, 14).padding(.vertical, 6)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
+                    manualSection
                 }
                 .padding(.bottom, 10)
             }
@@ -158,6 +166,59 @@ struct TakeWorkbench: View {
                 .padding(.horizontal, 14).padding(.vertical, 8)
             }
         }
+    }
+
+    private var manualSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionLabel("Make a group by hand")
+            DSTextField(placeholder: "Search your videos", text: $clipQuery, icon: "magnifyingglass") {
+                guard !clipQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                startManual()
+                send("search", query: clipQuery)
+            }
+            HStack(spacing: 6) {
+                Button("Find related") { send("suggestTakeGroups", fileIDs: pool.map(\.fileID)) }
+                    .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+                    .disabled(pool.count < 2)
+                    .help(pool.count < 2 ? "Search for at least two videos first" : "Suggest groups of clips that look alike and were filmed close together")
+                Button { startManual(); newGroup() } label: { Label("New group", systemImage: "plus") }
+                    .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
+            }
+            if !suggestedGroups.isEmpty {
+                ForEach(suggestedGroups.indices, id: \.self) { index in
+                    SuggestionRow(suggestion: suggestedGroups[index]) {
+                        startManual()
+                        newGroup()
+                        foundClips.append(contentsOf: suggestedGroups[index].members.map {
+                            CatalogHit(fileID: $0.fileID, path: $0.path, kind: "video", text: "")
+                        })
+                        selectedIDs = Set(suggestedGroups[index].members.map(\.fileID))
+                        ToastCenter.shared.show("Name the group and describe the outcome, then save")
+                    }
+                    .padding(.horizontal, -6)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+    }
+
+    private var emptyDetail: some View {
+        VStack {
+            if autoLoading && !autoLoaded {
+                VStack(alignment: .leading, spacing: 10) {
+                    IndeterminateBar().frame(width: 160)
+                    MetaText("Looking for bursts and repeated clips…", size: 13)
+                }
+                .accessibilityElement(children: .combine)
+            } else if autoGroups.isEmpty {
+                DashedNotice(title: "No tries to compare yet",
+                             subtitle: "After a scan, Best Takes groups bursts and repeated clips here by itself. Scan a folder with photo bursts, or make a group by hand on the left.")
+            } else {
+                DashedNotice(title: "Pick a group", subtitle: "Choose a possible group on the left to compare its tries.")
+            }
+        }
+        .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Group editor
@@ -292,7 +353,47 @@ struct TakeWorkbench: View {
 
     // MARK: - Actions
 
+    private func openAuto(_ group: CatalogTakeAutoGroup) {
+        withAnimation(Theme.springStandard) {
+            selectedAutoKey = group.groupKey
+            selectedEvent = nil
+            manual = false
+        }
+    }
+
+    private func startManual() {
+        withAnimation(Theme.springStandard) { selectedAutoKey = nil; manual = true }
+    }
+
+    /// Refreshes the suggested groups. After `resolved` is handled, opens the
+    /// group that followed it (or keeps the current one) so review flows on.
+    private func reloadAuto(after resolved: String?) {
+        guard !autoLoading else { return }
+        autoLoading = true
+        let position = resolved.flatMap { key in autoGroups.firstIndex { $0.groupKey == key } }
+        Task {
+            let response = await TakeRequests.send(engine, CatalogRequest(requestID: UUID().uuidString, action: "autoTakeGroups", limit: 100), timeout: 60)
+            autoLoading = false
+            autoLoaded = true
+            guard let response, response.status == "ok" else { return }
+            let groups = response.takeGroups ?? []
+            withAnimation(Theme.springStandard) {
+                autoGroups = groups
+                if let resolved, selectedAutoKey == resolved || selectedAutoKey == nil {
+                    let open = groups.filter { $0.status == "open" && $0.groupKey != resolved }
+                    selectedAutoKey = open.isEmpty ? nil : open[min(position ?? 0, open.count - 1)].groupKey
+                } else if selectedAutoKey == nil, selectedEvent == nil, !manual {
+                    selectedAutoKey = groups.first { $0.status == "open" }?.groupKey
+                } else if let key = selectedAutoKey, !groups.contains(where: { $0.groupKey == key }) {
+                    selectedAutoKey = groups.first { $0.status == "open" }?.groupKey
+                }
+            }
+        }
+    }
+
     private func open(_ event: CatalogEvent) {
+        selectedAutoKey = nil
+        manual = false
         selectedEvent = event
         lastDeletedEventID = nil
         title = event.title
@@ -427,6 +528,38 @@ struct TakeWorkbench: View {
             if action == "undoEventEdit" { lastDeletedEventID = nil }
             send("listEvents")
         }
+    }
+}
+
+// MARK: - Possible group row
+
+private struct AutoGroupRow: View {
+    let group: CatalogTakeAutoGroup
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let noun = group.kind == "videos" ? "clips" : "photos"
+        RailRow(selected: selected, action: action) {
+            HStack(spacing: 10) {
+                HStack(spacing: 2) {
+                    ForEach(group.shots.prefix(3), id: \.primaryFileID) { shot in
+                        AsyncThumbnail(url: URL(fileURLWithPath: shot.path), size: 96) { Color.white.opacity(0.05) }
+                            .frame(width: 28, height: 28)
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    }
+                }
+                .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))
+                        .foregroundStyle(group.status == "skipped" ? Theme.text3 : Theme.text1)
+                    Text(TakeReview.dateText(group.capturedAt) + (group.status == "skipped" ? " · Skipped" : ""))
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .accessibilityLabel("\(group.shots.count) \(noun), \(TakeReview.dateText(group.capturedAt))\(group.status == "skipped" ? ", skipped" : "")")
     }
 }
 

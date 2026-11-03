@@ -1396,6 +1396,9 @@ mod tests {
                 takes: None,
                 recommendation: None,
                 suggested_take_groups: None,
+                take_groups: None,
+                take_qualities: None,
+                take_goal_ranking: None,
             }))),
             IpcEvent::now(EventPayload::ToolResponse(Wrap::new(ToolResponse {
                 request_id: "tools-2".into(),

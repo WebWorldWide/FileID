@@ -1,0 +1,181 @@
+[
+  {
+    "name": "takes-score-sharp-try-and-reasons",
+    "description": "scoreTakes scores two tries of one picture without a model: the sharp try is recommended with the reason Sharpest, the softened one says Out of focus. Keep all hides the group's choice and reopen forgets it; ranking by a goal reports unavailable when no description model is loaded.",
+    "tree": [
+      {
+        "path": "burst/try1.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 100
+        }
+      },
+      {
+        "path": "burst/try2.png",
+        "generate": "checker",
+        "dimensions": [
+          96,
+          64
+        ],
+        "blur": 3,
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 101
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "score",
+        "catalog": {
+          "action": "scoreTakes",
+          "fileIDs": [
+            2,
+            1
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "takeQualities": [
+            {
+              "primaryFileID": 1,
+              "fileIDs": [
+                1
+              ],
+              "path": "{path:burst/try1.png}",
+              "rank": 1,
+              "recommended": true,
+              "reasons": [
+                "Sharpest"
+              ],
+              "faces": []
+            },
+            {
+              "primaryFileID": 2,
+              "fileIDs": [
+                2
+              ],
+              "path": "{path:burst/try2.png}",
+              "rank": 2,
+              "recommended": false,
+              "reasons": [
+                "Out of focus"
+              ],
+              "faces": []
+            }
+          ]
+        }
+      },
+      {
+        "label": "keep all",
+        "catalog": {
+          "action": "decideTakeGroup",
+          "takeDecision": {
+            "groupKey": "takes-test",
+            "decision": "keepAll",
+            "fileIDs": [
+              1,
+              2
+            ]
+          }
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "choice stored",
+        "db": "SELECT group_key,decision,file_ids_json FROM take_group_decisions",
+        "expect": [
+          [
+            "takes-test",
+            "keepAll",
+            "[1,2]"
+          ]
+        ]
+      },
+      {
+        "label": "reopen",
+        "catalog": {
+          "action": "decideTakeGroup",
+          "takeDecision": {
+            "groupKey": "takes-test",
+            "decision": "reopen",
+            "fileIDs": [
+              1,
+              2
+            ]
+          }
+        },
+        "expect": {
+          "status": "ok"
+        }
+      },
+      {
+        "label": "choice forgotten",
+        "db": "SELECT COUNT(*) FROM take_group_decisions",
+        "expect": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "label": "bad decision",
+        "catalog": {
+          "action": "decideTakeGroup",
+          "takeDecision": {
+            "groupKey": "takes-test",
+            "decision": "delete",
+            "fileIDs": [
+              1,
+              2
+            ]
+          }
+        },
+        "expect": {
+          "status": "error"
+        }
+      },
+      {
+        "label": "goal without a model",
+        "catalog": {
+          "action": "rankTakesWithGoal",
+          "query": "the board is sharp",
+          "fileIDs": [
+            1,
+            2
+          ]
+        },
+        "expect": {
+          "status": "ok",
+          "takeGoalRanking": {
+            "status": "unavailable",
+            "order": [
+              1,
+              2
+            ],
+            "metFileIDs": []
+          }
+        }
+      },
+      {
+        "label": "no suggestions without vectors",
+        "catalog": {
+          "action": "autoTakeGroups"
+        },
+        "expect": {
+          "status": "ok",
+          "takeGroups": []
+        }
+      }
+    ]
+  }
+]

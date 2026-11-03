@@ -56,6 +56,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v25_ocr_text_source", include_str!("../../../../../../shared/catalog/v25.sql")),
         ("v26_vlm_inherited_from", include_str!("../../../../../../shared/catalog/v26.sql")),
         ("v27_chat_retrieval", include_str!("../../../../../../shared/catalog/v27.sql")),
+        ("v28_take_quality", include_str!("../../../../../../shared/catalog/v28.sql")),
     ]
 }
 
@@ -700,6 +701,7 @@ mod tests {
             "v25_ocr_text_source",
             "v26_vlm_inherited_from",
             "v27_chat_retrieval",
+            "v28_take_quality",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");

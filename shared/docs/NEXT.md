@@ -91,6 +91,14 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [ ] Best Takes (agent/best-takes): groups suggested automatically after a scan (bursts and repeated clips), model-free subject sharpness/blur/exposure/eyes/framing scoring with plain reasons, optional one-pass goal scoring, side-by-side compare with keyboard, "Keep the best, move the other N to Trash" with Undo; shared engine gets the same grouping and scoring.
 - [ ] Describe Files faster again (agent/describe-faster): target ≥3× on top of 214 s / 300 photos at equal blinded quality — shorter outputs with early stop, speculative/prompt-lookup decoding, Qwen3-VL 2B as a fast choice, parallel or pipelined instances, template descriptions for files tags+OCR already describe, and an accurate time estimate.
 
+## Best Takes follow-ups (from agent/best-takes, 2026-10-21)
+
+- [ ] WinUI and GTK Best Takes pages per the port spec in `DESIGN_V3_PORT.md` (engine side is done in the shared Rust engine).
+- [ ] On-screen check of the macOS page: keyboard (← → Space Z Return), VoiceOver labels, Undo after Trash, a populated video group.
+- [ ] Eye openness in the shared engine once the face-quality gate from the accuracy work lands (`TakeFaceAnalyzer`); swap the macOS Vision judgement for the same gate.
+- [ ] Capture time with sub-seconds (EXIF SubSecTimeOriginal) at scan time would let bursts split at the real 0.1 s gaps instead of 2 s file times.
+- [ ] Goal ranking on the shared engine (llama.cpp VLM, one contact-sheet pass).
+
 ## Owner focus (2026-10-20 evening): usable by anyone, 50–200× faster AI, hardened core
 
 - [x] Usability (macOS): first-time-user pass on every page. Pages renamed by what they do (Describe Files, Duplicates, Organize Folders); choosing a folder starts the scan; the scan card says what to do next ("Next: describe files →") instead of "Step 4 of 5 · captions not started"; Describe Files no longer locks its main button behind naming people; one primary action per page; every disabled control says why; jargon (CLIP, RAM++, SHA-256, perceptual hash, catalog, engine) moved to tooltips or Settings; two pixel fixes (sidebar card width, 20 → 26 pt page inset). Swift suite 607 tests pass. Welcome sheet changes checked in code only.
