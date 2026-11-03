@@ -304,6 +304,11 @@ public enum DeepAnalyzeRunner {
                 cancelled = true
                 break
             }
+            await ChatYield.shared.drain()
+            if await analyzer.isCancelled() {
+                cancelled = true
+                break
+            }
             // Emit "starting this file" progress so the UI can show what's
             // being analyzed right now.
             let elapsed = Date().timeIntervalSince(batchStart)

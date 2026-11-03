@@ -27,6 +27,17 @@ actor ChatService {
         var summarize: Bool
     }
 
+    /// Same wording as the Rust engine so both apps tell the user what is happening.
+    enum Busy: Error, LocalizedError {
+        case conversation, tooMany
+        var errorDescription: String? {
+            switch self {
+            case .conversation: "A local model summary is still running for this conversation."
+            case .tooMany: "Too many local model summaries are running."
+            }
+        }
+    }
+
     func handle(_ request: ChatRequest, database: Database, sink: IPCSink) async {
         do {
             guard !request.requestID.isEmpty, request.requestID.count <= 200,
@@ -39,6 +50,7 @@ actor ChatService {
                 latestRequest[request.conversationID] = request.requestID
                 if let id = active.removeValue(forKey: request.conversationID) {
                     await JobQueue.shared.cancelPending(id: "chat-" + id)
+                    _ = await ChatYield.shared.remove(id: id)
                     if running == id { await DeepAnalyze.shared.requestCancel() }
                     accumulated.removeValue(forKey: id); lastEmit.removeValue(forKey: id)
                 }
@@ -47,7 +59,9 @@ actor ChatService {
                 }
                 await emit(request, status: request.action == "clear" ? "completed" : "cancelled", message: request.action == "clear" ? "Conversation deleted." : "Model response stopped.", database: database, sink: sink)
             case "send":
-                guard active[request.conversationID] == nil, active.count < 8, let text = request.text,
+                if active[request.conversationID] != nil { throw Busy.conversation }
+                if active.count >= 8 { throw Busy.tooMany }
+                guard let text = request.text,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 2000 else { throw CatalogStore.InvalidRequest() }
                 active[request.conversationID] = request.requestID
                 latestRequest[request.conversationID] = request.requestID
@@ -71,11 +85,16 @@ actor ChatService {
                    request.modelKind == nil || request.modelKind == model.rawValue {
                     active[request.conversationID] = request.requestID
                     let busy = await JobQueue.shared.hasActive(category: .deepAnalyze)
-                    let wait = busy ? "Results are ready. The local model will write its answer after the current Describe or video job finishes." : "Results are ready. The local model is writing its answer; a model that was resting can take a few seconds to wake."
+                    let wait = busy ? "Results are ready. The local model will write its answer as soon as the file it is describing is done." : "Results are ready. The local model is writing its answer; a model that was resting can take a few seconds to wake."
                     await emit(request, status: "queued", message: wait, hits: hits, database: database, sink: sink)
                     guard active[request.conversationID] == request.requestID else { return }
+                    let job: @Sendable (Bool) async -> Void = { interleaved in
+                        await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink, interleaved: interleaved)
+                    }
+                    if busy { await ChatYield.shared.park(id: request.requestID, job) }
                     await JobQueue.shared.enqueue(.init(id: "chat-" + request.requestID, category: .deepAnalyze, title: "Chat evidence summary", etaSeconds: nil, priority: .interactive, blocksExclusiveCommands: false) {
-                        await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
+                        if busy, !(await ChatYield.shared.remove(id: request.requestID)) { return }
+                        await job(false)
                     })
                 } else {
                     var loading = false
@@ -305,13 +324,13 @@ actor ChatService {
         }) ?? []
     }
 
-    private func summarize(_ request: ChatRequest, hits: [CatalogHit], model: AIModelKind, fallback: String, database: Database, sink: IPCSink) async {
+    private func summarize(_ request: ChatRequest, hits: [CatalogHit], model: AIModelKind, fallback: String, database: Database, sink: IPCSink, interleaved: Bool = false) async {
         guard active[request.conversationID] == request.requestID else { return }
         running = request.requestID
         defer { running = nil; accumulated.removeValue(forKey: request.requestID); lastEmit.removeValue(forKey: request.requestID) }
         var answer = fallback
         if case .ready(let current) = await DeepAnalyze.shared.loadState, current == model {
-            await DeepAnalyze.shared.clearCancel()
+            if !interleaved { await DeepAnalyze.shared.clearCancel() }
             let earlier: [(role: String, text: String)] = (try? await database.pool.read { db in
                 try Row.fetchAll(db, sql: "SELECT role,text FROM (SELECT rowid,role,text FROM catalog_chat WHERE conversation_id=? ORDER BY rowid DESC LIMIT 5) ORDER BY rowid", arguments: [request.conversationID])
                     .map { (role: $0["role"] as String, text: $0["text"] as String) }
@@ -329,7 +348,7 @@ actor ChatService {
                 }
                 if !DeepAnalyzeRunner.isAnalysisFailure(result), !result.description.isEmpty { answer = result.description }
             }
-            await DeepAnalyze.shared.clearCancel()
+            if !interleaved { await DeepAnalyze.shared.clearCancel() }
         }
         guard active[request.conversationID] == request.requestID else { return }
         let (prose, proposals) = ChatActions.modelProposals(answer)
