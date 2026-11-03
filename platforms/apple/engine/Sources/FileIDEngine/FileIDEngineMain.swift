@@ -690,7 +690,7 @@ struct FileIDEngineMain {
             // behind a download that takes hours.
             JSONLog.shared.info(ev: "prewarm_model_started",
                                 extra: ["kind": AnyCodable(kind.rawValue)])
-            let work = Task.detached(priority: .userInitiated) {
+            await DeepAnalyze.shared.startPrewarm {
                 SleepGuard.shared.begin(reason: "Model prewarm")
                 defer { SleepGuard.shared.end() }
                 do {
@@ -730,9 +730,7 @@ struct FileIDEngineMain {
                         modelKind: isIntegrity ? kind.rawValue : nil
                     )))
                 }
-                await DeepAnalyze.shared.setPrewarmTask(nil)
             }
-            await DeepAnalyze.shared.setPrewarmTask(work)
         case .cancelPrewarm:
             await DeepAnalyze.shared.cancelPrewarm()
             JSONLog.shared.info(ev: "prewarm_cancel_requested")
@@ -1424,25 +1422,39 @@ struct FileIDEngineMain {
 
     static func wipeLibrary(database: Database) async -> LibraryWiped {
         do {
-            try await database.pool.write { db in
-                let virtuals = try String.fetchAll(db, sql: "SELECT name FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'")
-                let tables = try String.fetchAll(db, sql: """
-                    SELECT name FROM sqlite_master
-                    WHERE type='table' AND sql LIKE 'CREATE TABLE%'
-                      AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations'
-                    """).filter { table in
-                        !virtuals.contains { v in table.hasPrefix(v + "_") }
-                    }
+            // foreign_keys is a no-op inside a transaction, so toggle it outside one.
+            try await database.pool.writeWithoutTransaction { db in
                 try db.execute(sql: "PRAGMA foreign_keys = OFF")
-                for table in tables {
-                    try db.execute(sql: "DELETE FROM \"\(table.replacingOccurrences(of: "\"", with: "\"\""))\"")
+                defer { try? db.execute(sql: "PRAGMA foreign_keys = ON") }
+                try db.inTransaction {
+                    let virtualRows = try Row.fetchAll(db, sql: "SELECT name, instr(lower(replace(sql,' ','')),'content=')>0 AS external FROM sqlite_master WHERE type='table' AND sql LIKE 'CREATE VIRTUAL TABLE%'")
+                    let virtuals: [String] = virtualRows.map { $0["name"] }
+                    let tables = try String.fetchAll(db, sql: """
+                        SELECT name FROM sqlite_master
+                        WHERE type='table' AND sql LIKE 'CREATE TABLE%'
+                          AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations'
+                          AND name <> 'catalog_vector_state'
+                        """).filter { table in
+                            !virtuals.contains { v in table.hasPrefix(v + "_") }
+                        }
+                    for table in tables {
+                        try db.execute(sql: "DELETE FROM \"\(table.replacingOccurrences(of: "\"", with: "\"\""))\"")
+                    }
+                    // 'delete-all' exists only for contentless/external-content FTS5.
+                    for row in virtualRows {
+                        let q = (row["name"] as String).replacingOccurrences(of: "\"", with: "\"\"")
+                        let external: Bool = row["external"]
+                        try db.execute(sql: external ? "INSERT INTO \"\(q)\"(\"\(q)\") VALUES('delete-all')" : "DELETE FROM \"\(q)\"")
+                    }
+                    try? db.execute(sql: "DELETE FROM sqlite_sequence")
+                    // The vector-change triggers and the HNSW cache need these seed rows;
+                    // a fresh instance id invalidates any index cached before the wipe.
+                    // Deleting tables fires the vector triggers, so clear their log last.
+                    try db.execute(sql: "DELETE FROM catalog_vector_changes")
+                    try db.execute(sql: "UPDATE catalog_vector_state SET instance_id=hex(randomblob(16)),generation=0")
+                    try db.execute(sql: "UPDATE catalog_vector_state SET nonce=instance_id")
+                    return .commit
                 }
-                for table in virtuals {
-                    let q = table.replacingOccurrences(of: "\"", with: "\"\"")
-                    try db.execute(sql: "INSERT INTO \"\(q)\"(\"\(q)\") VALUES('delete-all')")
-                }
-                try? db.execute(sql: "DELETE FROM sqlite_sequence")
-                try db.execute(sql: "PRAGMA foreign_keys = ON")
             }
             return LibraryWiped(ok: true)
         } catch {

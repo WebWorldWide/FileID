@@ -638,3 +638,46 @@ struct DeepAnalyzeRunnerTests {
         return c
     }
 }
+
+@Suite("Deep Analyze trusted filename years")
+struct TrustedYearsDatabaseTests {
+    @Test("Capture date, OCR text and Year tags all ground a year")
+    func trustedYearsReadsTheCatalog() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDYears-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try Database(at: root.appendingPathComponent("years.sqlite"))
+        try await db.pool.write { sql in
+            try sql.execute(sql: "INSERT INTO files (id, path_text, path_hash, size_bytes, created_at, scanned_at, kind, extension) VALUES (1, '/a.jpg', 1, 1, 1183248000, 0, 'image', 'jpg')")
+            try sql.execute(sql: "INSERT INTO ocr_text (file_id, text) VALUES (1, 'Invoice 2024')")
+            try sql.execute(sql: "INSERT INTO tags (file_id, tag, source) VALUES (1, 'Year_2019', 'auto')")
+        }
+        let years = try await DeepAnalyzeRunner.trustedYears(database: db, fileID: 1)
+        #expect(years == [2007, 2019, 2024])
+    }
+}
+
+@Suite("Model prewarm cancellation")
+struct PrewarmCancellationTests {
+    @Test("A Cancel sent while no prewarm runs does not cancel the next prewarm")
+    func idleCancelDoesNotLinger() async throws {
+        let analyzer = DeepAnalyze()
+        await analyzer.cancelPrewarm()
+        let task = await analyzer.startPrewarm { try? await Task.sleep(for: .seconds(5)) }
+        #expect(!task.isCancelled)
+        task.cancel()
+        await task.value
+    }
+
+    @Test("A prewarm finishing does not make a concurrent prewarm uncancellable")
+    func concurrentPrewarmStaysCancellable() async throws {
+        let analyzer = DeepAnalyze()
+        let quick = await analyzer.startPrewarm {}
+        let slow = await analyzer.startPrewarm { try? await Task.sleep(for: .seconds(30)) }
+        await quick.value
+        while await analyzer.activePrewarmCount > 1 { await Task.yield() }
+        await analyzer.cancelPrewarm()
+        #expect(slow.isCancelled)
+        await slow.value
+        while await analyzer.activePrewarmCount > 0 { await Task.yield() }
+    }
+}

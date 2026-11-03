@@ -647,10 +647,11 @@ public enum DeepAnalyzeRunner {
     static func trustedYears(database: Database, fileID: Int64) async throws -> Set<Int> {
         try await database.pool.read { db in
             guard let row = try Row.fetchOne(db, sql: """
-                SELECT created_at, ocr_text FROM files WHERE id = ?
+                SELECT files.created_at, ocr_text.text AS ocr FROM files
+                LEFT JOIN ocr_text ON ocr_text.file_id = files.id WHERE files.id = ?
                 """, arguments: [fileID]) else { return [] }
 
-            var years = Self.trustedYears(in: (row["ocr_text"] as String?) ?? "")
+            var years = Self.trustedYears(in: (row["ocr"] as String?) ?? "")
             if let createdAt: Double = row["created_at"], createdAt.isFinite {
                 let year = Calendar(identifier: .gregorian)
                     .component(.year, from: Date(timeIntervalSince1970: createdAt))
