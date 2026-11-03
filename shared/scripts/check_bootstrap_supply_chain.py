@@ -36,7 +36,7 @@ REVIEWED_SHELL_SCRIPT_SHA256 = {
     "packaging/appimage/build-appimage.sh": "1f281b23f3fb3bf12025b0a72f66de6b8901356b71392b9478b41b29859a970f",
     "packaging/aur/PKGBUILD": "f31f5fbaeb9239196df202ade1231fa4ab84f2060c6280f7e1b2c6e314ae38e5",
     "platforms/apple/run.sh": "8bcb4be432d5e3c1ad7adc1fb9474dee574e14bcaf8ddd5eede0ab51fac87455",
-    "platforms/apple/scripts/assemble_app.sh": "920fccc56864259dd4ddca1e47ee3a67859705f8c87b5a76bf0f9439e0b40f52",
+    "platforms/apple/scripts/assemble_app.sh": "0774144673b6e50abdec3d8626ffe076340a917c0508c6f45a96896fe883af52",
     "platforms/apple/scripts/build_corpus.sh": "a5f53f4df77c07dc7aefd4e0c31dbbaa90dac92e68d3e614c789c36320cced87",
     "platforms/apple/scripts/build_dmg.sh": "ce5c5bc478f240bb6e0cfdde311b764cb380132e5b555126364092ece8556390",
     "platforms/apple/scripts/ensure_mlx_metallib.sh": "814daff5af2738d7720d0612f5df25a865d83a3c3e3811c8c0090a5b2e9d2700",
