@@ -194,10 +194,16 @@ enum ChatFacts {
             while dir.count > 1, dir.hasSuffix("/") { dir.removeLast() }
             return FolderTotal(name: dir.split(separator: "/").last.map(String.init) ?? dir, path: dir, count: row["c"], bytes: row["b"])
         }
-        let repeated = Dictionary(grouping: found, by: \.name).filter { $0.value.count > 1 }.keys
-        for index in found.indices where repeated.contains(found[index].name) {
-            let parts = found[index].path.split(separator: "/")
-            if parts.count > 1 { found[index].name = parts.suffix(2).joined(separator: "/") }
+        // Widen the label one folder at a time until no two folders share it.
+        var depth = 1
+        while depth < 8 {
+            let repeated = Set(Dictionary(grouping: found, by: \.name).filter { $0.value.count > 1 }.keys)
+            if repeated.isEmpty { break }
+            depth += 1
+            for index in found.indices where repeated.contains(found[index].name) {
+                let parts = found[index].path.split(separator: "/")
+                if parts.count >= depth { found[index].name = parts.suffix(depth).joined(separator: "/") }
+            }
         }
         return found
     }

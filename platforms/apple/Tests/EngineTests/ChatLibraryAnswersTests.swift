@@ -58,6 +58,19 @@ struct ChatLibraryAnswersTests {
         #expect(names == ["Videos/Downloads", "Docs", "Photos/Downloads"])
     }
 
+    @Test func foldersThatStillCollideGetMoreOfTheirPath() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for (id, path) in [(1, "/a/2019/Videos/Downloads/x.mov"), (2, "/a/2019/Videos/Downloads/y.mov"), (3, "/a/2020/Videos/Downloads/z.mov")] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,1000,0,'video','x')", arguments: [id, path, id])
+            }
+        }
+        let names = try await database.pool.read { try ChatFacts.folders($0, bySize: false, limit: 5).map(\.name) }
+        #expect(names == ["2019/Videos/Downloads", "2020/Videos/Downloads"])
+    }
+
     @Test func folderTotalsWalkTheDirectoryIndex() async throws {
         let (database, directory) = try await catalog()
         defer { try? FileManager.default.removeItem(at: directory) }

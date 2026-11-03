@@ -287,15 +287,20 @@ pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64) -> Result<Ve
         Ok(FolderTotal { name: dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(&dir).to_owned(), path: dir, count: row.get(1)?, bytes: row.get(2)? })
     })?;
     let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    let repeated: std::collections::HashSet<String> = {
+    // Widen the label one folder at a time until no two folders share it.
+    for depth in 2..8 {
         let mut seen = std::collections::HashSet::new();
-        found.iter().filter(|folder| !seen.insert(folder.name.clone())).map(|folder| folder.name.clone()).collect()
-    };
-    for folder in &mut found {
-        if repeated.contains(&folder.name) {
-            let parts: Vec<&str> = folder.path.split('/').filter(|part| !part.is_empty()).collect();
-            if parts.len() > 1 {
-                folder.name = parts[parts.len() - 2..].join("/");
+        let repeated: std::collections::HashSet<String> =
+            found.iter().filter(|folder| !seen.insert(folder.name.clone())).map(|folder| folder.name.clone()).collect();
+        if repeated.is_empty() {
+            break;
+        }
+        for folder in &mut found {
+            if repeated.contains(&folder.name) {
+                let parts: Vec<&str> = folder.path.split('/').filter(|part| !part.is_empty()).collect();
+                if parts.len() >= depth {
+                    folder.name = parts[parts.len() - depth..].join("/");
+                }
             }
         }
     }
@@ -445,6 +450,16 @@ mod tests {
             .unwrap();
         assert!(plan.iter().any(|line| line.contains("catalog_files_dir")), "{plan:?}");
         assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE FOR GROUP BY")), "{plan:?}");
+    }
+
+    #[test]
+    fn folders_that_still_collide_get_more_of_their_path() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path) in [(1, "/a/2019/Videos/Downloads/x.mov"), (2, "/a/2019/Videos/Downloads/y.mov"), (3, "/a/2020/Videos/Downloads/z.mov")] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'video','x')", rusqlite::params![id, path]).unwrap();
+        }
+        let names: Vec<String> = folders(&conn, false, 5).unwrap().into_iter().map(|folder| folder.name).collect();
+        assert_eq!(names, vec!["2019/Videos/Downloads", "2020/Videos/Downloads"]);
     }
 
     #[test]
