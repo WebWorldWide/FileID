@@ -108,11 +108,14 @@ impl Filter {
             }
         }
         if let Some(folder) = &self.folder {
-            parts.push("f.path_text LIKE ? ESCAPE '\\'".into());
-            args.push(Value::Text(match folder.strip_prefix("named:") {
-                Some(name) => format!("%/{}/%", like_escape(name)),
-                None => format!("{}/%", like_escape(folder.trim_end_matches(['/', '\\']))),
-            }));
+            // Windows catalogs store `\` separators; accept either.
+            parts.push("(f.path_text LIKE ? ESCAPE '\\' OR f.path_text LIKE ? ESCAPE '\\')".into());
+            for separator in ["/", "\\\\"] {
+                args.push(Value::Text(match folder.strip_prefix("named:") {
+                    Some(name) => format!("%{separator}{}{separator}%", like_escape(name)),
+                    None => format!("{}{separator}%", like_escape(folder.trim_end_matches(['/', '\\']))),
+                }));
+            }
         }
         if self.undescribed {
             parts.push("(f.vlm_description IS NULL OR trim(f.vlm_description)='')".into());
@@ -515,6 +518,20 @@ mod tests {
 
     use super::*;
     use crate::commands::chat_intent::parse_question;
+
+    #[test]
+    fn folder_filters_match_windows_separators() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path) in [(1, "C:\\Users\\a\\Downloads\\x.jpg"), (2, "C:\\Users\\a\\Downloads\\sub\\y.jpg"), (3, "C:\\Users\\a\\Pictures\\z.jpg"), (4, "/lib/Downloads/w.jpg")] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'image','jpg')", rusqlite::params![id, path]).unwrap();
+        }
+        let count = |folder: &str| totals(&conn, &Filter { folder: Some(folder.into()), ..Filter::default() }).unwrap().0;
+        assert_eq!(count("named:Downloads"), 3);
+        assert_eq!(count("C:\\Users\\a\\Downloads"), 2);
+        assert_eq!(count("C:\\Users\\a\\Downloads\\"), 2);
+        assert_eq!(count("/lib/Downloads"), 1);
+        assert_eq!(count("C:\\Users\\a\\Down"), 0);
+    }
 
     fn library() -> Connection {
         let conn = crate::db::test_support::memory_db();
