@@ -264,9 +264,18 @@ actor ChatService {
     /// Numbered one-line evidence instead of JSON: about a third fewer prompt
     /// tokens (prefill dominates time to first word on 4B+ models), no empty
     /// fields, and small models no longer echo the structure back.
-    static func evidencePrompt(request: String, hits: [CatalogHit], limit: Int = 8) -> String {
+    static func historyBlock(_ turns: [(role: String, text: String)], maxTurns: Int = 4, maxChars: Int = 300) -> String {
+        let recent = turns.suffix(maxTurns).compactMap { turn -> String? in
+            let flat = turn.text.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+            guard !flat.isEmpty else { return nil }
+            return "\(turn.role == "user" ? "User" : "Assistant"): \(flat.prefix(maxChars))"
+        }
+        return recent.isEmpty ? "" : "Earlier in this conversation:\n" + recent.joined(separator: "\n") + "\n"
+    }
+
+    static func evidencePrompt(request: String, hits: [CatalogHit], limit: Int = 8, history: String = "") -> String {
         let shown = hits.prefix(limit)
-        var lines = ["Request: \(request)", "Matches found: \(hits.count)\(hits.count > shown.count ? " (showing \(shown.count))" : "")", "<evidence>"]
+        var lines = [history + "Request: \(request)", "Matches found: \(hits.count)\(hits.count > shown.count ? " (showing \(shown.count))" : "")", "<evidence>"]
         for (index, hit) in shown.enumerated() {
             var where_: [String] = [hit.kind]
             if let s = hit.startSeconds { where_.append(String(format: "at %.0f s", s)) }
@@ -298,7 +307,12 @@ actor ChatService {
         var answer = fallback
         if case .ready(let current) = await DeepAnalyze.shared.loadState, current == model {
             await DeepAnalyze.shared.clearCancel()
-            let prompt = Self.evidencePrompt(request: request.text ?? "", hits: hits) + "\n" + ChatActions.actionToolFormat
+            let earlier: [(role: String, text: String)] = (try? await database.pool.read { db in
+                try Row.fetchAll(db, sql: "SELECT role,text FROM (SELECT rowid,role,text FROM catalog_chat WHERE conversation_id=? ORDER BY rowid DESC LIMIT 5) ORDER BY rowid", arguments: [request.conversationID])
+                    .map { (role: $0["role"] as String, text: $0["text"] as String) }
+            }) ?? []
+            let history = Self.historyBlock(Array(earlier.dropLast()))
+            let prompt = Self.evidencePrompt(request: request.text ?? "", hits: hits, history: history) + "\n" + ChatActions.actionToolFormat
             do {
                 let result = await DeepAnalyze.shared.runCancellableAnalysis {
                     do {

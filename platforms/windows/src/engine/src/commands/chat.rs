@@ -159,19 +159,20 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     let cancel = Arc::new(AtomicBool::new(false));
     let _claim = Claim::take(&request, &cancel)?;
     let (db, req) = (database.clone(), request.clone());
-    let (prepared, queued) = blocking(move || {
+    let (prepared, queued, history) = blocking(move || {
         let mut conn = db.lock();
         let prepared = prepare_send(&conn, &req, &live_semantic)?;
         if prepared.hits.is_empty() || !prepared.summarize {
             let message = if prepared.summarize { format!("{}{}", prepared.message, model_note(true)) } else { prepared.message.clone() };
             save_turn(&mut conn, &req.conversation_id, &[("user", &prepared.text), ("assistant", &message)])?;
             let response = respond(&conn, &req, "completed", message, prepared.hits.clone(), prepared.actions.clone())?;
-            return Ok((prepared, response));
+            return Ok((prepared, response, String::new()));
         }
+        let history = history_block(&recent_turns(&conn, &req.conversation_id)?, 4, 300);
         save_turn(&mut conn, &req.conversation_id, &[("user", &prepared.text)])?;
         let message = "Results are ready. The local model will summarize their evidence when its current work finishes.";
         let response = respond(&conn, &req, "queued", message.into(), prepared.hits.clone(), vec![])?;
-        Ok((prepared, response))
+        Ok((prepared, response, history))
     })
     .await?;
     if queued.status != "queued" {
@@ -181,7 +182,7 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     let hits = queued.hits.clone();
     emit(sink, queued).await;
     let prompt = format!(
-        "{EVIDENCE_SYSTEM}\n\n{}\n{}",
+        "{EVIDENCE_SYSTEM}\n\n{history}{}\n{}",
         evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE),
         chat_actions::ACTION_TOOL_FORMAT
     );
@@ -233,6 +234,36 @@ async fn summarize(model: &str, prompt: &str, cancel: Arc<AtomicBool>) -> Result
         tracing::warn!(?error, "releasing the chat summary model failed");
     }
     result
+}
+
+fn recent_turns(conn: &Connection, conversation_id: &str) -> Result<Vec<(String, String)>> {
+    let mut statement = conn.prepare("SELECT role,text FROM (SELECT rowid,role,text FROM catalog_chat WHERE conversation_id=?1 ORDER BY rowid DESC LIMIT 4) ORDER BY rowid")?;
+    let rows = statement
+        .query_map([conversation_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Last turns of the conversation for the model prompt. Mirrors macOS `ChatService.historyBlock`.
+pub(crate) fn history_block(turns: &[(String, String)], max_turns: usize, max_chars: usize) -> String {
+    let start = turns.len().saturating_sub(max_turns);
+    let lines: Vec<String> = turns[start..]
+        .iter()
+        .filter_map(|(role, text)| {
+            let flat = text.split(is_newline).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ");
+            let flat = flat.trim();
+            if flat.is_empty() {
+                return None;
+            }
+            let who = if role == "user" { "User" } else { "Assistant" };
+            Some(format!("{who}: {}", flat.chars().take(max_chars).collect::<String>()))
+        })
+        .collect();
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("Earlier in this conversation:\n{}\n", lines.join("\n"))
+    }
 }
 
 /// Numbered one-line evidence. Mirrors macOS `ChatService.evidencePrompt`.
@@ -702,6 +733,18 @@ mod tests {
         );
         assert_eq!(time_label(65.4), "1:05");
         assert_eq!(time_label(3_600.0), "60:00");
+    }
+
+    #[test]
+    fn history_keeps_the_last_turns_trimmed() {
+        let turns: Vec<(String, String)> = (1..=6)
+            .map(|i| ((if i % 2 == 1 { "user" } else { "assistant" }).to_owned(), format!("turn {i} {}", "x".repeat(400))))
+            .collect();
+        let block = history_block(&turns, 4, 20);
+        assert!(!block.contains("turn 2"));
+        assert!(block.contains("turn 3") && block.contains("turn 6"));
+        assert!(block.lines().skip(1).all(|line| line.chars().count() < 40));
+        assert_eq!(history_block(&[], 4, 20), "");
     }
 
     #[test]
