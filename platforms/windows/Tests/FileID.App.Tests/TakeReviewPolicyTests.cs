@@ -6,6 +6,9 @@ namespace FileID.App.Tests;
 
 public sealed class TakeReviewPolicyTests
 {
+    private static readonly long[] TrashedWithTwins = { 1, 3, 11 };
+    private static readonly long[] OnlyBest = { 2 };
+    private static readonly long[] WholeGroup = { 1, 2 };
     private static CatalogTakeQuality Quality(long id, int rank, bool recommended, params long[] files) =>
         new(id, files, $"C:\\shoot\\IMG_{id}.jpg", 1.0 / rank, rank, recommended, Array.Empty<string>(), Array.Empty<CatalogTakeBox>());
 
@@ -32,8 +35,8 @@ public sealed class TakeReviewPolicyTests
     {
         var qualities = Three();
         var keep = TakeReviewPolicy.DefaultKeep(qualities);
-        Assert.Equal(new long[] { 2 }, keep.ToArray());
-        Assert.Equal(new long[] { 1, 3, 11 }, TakeReviewPolicy.TrashIds(qualities, keep));
+        Assert.Equal(OnlyBest, keep.ToArray());
+        Assert.Equal(TrashedWithTwins, TakeReviewPolicy.TrashIds(qualities, keep));
         Assert.Equal(2, TakeReviewPolicy.DroppedTries(qualities, keep));
     }
 
@@ -84,13 +87,14 @@ public sealed class TakeReviewPolicyTests
         var group = Group("photos", "open", 1, 2);
         var decision = TakeReviewPolicy.Decision(group, "skip");
         Assert.Equal(("takes-1", "skip"), (decision.GroupKey, decision.Decision));
-        Assert.Equal(new long[] { 1, 2 }, decision.FileIDs.ToArray());
+        Assert.Equal(WholeGroup, decision.FileIDs.ToArray());
         Assert.Equal("ALL 3 PHOTOS · 1 TO KEEP", TakeReviewPolicy.FilmstripHeader(Group("photos", "open", 1, 2, 3), new HashSet<long> { 2 }, 3));
     }
 }
 
 public sealed class SidebarTabShortcutTests
 {
+    private static readonly string[] AnalyzeOrder = { "deepanalyze", "chat", "takes", "models" };
     [Fact]
     public void BestTakesIsCtrlSixAndTheOtherPagesKeepTheMacNumbers()
     {
@@ -99,7 +103,7 @@ public sealed class SidebarTabShortcutTests
         Assert.Equal(9, SidebarTab.Tools.ShortcutNumber);
         Assert.Equal(0, SidebarTab.Models.ShortcutNumber);
         Assert.Equal("Analyze", SidebarTab.Takes.Area);
-        Assert.Equal(new[] { "deepanalyze", "chat", "takes", "models" }, SidebarTab.InArea("Analyze").Select(t => t.Id).ToArray());
+        Assert.Equal(AnalyzeOrder, SidebarTab.InArea("Analyze").Select(t => t.Id).ToArray());
         Assert.Equal("Analyze / Best Takes", SidebarTab.Takes.Crumb);
         Assert.Equal("takes", SidebarTab.ById("takes").Id);
     }
