@@ -1287,14 +1287,12 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
             match event {
                 EngineState::RestructurePlan(plan) => ui.show_plan(plan),
                 EngineState::RestructureApplyResult(result) => ui.finish(result),
-                EngineState::Error { kind, message, .. } if ui.operation.get().is_some() => {
+                EngineState::Error { kind, message, .. }
+                    if ui.operation.get().is_some() && is_restructure_error(&kind) =>
+                {
                     ui.operation.set(None);
                     ui.stopping.set(false);
-                    ui.set_notice(
-                        Tone::Warning,
-                        "Something went wrong",
-                        &format!("{kind}: {message}"),
-                    );
+                    ui.set_notice(Tone::Warning, "Something went wrong", &message);
                     ui.refresh();
                 }
                 EngineState::Exited => {
@@ -1313,9 +1311,37 @@ fn wire(ui: &Rc<Ui>, change_folder: &gtk::Button) {
     });
 }
 
+/// Another page's failure (a model download, a trash) must not end a plan or
+/// apply that is still running and still owns its Stop button.
+fn is_restructure_error(kind: &str) -> bool {
+    kind.contains("restructure")
+        || matches!(
+            kind,
+            "db_unavailable" | "command_limit_exceeded" | "command_decode_failed" | "oversized_frame"
+        )
+}
+
 #[cfg(test)]
 mod review_tests {
     use super::*;
+
+    #[test]
+    fn only_restructure_failures_end_the_operation() {
+        for kind in [
+            "plan_restructure_failed",
+            "apply_restructure",
+            "undo_restructure",
+            "restructure_already_running",
+            "restructure_shortcut_undo",
+            "db_unavailable",
+            "oversized_frame",
+        ] {
+            assert!(is_restructure_error(kind), "{kind}");
+        }
+        for kind in ["vlm_server_payload_rejected", "deep_analyze_failed", "model_download_failed"] {
+            assert!(!is_restructure_error(kind), "{kind}");
+        }
+    }
 
     #[test]
     fn review_filters_title_and_select_moves() {

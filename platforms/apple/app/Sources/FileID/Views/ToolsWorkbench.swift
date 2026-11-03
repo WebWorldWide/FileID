@@ -32,7 +32,19 @@ final class ToolsSession {
     var outputs: [ToolOutput] = []
     var executed = false
     var capabilities: [ToolCapability] = []
+    var pendingEngineGeneration = 0
 
+    /// A request sent to an engine that has since exited never gets a reply;
+    /// without this every control stays disabled for the rest of the session.
+    func abandonPendingIfEngineRestarted(generation: Int) {
+        guard !pending.isEmpty, generation != pendingEngineGeneration else { return }
+        let action = pendingAction
+        pending = ""
+        pendingAction = ""
+        message = action == "execute"
+            ? "FileID's engine stopped during the export. Some files may already be saved; press Show last export to check."
+            : "FileID's engine stopped before this finished. Try again."
+    }
 }
 
 struct ToolsWorkbench: View {
@@ -81,6 +93,7 @@ struct ToolsWorkbench: View {
         .tint(Theme.gold)
         .onAppear {
             consume(); consumeSearch()
+            session.abandonPendingIfEngineRestarted(generation: engine.engineResetSignal)
             if session.pending.isEmpty && session.capabilities.isEmpty { send(ToolRequest(requestID: UUID().uuidString, action: "capabilities")) }
         }
         .task(id: selectedHits.first?.path) {
@@ -95,6 +108,7 @@ struct ToolsWorkbench: View {
         .onChange(of: session.videoAspectRatio) { _, _ in invalidate() }
         .onChange(of: session.videoFraming) { _, _ in invalidate() }
         .onChange(of: session.videoStabilization) { _, _ in invalidate() }
+        .onChange(of: engine.engineResetSignal) { _, new in session.abandonPendingIfEngineRestarted(generation: new) }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }
     }
@@ -425,6 +439,7 @@ struct ToolsWorkbench: View {
     }
     private func send(_ request: ToolRequest) {
         session.pending = request.requestID; session.pendingAction = request.action
+        session.pendingEngineGeneration = engine.engineResetSignal
         session.searchID = ""
         if !engine.send(.toolRequest(request: request)) { session.pending = ""; session.pendingAction = ""; session.message = "FileID is still getting ready. Try again in a moment." }
     }

@@ -851,6 +851,10 @@ public final class EngineClient {
         autoPilotActive = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
+        // Keep the counters as context, but a scan the dead engine was running
+        // can never report its terminal phase: left live, the sidebar offers
+        // only Pause/Stop against a jobless engine and hides Scan again.
+        lastProgress = lastProgress?.settledAfterEngineExit()
         // Signal views that own their in-flight UI (e.g. Deep Analyze's
         // StreamCard + inert Cancel) to reset — the engine can no longer
         // emit the terminal event that would clear them.
@@ -1376,6 +1380,16 @@ public final class EngineClient {
 }
 
 extension ScanProgress {
+    func settledAfterEngineExit() -> ScanProgress {
+        switch phase {
+        case .completed, .cancelled, .failed, .idle: return self
+        case .discovering, .tagging, .postScan:
+            return ScanProgress(sessionID: sessionID, phase: .failed, total: total, discovered: discovered,
+                                processed: processed, failed: failed, filesPerSecond: 0, etaSeconds: nil,
+                                residentMB: residentMB, availableMB: availableMB)
+        }
+    }
+
     /// True when `self` is a fresher scan-progress snapshot than `prior`
     /// and should replace it. Snapshots reach the main actor as
     /// independent unstructured Tasks the runtime may reorder; a stale
