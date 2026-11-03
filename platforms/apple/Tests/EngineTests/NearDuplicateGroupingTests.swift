@@ -44,6 +44,18 @@ struct NearDuplicateGroupingTests {
         #expect(groups.allSatisfy { $0.members.count == 1 })
     }
 
+    @Test func bestTakesGroupsOnPHashAloneButDescribeDoesNot() {
+        let items = [
+            item(1, "/c/DSC001.JPG", 100, nil, phash: 0xF0F0_F0F0_F0F0_F0F0),
+            item(2, "/c/DSC002.JPG", 101, nil, phash: 0xF0F0_F0F0_F0F0_F0F1),
+            item(3, "/c/DSC003.JPG", 102, nil, phash: 0x0F0F_0F0F_0F0F_0F0F),
+            item(4, "/c/DSC004.JPG", 103, nil, phash: 0),
+        ]
+        #expect(NearDuplicateGrouping.groups(items, thresholds: .takes).map(\.members) == [[1, 2], [3], [4]])
+        #expect(NearDuplicateGrouping.groups(items, thresholds: .nearDuplicate).map(\.members) == [[1], [2], [3], [4]])
+        #expect(NearDuplicateGrouping.groups(items, thresholds: .clips).map(\.members) == [[1], [2], [3], [4]])
+    }
+
     @Test func missingEmbeddingsKeepFilesSeparateExceptSidecarPairs() {
         let groups = NearDuplicateGrouping.groups([
             item(1, "/a/IMG_1.HEIC", 10, nil), item(2, "/a/IMG_1.DNG", 10, nil), item(3, "/a/IMG_2.HEIC", 10.5, nil),

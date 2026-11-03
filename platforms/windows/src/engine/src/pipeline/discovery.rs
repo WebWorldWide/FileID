@@ -155,7 +155,8 @@ impl FileKind {
             | "adoc" | "csv" | "tsv" | "log" | "markdown" | "text" | "json" | "yaml" | "yml"
             | "toml" | "xml" | "html" | "htm" => FileKind::Doc,
             "mp3" | "mp2" | "mp1" | "wav" | "flac" | "ogg" | "oga" | "m4a" | "m4b"
-            | "aac" | "opus" | "aiff" | "aif" | "aifc" | "caf" | "mka" | "spx" => {
+            | "aac" | "opus" | "aiff" | "aif" | "aifc" | "caf" | "mka" | "spx" | "wma" | "amr"
+            | "ape" | "wv" => {
                 FileKind::Audio
             }
             // 3D models — `.obj` clusters by its rendered shape (CLIP); the rest are grouped

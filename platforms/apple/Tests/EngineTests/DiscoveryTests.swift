@@ -291,3 +291,16 @@ struct DiscoverySkipPredicateTests {
             currentModified: 1_700_000_000.0 + 1e-7, currentSize: 10))
     }
 }
+
+@Suite("File type tables")
+struct FileTypeTableTests {
+    @Test func commonCameraAndAudioFormatsAreIndexed() {
+        for ext in ["wma", "cr3", "avif", "mxf", "vob", "caf", "AIF"] {
+            #expect(FileTypes.isTaggable(ext), "\(ext)")
+        }
+        #expect(FileTypes.kind(forExtension: "wma") == .audio)
+        #expect(FileTypes.kind(forExtension: "cr3") == .image)
+        #expect(FileTypes.kind(forExtension: "vob") == .video)
+        #expect(!FileTypes.isTaggable("iso"))
+    }
+}

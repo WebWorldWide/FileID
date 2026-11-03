@@ -22,6 +22,8 @@ enum ChatFacts {
         var folder: String?
         var undescribed = false
         var ids: [Int64]?
+        /// Lowercase file extensions ("raw" covers every RAW type).
+        var extensions: [String] = []
 
         var effectiveKinds: [String] { kinds.isEmpty && undescribed ? ChatFacts.analyzable : kinds }
 
@@ -34,6 +36,9 @@ enum ChatFacts {
             var parts = ["f.failed=0"]
             if !effectiveKinds.isEmpty {
                 parts.append("\(ordered ? "+" : "")f.kind IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(effectiveKinds))
+            }
+            if !extensions.isEmpty {
+                parts.append("lower(f.extension) IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(extensions))
             }
             if !personIDs.isEmpty {
                 parts.append("f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)")
@@ -69,12 +74,18 @@ enum ChatFacts {
         /// " of Kyle in Downloads from 2023 not described yet".
         var qualifiers: String {
             var text = ""
+            if !extensions.isEmpty { text += " in \(ChatFacts.formatLabel(extensions)) format" }
             if !personNames.isEmpty { text += " of \(personNames.joined(separator: " and "))" }
             if let folder { text += " in \(folder.hasPrefix("named:") ? String(folder.dropFirst(6)) : folder)" }
             if let date { text += " \(date.phrase)" }
             if undescribed { text += " not described yet" }
             return text
         }
+    }
+
+    /// "RAW" for the RAW family, else the first extension in capitals ("JPG", "PNG").
+    static func formatLabel(_ extensions: [String]) -> String {
+        extensions.contains("arw") && extensions.contains("cr2") ? "RAW" : (extensions.first ?? "").uppercased()
     }
 
     static func json<T: Encodable>(_ value: T) -> String {
@@ -171,8 +182,59 @@ enum ChatFacts {
         return "Found \(ChatIntent.countLabel(extras.count)) \(extras.count == 1 ? "extra copy" : "extra copies") of \(ChatIntent.countLabel(extras.groups)) \(extras.groups == 1 ? "file" : "files")\(qualifiers), using \(ChatIntent.bytesLabel(extras.bytes)). Cleanup checks every copy byte by byte before anything moves."
     }
 
+    struct FolderTotal: Sendable { var name: String; let path: String; let count: Int64; let bytes: Int64 }
+
+    /// Folders holding the most files (or bytes), from the stored paths. Both path
+    /// separators are folded so a catalog scanned on Windows reads the same.
+    static func folders(_ db: GRDB.Database, bySize: Bool, limit: Int) throws -> [FolderTotal] {
+        let path = "replace(f.path_text,char(92),'/')"
+        let order = bySize ? "b DESC,c DESC" : "c DESC,b DESC"
+        var found = try Row.fetchAll(db, sql: "SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 GROUP BY dir ORDER BY \(order),dir ASC LIMIT ?", arguments: [limit]).map { row -> FolderTotal in
+            var dir: String = row["dir"]
+            while dir.count > 1, dir.hasSuffix("/") { dir.removeLast() }
+            return FolderTotal(name: dir.split(separator: "/").last.map(String.init) ?? dir, path: dir, count: row["c"], bytes: row["b"])
+        }
+        let repeated = Dictionary(grouping: found, by: \.name).filter { $0.value.count > 1 }.keys
+        for index in found.indices where repeated.contains(found[index].name) {
+            let parts = found[index].path.split(separator: "/")
+            if parts.count > 1 { found[index].name = parts.suffix(2).joined(separator: "/") }
+        }
+        return found
+    }
+
+    static func folderPhrase(_ folder: FolderTotal) -> String {
+        "\(folder.name) (\(ChatIntent.countLabel(folder.count)) \(folder.count == 1 ? "file" : "files"), \(ChatIntent.bytesLabel(folder.bytes)))"
+    }
+
+    private static func libraryAnswer(_ db: GRDB.Database, _ question: ChatIntent.Question) throws -> (String, [CatalogHit]) {
+        let everything = Filter()
+        let (count, bytes) = try totals(db, everything)
+        let hits = try listed(db, everything, order: "newest", limit: shown, count: count)
+        guard count > 0 else { return ("Your library is empty. Scan a folder to get started.", hits) }
+        if question.measure == "folders" {
+            let bySize = question.order == "largest"
+            let top = try folders(db, bySize: bySize, limit: 5)
+            return ("\(bySize ? "Biggest folders" : "Folders with the most files"): \(top.map(folderPhrase).joined(separator: ", ")).", hits)
+        }
+        let kinds = try Row.fetchAll(db, sql: "SELECT f.kind AS k,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,k ASC")
+            .map { row -> String in
+                let n: Int64 = row["c"]
+                let kind: String = row["k"]
+                return "\(ChatIntent.countLabel(n)) \(ChatIntent.noun([kind], n))"
+            }
+        var message = "Your library has \(ChatIntent.countLabel(count)) \(count == 1 ? "file" : "files") using \(ChatIntent.bytesLabel(bytes)): \(kinds.joined(separator: ", "))."
+        if let range = try Row.fetchOne(db, sql: "SELECT strftime('%Y-%m-%d',MIN(\(taken)),'unixepoch','localtime') AS lo,strftime('%Y-%m-%d',MAX(\(taken)),'unixepoch','localtime') AS hi FROM files f WHERE f.failed=0"),
+           let lo: String = range["lo"], let hi: String = range["hi"] {
+            message += lo == hi ? " Taken on \(lo)." : " Dates run from \(lo) to \(hi)."
+        }
+        let top = try folders(db, bySize: false, limit: 3)
+        if !top.isEmpty { message += " Busiest folders: \(top.map(folderPhrase).joined(separator: ", "))." }
+        return (message, hits)
+    }
+
     /// Answers a question that is fully structured: no subject words remain.
     static func answer(_ db: GRDB.Database, _ question: ChatIntent.Question, _ filter: Filter) throws -> (String, [CatalogHit]) {
+        if question.measure == "overview" || question.measure == "folders" { return try libraryAnswer(db, question) }
         let qualifiers = filter.qualifiers
         if question.duplicates {
             let found = try extras(db, filter, limit: shown)

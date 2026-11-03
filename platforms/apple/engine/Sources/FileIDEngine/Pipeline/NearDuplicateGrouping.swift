@@ -29,11 +29,14 @@ enum NearDuplicateGrouping {
         let minSeedCosine: Float
         let maxHamming: Int
         let maxGroupSize: Int
+        /// Join on capture time plus pHash alone when a CLIP vector is missing. Only Best Takes
+        /// (which suggests groups for the user to check) may use it; Describe shares text across a group.
+        var phashFallback = false
 
         static let nearDuplicate = Thresholds(maxGapSeconds: 2, maxSpanSeconds: 12, minCosine: 0.97,
                                               minSeedCosine: 0.955, maxHamming: 8, maxGroupSize: 24)
         static let takes = Thresholds(maxGapSeconds: 4, maxSpanSeconds: 30, minCosine: 0.93,
-                                      minSeedCosine: 0.88, maxHamming: 12, maxGroupSize: 60)
+                                      minSeedCosine: 0.88, maxHamming: 12, maxGroupSize: 60, phashFallback: true)
         static let clips = Thresholds(maxGapSeconds: 900, maxSpanSeconds: 3_600, minCosine: 0.90,
                                       minSeedCosine: 0.86, maxHamming: 0, maxGroupSize: 24)
     }
@@ -126,7 +129,10 @@ enum NearDuplicateGrouping {
         let itemStem = stem(item.path)
         if current.contains(where: { stem($0.path) == itemStem && $0.path != item.path }) { return true }
         guard let embedding = item.embedding, let lastEmbedding = last.embedding,
-              let seedEmbedding = current[0].embedding else { return false }
+              let seedEmbedding = current[0].embedding else {
+            guard limits.phashFallback, let p = item.phash, let q = last.phash, p != 0, q != 0 else { return false }
+            return hamming(p, q) <= limits.maxHamming
+        }
         let toLast = cosine(embedding, lastEmbedding)
         guard cosine(embedding, seedEmbedding) >= limits.minSeedCosine else { return false }
         if toLast >= limits.minCosine { return true }

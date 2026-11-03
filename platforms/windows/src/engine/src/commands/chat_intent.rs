@@ -69,6 +69,9 @@ pub struct Question {
     pub undescribed: bool,
     /// The message without the words the structure consumed.
     pub reduced: String,
+    /// File extensions named in the question ("RAW", "PNGs"), lowercase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formats: Option<Vec<String>>,
 }
 
 impl Default for Question {
@@ -82,13 +85,14 @@ impl Default for Question {
             duplicates: false,
             undescribed: false,
             reduced: String::new(),
+            formats: None,
         }
     }
 }
 
 impl Question {
     pub fn structured(&self) -> bool {
-        self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed
+        self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
     }
 }
 
@@ -457,6 +461,12 @@ pub fn parse_question(text: &str) -> Question {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
     let mut question = Question::default();
+    if let Some((measure, order)) = library_measure(&words) {
+        question.measure = measure.into();
+        question.order = order.into();
+        question.explicit_order = order == "largest";
+        return question;
+    }
     let mut used = BTreeSet::new();
     let mark = |used: &mut BTreeSet<usize>, range: std::ops::Range<usize>| used.extend(range);
     for (index, pair) in words.windows(2).enumerate() {
@@ -510,6 +520,20 @@ pub fn parse_question(text: &str) -> Question {
             }
         }
     }
+    let mut formats: Vec<String> = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        if let Some(extensions) = format_extensions(word) {
+            for extension in extensions {
+                if !formats.iter().any(|known| known == extension) {
+                    formats.push((*extension).to_owned());
+                }
+            }
+            used.insert(index);
+        }
+    }
+    if !formats.is_empty() {
+        question.formats = Some(formats);
+    }
     if let Some((filter, range)) = date_filter(&words) {
         question.date = Some(filter);
         mark(&mut used, range);
@@ -535,6 +559,73 @@ pub fn parse_question(text: &str) -> Question {
         text.clone_into(&mut question.reduced);
     }
     question
+}
+
+const RAW_EXTENSIONS: [&str; 20] = [
+    "raw", "arw", "cr2", "cr3", "nef", "dng", "orf", "rw2", "raf", "srw", "pef", "3fr", "erf", "kdc", "mef", "mos", "mrw", "rwl", "srf", "x3f",
+];
+
+/// "How many RAW photos?" / "show my PNGs": format words that filter by extension.
+fn format_extensions(word: &str) -> Option<&'static [&'static str]> {
+    Some(match word {
+        "raw" | "raws" => &RAW_EXTENSIONS,
+        "jpg" | "jpgs" | "jpeg" | "jpegs" => &["jpg", "jpeg"],
+        "arw" => &["arw"],
+        "cr2" => &["cr2"],
+        "cr3" => &["cr3"],
+        "nef" => &["nef"],
+        "dng" => &["dng"],
+        "orf" => &["orf"],
+        "raf" => &["raf"],
+        "rw2" => &["rw2"],
+        "png" | "pngs" => &["png"],
+        "heic" | "heics" => &["heic", "heif"],
+        "gif" | "gifs" => &["gif"],
+        "tiff" | "tiffs" => &["tif", "tiff"],
+        "webp" => &["webp"],
+        "mov" | "movs" => &["mov"],
+        "mp4" | "mp4s" => &["mp4"],
+        "mkv" => &["mkv"],
+        "avi" => &["avi"],
+        "mp3" | "mp3s" => &["mp3"],
+        "flac" => &["flac"],
+        "wav" => &["wav"],
+        "m4a" => &["m4a"],
+        "wma" => &["wma"],
+        "docx" => &["docx"],
+        "xlsx" => &["xlsx"],
+        "pptx" => &["pptx"],
+        "txt" => &["txt"],
+        "csv" => &["csv"],
+        "json" => &["json"],
+        _ => return None,
+    })
+}
+
+const OVERVIEW_WORDS: [&str; 26] = [
+    "what", "whats", "is", "in", "my", "the", "library", "files", "collection", "tell", "me", "about", "give", "an", "overview", "summary", "of",
+    "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got",
+];
+
+/// "What is in my library?" and "which folder has the most files?": questions about the
+/// library as a whole, answered from totals rather than searched for as words.
+fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
+    let words: Vec<String> = words.iter().filter(|word| !word.is_empty()).cloned().collect();
+    if words.is_empty() {
+        return None;
+    }
+    if words.iter().all(|word| OVERVIEW_WORDS.contains(&word.as_str()))
+        && has(&words, &["library", "collection", "overview", "summary", "summarize", "summarise"])
+    {
+        return Some(("overview", "newest"));
+    }
+    if has(&words, &["folder", "folders", "directory", "directories"])
+        && has(&words, &["most", "biggest", "largest", "top", "fullest", "heaviest"])
+        && !has(&words, &["in", "inside", "under", "from"])
+    {
+        return Some(("folders", if has(&words, &["biggest", "largest", "heaviest"]) { "largest" } else { "newest" }));
+    }
+    None
 }
 
 fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::Range<usize>)> {

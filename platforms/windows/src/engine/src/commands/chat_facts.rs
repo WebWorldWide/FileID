@@ -15,6 +15,15 @@ pub(crate) const SHOWN: usize = 50;
 pub(crate) const LARGE: i64 = 2_000;
 const TAKEN: &str = "COALESCE(f.created_at,f.modified_at)";
 
+/// "RAW" for the RAW family, else the first extension in capitals ("JPG", "PNG").
+pub(crate) fn format_label(extensions: &[String]) -> String {
+    if extensions.iter().any(|e| e == "arw") && extensions.iter().any(|e| e == "cr2") {
+        "RAW".into()
+    } else {
+        extensions.first().map(|e| e.to_uppercase()).unwrap_or_default()
+    }
+}
+
 /// Which files a structured answer or action covers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Filter {
@@ -26,6 +35,8 @@ pub(crate) struct Filter {
     pub folder: Option<String>,
     pub undescribed: bool,
     pub ids: Option<Vec<i64>>,
+    /// Lowercase file extensions ("raw" covers every RAW type).
+    pub extensions: Vec<String>,
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Value {
@@ -64,6 +75,10 @@ impl Filter {
         if !kinds.is_empty() {
             parts.push(if ordered { "+f.kind IN (SELECT value FROM json_each(?))" } else { "f.kind IN (SELECT value FROM json_each(?))" }.into());
             args.push(json(&kinds));
+        }
+        if !self.extensions.is_empty() {
+            parts.push("lower(f.extension) IN (SELECT value FROM json_each(?))".into());
+            args.push(json(&self.extensions));
         }
         if !self.person_ids.is_empty() {
             parts.push("f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)".into());
@@ -109,6 +124,9 @@ impl Filter {
     pub fn qualifiers(&self) -> String {
         use std::fmt::Write;
         let mut text = String::new();
+        if !self.extensions.is_empty() {
+            let _ = write!(text, " in {} format", format_label(&self.extensions));
+        }
         if !self.person_names.is_empty() {
             let _ = write!(text, " of {}", self.person_names.join(" and "));
         }
@@ -247,8 +265,100 @@ pub(crate) fn duplicates_sentence(extras: &Extras, qualifiers: &str) -> String {
     )
 }
 
+pub(crate) struct FolderTotal {
+    pub name: String,
+    pub path: String,
+    pub count: i64,
+    pub bytes: i64,
+}
+
+/// Folders holding the most files (or bytes), from the stored paths. Both path
+/// separators are folded so a catalog scanned on Windows reads the same.
+pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64) -> Result<Vec<FolderTotal>> {
+    let path = "replace(f.path_text,char(92),'/')";
+    let order = if by_size { "b DESC,c DESC" } else { "c DESC,b DESC" };
+    let sql = format!("SELECT rtrim({path},replace({path},'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 GROUP BY dir ORDER BY {order},dir ASC LIMIT ?1");
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map([limit], |row| {
+        let mut dir: String = row.get(0)?;
+        while dir.len() > 1 && dir.ends_with('/') {
+            dir.pop();
+        }
+        Ok(FolderTotal { name: dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(&dir).to_owned(), path: dir, count: row.get(1)?, bytes: row.get(2)? })
+    })?;
+    let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let repeated: std::collections::HashSet<String> = {
+        let mut seen = std::collections::HashSet::new();
+        found.iter().filter(|folder| !seen.insert(folder.name.clone())).map(|folder| folder.name.clone()).collect()
+    };
+    for folder in &mut found {
+        if repeated.contains(&folder.name) {
+            let parts: Vec<&str> = folder.path.split('/').filter(|part| !part.is_empty()).collect();
+            if parts.len() > 1 {
+                folder.name = parts[parts.len() - 2..].join("/");
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn folder_phrase(folder: &FolderTotal) -> String {
+    format!("{} ({} {}, {})", folder.name, count_label(folder.count), if folder.count == 1 { "file" } else { "files" }, bytes_label(folder.bytes))
+}
+
+fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec<CatalogHit>)> {
+    let everything = Filter::default();
+    let (count, bytes) = totals(conn, &everything)?;
+    let hits = listed(conn, &everything, "newest", SHOWN, count)?;
+    if count == 0 {
+        return Ok(("Your library is empty. Scan a folder to get started.".into(), hits));
+    }
+    if question.measure == "folders" {
+        let by_size = question.order == "largest";
+        let top = folders(conn, by_size, 5)?;
+        let list = top.iter().map(folder_phrase).collect::<Vec<_>>().join(", ");
+        return Ok((format!("{}: {list}.", if by_size { "Biggest folders" } else { "Folders with the most files" }), hits));
+    }
+    let mut statement = conn.prepare("SELECT f.kind,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,f.kind ASC")?;
+    let kinds = statement
+        .query_map([], |row| {
+            let (kind, n): (String, i64) = (row.get(0)?, row.get(1)?);
+            Ok(format!("{} {}", count_label(n), noun(&[kind], n)))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut message = format!(
+        "Your library has {} {} using {}: {}.",
+        count_label(count),
+        if count == 1 { "file" } else { "files" },
+        bytes_label(bytes),
+        kinds.join(", ")
+    );
+    let range: (Option<String>, Option<String>) = conn.query_row(
+        &format!("SELECT strftime('%Y-%m-%d',MIN({TAKEN}),'unixepoch','localtime'),strftime('%Y-%m-%d',MAX({TAKEN}),'unixepoch','localtime') FROM files f WHERE f.failed=0"),
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if let (Some(lo), Some(hi)) = range {
+        {
+            use std::fmt::Write;
+            let _ = if lo == hi { write!(message, " Taken on {lo}.") } else { write!(message, " Dates run from {lo} to {hi}.") };
+        }
+    }
+    let top = folders(conn, false, 3)?;
+    if !top.is_empty() {
+        {
+            use std::fmt::Write;
+            let _ = write!(message, " Busiest folders: {}.", top.iter().map(folder_phrase).collect::<Vec<_>>().join(", "));
+        }
+    }
+    Ok((message, hits))
+}
+
 /// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
+    if question.measure == "overview" || question.measure == "folders" {
+        return library_answer(conn, question);
+    }
     let qualifiers = filter.qualifiers();
     if question.duplicates {
         let extras = extras(conn, filter, SHOWN)?;
@@ -308,6 +418,67 @@ pub(crate) fn restrict(conn: &Connection, hits: Vec<CatalogHit>, filter: &Filter
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folders_with_the_same_name_are_told_apart_by_their_parent() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path) in [(1, "/a/Videos/Downloads/x.mov"), (2, "/a/Videos/Downloads/y.mov"), (3, "/a/Photos/Downloads/z.jpg"), (4, "/a/Docs/n.txt")] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'image','x')", rusqlite::params![id, path]).unwrap();
+        }
+        let names: Vec<String> = folders(&conn, false, 5).unwrap().into_iter().map(|folder| folder.name).collect();
+        assert_eq!(names, vec!["Videos/Downloads", "Docs", "Photos/Downloads"]);
+    }
+
+    #[test]
+    fn format_words_filter_by_extension() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path, kind, size, ext) in [
+            (1, "/p/a.jpg", "image", 3_000, "jpg"),
+            (2, "/p/b.arw", "image", 9_000, "arw"),
+            (3, "/p/c.JPG", "image", 3_000, "JPG"),
+            (4, "/p/d.png", "image", 1_000, "png"),
+        ] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES(?1,?2,?1,?3,1,0,?4,?5)", rusqlite::params![id, path, size, kind, ext]).unwrap();
+        }
+        let ask = |text: &str| {
+            let question = super::super::chat_intent::parse_question(text);
+            let kinds = if question.reduced.to_lowercase().contains("photo") { vec!["image".to_owned()] } else { vec![] };
+            let filter = Filter { kinds, extensions: question.formats.clone().unwrap_or_default(), ..Filter::default() };
+            answer(&conn, &question, &filter).unwrap().0
+        };
+        assert_eq!(ask("how many RAW photos are there"), "Found 1 photo in RAW format, using 9.0 KB.");
+        assert_eq!(ask("how many jpgs"), "Found 2 files in JPG format, using 6.0 KB.");
+        assert_eq!(ask("how many pngs"), "Found 1 file in PNG format, using 1.0 KB.");
+    }
+
+    #[test]
+    fn library_overview_and_folder_questions_read_totals_not_words() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path, kind, size, created) in [
+            (1, "/Volumes/Adlon/Camera/Game/a.jpg", "image", 3_000, 1_000_000.0),
+            (2, "/Volumes/Adlon/Camera/Game/b.arw", "image", 9_000, 1_000_100.0),
+            (3, "/Volumes/Adlon/Camera/Game/c.jpg", "image", 3_000, 1_000_200.0),
+            (4, "/Volumes/Adlon/Cabinet/clip.mp4", "video", 50_000, 2_000_000.0),
+            (5, "C:\\Users\\a\\Pictures\\d.png", "image", 1_000, 3_000_000.0),
+        ] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES(?1,?2,?1,?3,?4,0,?5,'x')", rusqlite::params![id, path, size, created, kind]).unwrap();
+        }
+        let ask = |text: &str| {
+            let question = super::super::chat_intent::parse_question(text);
+            answer(&conn, &question, &Filter::default()).unwrap().0
+        };
+        let overview = ask("what is in my library");
+        assert!(overview.starts_with("Your library has 5 files using 66.0 KB: 4 photos, 1 video."), "{overview}");
+        assert!(overview.contains("Dates run from 1970-01-12 to 1970-02-"), "{overview}");
+        assert!(overview.contains("Busiest folders: Game (3 files, 15.0 KB), Cabinet (1 file, 50.0 KB), Pictures (1 file, 1.0 KB)."), "{overview}");
+        assert!(ask("which folder has the most files").starts_with("Folders with the most files: Game (3 files, 15.0 KB), Cabinet (1 file, 50.0 KB)"));
+        assert!(ask("what are my biggest folders").starts_with("Biggest folders: Cabinet (1 file, 50.0 KB), Game (3 files, 15.0 KB)"));
+        let parse = |text: &str| super::super::chat_intent::parse_question(text).measure;
+        assert_eq!(parse("how many files in my library"), "count");
+        assert_eq!(parse("photos of my library dog"), "list");
+        assert_eq!(parse("what is the biggest file"), "list");
+        assert_eq!(parse("show me the folder from Downloads"), "list");
+    }
+
     use super::*;
     use crate::commands::chat_intent::parse_question;
 
