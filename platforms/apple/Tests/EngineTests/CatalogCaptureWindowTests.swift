@@ -38,3 +38,20 @@ struct CatalogCaptureWindowTests {
         await #expect(throws: CatalogSearch.RequestError.self) { _ = try await ids(5_000, 1_000, database) }
     }
 }
+
+@Suite("Catalog search errors")
+struct CatalogSearchErrorTests {
+    @Test func hybridWithoutAVectorExplainsTheMissingModel() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        let request = CatalogRequest(requestID: "r", action: "search", query: "beach", searchMode: "hybrid")
+        do {
+            _ = try await CatalogSearch.handle(request, database: database)
+            Issue.record("expected an error")
+        } catch {
+            #expect(error.localizedDescription.contains("isn't installed"))
+            #expect(!error.localizedDescription.contains("RequestError"))
+        }
+    }
+}

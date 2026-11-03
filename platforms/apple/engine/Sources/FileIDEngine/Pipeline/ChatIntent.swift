@@ -366,6 +366,12 @@ struct ChatIntent: Codable, Equatable, Sendable {
         let raw = split(text)
         let words = raw.map { clean($0).replacingOccurrences(of: "'", with: "") }
         var question = Question()
+        if let measure = libraryMeasure(words) {
+            question.measure = measure.name
+            question.order = measure.order
+            question.explicitOrder = measure.order == "largest"
+            return question
+        }
         var used = Set<Int>()
         for index in words.indices.dropLast() {
             let pair = (words[index], words[index + 1])
@@ -417,6 +423,26 @@ struct ChatIntent: Codable, Equatable, Sendable {
             question.reduced = text
         }
         return question
+    }
+
+    /// "What is in my library?" and "which folder has the most files?": questions about the
+    /// library as a whole, answered from totals rather than searched for as words.
+    private static let overviewWords: Set<String> = [
+        "what", "whats", "is", "in", "my", "the", "library", "files", "collection", "tell", "me", "about", "give", "an", "overview",
+        "summary", "of", "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got"
+    ]
+
+    static func libraryMeasure(_ words: [String]) -> (name: String, order: String)? {
+        let words = words.filter { !$0.isEmpty }
+        guard !words.isEmpty else { return nil }
+        if words.allSatisfy({ overviewWords.contains($0) }), has(words, ["library", "collection", "overview", "summary", "summarize", "summarise"]) {
+            return ("overview", "newest")
+        }
+        if has(words, ["folder", "folders", "directory", "directories"]), has(words, ["most", "biggest", "largest", "top", "fullest", "heaviest"]),
+           !has(words, ["in", "inside", "under", "from"]) {
+            return ("folders", has(words, ["biggest", "largest", "heaviest"]) ? "largest" : "newest")
+        }
+        return nil
     }
 
     private static func capitalizedFirst(_ text: String) -> String {

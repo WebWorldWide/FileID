@@ -457,6 +457,12 @@ pub fn parse_question(text: &str) -> Question {
     let raw: Vec<&str> = text.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|word| clean(word).replace('\'', "")).collect();
     let mut question = Question::default();
+    if let Some((measure, order)) = library_measure(&words) {
+        question.measure = measure.into();
+        question.order = order.into();
+        question.explicit_order = order == "largest";
+        return question;
+    }
     let mut used = BTreeSet::new();
     let mark = |used: &mut BTreeSet<usize>, range: std::ops::Range<usize>| used.extend(range);
     for (index, pair) in words.windows(2).enumerate() {
@@ -535,6 +541,32 @@ pub fn parse_question(text: &str) -> Question {
         text.clone_into(&mut question.reduced);
     }
     question
+}
+
+const OVERVIEW_WORDS: [&str; 26] = [
+    "what", "whats", "is", "in", "my", "the", "library", "files", "collection", "tell", "me", "about", "give", "an", "overview", "summary", "of",
+    "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got",
+];
+
+/// "What is in my library?" and "which folder has the most files?": questions about the
+/// library as a whole, answered from totals rather than searched for as words.
+fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
+    let words: Vec<String> = words.iter().filter(|word| !word.is_empty()).cloned().collect();
+    if words.is_empty() {
+        return None;
+    }
+    if words.iter().all(|word| OVERVIEW_WORDS.contains(&word.as_str()))
+        && has(&words, &["library", "collection", "overview", "summary", "summarize", "summarise"])
+    {
+        return Some(("overview", "newest"));
+    }
+    if has(&words, &["folder", "folders", "directory", "directories"])
+        && has(&words, &["most", "biggest", "largest", "top", "fullest", "heaviest"])
+        && !has(&words, &["in", "inside", "under", "from"])
+    {
+        return Some(("folders", if has(&words, &["biggest", "largest", "heaviest"]) { "largest" } else { "newest" }));
+    }
+    None
 }
 
 fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::Range<usize>)> {

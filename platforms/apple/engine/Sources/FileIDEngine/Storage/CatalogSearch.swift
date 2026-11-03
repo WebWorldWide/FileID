@@ -4,7 +4,15 @@ import GRDB
 import FileIDShared
 
 enum CatalogSearch {
-    enum RequestError: Error { case invalid }
+    enum RequestError: Error, LocalizedError {
+        case invalid, needsVisualModel
+        var errorDescription: String? {
+            switch self {
+            case .invalid: "That search request wasn't valid."
+            case .needsVisualModel: "Searching by what is in photos needs the Search by description model, which isn't installed. Use Keyword search, or install the model in Settings."
+            }
+        }
+    }
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
         guard request.capturedFrom != nil || request.capturedTo != nil else { return try await run(request, database: database) }
@@ -38,6 +46,7 @@ enum CatalogSearch {
             return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
         }
         guard mode != "hybrid" || !query.isEmpty else { throw RequestError.invalid }
+        guard request.queryVector != nil || request.fileID != nil else { throw RequestError.needsVisualModel }
         let vector: [Float]
         if let supplied = request.queryVector {
             guard request.fileID == nil, request.embeddingModel == CLIPEmbeddingSpace.modelID,
