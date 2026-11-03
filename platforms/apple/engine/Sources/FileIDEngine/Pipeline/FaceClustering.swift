@@ -53,6 +53,10 @@ public enum FaceClustering {
         let id: Int64
         let arcFace: Data
         let quality: Double
+        /// Failed the per-face quality gate (pose, size, capture quality).
+        /// Held faces never form or bridge a person; they may only join an
+        /// established one through `attachHeldFaces`.
+        var held: Bool = false
     }
 
     struct EmbeddingSpace: Equatable, Sendable {
@@ -87,13 +91,13 @@ public enum FaceClustering {
         limit: Int = maxFacesPerRun
     ) throws -> SelectedPartition {
         let cursor = try GRDB.Row.fetchCursor(db, sql: """
-            SELECT fp.id,fp.file_id,fp.person_id,fp.bbox,fp.face_quality,
+            SELECT fp.id,fp.file_id,fp.person_id,fp.bbox,fp.face_quality,fp.excluded,
                    CASE WHEN LENGTH(fp.arcface_embedding)=512 THEN fp.arcface_embedding END AS embedding,
                    fp.embedding_model,fp.processing_version,fp.source_revision,
                    r.revision AS catalog_revision,f.path_text,f.size_bytes,f.modified_at,f.file_ref,f.failed
             FROM face_prints fp LEFT JOIN persons p ON p.id=fp.person_id
             LEFT JOIN files f ON f.id=fp.file_id LEFT JOIN catalog_revisions r ON r.file_id=fp.file_id
-            WHERE fp.excluded=0 AND COALESCE(p.is_unknown,0)=0 ORDER BY fp.id
+            WHERE COALESCE(p.is_unknown,0)=0 ORDER BY fp.id
             """)
         var rows: [ClusteringFaceRow] = []
         var snapshots: [ParticipantSnapshot] = []
@@ -121,7 +125,8 @@ public enum FaceClustering {
             }
             guard let actual = revisions[path], actual == row["source_revision"] as String? else { deferred += 1; continue }
             guard rows.count < limit else { deferred += 1; overflowed = true; continue }
-            rows.append(.init(id: id, arcFace: embedding!, quality: quality))
+            let excluded: Int = row["excluded"] ?? 0
+            rows.append(.init(id: id, arcFace: embedding!, quality: quality, held: excluded != 0))
             snapshots.append(.init(id: id, fileID: row["file_id"], bbox: row["bbox"], path: path,
                 size: row["size_bytes"], modified: row["modified_at"], fileRef: row["file_ref"],
                 personID: row["person_id"], model: row["embedding_model"],
@@ -407,11 +412,16 @@ public enum FaceClustering {
     /// ~0.12 are visually unrecognizable (blur/profile/occlusion) while genuine
     /// distinct singletons (sunglasses, face-paint, one-off portraits) sit ≥0.25.
     /// size≥3 is protected because ≥3 faces linked at cosine ≥0.66 is a real person
-    /// even when every frame is mediocre (e.g. a 20-shot low-light cluster). Defaults
-    /// take 407→280 persons (127 junk micro-clusters suppressed, 0 identity merges).
-    /// Set FILEID_FACE_SOLO_QUALITY=0 to disable suppression entirely.
+    /// even when every frame is mediocre (e.g. a 20-shot low-light cluster).
+    /// 2026-10-21, owner's camera library (956 photos, 696 faces, hand labels):
+    /// with same-photo cannot-links and the attach stage, raising the floor
+    /// 0.12 → 0.50 took People 93 → 34 with identical pairwise precision
+    /// (0.994) and recall (0.708); the suppressed one-offs were teammates in
+    /// partial view and crowd faces. They land in "Not sure" and can still
+    /// attach to a person on a later run. Set FILEID_FACE_SOLO_QUALITY=0 to
+    /// disable suppression entirely.
     public static var minClusterSizeToKeep: Int { envInt("FILEID_FACE_MIN_CLUSTER_SIZE", 3, 1...10_000) }
-    public static var soloQualityFloor: Double { envDouble("FILEID_FACE_SOLO_QUALITY", 0.12, 0.0...1.0) }
+    public static var soloQualityFloor: Double { envDouble("FILEID_FACE_SOLO_QUALITY", 0.50, 0.0...1.0) }
 
     /// Integer env override, clamped to `range`; falls back to `dflt`.
     static func envInt(_ key: String, _ dflt: Int, _ range: ClosedRange<Int>) -> Int {
@@ -434,6 +444,59 @@ public enum FaceClustering {
     static func envBool(_ key: String, _ dflt: Bool) -> Bool {
         guard let v = ProcessInfo.processInfo.environment[key] else { return dflt }
         return v == "1" || v.lowercased() == "true"
+    }
+
+    /// Second stage: a face that failed the quality gate, or whose cluster was
+    /// too small to keep, joins an established person only when it is close to
+    /// that person's centroid and clearly closer than to anyone else. It never
+    /// starts a person and never bridges two. Measured on the owner's labelled
+    /// set: 34 of 34 labelled held faces attached correctly at 0.55 / 0.05.
+    public static var attachMinCosine: Float { envCos("FILEID_FACE_ATTACH_COS", 0.55) }
+    public static var attachMinMargin: Float { envCos("FILEID_FACE_ATTACH_MARGIN", 0.05) }
+
+    static func attachHeldFaces(
+        _ clusters: [Int: [Int]], candidates: [Int], vectors: [[Float]], held: [Bool], fileOf: [Int64],
+        faceIDs: [Int64], differentPairs: Set<ProtectedFacePair>,
+        minClusterSize: Int, minCosine: Float, minMargin: Float
+    ) -> (clusters: [Int: [Int]], attached: Int) {
+        let dim = vectors.first?.count ?? 0
+        guard dim > 0, !candidates.isEmpty, minCosine < 1 else { return (clusters, 0) }
+        var targets: [(id: Int, centroid: [Float])] = []
+        var filesByCluster: [Int: Set<Int64>] = [:]
+        var facesByCluster: [Int: Set<Int64>] = [:]
+        for (clusterID, members) in clusters.sorted(by: { $0.key < $1.key }) {
+            filesByCluster[clusterID] = Set(members.map { fileOf[$0] })
+            facesByCluster[clusterID] = Set(members.map { faceIDs[$0] })
+            let anchors = members.filter { !held[$0] }
+            guard anchors.count >= max(1, minClusterSize) else { continue }
+            targets.append((clusterID, computeNormalizedCentroid(denseIdxs: anchors, vecsByDense: vectors, dim: dim)))
+        }
+        guard !targets.isEmpty else { return (clusters, 0) }
+        var blockedFaces: [Int64: Set<Int64>] = [:]
+        for pair in differentPairs {
+            blockedFaces[pair.first, default: []].insert(pair.second)
+            blockedFaces[pair.second, default: []].insert(pair.first)
+        }
+        var out = clusters
+        var attached = 0
+        for dense in candidates.sorted() where vectors[dense].count == dim {
+            let blocked = blockedFaces[faceIDs[dense]] ?? []
+            var best = (id: -1, sim: Float(-2))
+            var second: Float = -2
+            for target in targets {
+                if filesByCluster[target.id]!.contains(fileOf[dense]) { continue }
+                if !blocked.isDisjoint(with: facesByCluster[target.id]!) { continue }
+                let sim = dotProduct(vectors[dense], target.centroid)
+                if sim > best.sim { second = best.sim; best = (target.id, sim) }
+                else if sim > second { second = sim }
+            }
+            guard best.id >= 0, best.sim >= minCosine, best.sim - second >= minMargin else { continue }
+            out[best.id, default: []].append(dense)
+            filesByCluster[best.id]!.insert(fileOf[dense])
+            facesByCluster[best.id]!.insert(faceIDs[dense])
+            attached += 1
+        }
+        return (out, attached)
     }
 
     /// Apply junk-cluster suppression to a dense-index cluster map: keep a cluster
@@ -468,6 +531,19 @@ public enum FaceClustering {
             }
         }
         return (kept, sClusters, sFaces)
+    }
+
+    /// Two faces detected in one photo are two people. Returns every such
+    /// dense-index pair so clustering can never put them in one person.
+    static func sameFileCannotLinks(_ fileOfDense: [Int64]) -> [(Int, Int)] {
+        var byFile: [Int64: [Int]] = [:]
+        for (dense, file) in fileOfDense.enumerated() { byFile[file, default: []].append(dense) }
+        var links: [(Int, Int)] = []
+        for file in byFile.keys.sorted() {
+            let members = byFile[file]!
+            for a in members.indices { for b in members.index(after: a)..<members.endIndex { links.append((members[a], members[b])) } }
+        }
+        return links
     }
 
     /// Cap so a corrupt DB can't spawn arbitrarily many person rows.
@@ -509,6 +585,8 @@ public enum FaceClustering {
             let personCount: Int
             let suppressedClusters: Int
             let suppressedFaces: Int
+            let attachedFaces: Int
+            let unsureFaces: Int
             let truncatedFaces: Int
             let deferredFaces: Int
         }
@@ -523,19 +601,11 @@ public enum FaceClustering {
         let vecsByDense = partition.rows.map { FloatBlob.decode($0.arcFace) }
         let firstDim = 128
         let faceQualityByID = Dictionary(uniqueKeysWithValues: partition.rows.map { ($0.id,$0.quality) })
+        let representativeQualityByID = Dictionary(uniqueKeysWithValues: partition.rows.map { ($0.id, $0.held ? -1 : $0.quality) })
         let poolExcludedPersonIDs: Set<Int64> = []
             let freshPriors = try Self.priorAnchors(from: db)
                 let verdicts = try Self.faceVerdicts(from: db, participants: Set(denseToFaceID))
-            var differentPairs = Set(verdicts.filter { !$0.samePerson }.map(\.pair))
-            let poolJSON = String(decoding: try JSONEncoder().encode(denseToFaceID), as: UTF8.self)
-            let cooccurring = try GRDB.Row.fetchAll(db, sql: "SELECT id,file_id FROM face_prints WHERE id IN(SELECT value FROM json_each(?)) ORDER BY id", arguments: [poolJSON])
-            var firstByFile: [Int64:Int64] = [:]
-            for face in cooccurring {
-                let file: Int64 = face["file_id"]
-                let id: Int64 = face["id"]
-                if let first = firstByFile[file] { differentPairs.insert(.init(first,id)) }
-                else { firstByFile[file] = id }
-            }
+            let differentPairs = Set(verdicts.filter { !$0.samePerson }.map(\.pair))
                 var ownerByFaceID: [Int64: Int64] = [:]
                 for prior in freshPriors {
                     for faceID in prior.faceIDs { ownerByFaceID[faceID] = prior.id }
@@ -577,27 +647,37 @@ public enum FaceClustering {
                     protectedOwnerIDs.contains($0.value) && !preserveIDs.contains($0.value)
                         && poolFaceIDs.contains($0.key)
                 }
-                let partition = partitionProtectedClusters(
+                let partitionResult = partitionProtectedClusters(
                     rawClusters,
                     denseToFaceID: denseToFaceID,
                     bucketOwnerByFaceID: bucketOwnerByFaceID,
                     differentPairs: differentPairs,
                     excludedFaceIDs: excludedFaceIDs
                 )
-                let protectedClusterIDs = Set(partition.clusters.compactMap { (clusterID, members) in
-                    members.contains { partition.protectedFaceIDs.contains(denseToFaceID[$0]) }
+                let protectedClusterIDs = Set(partitionResult.clusters.compactMap { (clusterID, members) in
+                    members.contains { partitionResult.protectedFaceIDs.contains(denseToFaceID[$0]) }
                         ? clusterID : nil
                 })
                 let suppression = suppressLowQualityClusters(
-                    partition.clusters,
+                    partitionResult.clusters,
                     denseToFaceID: denseToFaceID,
                     faceQualityByID: faceQualityByID,
                     minSize: minClusterSize,
                     qualityFloor: soloQualityFloor,
                     alwaysKeep: protectedClusterIDs
                 )
+                let assignedDense = Set(suppression.kept.values.joined())
+                let attachCandidates = partition.rows.indices.filter { dense in
+                    !assignedDense.contains(dense) && !excludedFaceIDs.contains(denseToFaceID[dense])
+                        && !partitionResult.protectedFaceIDs.contains(denseToFaceID[dense])
+                }
+                let attached = attachHeldFaces(
+                    suppression.kept, candidates: attachCandidates, vectors: vecsByDense,
+                    held: partition.rows.map(\.held), fileOf: partition.snapshots.map(\.fileID),
+                    faceIDs: denseToFaceID, differentPairs: differentPairs,
+                    minClusterSize: minClusterSize, minCosine: attachMinCosine, minMargin: attachMinMargin)
                 let capped = try capClusters(
-                    suppression.kept,
+                    attached.clusters,
                     protectedClusterIDs: protectedClusterIDs,
                     preservedPersonCount: preservedPersonCount,
                     maxPersons: maxPersons
@@ -621,7 +701,7 @@ public enum FaceClustering {
                         )
                         let faceIDs = denseIdxs.map { denseToFaceID[$0] }
                         return (centroid, radius, faceIDs,
-                                representativeFaceID(faceIDs, quality: faceQualityByID))
+                                representativeFaceID(faceIDs, quality: representativeQualityByID))
                     }
                 let inheritanceCandidates = freshPriors.filter { !preserveIDs.contains($0.id) }.map { $0.scoped(to: poolFaceIDs) }
                 var matches = matchClustersToPriorAnchors(
@@ -690,6 +770,11 @@ public enum FaceClustering {
                     personCount: personCount,
                     suppressedClusters: suppression.suppressedClusters,
                     suppressedFaces: suppression.suppressedFaces,
+                    attachedFaces: attached.attached,
+                    unsureFaces: {
+                        let placed = Set(finalClusters.values.joined())
+                        return partition.rows.indices.filter { !placed.contains($0) && !excludedFaceIDs.contains(denseToFaceID[$0]) }.count
+                    }(),
                     truncatedFaces: truncatedFaces,
                     deferredFaces: deferredFaces
                 )
@@ -837,7 +922,7 @@ public enum FaceClustering {
         struct DecodedFace { let id: Int64; let vec: [Float] }
         var decoded: [DecodedFace] = []
         decoded.reserveCapacity(rows.count)
-        for row in rows {
+        for row in rows where !row.held {
             let vec = FloatBlob.decode(row.arcFace)
             if !vec.isEmpty {
                 decoded.append(DecodedFace(id: row.id, vec: vec))
@@ -903,8 +988,11 @@ public enum FaceClustering {
         // pass1Cosine is the tightest "same person" gate; RAISE it via
         // FILEID_FACE_PASS1_COS (e.g. 0.70) to split different people apart more
         // aggressively when over-merging. Default preserved.
+        let fileByFaceID = Dictionary(uniqueKeysWithValues: selectedPartition.snapshots.map { ($0.id, $0.fileID) })
+        let cannotLinks = sameFileCannotLinks(denseToFaceID.map { fileByFaceID[$0] ?? -$0 })
         let icParams = IdentityClustering.Hyperparameters(
             pass1Cosine: envCos("FILEID_FACE_PASS1_COS", 0.66),
+            kNN: envInt("FILEID_FACE_KNN", 10, 4...256),
             // Mutual-kNN Pass-1 gate — parity hook for the Rust FILEID_FACE_MUTUAL_KNN.
             // DEFAULT OFF on macOS (Windows is default-ON): the Vision quality scale +
             // separate alignment path mean the Windows calibration doesn't transfer, so
@@ -923,6 +1011,7 @@ public enum FaceClustering {
                 }
             },
             params: icParams,
+            cannotLinks: cannotLinks,
             // Poll the engine's sync cancel mirror (set via ScanCoordinator
             // .requestCancel on .cancelScan/.shutdown) so a mid-flight pass aborts
             // at a safe boundary instead of being killed by _exit(0) behind its
@@ -952,9 +1041,11 @@ public enum FaceClustering {
         // from 0). Iterate by sorted cluster id below so person-row creation
         // order — and the IDs the People tab shows — is stable across runs.
         // (007)
+        let rowIndexByFaceID = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($0.element.id, $0.offset) })
         var byCluster: [Int: [Int]] = [:]
         for (denseIdx, cid) in icResult.clusterIDs.enumerated() {
-            byCluster[cid, default: []].append(denseIdx)
+            guard let rowIndex = rowIndexByFaceID[denseToFaceID[denseIdx]] else { continue }
+            byCluster[cid, default: []].append(rowIndex)
         }
 
         let rawClusters = byCluster
@@ -987,6 +1078,11 @@ public enum FaceClustering {
                                         "minClusterSize": AnyCodable(minClusterSizeToKeep),
                                         "soloQualityFloor": AnyCodable(soloQualityFloor),
                                         "remainingClusters": AnyCodable(stats.personCount)])
+        }
+        if stats.attachedFaces > 0 || stats.unsureFaces > 0 {
+            JSONLog.shared.info(ev: "face_cluster_second_stage",
+                                extra: ["attached": AnyCodable(stats.attachedFaces),
+                                        "notSure": AnyCodable(stats.unsureFaces)])
         }
         if stats.truncatedFaces > 0 {
             JSONLog.shared.warn(ev: "face_cluster_truncated",
@@ -1111,12 +1207,13 @@ public enum FaceClustering {
                 var owners: [Int64:Int64] = [:]
                 for (row,snapshot) in zip(partition.rows,partition.snapshots) {
                     guard let owner = snapshot.personID, completeOwners.contains(owner) else { continue }
+                    owners[row.id] = owner
+                    if row.held { continue }
                     let vector = FloatBlob.decode(row.arcFace)
                     var sum = sums[owner] ?? [Float](repeating: 0, count: 128)
                     for index in sum.indices { sum[index] += vector[index] }
                     sums[owner] = sum
                     files[owner,default: []].insert(snapshot.fileID)
-                    owners[row.id] = owner
                 }
                 let rows = sums.keys.sorted().map { owner in
                     CentroidRow(personID: owner, sum: sums[owner]!, fileCount: files[owner]!.count,
@@ -1126,11 +1223,14 @@ public enum FaceClustering {
                     guard let a = owners[verdict.pair.first], let b = owners[verdict.pair.second], a != b else { return nil }
                     return .init(a,b)
                 })
-                var firstOwnerByFile: [Int64:Int64] = [:]
+                var ownersByFile: [Int64: Set<Int64>] = [:]
                 for snapshot in partition.snapshots {
                     guard let owner = owners[snapshot.id] else { continue }
-                    if let first = firstOwnerByFile[snapshot.fileID], first != owner { blockers.insert(.init(first,owner)) }
-                    else { firstOwnerByFile[snapshot.fileID] = owner }
+                    ownersByFile[snapshot.fileID, default: []].insert(owner)
+                }
+                for fileOwners in ownersByFile.values where fileOwners.count > 1 {
+                    let sorted = fileOwners.sorted()
+                    for a in sorted.indices { for b in sorted.index(after: a)..<sorted.endIndex { blockers.insert(.init(sorted[a], sorted[b])) } }
                 }
                 return ReadData(space: selectedSpace, partition: partition, priors: priors, verdicts: verdicts,
                     rows: rows, verdictPersonPairs: blockers.map { ($0.first,$0.second) },

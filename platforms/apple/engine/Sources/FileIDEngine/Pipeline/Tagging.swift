@@ -260,7 +260,9 @@ public enum Tagging {
                     // tags.score; the Vision fallback has none. Runs before OCR so
                     // its paper/handwriting tags can gate the text read.
                     let ramStart = CFAbsoluteTimeGetCurrent()
-                    let ramTags = RamPlusService.shared.tag(cgImage)
+                    let ramTags = TagAgreement.combine(ram: RamPlusService.shared.tag(cgImage),
+                                                       vision: pass.classifyConfidences,
+                                                       faceCount: pass.faceCount)
                     let ramMs = (CFAbsoluteTimeGetCurrent() - ramStart) * 1000
 
                     // OCR — fast read when the classifiers or the page shape suggest
