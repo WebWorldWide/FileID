@@ -247,4 +247,44 @@ struct BulkMutationTests {
         #expect(states[1]?.path.hasSuffix("1.txt") == true)
         #expect(states[1_005]?.path.hasSuffix("1005.txt") == true)
     }
+    @Test("Wipe empties a library with catalog search rows and vector changes")
+    func wipeEmptiesCatalog() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDWipe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let db = try makeDB(root)
+        try await insert(db, id: 1, path: root.appendingPathComponent("a.txt").path)
+        try await db.pool.write { sql in
+            try sql.execute(sql: "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (1, zeroblob(2048), ?)",
+                            arguments: [CLIPEmbeddingSpace.modelID])
+            try sql.execute(sql: "INSERT INTO text_embeddings (file_id, embedding, model) VALUES (1, zeroblob(1536), 'bge_small_en_v1_5')")
+            try sql.execute(sql: "INSERT INTO tags (file_id, tag, source) VALUES (1, 'mulch', 'user')")
+            try sql.execute(sql: "INSERT INTO doc_text (file_id, text) VALUES (1, 'mulch')")
+        }
+
+        let result = await FileIDEngineMain.wipeLibrary(database: db)
+        #expect(result.ok, "\(result.message ?? "")")
+        let leftovers = try await db.pool.read { sql -> [String] in
+            let tables = try String.fetchAll(sql, sql: """
+                SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                  AND name NOT IN ('grdb_migrations','catalog_vector_state') AND name NOT LIKE '%\\_fts\\_%' ESCAPE '\\'
+                """)
+            return try tables.filter { try (Int.fetchOne(sql, sql: "SELECT COUNT(*) FROM \"\($0)\"") ?? 0) > 0 }
+        }
+        #expect(leftovers == [])
+        let enforced = try await db.pool.write { sql in try Int.fetchOne(sql, sql: "PRAGMA foreign_keys") }
+        #expect(enforced == 1)
+        let seeded = try await db.pool.read { sql in
+            try Int.fetchOne(sql, sql: "SELECT COUNT(*) FROM catalog_vector_state WHERE generation=0 AND nonce=instance_id") ?? 0
+        }
+        #expect(seeded == 3)
+        try await insert(db, id: 1, path: root.appendingPathComponent("b.txt").path)
+        let generation = try await db.pool.write { sql in
+            try sql.execute(sql: "INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (1, zeroblob(2048), ?)",
+                            arguments: [CLIPEmbeddingSpace.modelID])
+            return try Int.fetchOne(sql, sql: "SELECT generation FROM catalog_vector_state WHERE namespace='clip'")
+        }
+        #expect(generation == 1)
+    }
 }

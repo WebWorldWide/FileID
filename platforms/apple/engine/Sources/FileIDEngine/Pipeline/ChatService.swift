@@ -6,6 +6,7 @@ actor ChatService {
     static let shared = ChatService()
     private var active: [String: String] = [:]
     private var running: String?
+    private var runningInterleaved = false
     private var accumulated: [String: String] = [:]
     private var lastEmit: [String: Date] = [:]
     private var latestRequest: [String: String] = [:]
@@ -51,7 +52,11 @@ actor ChatService {
                 if let id = active.removeValue(forKey: request.conversationID) {
                     await JobQueue.shared.cancelPending(id: "chat-" + id)
                     _ = await ChatYield.shared.remove(id: id)
-                    if running == id { await DeepAnalyze.shared.requestCancel() }
+                    if running == id {
+                        // An interleaved summary runs between a Describe batch's files;
+                        // the batch-wide cancel flag would stop that batch too.
+                        if runningInterleaved { await DeepAnalyze.shared.cancelCurrentAnalysis() } else { await DeepAnalyze.shared.requestCancel() }
+                    }
                     accumulated.removeValue(forKey: id); lastEmit.removeValue(forKey: id)
                 }
                 if request.action == "clear" {
@@ -327,7 +332,8 @@ actor ChatService {
     private func summarize(_ request: ChatRequest, hits: [CatalogHit], model: AIModelKind, fallback: String, database: Database, sink: IPCSink, interleaved: Bool = false) async {
         guard active[request.conversationID] == request.requestID else { return }
         running = request.requestID
-        defer { running = nil; accumulated.removeValue(forKey: request.requestID); lastEmit.removeValue(forKey: request.requestID) }
+        runningInterleaved = interleaved
+        defer { running = nil; runningInterleaved = false; accumulated.removeValue(forKey: request.requestID); lastEmit.removeValue(forKey: request.requestID) }
         var answer = fallback
         if case .ready(let current) = await DeepAnalyze.shared.loadState, current == model {
             if !interleaved { await DeepAnalyze.shared.clearCancel() }
