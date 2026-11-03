@@ -17,6 +17,55 @@ enum VLMGreedyDecoder {
         var draftedTokens = 0
         var acceptedTokens = 0
         var stoppedEarly = false
+        var brokeLoop = false
+    }
+
+    static func loopGuardEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        environment["FILEID_VLM_LOOP_GUARD"] != "0"
+    }
+
+    static let minimumLoopTokens = 16
+    static let maximumLoopTokens = 128
+
+    /// Length of the block that `tokens` ends with twice in a row, if any. Greedy
+    /// decoding that falls into a loop repeats a sentence until the token cap.
+    static func repeatedTailLength(_ tokens: [Int]) -> Int? {
+        let count = tokens.count
+        guard count >= 2 * minimumLoopTokens, let last = tokens.last else { return nil }
+        for length in minimumLoopTokens...min(maximumLoopTokens, count / 2) {
+            guard tokens[count - 1 - length] == last else { continue }
+            if tokens[(count - length)...] == tokens[(count - 2 * length)..<(count - length)] { return length }
+        }
+        return nil
+    }
+
+    /// True once the first top-level JSON object in `text` has closed.
+    static func isCompleteJSONObject(_ text: String) -> Bool {
+        var depth = 0, started = false, inString = false, escaped = false
+        for character in text {
+            if inString {
+                if escaped { escaped = false } else if character == "\\" { escaped = true } else if character == "\"" { inString = false }
+                continue
+            }
+            switch character {
+            case "\"": inString = true
+            case "{": depth += 1; started = true
+            case "}":
+                guard started else { break }
+                depth -= 1
+                if depth == 0 { return true }
+            default: break
+            }
+        }
+        return false
+    }
+
+    /// Ends a looped reply at its last complete sentence, keeping at least `keep` of it.
+    static func endingAtSentence(_ text: String, keep: Double = 0.4) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let end = trimmed.lastIndex(where: { ".!?".contains($0) }),
+              Double(trimmed.distance(from: trimmed.startIndex, to: end)) >= Double(trimmed.count) * keep else { return trimmed }
+        return String(trimmed[...end])
     }
 
     static func promptLookupEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
@@ -83,6 +132,7 @@ enum VLMGreedyDecoder {
         lookupSources: [[Int]],
         derivedSource: ((String) -> [Int]?)? = nil,
         promptLookup: Bool,
+        stopOnLoop: Bool = false,
         isComplete: (String) -> Bool,
         onText: ((String) async -> Void)?
     ) async throws -> Outcome {
@@ -152,6 +202,12 @@ enum VLMGreedyDecoder {
             }
             emittedText = text
             if finished { break decoding }
+            if stopOnLoop, let length = repeatedTailLength(outcome.tokens) {
+                outcome.tokens.removeLast(length)
+                emittedText = endingAtSentence(context.tokenizer.decode(tokenIds: outcome.tokens))
+                outcome.brokeLoop = true
+                break decoding
+            }
             if !derived, let extra = derivedSource?(text) {
                 sources.append(extra)
                 derived = true
