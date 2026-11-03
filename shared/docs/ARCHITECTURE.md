@@ -1,5 +1,9 @@
 # Architecture — cross-platform overview
 
+## Chat control and scalable retrieval (IPC v1.17 / catalog v27)
+
+`ChatRequest` gains optional `context` (page, selection, open person, folder) and a client CLIP `queryVector`; `ChatResponse` gains optional `actions`. Both engines parse imperatives deterministically, answer structured questions from fixed SQL templates, and fuse lexical, CLIP (HNSW) and BGE evidence with the same reciprocal-rank weights. Actions map onto existing commands and pages; destructive kinds carry a fixed `requiresConfirmation`. Retrieved file text never reaches the parser, and model proposals must be backed by the user's own words. Catalog v27 adds a trigger-maintained tag vocabulary and covering indexes for totals, ordering and duplicate twins. Details, the action table and the WinUI/GTK port note are in CHAT.md.
+
 ## Related-take proposals (IPC v1.11)
 
 `suggestTakeGroups` is a read-only catalog request scoped to explicit file IDs. Both engines inspect only current-model visual embeddings from image and video scan results, order candidates by file creation date, and compare each candidate to a bounded set of recent group anchors. Exact byte duplicates, cataloged derivatives, and members of saved groups are omitted. The response carries member paths and cosine similarity; it does not create events or score whether the user's desired outcome occurred. macOS presents proposals for review, then uses the existing `saveEvent` action only after the user supplies a title and goal. The 20-minute/0.90 proposal filters need rights-cleared calibration before catalog-wide jobs or automatic ranking.
@@ -57,7 +61,7 @@ When the engine crashes the app respawns it with bounded backoff (1 s / 4 s / 16
 
 ## Storage
 
-SQLite via WAL journaling. Schema versioned through v26 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
+SQLite via WAL journaling. Schema versioned through v27 (see `platforms/apple/engine/Sources/FileIDEngine/Storage/Database.swift` for the canonical migration list, and `platforms/windows/src/engine/src/db/migrations.rs` for the byte-faithful Rust port). Both engines use the same `grdb_migrations` tracking table so a database created on one platform can be opened by the other.
 
 PRAGMAs:
 - `journal_mode = WAL`

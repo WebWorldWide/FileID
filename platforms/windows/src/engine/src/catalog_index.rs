@@ -21,6 +21,7 @@ use std::{
 };
 
 const MAX_FILES: usize = 200_000;
+static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
 const MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Revision {
@@ -61,7 +62,13 @@ pub struct CatalogIndex {
 }
 impl CatalogIndex {
     pub fn new(writer: Arc<Mutex<Connection>>, database: PathBuf, directory: PathBuf) -> Arc<Self> {
-        Self::with_scheduler(writer, database, directory, ResourceScheduler::shared())
+        let index = Self::with_scheduler(writer, database, directory, ResourceScheduler::shared());
+        *CURRENT.lock() = Arc::downgrade(&index);
+        index
+    }
+    /// The engine's live index, for Chat's visual retrieval.
+    pub fn current() -> Option<Arc<Self>> {
+        CURRENT.lock().upgrade()
     }
     fn with_scheduler(
         writer: Arc<Mutex<Connection>>,

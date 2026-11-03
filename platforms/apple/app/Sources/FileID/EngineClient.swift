@@ -1241,6 +1241,20 @@ public final class EngineClient {
         beginDeepAnalyzeActivity()
     }
 
+    /// Describe an explicit selection of at most 100 files (the schema bound).
+    @discardableResult
+    public func deepAnalyzeSelection(fileIDs: [Int64], modelKind: String) -> Bool {
+        guard !fileIDs.isEmpty, fileIDs.count <= 100,
+              ModelLicenseGate.ensureAccepted(for: AIModelKind.migrated(rawValue: modelKind)) else { return false }
+        guard send(.deepAnalyzeAll(modelKind: modelKind, skipExisting: false, tagsOnly: false, proposeRenames: true, fileIDs: fileIDs, excludedFolders: nil)) else { return false }
+        deepAnalyzeInFlight = true
+        deepAnalyzeProgress = nil
+        deepAnalyzeComplete = nil
+        deepAnalyzeStarting = nil
+        beginDeepAnalyzeActivity()
+        return true
+    }
+
     public func deepAnalyzeCancel() {
         send(.deepAnalyzeCancel)
     }

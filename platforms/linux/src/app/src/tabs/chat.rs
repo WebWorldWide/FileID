@@ -70,7 +70,7 @@ impl ChatUi {
             action: action.into(),
             text: (action == "send").then(|| text.chars().take(2000).collect()),
             use_model: Some(false),
-            model_kind: None,
+            ..ChatRequest::default()
         };
         let dispatch = self.state.borrow_mut().begin(&request);
         match dispatch {

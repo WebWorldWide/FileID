@@ -123,7 +123,9 @@ pub(super) fn search(
 /// Files whose scan tags match the query words, best first. Each word matches
 /// the start of a tag word ("grass" hits "grassland", "sky" hits "blue_sky"),
 /// and only files matching the most words are kept so a filler word in the
-/// question can't hide a real match. Mirrors macOS `CatalogStore.tagHits`.
+/// question can't hide a real match. Words are matched against the v27 tag
+/// vocabulary, then files come from the tag index. Mirrors macOS
+/// `CatalogStore.tagHits`.
 fn tag_hits(
     conn: &Connection,
     query: &str,
@@ -142,35 +144,26 @@ fn tag_hits(
     if words.is_empty() {
         return Ok(vec![]);
     }
-    let forms: Vec<Vec<String>> = words.iter().map(|w| word_forms(w)).collect();
-    let mut next = 5;
-    let score = forms
-        .iter()
-        .map(|word| {
-            let likes = word
-                .iter()
-                .map(|_| {
-                    next += 1;
-                    format!("(' ' || REPLACE(LOWER(t.tag),'_',' ')) LIKE ?{}", next - 1)
-                })
-                .collect::<Vec<_>>()
-                .join(" OR ");
-            format!("EXISTS (SELECT 1 FROM tags t WHERE t.file_id=f.id AND t.source IN ('auto','user','vlm') AND ({likes}))")
-        })
-        .collect::<Vec<_>>()
-        .join(" + ");
-    let sql = format!(
-        "WITH scored AS (SELECT f.id,f.path_text,f.kind,{score} AS score FROM files f WHERE {filters} AND ?1 IS NOT NULL) \
-         SELECT s.id,s.path_text,s.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT REPLACE(TRIM(tag),'_',' ') AS tag FROM tags WHERE file_id=s.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL \
-         FROM scored s WHERE s.score>0 AND s.score=(SELECT MAX(score) FROM scored) ORDER BY s.id DESC LIMIT 100"
-    );
-    let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];
-    for form in forms.iter().flatten() {
-        args.push(Box::new(format!("% {form}%")));
+    let mut scores: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    for word in &words {
+        let forms = word_forms(word);
+        let likes = (0..forms.len()).map(|index| format!("(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?{}", index + 5)).collect::<Vec<_>>().join(" OR ");
+        let sql = format!("SELECT DISTINCT f.id FROM tags t JOIN files f ON f.id=t.file_id WHERE {filters} AND ?1 IS NOT NULL AND t.source IN ('auto','user','vlm') AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes})");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(query.to_owned()), Box::new(kinds.clone()), Box::new(people.clone()), Box::new(events.clone())];
+        args.extend(forms.iter().map(|form| Box::new(format!("% {form}%")) as Box<dyn rusqlite::ToSql>));
+        let mut statement = conn.prepare(&sql)?;
+        for id in statement.query_map(rusqlite::params_from_iter(args.iter().map(|arg| arg.as_ref())), |row| row.get::<_, i64>(0))? {
+            *scores.entry(id?).or_default() += 1;
+        }
     }
+    let Some(best) = scores.values().copied().max() else { return Ok(vec![]) };
+    let mut ids: Vec<i64> = scores.into_iter().filter(|(_, score)| *score == best).map(|(id, _)| id).collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    ids.truncate(100);
+    let sql = "SELECT f.id,f.path_text,f.kind,'Tags: ' || COALESCE((SELECT GROUP_CONCAT(tag,', ') FROM (SELECT DISTINCT REPLACE(TRIM(tag),'_',' ') AS tag FROM tags WHERE file_id=f.id AND source IN ('auto','user','vlm') ORDER BY CASE source WHEN 'user' THEN 0 WHEN 'vlm' THEN 1 ELSE 2 END,COALESCE(score,0) DESC LIMIT 8)),''),NULL,NULL,NULL FROM files f WHERE f.id IN (SELECT value FROM json_each(?1)) ORDER BY f.id DESC";
     Ok(conn
-        .prepare(&sql)?
-        .query_map(rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())), hit)?
+        .prepare(sql)?
+        .query_map([serde_json::to_string(&ids)?], hit)?
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

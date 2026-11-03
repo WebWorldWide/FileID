@@ -286,7 +286,7 @@ mod tests {
             action: action.into(),
             text: Some("fixture subject".into()),
             use_model: Some(false),
-            model_kind: None,
+            ..ChatRequest::default()
         }
     }
     #[test]

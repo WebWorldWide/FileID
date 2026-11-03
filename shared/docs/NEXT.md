@@ -11,6 +11,8 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 
 ## In flight
 
+- **Chat control (IPC v1.17, catalog v27, branch `agent/chat-control`)**: on the Mac, try the action cards on a real library (scan, describe, duplicates → Trash, organize → apply → undo, rename, name/merge people) and check they read clearly with VoiceOver. Measure Chat with CLIP and BGE installed (semantic lists were not exercised in the 100k benchmark). Port the cards to WinUI and GTK per the port note in `CHAT.md`; both apps already receive `ChatResponse.actions` and ignore it.
+
 0. **Finish the August-rollback restore** (engine landed first): restore the GTK app (paged restructure plans, engine client, settings) and the WinUI app (47 conflicted files) area by area, each as its own PR verified on its host. The macOS engine now implements `reassignFace`; the remaining portable-only commands (`findMergeSuggestions`, `embedTextQuery`, `embedImageQuery`, `restoreFromTrash`, `revertMerge`, `generateVideoThumbnail`) are served in-app on macOS and stay `not_implemented_yet` in its engine.
 1. **Redesign** (FileID Prototype v3, contract in `DESIGN_V3.md`, numbers in `DESIGN_V3_PORT.md`): every macOS page is on v3; the GTK and WinUI shells landed. Port the pages next, then check both on their hosts. Keep the grain fine (2× multi-octave).
 2. **Benchmarks on real hardware**: run the model catalog benchmark on the RTX 2060 PC and the Mac; exercise the WinUI Models workbench interactively; macOS MLX benchmarking is implemented (model browser → Speed on this Mac) but has not measured a real model yet because none is installed; with owner approval install Qwen3-VL 4B and run it. Then measure the shortlisted gap models in MODELS.md.

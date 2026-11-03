@@ -1412,6 +1412,7 @@ mod tests {
                 message: "Retrieved".into(),
                 messages: vec![],
                 hits: vec![],
+                actions: None,
             }))),
         ];
         let stream = events.iter().map(|e| serde_json::to_string(e).unwrap()).collect::<Vec<_>>().join("\n");

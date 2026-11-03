@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-10-21 — Chat answers at 100k files and controls FileID (IPC v1.17, catalog v27)
+
+Both engines now parse requests deterministically into proposed actions (17 kinds, each mapped to an existing command or page), answer counts/sizes/dates/folders/people/duplicates/"not described yet" from fixed SQL templates, and fuse lexical, CLIP (HNSW) and BGE evidence with the same RRF weights. Destructive kinds carry a fixed confirmation flag, enforced by both engines and the client; retrieved file text never reaches the parser, and model proposals must be backed by the user's own words. macOS renders action cards with counts, examples, the undo story, progress and Undo; Chat's trash reuses Cleanup's byte-verified path. Catalog v27 adds a tag vocabulary table and covering indexes.
+
+Measured time to first evidence over IPC on a synthetic 100,000-file library (`make_synthetic_library.py` + `benchmark_chat.py`, release builds, 110 sends each, M1 Pro at load average ~20–30 from other work): Rust p50 45 ms / p95 132 ms / max 175 ms; Swift p50 59 ms / p95 147 ms / max 190 ms. The slowest family is whole-library duplicates and "not described yet" (p95 175/190 ms). The Rust engine before this change: p50 4.7 s / p95 15.5 s. Both engines give identical answers. Not measured: semantic lists with CLIP/BGE installed, a real library, the cards on screen.
+
+Verified: Rust engine strict Clippy and 1,064 tests; CLI 62, TUI 99, GTK 112 tests; Swift 645 tests pass except the process-level scan-cancellation test, which fails the same way with an engine built before this work (and is disabled on CI); conformance 28 pass / 0 fail / 0 stale on each engine plus 6/6 cross-engine. C# DTOs were not built (no .NET on this Mac).
+
 ## 2026-10-20 — Audit fixes, every macOS page on v3, GTK and WinUI v3 shells
 
 A four-way audit (macOS defects; shared-engine, GTK and WinUI parity) had every finding re-checked by a second reviewer trying to refute it; 57 of 62 held.

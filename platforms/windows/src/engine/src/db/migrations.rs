@@ -55,6 +55,7 @@ fn registry() -> Vec<(&'static str, &'static str)> {
         ("v24_face_refresh_failures", include_str!("../../../../../../shared/catalog/v24.sql")),
         ("v25_ocr_text_source", include_str!("../../../../../../shared/catalog/v25.sql")),
         ("v26_vlm_inherited_from", include_str!("../../../../../../shared/catalog/v26.sql")),
+        ("v27_chat_retrieval", include_str!("../../../../../../shared/catalog/v27.sql")),
     ]
 }
 
@@ -498,7 +499,7 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 26, "expected 26 applied migrations");
+        assert_eq!(n, 27, "expected 27 applied migrations");
 
         let full_model_column: (String, i64, Option<String>) = conn
             .query_row(
@@ -577,7 +578,7 @@ mod tests {
         apply(&conn).unwrap();
         apply(&conn).unwrap(); // second run is a no-op
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM grdb_migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 26);
+        assert_eq!(n, 27);
     }
 
     /// A "different people" verdict's churn-stable (file_id, bbox)
@@ -671,7 +672,7 @@ mod tests {
     /// BOTH or the chains fork again.
     #[test]
     fn migration_identifiers_match_canonical_list() {
-        const CANONICAL: [&str; 26] = [
+        const CANONICAL: [&str; 27] = [
             "v1_core_tables",
             "v2_clip_embeddings",
             "v3_deep_analyze",
@@ -698,6 +699,7 @@ mod tests {
             "v24_face_refresh_failures",
             "v25_ocr_text_source",
             "v26_vlm_inherited_from",
+            "v27_chat_retrieval",
         ];
         let ids: Vec<&str> = registry().iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, CANONICAL, "migration identifiers must match the canonical cross-platform list");
