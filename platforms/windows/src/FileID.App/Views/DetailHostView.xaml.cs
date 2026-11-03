@@ -156,6 +156,7 @@ public sealed partial class DetailHostView : UserControl
         {
             "moments" => new Workbenches.CatalogWorkbench(),
             "chat" => new Workbenches.ChatWorkbench(),
+            "takes" => new Workbenches.TakesWorkbench(),
             "models" => new Workbenches.ModelsWorkbench(),
             _ => _toolsWorkbench ??= new Workbenches.ToolsWorkbench(HostWindowHandle()),
         };

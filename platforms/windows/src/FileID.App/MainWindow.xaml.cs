@@ -595,7 +595,7 @@ public sealed partial class MainWindow : Window
         // Ctrl+1..9 jump to pages in area order (DESIGN_V3 shell, macOS
         // Cmd+1..9); Alt+1..9 stays as the Windows-native alias (per
         // shared/docs/DECISIONS.md 2026-05-02 entry).
-        for (int i = 0; i < SidebarTab.Order.Count && i < 9; i++)
+        for (int i = 0; i < SidebarTab.ShortcutOrder.Count && i < 9; i++)
         {
             int idx = i;
             var key = (VirtualKey)((int)VirtualKey.Number1 + i);
@@ -604,7 +604,7 @@ public sealed partial class MainWindow : Window
                 AddAccelerator(key, modifier, (_, args) =>
                 {
                     if (KeyboardFocusGuard.IsTextEditing(Content.XamlRoot)) return;
-                    AppViewModel.Instance.ActiveTab = SidebarTab.Order[idx];
+                    AppViewModel.Instance.ActiveTab = SidebarTab.ShortcutOrder[idx];
                     args.Handled = true;
                 });
             }
