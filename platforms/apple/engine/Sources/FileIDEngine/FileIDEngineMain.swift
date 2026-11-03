@@ -1740,6 +1740,11 @@ struct FileIDEngineMain {
             return
         }
         guard !candidates.isEmpty else { return }
+        guard ScanRootGuard.isReachable(scanRootPath) else {
+            JSONLog.shared.warn(ev: "orphan_sweep_skipped_root_unreachable", sess: sessionID,
+                                error: "scan root missing, empty or unmounted; \(candidates.count) rows kept")
+            return
+        }
 
         // Stat off the writer thread; FileManager hits are cheap but blocking.
         let missing: [Int64] = await Task.detached(priority: .background) {
