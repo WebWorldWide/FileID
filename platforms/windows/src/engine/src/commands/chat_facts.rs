@@ -339,11 +339,17 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     if let (Some(lo), Some(hi)) = range {
-        message += &if lo == hi { format!(" Taken on {lo}.") } else { format!(" Dates run from {lo} to {hi}.") };
+        {
+            use std::fmt::Write;
+            let _ = if lo == hi { write!(message, " Taken on {lo}.") } else { write!(message, " Dates run from {lo} to {hi}.") };
+        }
     }
     let top = folders(conn, false, 3)?;
     if !top.is_empty() {
-        message += &format!(" Busiest folders: {}.", top.iter().map(folder_phrase).collect::<Vec<_>>().join(", "));
+        {
+            use std::fmt::Write;
+            let _ = write!(message, " Busiest folders: {}.", top.iter().map(folder_phrase).collect::<Vec<_>>().join(", "));
+        }
     }
     Ok((message, hits))
 }
