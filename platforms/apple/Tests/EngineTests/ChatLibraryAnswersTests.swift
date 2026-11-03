@@ -12,12 +12,12 @@ struct ChatLibraryAnswersTests {
             let rows: [(Int, String, String, Int, Double)] = [
                 (1, "/Volumes/Adlon/Camera/Game/a.jpg", "image", 3_000, 1_000_000),
                 (2, "/Volumes/Adlon/Camera/Game/b.arw", "image", 9_000, 1_000_100),
-                (3, "/Volumes/Adlon/Camera/Game/c.jpg", "image", 3_000, 1_000_200),
+                (3, "/Volumes/Adlon/Camera/Game/c.JPG", "image", 3_000, 1_000_200),
                 (4, "/Volumes/Adlon/Cabinet/clip.mp4", "video", 50_000, 2_000_000),
                 (5, "C:\\Users\\a\\Pictures\\d.png", "image", 1_000, 3_000_000),
             ]
             for (id, path, kind, size, created) in rows {
-                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES(?,?,?,?,?,0,?,'x')", arguments: [id, path, id, size, created, kind])
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES(?,?,?,?,?,0,?,?)", arguments: [id, path, id, size, created, kind, (path as NSString).pathExtension])
             }
         }
         return (database, directory)
@@ -43,6 +43,19 @@ struct ChatLibraryAnswersTests {
         #expect(try await answer("which folder has the most files", database).hasPrefix("Folders with the most files: Game (3 files, 15.0 KB), Cabinet (1 file, 50.0 KB)"))
         #expect(try await answer("what are my biggest folders", database).hasPrefix("Biggest folders: Cabinet (1 file, 50.0 KB), Game (3 files, 15.0 KB)"))
         #expect(try await answer("which folder has the most files", database).contains("Pictures (1 file, 1.0 KB)"))
+    }
+
+    @Test func formatWordsFilterByExtension() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func ask(_ text: String) async throws -> String {
+            let question = ChatIntent.question(text)
+            let filter = ChatFacts.Filter(kinds: question.reduced.lowercased().contains("photo") ? ["image"] : [], extensions: question.formats ?? [])
+            return try await database.pool.read { db in try ChatFacts.answer(db, question, filter).0 }
+        }
+        #expect(try await ask("how many RAW photos are there") == "Found 1 photo in RAW format, using 9.0 KB.")
+        #expect(try await ask("how many jpgs") == "Found 2 files in JPG format, using 6.0 KB.")
+        #expect(try await ask("how many pngs") == "Found 1 file in PNG format, using 1.0 KB.")
     }
 
     @Test func ordinaryQuestionsAreNotCapturedAsLibraryQuestions() {

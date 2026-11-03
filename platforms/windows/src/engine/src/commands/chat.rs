@@ -568,6 +568,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         folder: question.folder.clone(),
         undescribed: question.undescribed,
         ids: None,
+        extensions: question.formats.clone().unwrap_or_default(),
     };
     if question.structured() && plan.query.is_empty() && plan.event_ids.is_empty() && plan.time_seconds.is_none() {
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;

@@ -126,7 +126,8 @@ enum ChatActions {
         let question = ChatIntent.question(text)
         let plan = ChatSearchPlan.resolve(question.reduced, previous: nil, knownPeople: context.knownPeople, knownEvents: context.knownEvents)
         var filter = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, personNames: plan.personNames,
-                                      date: question.date, folder: question.folder, undescribed: question.undescribed)
+                                      date: question.date, folder: question.folder, undescribed: question.undescribed,
+                                      extensions: question.formats ?? [])
         if explicit {
             guard let ids = context.chat?.fileIDs, !ids.isEmpty else { return .failure(Message("Select files in Library first, then ask again.")) }
             filter.ids = ids

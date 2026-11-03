@@ -22,6 +22,8 @@ enum ChatFacts {
         var folder: String?
         var undescribed = false
         var ids: [Int64]?
+        /// Lowercase file extensions ("raw" covers every RAW type).
+        var extensions: [String] = []
 
         var effectiveKinds: [String] { kinds.isEmpty && undescribed ? ChatFacts.analyzable : kinds }
 
@@ -34,6 +36,9 @@ enum ChatFacts {
             var parts = ["f.failed=0"]
             if !effectiveKinds.isEmpty {
                 parts.append("\(ordered ? "+" : "")f.kind IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(effectiveKinds))
+            }
+            if !extensions.isEmpty {
+                parts.append("lower(f.extension) IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(extensions))
             }
             if !personIDs.isEmpty {
                 parts.append("f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)")
@@ -69,12 +74,18 @@ enum ChatFacts {
         /// " of Kyle in Downloads from 2023 not described yet".
         var qualifiers: String {
             var text = ""
+            if !extensions.isEmpty { text += " in \(ChatFacts.formatLabel(extensions)) format" }
             if !personNames.isEmpty { text += " of \(personNames.joined(separator: " and "))" }
             if let folder { text += " in \(folder.hasPrefix("named:") ? String(folder.dropFirst(6)) : folder)" }
             if let date { text += " \(date.phrase)" }
             if undescribed { text += " not described yet" }
             return text
         }
+    }
+
+    /// "RAW" for the RAW family, else the first extension in capitals ("JPG", "PNG").
+    static func formatLabel(_ extensions: [String]) -> String {
+        extensions.contains("arw") && extensions.contains("cr2") ? "RAW" : (extensions.first ?? "").uppercased()
     }
 
     static func json<T: Encodable>(_ value: T) -> String {

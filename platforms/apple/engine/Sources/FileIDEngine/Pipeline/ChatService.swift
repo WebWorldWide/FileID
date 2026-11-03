@@ -127,7 +127,8 @@ actor ChatService {
                 .reduce(nil as ChatSearchPlan?) { searchPlan($1, previous: $0, people: knownPeople, events: knownEvents).1 }
             let (question, plan) = searchPlan(text, previous: previous, people: knownPeople, events: knownEvents)
             let structured = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, personNames: plan.personNames,
-                                              date: question.date, folder: question.folder, undescribed: question.undescribed)
+                                              date: question.date, folder: question.folder, undescribed: question.undescribed,
+                                              extensions: question.formats ?? [])
             if question.structured, plan.query.isEmpty, plan.eventIDs.isEmpty, plan.timeSeconds == nil {
                 let (message, hits) = try ChatFacts.answer(db, question, structured)
                 return (Prepared(message: message, hits: hits, summarize: false), plan, question, [])

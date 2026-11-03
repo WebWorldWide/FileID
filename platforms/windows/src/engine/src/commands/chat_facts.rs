@@ -15,6 +15,15 @@ pub(crate) const SHOWN: usize = 50;
 pub(crate) const LARGE: i64 = 2_000;
 const TAKEN: &str = "COALESCE(f.created_at,f.modified_at)";
 
+/// "RAW" for the RAW family, else the first extension in capitals ("JPG", "PNG").
+pub(crate) fn format_label(extensions: &[String]) -> String {
+    if extensions.iter().any(|e| e == "arw") && extensions.iter().any(|e| e == "cr2") {
+        "RAW".into()
+    } else {
+        extensions.first().map(|e| e.to_uppercase()).unwrap_or_default()
+    }
+}
+
 /// Which files a structured answer or action covers.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Filter {
@@ -26,6 +35,8 @@ pub(crate) struct Filter {
     pub folder: Option<String>,
     pub undescribed: bool,
     pub ids: Option<Vec<i64>>,
+    /// Lowercase file extensions ("raw" covers every RAW type).
+    pub extensions: Vec<String>,
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Value {
@@ -64,6 +75,10 @@ impl Filter {
         if !kinds.is_empty() {
             parts.push(if ordered { "+f.kind IN (SELECT value FROM json_each(?))" } else { "f.kind IN (SELECT value FROM json_each(?))" }.into());
             args.push(json(&kinds));
+        }
+        if !self.extensions.is_empty() {
+            parts.push("lower(f.extension) IN (SELECT value FROM json_each(?))".into());
+            args.push(json(&self.extensions));
         }
         if !self.person_ids.is_empty() {
             parts.push("f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)".into());
@@ -109,6 +124,9 @@ impl Filter {
     pub fn qualifiers(&self) -> String {
         use std::fmt::Write;
         let mut text = String::new();
+        if !self.extensions.is_empty() {
+            let _ = write!(text, " in {} format", format_label(&self.extensions));
+        }
         if !self.person_names.is_empty() {
             let _ = write!(text, " of {}", self.person_names.join(" and "));
         }
@@ -380,6 +398,28 @@ pub(crate) fn restrict(conn: &Connection, hits: Vec<CatalogHit>, filter: &Filter
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn format_words_filter_by_extension() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path, kind, size, ext) in [
+            (1, "/p/a.jpg", "image", 3_000, "jpg"),
+            (2, "/p/b.arw", "image", 9_000, "arw"),
+            (3, "/p/c.JPG", "image", 3_000, "JPG"),
+            (4, "/p/d.png", "image", 1_000, "png"),
+        ] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES(?1,?2,?1,?3,1,0,?4,?5)", rusqlite::params![id, path, size, kind, ext]).unwrap();
+        }
+        let ask = |text: &str| {
+            let question = super::super::chat_intent::parse_question(text);
+            let kinds = if question.reduced.to_lowercase().contains("photo") { vec!["image".to_owned()] } else { vec![] };
+            let filter = Filter { kinds, extensions: question.formats.clone().unwrap_or_default(), ..Filter::default() };
+            answer(&conn, &question, &filter).unwrap().0
+        };
+        assert_eq!(ask("how many RAW photos are there"), "Found 1 photo in RAW format, using 9.0 KB.");
+        assert_eq!(ask("how many jpgs"), "Found 2 files in JPG format, using 6.0 KB.");
+        assert_eq!(ask("how many pngs"), "Found 1 file in PNG format, using 1.0 KB.");
+    }
+
     #[test]
     fn library_overview_and_folder_questions_read_totals_not_words() {
         let conn = crate::db::test_support::memory_db();

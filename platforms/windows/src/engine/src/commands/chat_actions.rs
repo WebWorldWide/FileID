@@ -167,6 +167,7 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
         folder: question.folder.clone(),
         undescribed: question.undescribed,
         ids: None,
+        extensions: question.formats.clone().unwrap_or_default(),
     };
     if explicit {
         match context.chat.and_then(|chat| chat.file_ids.clone()).filter(|ids| !ids.is_empty()) {

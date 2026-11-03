@@ -69,9 +69,11 @@ struct ChatIntent: Codable, Equatable, Sendable {
         var duplicates = false
         var undescribed = false
         var reduced = ""
+        /// File extensions named in the question ("RAW", "PNGs"), lowercase.
+        var formats: [String]?
 
         var structured: Bool {
-            measure != "list" || explicitOrder || date != nil || folder != nil || duplicates || undescribed
+            measure != "list" || explicitOrder || date != nil || folder != nil || duplicates || undescribed || formats != nil
         }
     }
 
@@ -408,6 +410,13 @@ struct ChatIntent: Codable, Equatable, Sendable {
             let consumed: Set<String> = ["undescribed", "unanalyzed", "not", "no", "without", "missing", "havent", "hasnt", "need", "needs", "lacking", "yet", "been"]
             for (index, word) in words.enumerated() where consumed.contains(word) || described.contains(word) { used.insert(index) }
         }
+        var formats: [String] = []
+        for (index, word) in words.enumerated() {
+            if let extensions = formatWords[word] {
+                formats.append(contentsOf: extensions.filter { !formats.contains($0) }); used.insert(index)
+            }
+        }
+        if !formats.isEmpty { question.formats = formats }
         if let (filter, range) = dateFilter(words) { question.date = filter; used.formUnion(range) }
         if let (folder, range) = questionFolder(words, raw) { question.folder = folder; used.formUnion(range) }
         if question.structured {
@@ -444,6 +453,20 @@ struct ChatIntent: Codable, Equatable, Sendable {
         }
         return nil
     }
+
+    static let rawExtensions = ["raw", "arw", "cr2", "cr3", "nef", "dng", "orf", "rw2", "raf", "srw", "pef", "3fr", "erf", "kdc", "mef", "mos", "mrw", "rwl", "srf", "x3f"]
+
+    /// "How many RAW photos?" / "show my PNGs": format words that filter by extension.
+    static let formatWords: [String: [String]] = [
+        "raw": rawExtensions, "raws": rawExtensions,
+        "jpg": ["jpg", "jpeg"], "jpgs": ["jpg", "jpeg"], "jpeg": ["jpg", "jpeg"], "jpegs": ["jpg", "jpeg"],
+        "arw": ["arw"], "cr2": ["cr2"], "cr3": ["cr3"], "nef": ["nef"], "dng": ["dng"], "orf": ["orf"], "raf": ["raf"], "rw2": ["rw2"],
+        "png": ["png"], "pngs": ["png"], "heic": ["heic", "heif"], "heics": ["heic", "heif"],
+        "gif": ["gif"], "gifs": ["gif"], "tiff": ["tif", "tiff"], "tiffs": ["tif", "tiff"], "webp": ["webp"],
+        "mov": ["mov"], "movs": ["mov"], "mp4": ["mp4"], "mp4s": ["mp4"], "mkv": ["mkv"], "avi": ["avi"],
+        "mp3": ["mp3"], "mp3s": ["mp3"], "flac": ["flac"], "wav": ["wav"], "m4a": ["m4a"], "wma": ["wma"],
+        "docx": ["docx"], "xlsx": ["xlsx"], "pptx": ["pptx"], "txt": ["txt"], "csv": ["csv"], "json": ["json"]
+    ]
 
     private static func capitalizedFirst(_ text: String) -> String {
         (text.first.map { String($0).uppercased() } ?? "") + text.dropFirst()
