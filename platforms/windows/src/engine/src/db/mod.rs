@@ -280,7 +280,8 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
         let mut stmt = conn.prepare(
             "SELECT name FROM sqlite_master \
              WHERE type='table' AND sql LIKE 'CREATE TABLE%' \
-               AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations'",
+               AND name NOT LIKE 'sqlite_%' AND name <> 'grdb_migrations' \
+               AND name <> 'catalog_vector_state'",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         rows.filter_map(|r| r.ok()).filter(|n| !is_shadow(n)).collect()
@@ -310,6 +311,14 @@ pub fn wipe_all(conn: &Connection) -> Result<()> {
             };
             tx.execute_batch(&sql).with_context(|| format!("resetting FTS table {v}"))?;
         }
+        // The vector triggers UPDATE this row on every embedding change, so deleting it would stop
+        // the visual-search index from ever seeing a new embedding. Keep it, drop the old index's
+        // identity (a new instance id invalidates any cached graph) and restart its generation.
+        tx.execute_batch(
+            "UPDATE catalog_vector_state SET instance_id=hex(randomblob(16)),generation=0; \
+             UPDATE catalog_vector_state SET nonce=instance_id;",
+        )
+        .context("resetting vector state")?;
         // Reset AUTOINCREMENT so the next scan starts at id 1 again. Only present
         // when an AUTOINCREMENT table exists (it does); guard anyway.
         let _ = tx.execute_batch("DELETE FROM sqlite_sequence");
@@ -577,6 +586,38 @@ mod tests {
             assert_eq!(tables > 0, applied > 0, "a failed migration must not leave half its schema");
         }
         open_writer(&path).expect("the next open finishes the migrations");
+    }
+
+    #[test]
+    fn wipe_all_keeps_the_vector_state_the_triggers_need() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES (1, '/lib/a.jpg', 1, 1, 0, 'image', 'jpg'); \
+             INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (1, x'00', 'm');",
+        )
+        .unwrap();
+        let namespaces = |conn: &Connection| -> i64 { conn.query_row("SELECT COUNT(*) FROM catalog_vector_state", [], |r| r.get(0)).unwrap() };
+        let before = namespaces(&conn);
+        assert!(before > 0);
+        let old_instance: String = conn.query_row("SELECT instance_id FROM catalog_vector_state WHERE namespace='clip'", [], |r| r.get(0)).unwrap();
+        wipe_all(&conn).expect("wipe");
+        assert_eq!(namespaces(&conn), before, "the state rows must survive a wipe");
+        let (instance, generation, changes): (String, i64, i64) = conn
+            .query_row(
+                "SELECT instance_id, generation, (SELECT COUNT(*) FROM catalog_vector_changes) FROM catalog_vector_state WHERE namespace='clip'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_ne!(instance, old_instance, "a new instance id drops cached indexes");
+        assert_eq!((generation, changes), (0, 0));
+        conn.execute_batch(
+            "INSERT INTO files (id, path_text, path_hash, size_bytes, scanned_at, kind, extension) VALUES (1, '/lib/b.jpg', 2, 1, 0, 'image', 'jpg'); \
+             INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (1, x'00', 'm');",
+        )
+        .unwrap();
+        let generation: i64 = conn.query_row("SELECT generation FROM catalog_vector_state WHERE namespace='clip'", [], |r| r.get(0)).unwrap();
+        assert!(generation >= 1, "a new embedding after the wipe is recorded");
     }
 
     #[test]
