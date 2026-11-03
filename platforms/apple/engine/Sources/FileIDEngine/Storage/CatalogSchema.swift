@@ -325,4 +325,8 @@ CREATE INDEX catalog_files_kind_totals ON files(kind,failed,size_bytes,COALESCE(
 CREATE TABLE take_quality (file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,source_revision TEXT NOT NULL,version TEXT NOT NULL,signals_json TEXT NOT NULL,computed_at REAL NOT NULL);
 CREATE TABLE take_group_decisions (group_key TEXT PRIMARY KEY,decision TEXT NOT NULL CHECK(decision IN ('keepAll','skip')),file_ids_json TEXT NOT NULL,decided_at REAL NOT NULL);
 """#
+    static let v29 = #"""
+CREATE TABLE library_roots (id INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE,display TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'internal' CHECK(kind IN ('internal','external','network')),enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),added_at REAL NOT NULL,last_scan_at REAL,last_status TEXT);
+INSERT OR IGNORE INTO library_roots(path,display,kind,added_at,last_scan_at,last_status) SELECT root_path,root_path,CASE WHEN root_path LIKE '/Volumes/%' THEN 'external' ELSE 'internal' END,MIN(started_at),MAX(COALESCE(completed_at,started_at)),'completed' FROM scan_sessions WHERE status='completed' GROUP BY root_path;
+"""#
 }
