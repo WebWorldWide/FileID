@@ -1,5 +1,13 @@
 # FileID — Ship readiness (v1.0)
 
+## 2026-11-03 Mac App Store readiness audit
+
+Added `platforms/apple/Resources/PrivacyInfo.xcprivacy` (no tracking, no collected data; required-reason APIs declared against the calls actually found in app/engine/shared code: UserDefaults CA92.1, file timestamps 3B52.1 + C617.1, disk space E174.1 + 85F4.1, system uptime 35F9.1). `assemble_app.sh` copies it to `Contents/Resources` and lints it, so every bundle (DMG, TestFlight) carries it. Previously no manifest existed anywhere in the repo.
+
+Already in place: sandboxed entitlements for app and engine (`FileIDAppStore.entitlements`, `FileIDEngineAppStore.entitlements`, engine inherits), `scripts/testflight.sh` (release build with `-DFILEID_APP_STORE`, hardened-runtime signing, `productbuild`, `altool` upload), `NSSpeechRecognitionUsageDescription` plus folder usage strings in both Info.plists, bundle `com.fileid.app` registered (App Store Connect 6818813859, TestFlight 875 validated 2026-10-08). Local signing material present: Apple Distribution and 3rd Party Mac Developer Installer identities, and `FileID_macOS_App_Store.provisionprofile` (team RSDJXF7DXN, app id RSDJXF7DXN.com.fileid.app, expires 2027-10-02).
+
+Not done and why: no new package was built or uploaded this session (a release MLX build would distort the running benchmarks, and uploading is the owner's call). Owner decisions before submitting: export-compliance answer (`ITSAppUsesNonExemptEncryption` is not set in Info.plist; the app uses HTTPS to huggingface.co and CryptoKit hashing only, so `false` is the likely answer, but it is the owner's legal declaration), the App Privacy "Data Not Collected" questionnaire, age rating, screenshots, support/privacy URLs, and review notes explaining that models are downloaded on request from huggingface.co and run locally. `swift build -c release -Xswiftc -DFILEID_APP_STORE` and `bash scripts/testflight.sh --package-only` should be run once on a quiet machine to confirm the sandboxed build still compiles and signs.
+
 ## 2026-10-13 platform integration checkpoint
 
 PR #238 consolidates the Store, Windows, Linux, and native Mac follow-ons. The separate source branches passed their Windows and Linux VM suites and the benchmark harness; combined hosted CI, signed-package runtime checks, and the release gates below remain open. The owner deferred macOS local verification. This checkpoint does not certify a production release.
