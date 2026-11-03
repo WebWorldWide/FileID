@@ -28,6 +28,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     // AllowedVlmKinds) byte-for-byte so a DB shared across platforms
     // round-trips the "analyzed" state (skipExisting matches, badge lights).
     public static let qwen2VL7B = Self(registeredValue: "qwen2_5_vl_7b")
+    public static let qwen3VL2B = Self(registeredValue: "qwen3_vl_2b")
     public static let qwen3VL4B = Self(registeredValue: "qwen3_vl_4b")
     public static let qwen3VL8B = Self(registeredValue: "qwen3_vl_8b")
     public static let qwen35_2B = Self(registeredValue: "qwen3_5_2b")
@@ -37,7 +38,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public static let paligemma3B = Self(registeredValue: "paligemma_3b")
 
 
-    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .paligemma3B]
+    public static let favorites: [Self] = [.qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .gemma3_4B, .gemma3_12B, .mistralSmall32, .paligemma3B]
     public static var allCases: [Self] { favorites + MLXModelCatalog.entries.filter { entry in !favorites.contains { $0.sourceRepo == entry.repo } }.map { Self(registeredValue: $0.id) } }
     public var catalogEntry: CatalogModel? { MLXModelCatalog.entry(forRepo: sourceRepo) }
     public var supportsVision: Bool { MLXModelCatalog.entry(forID: rawValue)?.role != .text }
@@ -45,6 +46,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public var displayName: String {
         switch self {
         case .qwen2VL7B:     return "Qwen2.5-VL 7B (4-bit)"
+        case .qwen3VL2B:     return "Qwen3-VL 2B (4-bit)"
         case .qwen3VL4B:     return "Qwen3-VL 4B (4-bit)"
         case .qwen3VL8B:     return "Qwen3-VL 8B (4-bit)"
         case .qwen35_2B:     return "Qwen3.5 2B (4-bit)"
@@ -59,6 +61,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public var subtitle: String {
         switch self {
         case .qwen2VL7B:     return "Proven Apache-2.0 model with strong OCR + scene understanding."
+        case .qwen3VL2B:     return "Fast. About twice the speed of 4B with close description quality."
         case .qwen3VL4B:     return "Recommended for 8 GB Macs. Strong grounding with a light memory footprint."
         case .qwen3VL8B:     return "Best quality for 16 GB Macs. Stronger detail, OCR, and grounded naming."
         case .qwen35_2B:     return "Compact vision model for memory-constrained Macs. Experimental until evaluated."
@@ -73,6 +76,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public var sourceRepo: String {
         switch self {
         case .qwen2VL7B:     return "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
+        case .qwen3VL2B:     return "mlx-community/Qwen3-VL-2B-Instruct-4bit"
         case .qwen3VL4B:     return "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit"
         case .qwen3VL8B:     return "lmstudio-community/Qwen3-VL-8B-Instruct-MLX-4bit"
         case .qwen35_2B:     return "mlx-community/Qwen3.5-2B-MLX-4bit"
@@ -87,6 +91,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public var approxBytes: Int64 {
         switch self {
         case .qwen2VL7B:     return 4_300_000_000
+        case .qwen3VL2B:     return 1_800_000_000
         case .qwen3VL4B:     return 3_500_000_000
         case .qwen3VL8B:     return 5_776_636_403
         case .qwen35_2B:     return 1_750_000_000
@@ -101,6 +106,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
     public var ramBudgetGB: Double {
         switch self {
         case .qwen2VL7B:     return 7.0
+        case .qwen3VL2B:     return 3.0
         case .qwen3VL4B:     return 5.0
         case .qwen3VL8B:     return 8.5
         case .qwen35_2B:     return 3.0
@@ -129,7 +135,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     public var licensePolicyKey: String {
         switch self {
-        case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache-2.0"
+        case .qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache-2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma"
         default: return ["apache-2.0":"Apache-2.0", "mit":"MIT", "bsd-2-clause":"BSD-2-Clause", "bsd-3-clause":"BSD-3-Clause", "isc":"ISC"][MLXModelCatalog.entry(forID: rawValue)!.license] ?? "Unknown"
         }
@@ -137,7 +143,7 @@ public struct AIModelKind: RawRepresentable, CaseIterable, Hashable, Sendable, C
 
     public var licenseName: String {
         switch self {
-        case .qwen2VL7B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache License 2.0"
+        case .qwen2VL7B, .qwen3VL2B, .qwen3VL4B, .qwen3VL8B, .qwen35_2B, .mistralSmall32: return "Apache License 2.0"
         case .gemma3_4B, .gemma3_12B, .paligemma3B:   return "Gemma Terms of Use"
         default: return licensePolicyKey
         }

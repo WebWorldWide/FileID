@@ -16,6 +16,17 @@ final class VLMPassStats: @unchecked Sendable {
         values[pass + "GenMs", default: 0] += info.generateTime * 1000
     }
 
+    func record(_ pass: String, _ outcome: VLMGreedyDecoder.Outcome) {
+        lock.lock(); defer { lock.unlock() }
+        values[pass + "PromptTokens", default: 0] += Double(outcome.promptTokens)
+        values[pass + "PromptMs", default: 0] += outcome.promptSeconds * 1000
+        values[pass + "GenTokens", default: 0] += Double(outcome.tokens.count)
+        values[pass + "GenMs", default: 0] += outcome.generateSeconds * 1000
+        values[pass + "ModelCalls", default: 0] += Double(outcome.modelCalls)
+        values[pass + "Drafted", default: 0] += Double(outcome.draftedTokens)
+        values[pass + "Accepted", default: 0] += Double(outcome.acceptedTokens)
+    }
+
     func set(_ key: String, _ value: Double) {
         lock.lock(); values[key] = value; lock.unlock()
     }
