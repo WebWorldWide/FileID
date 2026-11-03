@@ -101,8 +101,13 @@ public actor DeepAnalyze {
         case compact
     }
 
-    nonisolated static func replyFormat(environment: [String: String] = ProcessInfo.processInfo.environment) -> ReplyFormat {
-        environment["FILEID_VLM_FORMAT"].flatMap(ReplyFormat.init(rawValue:)) ?? .sections
+    /// Qwen3-VL 2B ignores the one-sentence rule in sections form (46% more tokens,
+    /// 6 of 20 photos looped, 6 lost TAGS and needed a second image pass) but keeps
+    /// the one-line form. 4B already writes one sentence in sections form and breaks
+    /// the compact line into labelled lines, so every other model keeps sections.
+    nonisolated static func replyFormat(model: AIModelKind?, environment: [String: String] = ProcessInfo.processInfo.environment) -> ReplyFormat {
+        if let forced = environment["FILEID_VLM_FORMAT"].flatMap(ReplyFormat.init(rawValue:)) { return forced }
+        return model == .qwen3VL2B ? .compact : .sections
     }
 
     /// Our greedy loop (early stop, optional prompt lookup) instead of the library's stream.
@@ -818,7 +823,7 @@ public actor DeepAnalyze {
 
         let sceneCaption = sceneCaption && boxCI != nil
         let mergedTags = !sceneCaption && Self.mergedTagsEnabled() && boxCI != nil
-        let format: ReplyFormat = mergedTags ? Self.replyFormat() : .sections
+        let format: ReplyFormat = mergedTags ? Self.replyFormat(model: loadedKind) : .sections
         let systemPrompt = sceneCaption ? Self.sceneSystemPrompt : Self.analysisSystemPrompt(
             mediaKind: mediaKind,
             fileExtension: imageURL.pathExtension,

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import FileIDEngine
+import FileIDShared
 
 @Suite("VLM scene captions and loop guard")
 struct VLMSceneCaptionTests {
@@ -56,5 +57,72 @@ struct VLMSceneCaptionTests {
     func switches() {
         #expect(VLMGreedyDecoder.loopGuardEnabled(environment: [:]))
         #expect(!VLMGreedyDecoder.loopGuardEnabled(environment: ["FILEID_VLM_LOOP_GUARD": "0"]))
+    }
+}
+
+@Suite("Photo caption reply format")
+struct VLMReplyFormatTests {
+    @Test("Qwen3-VL 2B defaults to the one-line reply, other models to sections, and the switch overrides both")
+    func defaultFormat() {
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL2B, environment: [:]) == .compact)
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL4B, environment: [:]) == .sections)
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL8B, environment: [:]) == .sections)
+        #expect(DeepAnalyze.replyFormat(model: nil, environment: [:]) == .sections)
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL2B, environment: ["FILEID_VLM_FORMAT": "sections"]) == .sections)
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL4B, environment: ["FILEID_VLM_FORMAT": "compact"]) == .compact)
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL2B, environment: ["FILEID_VLM_FORMAT": "bogus"]) == .compact)
+        #expect(DeepAnalyze.replyFormat(model: .qwen3VL4B, environment: ["FILEID_VLM_FORMAT": "bogus"]) == .sections)
+    }
+
+    @Test("the compact prompt asks for one line of three fields")
+    func compactPrompt() {
+        let prompt = DeepAnalyze.analysisSystemPrompt(
+            mediaKind: .image, fileExtension: "jpg", hasRaster: true, faceNames: ["Kyle"],
+            includeTags: true, format: .compact
+        )
+        #expect(prompt.contains("description | filename | tags"))
+        #expect(prompt.contains(DeepAnalyze.descriptionRules))
+        #expect(prompt.contains("Known people in this photo: Kyle."))
+        #expect(!prompt.contains("DESCRIPTION:"))
+        let untagged = DeepAnalyze.analysisSystemPrompt(
+            mediaKind: .image, fileExtension: "jpg", hasRaster: true, faceNames: [],
+            includeTags: false, format: .compact
+        )
+        #expect(untagged.contains("EXACTLY two sections"))
+    }
+
+    @Test("a compact reply parses into description, filename and tags")
+    func parsesCompact() {
+        let parsed = DeepAnalyze.parse(
+            rawOutput: "A boy in a blue \"Athletics\" uniform holds a red bat on a grassy field. | boy-holding-red-bat | baseball bat, youth baseball\n",
+            format: .compact
+        )
+        #expect(parsed.description == "A boy in a blue \"Athletics\" uniform holds a red bat on a grassy field.")
+        #expect(parsed.proposedName == "boy-holding-red-bat")
+        #expect(parsed.tags == ["baseball bat", "youth baseball"])
+        #expect(parsed.hasTagSection)
+    }
+
+    @Test("labelled or partial compact replies still parse, and a sections reply falls back")
+    func compactFallbacks() {
+        let labelled = DeepAnalyze.parse(rawOutput: "Description: A sundial in a rose garden. | Filename: sundial-rose-garden | tags: sundial", format: .compact)
+        #expect(labelled.description == "A sundial in a rose garden.")
+        #expect(labelled.proposedName == "sundial-rose-garden")
+        #expect(labelled.tags == ["sundial"])
+        let noTags = DeepAnalyze.parse(rawOutput: "A gazebo in a garden. | garden-gazebo", format: .compact)
+        #expect(noTags.proposedName == "garden-gazebo")
+        #expect(!noTags.hasTagSection)
+        let sections = DeepAnalyze.parse(rawOutput: "DESCRIPTION: A lake.\nFILENAME: mountain-lake\nTAGS: lake", format: .compact)
+        #expect(sections.description == "A lake.")
+        #expect(sections.proposedName == "mountain-lake")
+        #expect(sections.tags == ["lake"])
+    }
+
+    @Test("a compact reply is complete once its line holds every field and ends")
+    func compactCompletion() {
+        #expect(!DeepAnalyze.isCompleteReply("A dog runs. | dog-running | dog", format: .compact, includeTags: true))
+        #expect(!DeepAnalyze.isCompleteReply("A dog runs. | dog-running\n", format: .compact, includeTags: true))
+        #expect(DeepAnalyze.isCompleteReply("A dog runs. | dog-running | dog\n", format: .compact, includeTags: true))
+        #expect(DeepAnalyze.isCompleteReply("A dog runs. | dog-running\n", format: .compact, includeTags: false))
     }
 }
