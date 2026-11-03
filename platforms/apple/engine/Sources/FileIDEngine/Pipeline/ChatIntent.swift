@@ -441,10 +441,22 @@ struct ChatIntent: Codable, Equatable, Sendable {
         "summary", "of", "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got"
     ]
 
+    private static let kindWords: Set<String> = [
+        "photo", "photos", "picture", "pictures", "image", "images", "video", "videos", "clip", "clips", "document", "documents",
+        "pdf", "pdfs", "audio", "music", "song", "songs", "people", "person", "face", "faces", "file", "files"
+    ]
+
     static func libraryMeasure(_ words: [String]) -> (name: String, order: String)? {
         let words = words.filter { !$0.isEmpty }
         guard !words.isEmpty else { return nil }
         if words.allSatisfy({ overviewWords.contains($0) }), has(words, ["library", "collection", "overview", "summary", "summarize", "summarise"]) {
+            return ("overview", "newest")
+        }
+        // "tell me about my Adlon library": one name before "library", never after it ("library of dogs" is a search).
+        let unknown = words.enumerated().filter { !overviewWords.contains($0.element) }
+        if unknown.count == 1, let library = words.firstIndex(where: { $0 == "library" || $0 == "collection" }), unknown[0].offset < library,
+           ["tell", "describe", "summarize", "summarise", "give", "show", "what", "whats"].contains(words[0]),
+           !kindWords.contains(unknown[0].element), formatWords[unknown[0].element] == nil {
             return ("overview", "newest")
         }
         // "how many of each file type", "break down my files by type", "what file types do I have"

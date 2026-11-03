@@ -23,3 +23,20 @@ struct ChatHistoryPromptTests {
         #expect(prompt.hasPrefix("Earlier in this conversation:\nUser: photos of Sam\nRequest: only 2024"))
     }
 }
+
+@Suite("Chat model wake")
+struct ChatModelWakeTests {
+    private func request(_ kind: String?) -> ChatRequest {
+        ChatRequest(requestID: "r", conversationID: "c", action: "send", text: "hi", useModel: true, modelKind: kind)
+    }
+
+    @Test func onlyAKnownInstalledModelIsEverWoken() {
+        #expect(ChatService.wakeableKind(request(nil)) == nil, "no model chosen")
+        #expect(ChatService.wakeableKind(request("hf:attacker/arbitrary")) == nil, "unknown ids are never loaded")
+        #expect(ChatService.wakeableKind(request("")) == nil)
+    }
+
+    @Test func anIdleEngineMayWakeAModel() async {
+        #expect(await ChatService.canWake())
+    }
+}

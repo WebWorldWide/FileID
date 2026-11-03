@@ -602,6 +602,11 @@ fn format_extensions(word: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+const KIND_WORDS: [&str; 22] = [
+    "photo", "photos", "picture", "pictures", "image", "images", "video", "videos", "clip", "clips", "document", "documents", "pdf", "pdfs", "audio",
+    "music", "song", "songs", "people", "person", "face", "faces",
+];
+
 const OVERVIEW_WORDS: [&str; 26] = [
     "what", "whats", "is", "in", "my", "the", "library", "files", "collection", "tell", "me", "about", "give", "an", "overview", "summary", "of",
     "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got",
@@ -618,6 +623,19 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
         && has(&words, &["library", "collection", "overview", "summary", "summarize", "summarise"])
     {
         return Some(("overview", "newest"));
+    }
+    // "tell me about my Adlon library": one name before "library", never after it ("library of dogs" is a search).
+    let unknown: Vec<(usize, &String)> = words.iter().enumerate().filter(|(_, word)| !OVERVIEW_WORDS.contains(&word.as_str())).collect();
+    if let [(at, word)] = unknown.as_slice() {
+        if let Some(library) = words.iter().position(|word| word == "library" || word == "collection") {
+            if *at < library
+                && ["tell", "describe", "summarize", "summarise", "give", "show", "what", "whats"].contains(&words[0].as_str())
+                && !KIND_WORDS.contains(&word.as_str())
+                && format_extensions(word).is_none()
+            {
+                return Some(("overview", "newest"));
+            }
+        }
     }
     // "how many of each file type", "break down my files by type", "what file types do I have"
     if (has(&words, &["type", "types", "kind", "kinds"]) && has(&words, &["each", "every", "per", "by", "breakdown", "different"])

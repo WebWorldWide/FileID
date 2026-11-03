@@ -86,8 +86,24 @@ actor ChatService {
                 let explanation = prepared.message
                 await emit(request, status: "retrieving", message: explanation, hits: hits, database: database, sink: sink)
                 guard active[request.conversationID] == request.requestID else { return }
-                if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState,
-                   request.modelKind == nil || request.modelKind == model.rawValue {
+                var wakeFailed = false
+                var readyModel: AIModelKind?
+                if request.useModel == true, !hits.isEmpty {
+                    if case .ready(let loaded) = await DeepAnalyze.shared.loadState, request.modelKind == nil || request.modelKind == loaded.rawValue {
+                        readyModel = loaded
+                    } else if let kind = Self.wakeableKind(request), await Self.canWake() {
+                        await emit(request, status: "queued", message: "Results are ready. Waking \(kind.displayName) to write the answer; the first time takes a few seconds.", hits: hits, database: database, sink: sink)
+                        do {
+                            try await DeepAnalyze.shared.ensureLoaded(kind: kind)
+                            if case .ready(let loaded) = await DeepAnalyze.shared.loadState, loaded == kind { readyModel = loaded }
+                        } catch {
+                            JSONLog.shared.warn(ev: "chat_model_wake_failed", error: "\(error)")
+                            wakeFailed = true
+                        }
+                        guard active[request.conversationID] == request.requestID else { return }
+                    }
+                }
+                if let model = readyModel {
                     active[request.conversationID] = request.requestID
                     let busy = await JobQueue.shared.hasActive(category: .deepAnalyze)
                     let wait = busy ? "Results are ready. The local model will write its answer as soon as the file it is describing is done." : "Results are ready. The local model is writing its answer; a model that was resting can take a few seconds to wake."
@@ -104,7 +120,7 @@ actor ChatService {
                 } else {
                     var loading = false
                     if case .loading = await DeepAnalyze.shared.loadState { loading = true }
-                    let modelNote = hits.isEmpty ? "" : (loading ? " The local AI model is still loading, so these are the matching files; ask again in a moment for a written answer." : " Load a local AI model for a written answer; these are the matching files.")
+                    let modelNote = hits.isEmpty ? "" : (wakeFailed ? " The local AI model couldn't be started, so these are the matching files." : loading ? " The local AI model is still loading, so these are the matching files; ask again in a moment for a written answer." : " Load a local AI model for a written answer; these are the matching files.")
                     let message = explanation + (request.useModel == true ? modelNote + " Nothing was downloaded." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }
@@ -117,6 +133,19 @@ actor ChatService {
             if active[request.conversationID] == request.requestID { active.removeValue(forKey: request.conversationID) }
             await emit(request, status: "error", message: error.localizedDescription, database: database, sink: sink)
         }
+    }
+
+    /// The model the user picked for Chat, when it is already installed. Chat never downloads.
+    static func wakeableKind(_ request: ChatRequest) -> AIModelKind? {
+        guard let raw = request.modelKind, let kind = AIModelKind(rawValue: raw), kind.isInstalledOnDisk() else { return nil }
+        return kind
+    }
+
+    /// Loading swaps the resident model, so it waits for a moment when no Describe or video job is running.
+    static func canWake() async -> Bool {
+        let busy = await DeepAnalyze.shared.isAnalyzing
+        let queued = await JobQueue.shared.hasActive(category: .deepAnalyze)
+        return !busy && !queued
     }
 
     static func validContext(_ request: ChatRequest) -> Bool {
@@ -342,8 +371,7 @@ actor ChatService {
                     .map { (role: $0["role"] as String, text: $0["text"] as String) }
             }) ?? []
             let history = Self.historyBlock(Array(earlier.dropLast()))
-            let prompt = Self.evidencePrompt(request: request.text ?? "", hits: hits, history: history) + "\n" + ChatActions.actionToolFormat
-            do {
+            func generate(_ prompt: String) async -> String? {
                 let result = await DeepAnalyze.shared.runCancellableAnalysis {
                     do {
                         let text = try await DeepAnalyze.shared.answerCatalog(prompt: prompt) { chunk in
@@ -352,7 +380,16 @@ actor ChatService {
                         return DeepAnalyze.AnalysisResult(description: text, proposedName: nil)
                     } catch { return DeepAnalyze.AnalysisResult(description: "Inference failed: \(error.localizedDescription)", proposedName: nil) }
                 }
-                if !DeepAnalyzeRunner.isAnalysisFailure(result), !result.description.isEmpty { answer = result.description }
+                return DeepAnalyzeRunner.isAnalysisFailure(result) || result.description.isEmpty ? nil : result.description
+            }
+            let evidence = Self.evidencePrompt(request: request.text ?? "", hits: hits, history: history)
+            if let first = await generate(evidence + "\n" + ChatActions.actionToolFormat) {
+                answer = first
+                // Some models answer with only the <actions> line. Ask again, plainly, so the user gets words.
+                let stillActive = active[request.conversationID] == request.requestID
+                if stillActive, ChatActions.modelProposals(first).0.isEmpty, let plain = await generate(evidence) {
+                    answer = plain
+                }
             }
             if !interleaved { await DeepAnalyze.shared.clearCancel() }
         }

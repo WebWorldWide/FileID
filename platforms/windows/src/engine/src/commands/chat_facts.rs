@@ -466,6 +466,17 @@ mod tests {
     }
 
     #[test]
+    fn a_named_library_gets_the_overview_but_a_library_of_things_is_a_search() {
+        let measure = |text: &str| super::super::chat_intent::parse_question(text).measure;
+        for text in ["tell me about my Adlon library", "what is in my vacation library", "summarize my Adlon library"] {
+            assert_eq!(measure(text), "overview", "{text}");
+        }
+        for text in ["describe my photo collection", "show me my library of dogs", "tell me about my dog photos", "what is in my library of recipes", "give me my library photos"] {
+            assert_ne!(measure(text), "overview", "{text}");
+        }
+    }
+
+    #[test]
     fn per_type_questions_get_the_library_breakdown() {
         let measure = |text: &str| super::super::chat_intent::parse_question(text).measure;
         for text in ["how many files are there and how many of each file type", "break down my files by type", "what file types do I have", "how many of every kind of file"] {

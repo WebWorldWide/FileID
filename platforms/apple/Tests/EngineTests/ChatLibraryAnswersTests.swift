@@ -95,6 +95,15 @@ struct ChatLibraryAnswersTests {
         #expect(try await ask("how many pngs") == "Found 1 file in PNG format, using 1.0 KB.")
     }
 
+    @Test func aNamedLibraryGetsTheOverviewButALibraryOfThingsIsASearch() {
+        for text in ["tell me about my Adlon library", "describe my photo collection", "what is in my vacation library", "summarize my Adlon library"] {
+            #expect(ChatIntent.question(text).measure == (text.contains("photo collection") ? "list" : "overview"), "\(text)")
+        }
+        for text in ["show me my library of dogs", "tell me about my dog photos", "what is in my library of recipes", "give me my library photos"] {
+            #expect(ChatIntent.question(text).measure != "overview", "\(text)")
+        }
+    }
+
     @Test func perTypeQuestionsGetTheLibraryBreakdown() {
         for text in ["how many files are there and how many of each file type", "break down my files by type", "what file types do I have", "how many of every kind of file"] {
             #expect(ChatIntent.question(text).measure == "overview", "\(text)")
