@@ -300,7 +300,7 @@ struct FileIDEngineMain {
             // Reject a start-scan while one is already queued or running. Mirrors
             // the Windows engine's scan_session.rs guard. Prevents unbounded job
             // queue growth from a misbehaving or rapidly-clicking app client.
-            if await JobQueue.shared.hasActive(category: .scan) {
+            if !(await JobQueue.shared.waitUntilIdle(category: .scan)) {
                 await sink.emit(.error(EngineError(
                     kind: "scan_already_queued",
                     message: "A scan is already running or queued — cancel it first."

@@ -86,6 +86,18 @@ public actor JobQueue {
         return pending.contains { $0.category == category && $0.blocksExclusiveCommands }
     }
 
+    /// Waits up to `timeout` for no job of `category` to be running or queued. A job that has
+    /// just emitted its terminal event still holds its slot for a moment, so a client that
+    /// reacts instantly (a script, "Scan again") would otherwise be told it is still busy.
+    public func waitUntilIdle(category: JobCategory, timeout: Duration = .seconds(1)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while hasActive(category: category) {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return true
+    }
+
     // MARK: - Internals
 
     private func startDrainerIfNeeded() {

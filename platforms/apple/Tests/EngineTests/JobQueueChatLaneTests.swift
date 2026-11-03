@@ -27,3 +27,21 @@ actor AsyncGate {
         waiters.removeAll()
     }
 }
+
+@Suite("Job queue idle wait")
+struct JobQueueIdleWaitTests {
+    @Test func aFinishingJobReleasesItsSlotWithinTheGraceWindow() async {
+        let queue = JobQueue()
+        await queue.enqueue(.init(id: "scan", category: .scan, title: "Scan", etaSeconds: nil) { try? await Task.sleep(for: .milliseconds(150)) })
+        #expect(await queue.waitUntilIdle(category: .scan, timeout: .seconds(2)))
+    }
+
+    @Test func aStillRunningJobIsReportedBusyAfterTheTimeout() async {
+        let queue = JobQueue()
+        let gate = AsyncGate()
+        await queue.enqueue(.init(id: "scan", category: .scan, title: "Scan", etaSeconds: nil) { await gate.wait() })
+        #expect(await queue.waitUntilIdle(category: .scan, timeout: .milliseconds(120)) == false)
+        await gate.open()
+        #expect(await queue.waitUntilIdle(category: .scan, timeout: .seconds(2)))
+    }
+}
