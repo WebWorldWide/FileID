@@ -429,6 +429,25 @@ mod tests {
     }
 
     #[test]
+    fn folder_totals_walk_the_directory_index() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'C:\\a\\b.txt',1,5,0,'doc','txt')", []).unwrap();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(2,'C:/a/c.txt',2,5,0,'doc','txt')", []).unwrap();
+        let found = folders(&conn, false, 5).unwrap();
+        assert_eq!((found.len(), found[0].count, found[0].bytes), (1, 2, 10));
+        let path = "replace(f.path_text,char(92),'/')";
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN SELECT rtrim({path},replace({path},'/','')) AS dir,COUNT(*),COALESCE(SUM(f.size_bytes),0) FROM files f WHERE f.failed=0 GROUP BY dir"))
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(plan.iter().any(|line| line.contains("catalog_files_dir")), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE FOR GROUP BY")), "{plan:?}");
+    }
+
+    #[test]
     fn format_words_filter_by_extension() {
         let conn = crate::db::test_support::memory_db();
         for (id, path, kind, size, ext) in [

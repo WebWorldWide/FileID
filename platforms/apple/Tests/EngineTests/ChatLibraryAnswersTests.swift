@@ -58,6 +58,17 @@ struct ChatLibraryAnswersTests {
         #expect(names == ["Videos/Downloads", "Docs", "Photos/Downloads"])
     }
 
+    @Test func folderTotalsWalkTheDirectoryIndex() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = "replace(f.path_text,char(92),'/')"
+        let plan = try await database.pool.read { db in
+            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*),COALESCE(SUM(f.size_bytes),0) FROM files f WHERE f.failed=0 GROUP BY dir").map { $0["detail"] as String }
+        }
+        #expect(plan.contains { $0.contains("catalog_files_dir") })
+        #expect(!plan.contains { $0.contains("TEMP B-TREE FOR GROUP BY") })
+    }
+
     @Test func formatWordsFilterByExtension() async throws {
         let (database, directory) = try await catalog()
         defer { try? FileManager.default.removeItem(at: directory) }

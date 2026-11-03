@@ -33,6 +33,7 @@ QUERIES = {
              "biggest files in Downloads"],
     "dates": ["photos from March 2024", "videos from last year", "documents since June 2022"],
     "status": ["how many files are not described yet?", "find duplicates"],
+    "library": ["what is in my library", "which folder has the most files", "what are my biggest folders"],
 }
 
 

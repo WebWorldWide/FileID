@@ -53,8 +53,8 @@ enum CatalogTakeAuto {
         let rows = try Row.fetchAll(db, sql: """
             SELECT f.id, f.path_text, f.created_at, f.phash, f.kind FROM files f
             WHERE f.kind IN ('image','video') AND f.failed=0 AND f.created_at IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM catalog_assets a WHERE a.derived_id=f.id)
-              AND NOT EXISTS (SELECT 1 FROM catalog_event_files ef WHERE ef.file_id=f.id)
+              AND f.id NOT IN (SELECT derived_id FROM catalog_assets)
+              AND f.id NOT IN (SELECT file_id FROM catalog_event_files)
             ORDER BY f.created_at, f.id
             """).map { row -> Row1 in
                 let phash: Int64? = row["phash"]
