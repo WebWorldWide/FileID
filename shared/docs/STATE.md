@@ -8,6 +8,8 @@ Found and fixed: Best Takes found 0 groups in 721 photos because grouping needed
 
 Describe with Qwen3-VL 2B on 12 Adlon photos: 4.35 s/file steady (library decoder 2.6 s/file on 4 photos, likely a warm-cache effect, not a regression: the A/B is unmeasured on a quiet machine, load average 7-14 throughout). Descriptions read normally.
 
+Moments (sampled mode, Qwen3-VL 2B) on a 940 s Adlon training video: 80 scenes captioned in 465 s (about 2x realtime under load average ~5), 80 time-stamped passages written, and keyword searches return `sampledFrame` hits carrying the second to seek to (e.g. 22 s, 69 s, 71 s). A common single word ("interface") returns 100 library-wide hits with no moment times because the 100-hit cap fills with documents first; a specific phrase surfaces the moments. A bare engine that finishes a timeline asks macOS for Speech Recognition permission and aborts (TCC) because it has no usage string; the app and engine Info.plists both carry `NSSpeechRecognitionUsageDescription`, so shipped builds are fine, and headless runs should set `FILEID_TIMELINE_SPEECH=0`. After that crash the orphaned job restarts as `paused`, as intended.
+
 Not exercised and why: face clustering (SFace model not installed), CLIP/hybrid search, RAM++ tags (models not installed), Restructure apply, trash/restore, File Tools exports (all mutate the source; the drive is read-only by instruction). The Restructure plan call returned 0 moves for the baseball folder. Fresh scans print "Deep Analyze unavailable: mlx.metallib missing" until the metallib is copied beside the engine (done locally; `scripts/ensure_mlx_metallib.sh` built it in 4.4 min).
 
 ## 2026-11-03 — Convergence into one branch, merge fixes, first backlog items
