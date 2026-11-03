@@ -97,7 +97,4 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 
 cp "$PROJECT_DIR/Resources/FileID.icns" "$CONTENTS/Resources/FileID.icns"
-# Required-reason API declarations and "no tracking, no collected data" (App Store privacy manifest).
-cp "$PROJECT_DIR/Resources/PrivacyInfo.xcprivacy" "$CONTENTS/Resources/PrivacyInfo.xcprivacy"
-plutil -lint "$CONTENTS/Resources/PrivacyInfo.xcprivacy" >/dev/null
 echo "✅ Assembled $APP_BUNDLE (v${VERSION}, build ${BUILD_NUM})"
