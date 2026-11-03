@@ -7,6 +7,7 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 Done: Mac orphan-sweep mount guard; text-data and html indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines); catalog v29 `library_roots` registry fed by scans; `capturedFrom`/`capturedTo` search window (engines + schema, no UI yet); Rust chat retrieval off the writer lock; chat summary no longer blocks Describe on macOS; Mac document text cap 32k.
 
 Open and needs the Windows GPU PC (blind edit refused): the Rust Describe batch holds the resident-model lease for the whole run, so a chat summary waits unbounded (`commands/deep_analyze.rs` ~677, `models/resident_service.rs`). Add a waiter count and release/reacquire the lease between files.
+Windows/Linux parity still open: Windows Moments timeline lanes and playhead; look at the new Best Takes pages on real WinUI/GTK displays; Windows springs coverage audit; fold or document the extra Windows Models page.
 Open UI wiring: date pickers in Search & Moments for the capture window; Locations panel, "All locations" scope and OFFLINE badge on top of `library_roots`.
 
 Safety and quick wins:
