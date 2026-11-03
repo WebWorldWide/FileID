@@ -1,5 +1,15 @@
 # FileID — State
 
+## 2026-11-03 (later) — Rerun with CLIP and SFace installed; UI token audit
+
+CLIP ViT-B/32 (image + text + BPE) and SFace were installed from the pinned, sha256-verified manifest URLs into `~/Library/Application Support/FileID/Models` (about 650 MB, all permissive licences). Rescans of the Adlon folders: baseball 721 files in 97 s with 721 CLIP embeddings, 439 faces; Audio + Jeff 11,368 files in two registered locations with 7,936 CLIP embeddings, 4,537 faces and 66,101 tags.
+
+Verified on that data: semantic and hybrid search with real CLIP text vectors return sensible photos ("a bell tower" -> DSC00519, "a silver SUV with its trunk open" -> DSC00491/493, which Describe independently captioned as SUV tailgate photos); seed similarity returns the neighbouring shots; Best Takes now groups by CLIP + capture time (38 groups, up to 34 shots, vs 63 pHash-only groups; the model-free fallback is still used when vectors are missing); face clustering found 21 people among 316 faces in 18 s; People rename, chat-by-name ("114 photos of Kyle"), merge (114 + 51 = 165) and mark-unknown all behave; duplicate detection answers "none" and a SHA-256 of the real same-size files confirms there are none.
+
+Shared Rust engine on the same folder: all 721 files scanned (207 s while competing with the Swift scan) but no tags/CLIP/faces. Cause is layout, not a bug: the Rust engine expects `mobileclip/mobileclip_s2_image.onnx`, `sface/...`, `yunet/...` and `.sentinels/*.installed`, while the Mac app installs a flat layout. With symlinks into the engine layout, 8 test photos gave 8 CLIP embeddings and 40 tags. Faces on the Rust engine also need YuNet, which is not installed. macOS has no OCR in the Rust engine (Windows.Media.Ocr only).
+
+UI: the debug app was assembled, signed ad hoc and launched on an isolated catalog copy; the app and its engine ran with the catalog open and no crash report, but macOS denied Accessibility to `osascript` and Screen Recording to `screencapture`, so no screen was seen or driven. Token audit across `Theme.swift`, `Theme.xaml` and `theme.rs`: the four brand colours, the spring constants (0.35-0.4 response, 0.78-0.8 damping) and the shared neutrals are present in all three; Windows also defines hover/pressed golds (`#FFD633`, `#E6B800`), lava-lamp gradients and a tag-chip gold (`#FFCD3C`) that macOS does not, all intentional and commented. Pixel identity between three native toolkits is not verifiable without screenshots from each host.
+
 ## 2026-11-03 — Adlon drive runs (isolated catalogs, read-only source) and what they found
 
 Every run used a throwaway catalog via `FILEID_DATABASE_PATH`; the Adlon drive was only read. Catalog 1 = `Camera/Kyle Baseball Game 9-19-26` (721 files: 382 ARW + 339 JPG, 25 GB). Catalog 2 = `File Cabinet/Audio` + `File Cabinet/Jeff` (11,347 files, 75.9 GB, two registered roots). Scan speed: 721 files in 138 s (~5 files/s, RAW previews + Vision, no CLIP/RAM++ installed); 11,045 mixed files in 543 s (~20 files/s).
