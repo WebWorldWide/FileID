@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-11-03 — Convergence into one branch, merge fixes, first backlog items
+
+All ten `agent/*` branches and `integrate/owner-review` were merged with `main` into `converge/all` (PR #274). Chat control and Best Takes both claimed catalog v27 / IPC 1.17; resolved as v27 = chat retrieval, v28 = take quality. Fixed after the merge: Swift type-checker timeouts (`ChatActions.valid`, `TakeScoring.Luma`) and a shadowed `plan()` in `ChatService`; stale migration/favorites counts in Rust and Swift tests (28 migrations, 9 favorites); `tokio` 1.54.1 to clear the cargo-deny `AsyncFd` advisory.
+
+New: Mac orphan sweep is skipped when the scan root is missing, empty or an unmounted `/Volumes` mount point (`ScanRootGuard`); csv/tsv/log/markdown/text/json/yaml/yml/toml/xml are indexed as documents on both engines; the Mac size cap no longer drops large video/audio; Chat sends the last four turns to the model on both engines.
+
+Verified: Rust engine 1072 tests; Swift suites 163 + 41 + 460 pass. Not verified: .NET build, Windows/Linux CI, on-device behavior. The runtime egress gate still lists changed reviewed digests (EngineClient.swift, RamPlusService.swift, DeepAnalyze.swift, linux engine_client.rs, DocText.swift, doc_extract.rs); none of the diffs adds a network call, but the digests need an owner-approved refresh.
+
 ## 2026-10-21 — Chat answers at 100k files and controls FileID (IPC v1.17, catalog v27)
 
 Both engines now parse requests deterministically into proposed actions (17 kinds, each mapped to an existing command or page), answer counts/sizes/dates/folders/people/duplicates/"not described yet" from fixed SQL templates, and fuse lexical, CLIP (HNSW) and BGE evidence with the same RRF weights. Destructive kinds carry a fixed confirmation flag, enforced by both engines and the client; retrieved file text never reaches the parser, and model proposals must be backed by the user's own words. macOS renders action cards with counts, examples, the undo story, progress and Undo; Chat's trash reuses Cleanup's byte-verified path. Catalog v27 adds a tag vocabulary table and covering indexes.

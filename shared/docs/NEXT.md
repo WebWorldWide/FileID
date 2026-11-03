@@ -2,6 +2,26 @@
 
 Short, current priorities only. History lives in `STATE.md` (newest first) and git; release gates live in `SHIP.md`; the feature ledger lives in `NEXT_VERSION.md`; model choices live in `MODELS.md`.
 
+## Backlog plan (2026-11-03, from four read-only gap analyses)
+
+Done: Mac orphan-sweep mount guard; text-data indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines).
+
+Safety and quick wins:
+- [ ] Chat gets its own job category so a queued summary no longer blocks Describe (`deep_analyze_already_running`); schema first (`JobCategory`, ipc.schema.json:1174), then Swift, Rust, C# DTOs.
+- [ ] Status text while a parked model reloads or waits behind a job; filename-only hits for `failed=1` rows labelled "unreadable".
+- [ ] Mac indexed text cap 4000 chars toward Rust's 256 KiB; html/htm need a Rust extractor before they can be admitted on both engines.
+- [ ] Index unknown extensions as metadata-only `kind='other'` rows; archive entry names; surface skip/failure reasons (schema first).
+
+Locations (schema first): `v29` `library_roots`; IPC list/add/remove/rescan roots and `rootID` on scan events; mount check before scans; soft-hide in place of delete on Mac; Mac "All locations" scope, per-root bookmarks, OFFLINE tile badge (required by DESIGN_V3.md, missing on all three apps); WinUI/GTK ports; root filter chip in Search/Chat/Moments.
+
+Search and Moments: from/to capture-time filters on `CatalogRequest`; automatic event grouping (needs owner thresholds); rank moment chapters above frame captions; populated-panel and playback checks on Mac and Windows.
+
+Performance (needs a quiet Mac / the Windows GPU PC): route `analyzeSequence` through `VLMGreedyDecoder` with early stop; pooled frame helper for moments; A/B `FILEID_VLM_PROMPT_LOOKUP` and the per-file `MLX.GPU.clearCache()`; Rust chat semantic step off the writer lock and BGE brute-force scan replaced by an index; Windows streaming + early stop and `cache_prompt` check; park CLIP/RAM++/BGE/face models when idle; charge VRAM in the Rust scheduler from measured numbers.
+
+Parity: Best Takes pages for WinUI and GTK; Windows Moments timeline lanes; fold or document the Windows Models page; audit Windows springs.
+
+Models: keep about 10-15 curated defaults (2-3 per hardware tier); wire the existing 333-entry portable catalog into the Windows/Linux pickers filtered by RAM/VRAM; build text-chat, speech and embedding consumers; promote catalog entries only after a measured benchmark. Gemma 4's license is unverified.
+
 ## Where things stand (2026-10-20)
 
 - `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags; the pre-merge Mac completion checkpoint (including its dropped portable face-refresh Rust slice) is commit `03c50bcd`.
