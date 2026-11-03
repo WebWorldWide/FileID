@@ -91,10 +91,13 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         query_vector: None,
         embedding_model: None,
         limit: Some(100),
+        captured_from: None,
+        captured_to: None,
         result_scope: None,
         event: None,
         event_id: None,
         take_feedback: None,
+        take_decision: None,
     }
 }
 
@@ -122,7 +125,7 @@ impl ChatState {
         if request.action == "send"
             && (self.pending_write.is_some() || !self.deferred_clears.is_empty())
         {
-            return Err("A persisted Send/Clear is still pending. History, Stop and conversation changes do not cancel that write.");
+            return Err("Your last message is still being saved. Wait a moment; History, Stop and changes to the conversation don't cancel it.");
         }
         self.display.begin("chat", &request.request_id);
         if request.action == "clear" && self.pending_write.is_some() {
@@ -185,7 +188,7 @@ impl HybridSearch {
         let mut request = catalog_request("search");
         request.query = Some(response.query.clone());
         if !clip_space::valid(&response.embedding) {
-            return Some((request, Some("Hybrid unavailable: CLIP text model/runtime returned no valid normalized 512-dimensional embedding. Using keyword search; no download started.".into())));
+            return Some((request, Some("Hybrid search isn't available: the Search by description model didn't return a usable result. Using keyword search; nothing was downloaded.".into())));
         }
         request.search_mode = Some("hybrid".into());
         request.query_vector = Some(response.embedding.clone());
@@ -286,7 +289,7 @@ mod tests {
             action: action.into(),
             text: Some("fixture subject".into()),
             use_model: Some(false),
-            model_kind: None,
+            ..ChatRequest::default()
         }
     }
     #[test]

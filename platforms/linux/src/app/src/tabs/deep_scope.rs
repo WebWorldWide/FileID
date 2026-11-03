@@ -6,11 +6,11 @@ fn exclusions_at(path: &Path) -> Result<Vec<PathBuf>, String> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-        Err(error) => return Err(format!("Cannot validate Deep Analyze exclusions: {error}")),
+        Err(error) => return Err(format!("Couldn't read the folders not to describe: {error}")),
     };
     let map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&bytes).map_err(|_| {
-            "Cannot validate Deep Analyze exclusions: settings are malformed.".to_owned()
+            "Couldn't read the folders not to describe: the settings file is damaged.".to_owned()
         })?;
     let Some(value) = map.get("deepAnalyzeExcludedFolders") else {
         return Ok(vec![]);
@@ -18,17 +18,17 @@ fn exclusions_at(path: &Path) -> Result<Vec<PathBuf>, String> {
     let folders = value
         .as_array()
         .filter(|folders| folders.len() <= 256)
-        .ok_or("Cannot validate Deep Analyze exclusions: expected up to 256 absolute folders.")?;
+        .ok_or("Couldn't read the folders not to describe: expected up to 256 full folder paths.")?;
     folders
         .iter()
         .map(|value| {
             let raw = value.as_str().ok_or("Invalid excluded folder.")?;
             let folder = Path::new(raw);
             if !folder.is_absolute() {
-                return Err("Excluded folders must be absolute; repair Settings before analyzing.".into());
+                return Err("Folders not to describe must be full paths. Fix them in Settings, then try again.".into());
             }
             folder.canonicalize().map_err(|_| {
-                "Cannot resolve an excluded folder; restore it or repair Settings before analyzing.".into()
+                "A folder not to describe can't be found. Reconnect it or remove it in Settings, then try again.".into()
             })
         })
         .collect()
@@ -56,7 +56,7 @@ fn check_explicit_target(
                 .iter()
                 .any(|excluded| folder.starts_with(excluded) || excluded.starts_with(&folder))
             {
-                return Err("This folder overlaps a saved Deep Analyze exclusion.".into());
+                return Err("This folder overlaps one of the folders not to describe.".into());
             }
             let mut stmt = conn
                 .prepare("SELECT path_text FROM files WHERE substr(path_text,1,length(?1))=?1")
@@ -72,9 +72,9 @@ fn check_explicit_target(
     for raw in paths {
         let path = Path::new(&raw)
             .canonicalize()
-            .map_err(|_| "An indexed target is offline; restore it before analyzing.".to_owned())?;
+            .map_err(|_| "A scanned folder is offline. Reconnect it, then try again.".to_owned())?;
         if exclusions.iter().any(|excluded| path.starts_with(excluded)) {
-            return Err("The target is inside a saved Deep Analyze exclusion.".into());
+            return Err("This is inside one of the folders not to describe.".into());
         }
     }
     Ok(())

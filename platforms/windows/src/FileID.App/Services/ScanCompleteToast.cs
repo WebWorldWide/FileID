@@ -50,15 +50,13 @@ public static class ScanCompleteToast
         try
         {
             var doc = new XmlDocument();
-            var seconds = result.TotalSeconds;
-            var perSec = seconds > 0 ? result.ProcessedFiles / seconds : 0;
-            var body = $"Processed {result.ProcessedFiles} files in {seconds:0.#}s ({perSec:0} files/s).";
-            var safeFailed = result.FailedFiles > 0 ? $"  {result.FailedFiles} failed." : string.Empty;
+            var body = $"{result.ProcessedFiles:N0} files ready to browse.";
+            var safeFailed = result.FailedFiles > 0 ? $" {result.FailedFiles:N0} couldn't be read." : string.Empty;
             doc.LoadXml($"""
                 <toast>
                   <visual>
                     <binding template="ToastGeneric">
-                      <text>FileID scan complete</text>
+                      <text>Scan complete</text>
                       <text>{Escape(body + safeFailed)}</text>
                     </binding>
                   </visual>

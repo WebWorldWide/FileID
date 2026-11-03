@@ -48,6 +48,12 @@ struct CatalogWorkbench: View {
                 resultsPane
                     .frame(width: Theme.Metrics.sidePane)
                     .focusSection()
+                    .onChange(of: ChatHandoff.shared.momentsQuery, initial: true) { _, handed in
+                        guard let handed else { return }
+                        ChatHandoff.shared.momentsQuery = nil
+                        query = handed
+                        search()
+                    }
                 VHairline()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -160,6 +166,7 @@ struct CatalogWorkbench: View {
         case "person": parts.append("Person")
         case "documentText": parts.append("Text in document")
         case "ocrText": parts.append("Text in image")
+        case "handwrittenText": parts.append("Handwritten text")
         default: parts.append(hit.kind.capitalized)
         }
         return parts.joined(separator: " · ")

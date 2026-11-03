@@ -9,11 +9,13 @@ struct ChatWorkbench: View {
     @FocusState private var inputFocused: Bool
     @AppStorage("chatConversationID") private var conversationID = ""
     @AppStorage("chatDraft") private var input = ""
-    @State private var useModel = true
+    @AppStorage("chatUseModel") private var useModel = true
     @AppStorage("chatModelKind") private var chatModelKind = DeepAnalyzeSettings.shared.activeKind.rawValue
     @State private var modelsPresented = false
     @State private var messages: [ChatMessage] = []
     @State private var hits: [CatalogHit] = []
+    @State private var actions: [ChatAction] = []
+    @State private var handoff = ChatHandoff.shared
     @State private var message = ""
     @State private var busy = false
     @State private var ignored = Set<String>()
@@ -57,6 +59,7 @@ struct ChatWorkbench: View {
             if response.requestID == historyRequest, busy { return }
             messages = response.messages; message = response.message
             if response.status != "completed" || !response.hits.isEmpty || activeRequest == response.requestID { hits = response.hits }
+            if response.requestID == activeRequest || response.actions != nil { actions = (response.actions ?? []).filter(ChatActions.isRunnable) }
             busy = ["retrieving", "queued", "streaming"].contains(response.status)
             if busy, response.requestID != historyRequest { activeRequest = response.requestID }
         }
@@ -76,6 +79,13 @@ struct ChatWorkbench: View {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if messages.isEmpty { emptyState }
                         ForEach(messages) { entry in messageView(entry).id(entry.id) }
+                        if !busy && !actions.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(actions) { action in ChatActionCard(action: action, engine: engine) }
+                            }
+                            .padding(.leading, 12)
+                            .transition(.opacity)
+                        }
                         if busy {
                             HStack(spacing: 10) {
                                 IndeterminateBar().frame(width: 60)
@@ -125,11 +135,11 @@ struct ChatWorkbench: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Find the moment.").font(Theme.Font.display(isPage ? 34 : 28)).foregroundStyle(Theme.text1)
-            Text("Ask about files, people and moments in this library. Answers cite the files they come from.")
+            Text("Ask about files, people and moments in this library, or ask FileID to do something. Answers cite the files they come from, and anything that moves or deletes files waits for your OK.")
                 .font(Theme.Font.body(13.5)).foregroundStyle(Theme.text2)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 6) {
-                ForEach(["Find birthday gift opening", "Show videos with chapter markers", "Receipts from last spring"], id: \.self) { suggestion in
+                ForEach(["Find birthday gift opening", "How many videos are from last month?", "How much space do duplicates use?", "Organize my Downloads"], id: \.self) { suggestion in
                     Button { input = suggestion; inputFocused = true } label: {
                         HStack {
                             Text(suggestion).font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
@@ -330,10 +340,23 @@ struct ChatWorkbench: View {
 
     private func send() {
         guard !busy, !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, input.count <= 2000 else { return }
-        activeRequest = UUID().uuidString
-        let request = ChatRequest(requestID: activeRequest, conversationID: conversationID, action: "send", text: input, useModel: useModel, modelKind: chatModelKind)
-        if engine.send(.chatRequest(request: request)) { input = ""; busy = true; openedSource = nil }
-        else { message = "FileID is still getting ready. Try again in a moment." }
+        let text = input
+        let requestID = UUID().uuidString
+        activeRequest = requestID
+        actions = []
+        busy = true
+        Task {
+            // The engine fuses CLIP picture matches with keyword evidence when the
+            // app's text encoder is loaded; it never loads or downloads one here.
+            let vector = CLIPTextEncoder.shared.isReady
+                ? await Task.detached(priority: .userInitiated) { CLIPTextEncoder.shared.embedText(text) }.value : nil
+            guard activeRequest == requestID else { return }
+            let request = ChatRequest(requestID: requestID, conversationID: conversationID, action: "send", text: text, useModel: useModel,
+                                      modelKind: chatModelKind, context: handoff.context, queryVector: vector,
+                                      embeddingModel: vector == nil ? nil : CLIPEmbeddingSpace.modelID)
+            if engine.send(.chatRequest(request: request)) { input = ""; openedSource = nil }
+            else { busy = false; message = "FileID is still getting ready. Try again in a moment." }
+        }
     }
 
     private func control(_ action: String) {
@@ -341,7 +364,7 @@ struct ChatWorkbench: View {
         let request = ChatRequest(requestID: UUID().uuidString, conversationID: conversationID, action: action)
         if action == "history" { historyRequest = request.requestID }
         if engine.send(.chatRequest(request: request)) {
-            if action == "clear" { messages = []; hits = []; player?.pause(); player = nil; openedSource = nil }
+            if action == "clear" { messages = []; hits = []; actions = []; player?.pause(); player = nil; openedSource = nil }
         } else { message = "FileID is still getting ready. Try again in a moment." }
     }
 }

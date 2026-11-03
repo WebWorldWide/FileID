@@ -61,7 +61,7 @@
                                           IsChecked="{x:Bind IsSelected, Mode=OneWay}"
                                           Click="OnSelectableCheckClicked"
                                           AutomationProperties.Name="{x:Bind FileName}"
-                                          AutomationProperties.HelpText="Include this file in the restructure."/>
+                                          AutomationProperties.HelpText="Include this file in the move."/>
                                 <FontIcon Grid.Column="1" Glyph="{x:Bind FileGlyph}" FontSize="14"
                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                           VerticalAlignment="Center"/>

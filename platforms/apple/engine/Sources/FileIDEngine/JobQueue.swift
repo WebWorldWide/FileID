@@ -22,6 +22,10 @@ public actor JobQueue {
         public let title: String
         public let etaSeconds: Double?
         public let priority: Priority
+        /// False for short interactive work (a chat summary) that must not make a
+        /// Describe/scan command answer `already_running`; the Rust engine's chat
+        /// bypasses its mutation gate the same way.
+        public let blocksExclusiveCommands: Bool
         public let run: @Sendable () async -> Void
 
         public init(id: String = UUID().uuidString,
@@ -29,12 +33,14 @@ public actor JobQueue {
                     title: String,
                     etaSeconds: Double?,
                     priority: Priority = .background,
+                    blocksExclusiveCommands: Bool = true,
                     run: @escaping @Sendable () async -> Void) {
             self.id = id
             self.category = category
             self.title = title
             self.etaSeconds = etaSeconds
             self.priority = priority
+            self.blocksExclusiveCommands = blocksExclusiveCommands
             self.run = run
         }
     }
@@ -76,8 +82,20 @@ public actor JobQueue {
     /// deep_analyze_already_running error the Windows engine emits —
     /// the IPC contract must answer identically on both platforms.
     public func hasActive(category: JobCategory) -> Bool {
-        if running?.category == category { return true }
-        return pending.contains { $0.category == category }
+        if let running, running.category == category, running.blocksExclusiveCommands { return true }
+        return pending.contains { $0.category == category && $0.blocksExclusiveCommands }
+    }
+
+    /// Waits up to `timeout` for no job of `category` to be running or queued. A job that has
+    /// just emitted its terminal event still holds its slot for a moment, so a client that
+    /// reacts instantly (a script, "Scan again") would otherwise be told it is still busy.
+    public func waitUntilIdle(category: JobCategory, timeout: Duration = .seconds(1)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while hasActive(category: category) {
+            if ContinuousClock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
+        return true
     }
 
     // MARK: - Internals

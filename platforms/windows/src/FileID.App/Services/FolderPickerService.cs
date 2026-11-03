@@ -21,7 +21,9 @@ internal static class FolderPickerService
 {
     public sealed record PickResult(string? Path, string? FailureReason);
 
-    public static async Task<PickResult> PickFolderAsync(IntPtr hwnd)
+    public const string ScanCommitText = "Scan This Folder";
+
+    public static async Task<PickResult> PickFolderAsync(IntPtr hwnd, string? commitButtonText = null)
     {
         if (hwnd == IntPtr.Zero)
         {
@@ -32,6 +34,7 @@ internal static class FolderPickerService
         {
             SuggestedStartLocation = PickerLocationId.PicturesLibrary,
         };
+        if (commitButtonText is not null) picker.CommitButtonText = commitButtonText;
         // FolderPicker requires at least one FileTypeFilter entry on
         // unpackaged WinUI 3; "*" matches anything.
         picker.FileTypeFilter.Add("*");
@@ -89,7 +92,7 @@ internal static class FolderPickerService
         }
         catch (UnauthorizedAccessException)
         {
-            reason = "FileID doesn't have permission to read that folder. Pick a folder you own, or grant access in Properties → Security.";
+            reason = "FileID doesn't have permission to read that folder. Choose a different folder, or give FileID access in Properties → Security.";
             return false;
         }
         catch (DirectoryNotFoundException)

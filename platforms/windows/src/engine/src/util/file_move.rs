@@ -26,6 +26,32 @@ pub(crate) trait MoveFileIo {
     fn remove_stage(&self, stage: &Path) -> io::Result<()> {
         fs::remove_file(stage)
     }
+    fn rename_no_replace(&self, source: &Path, target: &Path) -> io::Result<()> {
+        super::path_safety::rename_no_replace(source, target)
+    }
+}
+
+/// The volume has no hard links (FAT, exFAT, many network shares), or the
+/// source is at its link limit. A no-replace rename gives the same no-clobber
+/// guarantee there, without the moment where both names exist.
+fn links_unavailable(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::EMLINK)
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_INVALID_FUNCTION: i32 = 1;
+        const ERROR_TOO_MANY_LINKS: i32 = 1142;
+        matches!(error.raw_os_error(), Some(ERROR_INVALID_FUNCTION | ERROR_TOO_MANY_LINKS))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
 }
 struct FileSystem;
 impl MoveFileIo for FileSystem {}
@@ -48,6 +74,10 @@ pub(crate) fn move_with_io(
             return io.remove_source(source);
         }
         Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {}
+        Err(error) if links_unavailable(&error) => {
+            io.rename_no_replace(source, target)?;
+            return on_published();
+        }
         Err(error) => return Err(error),
     }
     let parent = target.parent().ok_or_else(|| {
@@ -67,10 +97,19 @@ pub(crate) fn move_with_io(
         output.set_permissions(input.metadata()?.permissions())?;
         output.sync_all()?;
         drop(output);
-        io.publish_stage(&stage, target)?;
+        let stage_kept = match io.publish_stage(&stage, target) {
+            Ok(()) => true,
+            Err(error) if links_unavailable(&error) => {
+                io.rename_no_replace(&stage, target)?;
+                false
+            }
+            Err(error) => return Err(error),
+        };
         on_published()?;
         // Cleanup failure must leave the source present, not hide a committed move from its journal.
-        io.remove_stage(&stage)?;
+        if stage_kept {
+            io.remove_stage(&stage)?;
+        }
         io.remove_source(source)
     })();
     if result.is_err() {
@@ -124,6 +163,57 @@ mod tests {
             } else {
                 fs::remove_file(source)
             }
+        }
+    }
+    struct NoLinks {
+        cross_device: bool,
+    }
+    impl MoveFileIo for NoLinks {
+        fn link_source(&self, _: &Path, _: &Path) -> io::Result<()> {
+            Err(if self.cross_device {
+                io::ErrorKind::CrossesDevices.into()
+            } else {
+                io::ErrorKind::Unsupported.into()
+            })
+        }
+        fn publish_stage(&self, _: &Path, _: &Path) -> io::Result<()> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+    #[test]
+    fn volumes_without_hard_links_still_move_without_clobbering() {
+        for cross_device in [false, true] {
+            let directory = Directory(
+                std::env::temp_dir().join(format!("fileid-no-links-{}", uuid::Uuid::new_v4())),
+            );
+            fs::create_dir(&directory.0).unwrap();
+            let source = directory.0.join("source");
+            let target = directory.0.join("target");
+            let io = NoLinks { cross_device };
+
+            fs::write(&source, b"source bytes").unwrap();
+            fs::write(&target, b"occupant").unwrap();
+            let mut published = false;
+            assert!(move_with_io(&source, &target, &io, || {
+                published = true;
+                Ok(())
+            })
+            .is_err());
+            assert!(!published);
+            assert_eq!(fs::read(&source).unwrap(), b"source bytes");
+            assert_eq!(fs::read(&target).unwrap(), b"occupant");
+            assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 2);
+
+            fs::remove_file(&target).unwrap();
+            move_with_io(&source, &target, &io, || {
+                published = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(published);
+            assert!(!source.exists());
+            assert_eq!(fs::read(&target).unwrap(), b"source bytes");
+            assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
         }
     }
     #[test]

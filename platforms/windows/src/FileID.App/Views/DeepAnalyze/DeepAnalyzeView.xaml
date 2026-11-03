@@ -31,13 +31,9 @@
                 <TextBlock TextWrapping="Wrap"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           Text="Run a local vision-language model on every image to write captions and propose smart filenames. Works across your whole library." />
+                           Text="FileID's local AI looks at each file, writes a sentence about it and suggests a clearer name. Nothing is renamed until you approve it." />
             </StackPanel>
 
-            <!-- Item 4: plain-language explainer distinguishing automatic
-                 in-scan Tagging from the opt-in Deep Analyze pass. Dismissible;
-                 the close button persists HideDeepAnalyzeExplainer. Mirror of
-                 the macOS DeepAnalyzeView explainerCard. -->
             <Border x:Name="ExplainerBanner"
                     CornerRadius="10"
                     Padding="14,12"
@@ -59,12 +55,12 @@
                               Margin="0,2,0,0"
                               AutomationProperties.AccessibilityView="Raw" />
                     <StackPanel Grid.Column="1" Spacing="4">
-                        <TextBlock Text="Tagging vs. Deep Analyze"
+                        <TextBlock Text="Tags and descriptions"
                                    Style="{StaticResource BodyStrongTextBlockStyle}" />
                         <TextBlock TextWrapping="Wrap"
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                   Text="Tagging runs automatically as you scan — it adds quick keyword tags (like sunset, beach, dog) so search works. Deep Analyze is an optional, heavier step: it reads each photo, writes a full sentence describing it, and suggests a smart filename — using the people you've named." />
+                                   Text="Tags like sunset, beach or dog are added automatically during the scan, so search already works. Describing is an optional extra step: the AI writes a full sentence about each file and suggests a clearer name, using the names you gave people. It is slower, so it runs only when you ask." />
                     </StackPanel>
                     <Button Grid.Column="2"
                             x:Name="DismissExplainerButton"
@@ -80,20 +76,56 @@
                 </Grid>
             </Border>
 
-            <!-- The Store package includes the Vulkan llama.cpp runtime; only
-                 Hugging Face model weights are fetched after the user selects Install. -->
+            <Border x:Name="LibraryStatusCard"
+                    CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <StackPanel Spacing="10">
+                    <TextBlock Text="This library"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               AutomationProperties.HeadingLevel="Level2" />
+                    <TextBlock x:Name="LibraryEmptyText"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Visibility="Collapsed"
+                               Text="No files to describe yet. Scan a folder first; its photos, videos and documents appear here." />
+                    <Grid ColumnSpacing="16" RowSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Can be described"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="EligibleCountText" Text="—"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Not described yet"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PendingCountText" Text="—"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="AI model"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Grid.Row="2" Grid.Column="1" x:Name="ActiveModelText"
+                                   FontWeight="SemiBold"
+                                   Text="Qwen 2.5-VL 7B"
+                                   ToolTipService.ToolTip="Change the description model below" />
+                    </Grid>
+                </StackPanel>
+            </Border>
 
-            <!-- "Name people first" gate banner. Visible when any
-                 person cluster has both name + first_name NULL — Deep
-                 Analyze on unnamed people produces less-useful captions
-                 ("a person at a party" vs "Adam at a party"). Mirror of
-                 macOS DeepAnalyzeView's `unnamedClustersWarning` strip. -->
             <Border x:Name="NamePeopleGateBanner"
                     CornerRadius="10"
                     Padding="14,12"
                     Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                    BorderBrush="{ThemeResource AiBrush}"
-                    BorderThickness="1"
+                    BorderBrush="{ThemeResource WarningBrush}"
+                    BorderThickness="3,1,1,1"
                     Visibility="Collapsed">
                 <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
@@ -104,26 +136,43 @@
                     <FontIcon Grid.Column="0"
                               Glyph="&#xE77B;"
                               FontSize="16"
-                              Foreground="{ThemeResource AiBrush}"
+                              Foreground="{ThemeResource WarningBrush}"
                               VerticalAlignment="Top"
                               Margin="0,2,0,0"
                               AutomationProperties.AccessibilityView="Raw" />
-                    <TextBlock Grid.Column="1"
-                               x:Name="NamePeopleGateText"
-                               TextWrapping="Wrap"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Text="Name your people first so smart-name proposals can use their names." />
+                    <StackPanel Grid.Column="1" Spacing="6">
+                        <TextBlock Text="Tip: name people first"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock TextWrapping="Wrap"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Text="With names, descriptions read &quot;Mia playing piano&quot; instead of &quot;a person playing piano&quot;. You can also describe now and again later." />
+                        <Button x:Name="GoToPeopleButton"
+                                Click="OnGoToPeopleClicked"
+                                HorizontalAlignment="Left"
+                                ToolTipService.ToolTip="Open the People page and type names on the faces you know"
+                                AutomationProperties.Name="Name people"
+                                AutomationProperties.HelpText="Open the People page and type names on the faces you know">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock Text="Name people" />
+                                <FontIcon Glyph="&#xE72A;" FontSize="12" AutomationProperties.AccessibilityView="Raw" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
                     <Button Grid.Column="2"
-                            x:Name="GoToPeopleButton"
-                            Content="Open People"
-                            Click="OnGoToPeopleClicked"
-                            VerticalAlignment="Center"
-                            AutomationProperties.Name="Open People"
-                            AutomationProperties.HelpText="Go to the People tab to name face clusters before analyzing" />
+                            x:Name="DismissNamePeopleTipButton"
+                            Click="OnDismissNamePeopleTipClicked"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Padding="6"
+                            VerticalAlignment="Top"
+                            AutomationProperties.Name="Hide this tip"
+                            ToolTipService.ToolTip="Hide this tip">
+                        <FontIcon Glyph="&#xE711;" FontSize="12" />
+                    </Button>
                 </Grid>
             </Border>
 
-            <!-- Model picker — three existing choices and two optional Qwen3-VL choices. -->
             <StackPanel Spacing="6">
                 <TextBlock Text="Choose a model"
                            Style="{StaticResource CaptionTextBlockStyle}"
@@ -151,7 +200,7 @@
                             AutomationProperties.HelpText="Select this model. Approximately 15.2 GB disk and 16 GB RAM.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Mistral-Small 3.2" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈15.2 GB disk · 16 GB RAM"
+                            <TextBlock Text="≈15.2 GB download · needs 16 GB memory"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="MistralStatus"
@@ -162,12 +211,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Mistral-Small 3.2 download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="MistralInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="mistral_small_3_2"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Mistral-Small 3.2" />
+                                    AutomationProperties.Name="Download Mistral-Small 3.2" />
                         </StackPanel>
                     </Border>
 
@@ -201,7 +250,7 @@
                                                FontWeight="SemiBold" />
                                 </Border>
                             </Grid>
-                            <TextBlock Text="≈6.1 GB disk · 7 GB RAM · default"
+                            <TextBlock Text="≈6.1 GB download · needs 7 GB memory"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="QwenLargeStatus"
@@ -212,12 +261,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Qwen 2.5-VL 7B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="QwenLargeInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="qwen2_5_vl_7b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Qwen 2.5-VL 7B" />
+                                    AutomationProperties.Name="Download Qwen 2.5-VL 7B" />
                         </StackPanel>
                     </Border>
 
@@ -234,7 +283,7 @@
                             AutomationProperties.HelpText="Select this model. Approximately 3.4 GB disk and 4.5 GB RAM.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Gemma 3 4B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈3.4 GB disk · 4.5 GB RAM"
+                            <TextBlock Text="≈3.4 GB download · needs 4.5 GB memory"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="GemmaStatus"
@@ -245,12 +294,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Gemma 3 4B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="GemmaInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="gemma_3_4b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Gemma 3 4B" />
+                                    AutomationProperties.Name="Download Gemma 3 4B" />
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -273,7 +322,7 @@
                             AutomationProperties.HelpText="Select the optional Qwen3-VL 4B model. Approximately 3.3 GB disk.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Qwen3-VL 4B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈3.3 GB disk · optional"
+                            <TextBlock Text="≈3.3 GB download · optional"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="Qwen3FourStatus"
@@ -284,12 +333,12 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Qwen3-VL 4B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="Qwen3FourInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="qwen3_vl_4b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Qwen3-VL 4B" />
+                                    AutomationProperties.Name="Download Qwen3-VL 4B" />
                         </StackPanel>
                     </Border>
                     <Border Grid.Column="1"
@@ -305,7 +354,7 @@
                             AutomationProperties.HelpText="Select the optional Qwen3-VL 8B model. Approximately 6.2 GB disk.">
                         <StackPanel Spacing="6">
                             <TextBlock Text="Qwen3-VL 8B" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="≈6.2 GB disk · optional"
+                            <TextBlock Text="≈6.2 GB download · optional"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock x:Name="Qwen3EightStatus"
@@ -316,111 +365,93 @@
                                          Visibility="Collapsed"
                                          Foreground="{ThemeResource GoldBrush}"
                                          AutomationProperties.Name="Qwen3-VL 8B download progress" />
-                            <Button Content="Install"
+                            <Button Content="Download"
                                     x:Name="Qwen3EightInstallButton"
                                     Click="OnInstallModelClicked"
                                     Tag="qwen3_vl_8b"
                                     Margin="0,4,0,0"
-                                    AutomationProperties.Name="Install Qwen3-VL 8B" />
+                                    AutomationProperties.Name="Download Qwen3-VL 8B" />
                         </StackPanel>
                     </Border>
                 </Grid>
             </StackPanel>
 
-            <!-- Run controls. -->
             <Border CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     Padding="20">
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Analyze"
+                    <TextBlock Text="Describe files"
                                Style="{StaticResource SubtitleTextBlockStyle}"
                                AutomationProperties.HeadingLevel="Level2" />
-                    <TextBlock x:Name="ActiveModelText"
-                               Style="{StaticResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="Active model: Qwen 2.5-VL 7B" />
-                    <!-- Horizontal scroll so this action row never clips its
-                         right-hand controls (Propose renames / Cancel) on a
-                         narrow / laptop window. Mirrors the PeopleView +
-                         CleanupView header pattern. -->
+                    <StackPanel Orientation="Horizontal" Spacing="16">
+                        <CheckBox x:Name="SkipExistingToggle"
+                                  Content="Only files not described yet"
+                                  IsChecked="True"
+                                  Click="OnSkipExistingClicked"
+                                  ToolTipService.ToolTip="Leave this on to skip files that already have a description from this model"
+                                  AutomationProperties.Name="Only files not described yet"
+                                  AutomationProperties.HelpText="When on, files that completed a full pass with this model are skipped; partial passes may run again. When off, every file is described again." />
+                        <CheckBox x:Name="ProposeRenamesCheck"
+                                  Content="Suggest clearer names"
+                                  IsChecked="True"
+                                  AutomationProperties.HelpText="When checked, FileID also suggests a clearer name for each file it describes. Nothing is renamed until you approve it." />
+                    </StackPanel>
                     <ScrollViewer HorizontalScrollMode="Auto"
                                   HorizontalScrollBarVisibility="Auto"
                                   VerticalScrollMode="Disabled"
                                   VerticalScrollBarVisibility="Disabled">
-                    <Grid ColumnSpacing="8">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
-                        </Grid.ColumnDefinitions>
-                        <Button Grid.Column="0"
-                                x:Name="AnalyzeAllButton"
-                                Click="OnAnalyzeAllClicked"
-                                Style="{StaticResource AccentButtonStyle}"
-                                AutomationProperties.Name="Analyze whole library"
-                                AutomationProperties.HelpText="Run the selected vision-language model on every image in the library">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE945;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
-                                <TextBlock Text="Whole library" />
-                            </StackPanel>
-                        </Button>
-                        <!-- Mirrors macOS DeepAnalyzeView's two extra actions:
-                             "Selected" (from a Library multi-select) + "Current"
-                             (from the focused FilePreviewSheet). Both pull their
-                             targets from SelectionRegistry; disabled when nothing
-                             matches. -->
-                        <Button Grid.Column="1"
-                                x:Name="AnalyzeSelectedButton"
-                                Click="OnAnalyzeSelectedClicked"
-                                ToolTipService.ToolTip="Analyze only files currently selected in the Library"
-                                AutomationProperties.HelpText="Analyze only files currently selected in the Library">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE762;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
-                                <TextBlock x:Name="AnalyzeSelectedText" Text="Selected" />
-                            </StackPanel>
-                        </Button>
-                        <Button Grid.Column="2"
-                                x:Name="AnalyzeCurrentButton"
-                                Click="OnAnalyzeCurrentClicked"
-                                ToolTipService.ToolTip="Analyze only the file open in the preview sheet"
-                                AutomationProperties.Name="Analyze current file"
-                                AutomationProperties.HelpText="Analyze only the file open in the preview sheet">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE890;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
-                                <TextBlock Text="Current" />
-                            </StackPanel>
-                        </Button>
-                        <ToggleSwitch Grid.Column="3"
-                                      x:Name="SkipExistingToggle"
-                                      IsOn="True"
-                                      OffContent="Re-analyze all"
-                                      OnContent="Skip already-analyzed"
-                                      Margin="14,0,0,0"
-                                      AutomationProperties.Name="Skip already-analyzed files"
-                                      AutomationProperties.HelpText="When on, files that completed a full pass with this model are skipped; partial passes may run again. When off, every file is re-analyzed." />
-                        <CheckBox Grid.Column="5"
-                                  x:Name="ProposeRenamesCheck"
-                                  Content="Propose renames"
-                                  IsChecked="True"
-                                  AutomationProperties.HelpText="When checked, the model also proposes smart filenames for each analyzed file" />
-                        <Button Grid.Column="6"
-                                x:Name="CancelButton"
-                                Content="Cancel"
-                                Click="OnCancelClicked"
-                                IsEnabled="False"
-                                AutomationProperties.HelpText="Stop the in-progress Deep Analyze run" />
-                    </Grid>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="AnalyzeAllButton"
+                                    Click="OnAnalyzeAllClicked"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    AutomationProperties.Name="Describe files">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE945;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
+                                    <TextBlock x:Name="AnalyzeAllText" Text="Describe files" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="AnalyzeSelectedButton"
+                                    Click="OnAnalyzeSelectedClicked"
+                                    ToolTipService.ToolTip="Describe only the files chosen in Library"
+                                    AutomationProperties.HelpText="Describe only the files chosen in Library">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE762;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
+                                    <TextBlock x:Name="AnalyzeSelectedText" Text="Chosen files" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="AnalyzeCurrentButton"
+                                    Click="OnAnalyzeCurrentClicked"
+                                    ToolTipService.ToolTip="Describe only the file open in the preview"
+                                    AutomationProperties.Name="Describe the open file"
+                                    AutomationProperties.HelpText="Describe only the file open in the preview">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE890;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
+                                    <TextBlock Text="Open file" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="CancelButton"
+                                    Content="Stop"
+                                    Click="OnCancelClicked"
+                                    IsEnabled="False"
+                                    Visibility="Collapsed"
+                                    ToolTipService.ToolTip="Stop describing. Files already described keep their descriptions."
+                                    AutomationProperties.HelpText="Stop describing. Files already described keep their descriptions." />
+                        </StackPanel>
                     </ScrollViewer>
+                    <TextBlock x:Name="RunMetaText"
+                               TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="You can keep using your PC while this runs." />
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               Text="To describe one file, open it in Library and press Describe." />
                 </StackPanel>
             </Border>
 
-            <!-- Live caption stream. -->
             <Border x:Name="StreamCard"
                     CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -429,7 +460,7 @@
                     Padding="20"
                     Visibility="Collapsed">
                 <StackPanel Spacing="14">
-                    <TextBlock Text="Live caption" Style="{StaticResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                    <TextBlock x:Name="StreamTitleText" Text="Describing files…" Style="{StaticResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                     <Grid ColumnSpacing="14">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
@@ -439,7 +470,7 @@
                                 CornerRadius="8"
                                 Background="{ThemeResource SubtleFillColorTertiaryBrush}"
                                 Width="160" Height="160">
-                            <Image x:Name="StreamImage" Stretch="UniformToFill" Width="160" Height="160" AutomationProperties.Name="Preview of the file currently being analyzed" />
+                            <Image x:Name="StreamImage" Stretch="UniformToFill" Width="160" Height="160" AutomationProperties.Name="Preview of the file being described" />
                         </Border>
                         <StackPanel Grid.Column="1" Spacing="8">
                             <TextBlock x:Name="StreamFileNameText"
@@ -449,39 +480,59 @@
                                        TextWrapping="Wrap"
                                        Style="{StaticResource BodyTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="StreamInheritedText"
+                                       Text="Same as a similar photo"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                       Visibility="Collapsed" />
                             <TextBlock x:Name="StreamProposedNameText"
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource AiBrush}" />
                         </StackPanel>
                     </Grid>
-                    <ProgressBar x:Name="OverallProgress" Value="0" Maximum="1" AutomationProperties.Name="Deep Analyze overall progress" />
+                    <ProgressBar x:Name="OverallProgress" Value="0" Maximum="1" AutomationProperties.Name="Describing progress" />
                     <TextBlock x:Name="OverallProgressText"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                 </StackPanel>
             </Border>
 
-            <!-- smart-names pending-rename pill. Visible after
-                 Deep Analyze produces one or more ProposedName values.
-                 Tap routes back to the Library so the user can apply
-                 the proposed names via BulkRenameSheet. -->
-            <Button x:Name="ProposedNamesPill"
-                    Click="OnProposedNamesPillClicked"
-                    Visibility="Collapsed"
-                    HorizontalAlignment="Left"
-                    AutomationProperties.HelpText="Open the bulk rename sheet to apply the smart filenames the model proposed">
-                <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <FontIcon Glyph="&#xE8AC;" FontSize="13" Foreground="{ThemeResource AiBrush}" AutomationProperties.AccessibilityView="Raw" />
-                    <TextBlock x:Name="ProposedNamesPillText"
-                               Style="{StaticResource CaptionTextBlockStyle}" />
+            <Border x:Name="ProposedNamesPill"
+                    CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20"
+                    Visibility="Collapsed">
+                <StackPanel Spacing="10">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Suggested names" Style="{StaticResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                        <TextBlock Grid.Column="1"
+                                   x:Name="ProposedNamesPillText"
+                                   VerticalAlignment="Center"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    </Grid>
+                    <TextBlock TextWrapping="Wrap"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Text="FileID suggested clearer names for these files. Check them and choose which to use; nothing is renamed until you do." />
+                    <Button x:Name="ReviewNamesButton"
+                            Click="OnProposedNamesPillClicked"
+                            Style="{StaticResource AccentButtonStyle}"
+                            AutomationProperties.HelpText="Open the list of suggested names and choose which to use">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE8AC;" FontSize="13" AutomationProperties.AccessibilityView="Raw" />
+                            <TextBlock Text="Review suggested names…" />
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
-            </Button>
+            </Border>
 
-            <!-- Item 5: write tags / people / smart names onto the actual files.
-                 Tags + people are added as file tags (sidecar + IPropertyStore)
-                 so Windows Search finds the photos; Apply all also routes the
-                 pending smart-name renames through the review sheet. Mirror of
-                 the macOS DeepAnalyzeView applyActionsCard. -->
             <Border x:Name="ApplyActionsCard"
                     CornerRadius="12"
                     Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
@@ -490,42 +541,43 @@
                     Padding="20">
                 <StackPanel Spacing="12">
                     <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE74E;" FontSize="16" Foreground="{ThemeResource AiBrush}" AutomationProperties.AccessibilityView="Raw" />
-                        <TextBlock Text="Apply to your files" Style="{StaticResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
+                        <TextBlock Text="Save to your files" Style="{StaticResource SubtitleTextBlockStyle}" AutomationProperties.HeadingLevel="Level2" />
                         <ProgressRing x:Name="ApplyProgressRing" Width="16" Height="16" IsActive="False" Visibility="Collapsed" />
                     </StackPanel>
                     <TextBlock TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                               Text="Write what FileID found onto the files themselves. Tags and people are added as file tags so Windows Search finds your photos; Apply all also applies the smart names." />
+                               Text="Add what FileID found to the files themselves as file tags, so File Explorer and Windows Search can find them too. Your own tags are kept." />
                     <StackPanel Orientation="Horizontal" Spacing="10">
                         <Button x:Name="ApplyTagsButton" Click="OnApplyTagsClicked"
-                                AutomationProperties.Name="Apply tags"
-                                AutomationProperties.HelpText="Write the keyword tags onto the files so Windows Search finds them.">
+                                AutomationProperties.Name="Add tags to files"
+                                AutomationProperties.HelpText="Add the tags FileID found to the files so Windows Search finds them.">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon FontSize="13" Glyph="&#xE8EC;" />
-                                <TextBlock Text="Apply tags" />
+                                <TextBlock Text="Add tags to files" />
                             </StackPanel>
                         </Button>
                         <Button x:Name="ApplyPeopleButton" Click="OnApplyPeopleClicked"
-                                AutomationProperties.Name="Apply people as tags"
-                                AutomationProperties.HelpText="Write each named person onto their photos as a file tag.">
+                                ToolTipService.ToolTip="Tag each photo with the names of the people in it"
+                                AutomationProperties.Name="Add people's names to files"
+                                AutomationProperties.HelpText="Tag each photo with the names of the people in it.">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                                 <FontIcon FontSize="13" Glyph="&#xE77B;" />
-                                <TextBlock Text="Apply people as tags" />
-                            </StackPanel>
-                        </Button>
-                        <Button x:Name="ApplyAllButton" Click="OnApplyAllClicked"
-                                Style="{StaticResource AccentButtonStyle}"
-                                AutomationProperties.Name="Apply all"
-                                AutomationProperties.HelpText="Apply smart names, tags, and people all at once.">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon FontSize="13" Glyph="&#xE73E;" />
-                                <TextBlock Text="Apply all" />
+                                <TextBlock Text="Add people's names to files" />
                             </StackPanel>
                         </Button>
                     </StackPanel>
+                    <Button x:Name="ApplyAllButton" Click="OnApplyAllClicked"
+                            HorizontalAlignment="Stretch"
+                            ToolTipService.ToolTip="Adds tags and people's names to the files"
+                            AutomationProperties.Name="Add tags and names">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon FontSize="13" Glyph="&#xE73E;" />
+                            <TextBlock x:Name="ApplyAllText" Text="Add tags and names" />
+                        </StackPanel>
+                    </Button>
                     <TextBlock x:Name="ApplyStatusText"
+                               TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                Visibility="Collapsed" />

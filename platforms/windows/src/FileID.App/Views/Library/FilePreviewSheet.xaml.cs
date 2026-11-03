@@ -714,7 +714,7 @@ public sealed partial class FilePreviewSheet : UserControl
             var dt = DateTimeOffset.FromUnixTimeMilliseconds((long)(modifiedAt.Value * 1000)).LocalDateTime;
             AddMetadataRow("Modified", dt.ToString("g"));
         }
-        if (TextBadge.Visibility == Visibility.Visible) AddMetadataRow("Text", "Detected (OCR)");
+        if (TextBadge.Visibility == Visibility.Visible) AddMetadataRow("Text", "Found in this file");
     }
 
     private void AddMetadataRow(string label, string value, bool monospaced = false, bool wrap = false)
@@ -767,15 +767,17 @@ public sealed partial class FilePreviewSheet : UserControl
     {
         ProposedRenameCard.Visibility = Visibility.Collapsed;
         _pendingProposedName = null;
+        SetDescribeButtonState(false);
         if (fileId <= 0) return;
         string? name = null;
+        var described = false;
         try
         {
-            name = await System.Threading.Tasks.Task.Run(() =>
+            (name, described) = await System.Threading.Tasks.Task.Run(() =>
             {
                 try
                 {
-                    if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return null;
+                    if (!System.IO.File.Exists(Services.AppPaths.DbPath)) return ((string?)null, false);
                     using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
                         new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
                         {
@@ -784,17 +786,21 @@ public sealed partial class FilePreviewSheet : UserControl
                         }.ToString());
                     conn.Open();
                     using var cmd = conn.CreateCommand();
-                    cmd.CommandText = "SELECT vlm_proposed_name FROM files WHERE id = $id";
+                    cmd.CommandText = "SELECT vlm_proposed_name, vlm_description FROM files WHERE id = $id";
                     cmd.Parameters.AddWithValue("$id", fileId);
-                    var v = cmd.ExecuteScalar();
-                    var s = v as string;
-                    return string.IsNullOrWhiteSpace(s) ? null : s;
+                    using var reader = cmd.ExecuteReader();
+                    if (!reader.Read()) return ((string?)null, false);
+                    var s = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    var hasDescription = !reader.IsDBNull(1) && !string.IsNullOrWhiteSpace(reader.GetString(1));
+                    return (string.IsNullOrWhiteSpace(s) ? null : s, hasDescription);
                 }
-                catch { return null; }
+                catch { return ((string?)null, false); }
             }).ConfigureAwait(true);
         }
         catch { name = null; }
 
+        if (_isClosed || _navGen != navGen) return;
+        SetDescribeButtonState(described);
         if (string.IsNullOrWhiteSpace(name)) return;
         _pendingProposedName = name;
         // Defensive: sheet may have closed during the async query. Bail before
@@ -960,6 +966,23 @@ public sealed partial class FilePreviewSheet : UserControl
     };
 
     private static string FormatSize(long bytes) => FileID.Services.ByteFormat.File(bytes);
+
+    private void SetDescribeButtonState(bool described)
+    {
+        try
+        {
+            AnalyzeButtonText.Text = described ? "Describe again" : "Describe";
+            var busy = ViewModels.EngineClient.Instance.DeepAnalyzeCommandInFlight
+                       || ViewModels.EngineClient.Instance.DeepAnalyzeProgress is not null;
+            ToolTipService.SetToolTip(AnalyzeButton, busy
+                ? "FileID is already describing files. Try again when it finishes."
+                : "Write a description and a suggested name for this file");
+        }
+        catch (Exception ex)
+        {
+            Services.DebugLog.Warn("SetDescribeButtonState threw (sheet closed?): " + ex.Message);
+        }
+    }
 
     private async void OnAnalyzeClicked(object sender, RoutedEventArgs e)
     {

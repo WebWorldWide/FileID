@@ -53,9 +53,11 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         "txt" | "md" | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
         | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
         | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua" | "dart"
-        | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org" | "adoc" => {
+        | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org" | "adoc" | "csv" | "tsv" | "log" | "markdown"
+        | "text" | "json" | "yaml" | "yml" | "toml" | "xml" => {
             Some(read_plain(path, bytes)?)
         }
+        "html" | "htm" => Some(html_to_text(&read_plain(path, bytes)?)),
         "docx" => Some(extract_zip_xml(path, bytes, &["word/document.xml"], &["w:t"])?),
         // OpenDocument Text: content.xml, paragraph/heading/span runs (text:p / text:h /
         // text:span). Near-identical to the macOS textutil odt path (same words).
@@ -81,6 +83,43 @@ fn truncate_to_max(mut t: String) -> String {
         t.truncate(n);
     }
     t
+}
+
+/// Visible text of an HTML page: tags removed, script/style/head bodies dropped, common
+/// entities decoded, whitespace collapsed.
+fn html_to_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut i = 0;
+    while i < html.len() {
+        let rest = &html[i..];
+        if rest.starts_with('<') {
+            if rest.starts_with("<!--") {
+                i += rest.find("-->").map_or(rest.len(), |end| end + 3);
+                continue;
+            }
+            let skip = ["script", "style", "head"].iter().find(|tag| lower[i..].starts_with(&format!("<{tag}")));
+            if let Some(tag) = skip {
+                let close = format!("</{tag}");
+                i += lower[i..].find(&close).map_or(rest.len(), |end| end + rest[end..].find('>').map_or(rest.len() - end, |gt| gt + 1));
+                continue;
+            }
+            i += rest.find('>').map_or(rest.len(), |end| end + 1);
+            out.push(' ');
+            continue;
+        }
+        let next = rest.find('<').unwrap_or(rest.len());
+        out.push_str(&rest[..next]);
+        i += next;
+    }
+    let decoded = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn read_plain(path: &Path, bytes: Option<&[u8]>) -> Result<String> {
@@ -537,6 +576,14 @@ mod tests {
         let t = extract(&p, None).unwrap().unwrap();
         assert!(t.contains("Body"));
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn html_keeps_visible_text_only() {
+        let page = "<html><head><title>Hidden</title><style>p{color:red}</style></head><body><!-- note --><h1>Trip &amp; Tour</h1><script>var secret=1;</script><p>Day&nbsp;one <b>sunny</b></p></body></html>";
+        assert_eq!(html_to_text(page), "Trip & Tour Day one sunny");
+        assert_eq!(html_to_text("plain <b>text"), "plain text");
+        assert_eq!(html_to_text("<p>unclosed <script>x"), "unclosed");
     }
 
     #[test]

@@ -35,6 +35,9 @@ struct FileIDEngineMain {
         if CommandLine.arguments.dropFirst().first == "--sample-video-sequence" {
             exit(await VideoFrameWorker.runSequence(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
+        if CommandLine.arguments.dropFirst().first == "--sample-video-pool" {
+            exit(await VideoFramePool.run(arguments: Array(CommandLine.arguments.dropFirst(2))))
+        }
         if CommandLine.arguments.dropFirst().first == "--scan-video-signals" {
             exit(await VideoFrameWorker.runSignals(arguments: Array(CommandLine.arguments.dropFirst(2))))
         }
@@ -128,6 +131,7 @@ struct FileIDEngineMain {
         JSONLog.shared.info(ev: "engine_ready",
                             extra: ["pid": AnyCodable(ProcessInfo.processInfo.processIdentifier),
                                     "workers": AnyCodable(Hardware.workerCap)])
+        AccurateOCRWarmup.shared.startWhenIdle()
 
         // Capability check: Deep Analyze needs mlx.metallib next to the
         // engine binary (run.sh copies it in from .build/cache). Without
@@ -249,7 +253,7 @@ struct FileIDEngineMain {
                 await sink.emit(.catalogResponse(CatalogResponse(requestID: request.requestID, status: "error", message: "The catalog database is unavailable.")))
                 return
             }
-            if request.action == "search" {
+            if ["search", "autoTakeGroups", "scoreTakes", "rankTakesWithGoal"].contains(request.action) {
                 Task { await sink.emit(.catalogResponse(await CatalogStore.handle(request, database: database))) }
                 return
             }
@@ -296,7 +300,7 @@ struct FileIDEngineMain {
             // Reject a start-scan while one is already queued or running. Mirrors
             // the Windows engine's scan_session.rs guard. Prevents unbounded job
             // queue growth from a misbehaving or rapidly-clicking app client.
-            if await JobQueue.shared.hasActive(category: .scan) {
+            if !(await JobQueue.shared.waitUntilIdle(category: .scan)) {
                 await sink.emit(.error(EngineError(
                     kind: "scan_already_queued",
                     message: "A scan is already running or queued — cancel it first."
@@ -971,6 +975,9 @@ struct FileIDEngineMain {
             }
             guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
             await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs)))
+        case .restoreFromTrash(let batchID):
+            guard let database else { await emitDbUnavailable(sink, action: "restoreFromTrash"); return }
+            await sink.emit(.bulkActionResult(await TrashJournal.restore(batchID: batchID, database: database)))
         case .mergeClusters(let sourcePersonID, let destinationPersonID):
             guard let database else { await emitDbUnavailable(sink, action: "mergeClusters"); return }
             await sink.emit(.bulkActionResult(await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID)))
@@ -1002,7 +1009,6 @@ struct FileIDEngineMain {
         case .findMergeSuggestions,
              .embedTextQuery,
              .embedImageQuery,
-             .restoreFromTrash,
              .revertMerge,
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
@@ -1167,6 +1173,7 @@ struct FileIDEngineMain {
         defer { SleepGuard.shared.end() }
         let uniqueIDs = orderedUniqueFileIDs(fileIDs)
         var messages: [BulkActionItem] = []
+        var journal: [TrashJournal.Item] = []
         let states: [Int64: BulkFileState]
         do {
             states = try await fetchBulkStates(database: database, fileIDs: uniqueIDs)
@@ -1188,7 +1195,12 @@ struct FileIDEngineMain {
             }
             do {
                 try ReadOnlyLocations.requireSourceMutation(url)
-                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
+                var landed: NSURL?
+                try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
+                if let landed = landed as URL? {
+                    journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: landed.path, rows: rows))
+                }
                 try await database.pool.write { db in
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
                     guard db.changesCount == 1 else {
@@ -1200,7 +1212,12 @@ struct FileIDEngineMain {
                 messages.append(item(id, ok: false, error.localizedDescription))
             }
         }
-        return BulkActionResult(action: "trashFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+        var action = "trashFiles"
+        if !journal.isEmpty {
+            let batch = TrashJournal.Batch(id: UUID().uuidString.lowercased(), createdAt: Date().timeIntervalSince1970, items: journal)
+            if (try? TrashJournal.append(batch)) != nil { action += ":" + batch.id }
+        }
+        return BulkActionResult(action: action, succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
     }
 
     static func mergeClusters(database: Database, source: Int64, destination: Int64) async -> BulkActionResult {
@@ -1474,6 +1491,10 @@ struct FileIDEngineMain {
                     INSERT INTO scan_sessions (id, root_path, started_at, status)
                     VALUES (?, ?, ?, 'running')
                     """, arguments: [session.id, url.path, Date().timeIntervalSince1970])
+                let kind = url.path.hasPrefix("/Volumes/") ? "external" : "internal"
+                try db.execute(sql: """
+                    INSERT INTO library_roots(path,display,kind,added_at,last_status) VALUES(?,?,?,?,'running') ON CONFLICT(path) DO UPDATE SET last_status='running'
+                    """, arguments: [url.path, url.path, kind, Date().timeIntervalSince1970])
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_insert_failed", sess: session.id, error: "\(error)")
@@ -1723,6 +1744,11 @@ struct FileIDEngineMain {
             return
         }
         guard !candidates.isEmpty else { return }
+        guard ScanRootGuard.isReachable(scanRootPath) else {
+            JSONLog.shared.warn(ev: "orphan_sweep_skipped_root_unreachable", sess: sessionID,
+                                error: "scan root missing, empty or unmounted; \(candidates.count) rows kept")
+            return
+        }
 
         // Stat off the writer thread; FileManager hits are cheap but blocking.
         let missing: [Int64] = await Task.detached(priority: .background) {
@@ -2086,6 +2112,9 @@ struct FileIDEngineMain {
                     UPDATE scan_sessions SET status = ?, completed_at = ?
                     WHERE id = ?
                     """, arguments: [status, completedAt, sessionID])
+                try db.execute(sql: """
+                    UPDATE library_roots SET last_scan_at=?,last_status=? WHERE path=(SELECT root_path FROM scan_sessions WHERE id=?)
+                    """, arguments: [completedAt, status, sessionID])
             }
         } catch {
             JSONLog.shared.warn(ev: "scan_session_update_failed",

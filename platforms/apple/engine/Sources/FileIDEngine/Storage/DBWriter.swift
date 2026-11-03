@@ -67,6 +67,9 @@ public struct TaggedFile: Sendable {
     public var clipMs: Double = 0
     public var ramMs: Double = 0
     public var ocrMs: Double = 0
+    public var ocrCarefulMs: Double = 0
+    /// The OCR text came from Vision's accurate tier reading handwriting.
+    public var ocrHandwritten = false
 
     // CLIP image embedding (raw float32 little-endian bytes). nil for
     // non-images, files where the model isn't loaded, or inference failures.
@@ -377,6 +380,7 @@ public actor DBWriter {
         let clipTimes = batchFiles.map(\.clipMs).filter { $0 > 0 }.sorted()
         let ramTimes = batchFiles.map(\.ramMs).filter { $0 > 0 }.sorted()
         let ocrTimes = batchFiles.map(\.ocrMs).filter { $0 > 0 }.sorted()
+        let carefulOcrTimes = batchFiles.map(\.ocrCarefulMs).filter { $0 > 0 }.sorted()
         // Worker utilization: what fraction of the 14-worker × wall time was
         // actually spent doing per-file work. <50% = workers idle (we have
         // headroom for more parallelism); >80% = ANE/IO bound.
@@ -416,6 +420,10 @@ public actor DBWriter {
                 "ramP95Ms":      AnyCodable(percentile(ramTimes, 0.95)),
                 "ocrP50Ms":      AnyCodable(percentile(ocrTimes, 0.50)),
                 "ocrP95Ms":      AnyCodable(percentile(ocrTimes, 0.95)),
+                "ocrRuns":       AnyCodable(ocrTimes.count),
+                "ocrAccurateRuns": AnyCodable(carefulOcrTimes.count),
+                "ocrAccurateP50Ms": AnyCodable(percentile(carefulOcrTimes, 0.50)),
+                "ocrAccurateP95Ms": AnyCodable(percentile(carefulOcrTimes, 0.95)),
                 "imagesInBatch": AnyCodable(visionTimes.count)
             ]
         )
@@ -719,12 +727,15 @@ public actor DBWriter {
         // now-empty text (covering a changed file that no longer yields OCR).
         // Mirrors the Windows `ocr_stage_ran` gate (dbwriter.rs).
         if file.ocrStageRan {
-            try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ?")
+            // A Deep Analyze transcription (source 'vlm') outlives rescans of an
+            // unchanged file; the v25 trigger drops it when the file changes.
+            try db.cachedStatement(sql: "DELETE FROM ocr_text WHERE file_id = ? AND source = 'ocr'")
                 .execute(arguments: [fileID])
             if let text = file.ocrText, !text.isEmpty {
                 try db.cachedStatement(sql: """
-                    INSERT INTO ocr_text (file_id, text) VALUES (?, ?)
-                    """).execute(arguments: [fileID, text])
+                    INSERT INTO ocr_text (file_id, text, handwritten)
+                    SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?)
+                    """).execute(arguments: [fileID, text, file.ocrHandwritten ? 1 : 0, fileID])
             }
         }
 
@@ -984,7 +995,7 @@ public actor DBWriter {
     /// (extremely blurry frames, occluded eyes). 0.02 is the bottom of
     /// the "still has a face" range; below this it's typically a false
     /// positive from the detector.
-    static let qualityFloor: Double = 0.02
+    static let qualityFloor: Double = FaceQualityGate.qualityFloor
 
     /// Minimum bbox area (fraction of image) for clustering — a backstop
     /// against degenerate detections only (near-zero-area boxes), not the
@@ -994,7 +1005,7 @@ public actor DBWriter {
     /// well-resolved face in a high-megapixel photo. `minBBoxMinDimPx`
     /// below is the real gate; this was lowered from 0.002 to 0.0002
     /// alongside it (Windows FACE_MIN_BBOX_AREA_FRACTION, same change).
-    static let minBBoxAreaFraction: Double = 0.0002
+    static let minBBoxAreaFraction: Double = FaceQualityGate.minBBoxAreaFraction
 
     /// Minimum bbox size in absolute pixels of the DECODED image handed to
     /// Vision (not the source file's native resolution). Mirrors the Windows
@@ -1025,14 +1036,14 @@ public actor DBWriter {
     /// env. Re-measure on real Mac hardware before treating 40.0 as final
     /// here; raising FILEID_SCAN_MAX_PIXELS is the cleaner lever if macOS
     /// under-detects.
-    static let minBBoxMinDimPx: Double = 40.0
+    static let minBBoxMinDimPx: Double = FaceQualityGate.minBBoxMinDimPx
 
     /// |yaw| beyond this is "heavy profile" — same identity at frontal vs
     /// 60° profile lands far apart in embedding space, polluting clusters.
-    static let maxYawRadians: Double = 50.0 * .pi / 180.0
+    static let maxYawRadians: Double = FaceQualityGate.maxYawRadians
 
     /// |pitch| beyond this is "looking up/down hard" — similarly noisy.
-    static let maxPitchRadians: Double = 30.0 * .pi / 180.0
+    static let maxPitchRadians: Double = FaceQualityGate.maxPitchRadians
 
     /// Parse the "x,y,w,h" normalized bbox string and return w*h.
     static func bboxArea(_ s: String) -> Double {
@@ -1047,13 +1058,8 @@ public actor DBWriter {
     /// so we exclude (admitting them lets noise into clusters).
     static func isExcluded(quality: Double?, yaw: Double?, pitch: Double?,
                            bboxArea: Double, bboxMinDimPx: Double) -> Bool {
-        guard let q = quality else { return true }
-        if q < qualityFloor { return true }
-        if bboxArea < minBBoxAreaFraction { return true }
-        if bboxMinDimPx < minBBoxMinDimPx { return true }
-        if let y = yaw, abs(y) > maxYawRadians { return true }
-        if let p = pitch, abs(p) > maxPitchRadians { return true }
-        return false
+        FaceQualityGate.holdReason(quality: quality, yaw: yaw, pitch: pitch,
+                                   bboxArea: bboxArea, minDimPx: bboxMinDimPx) != nil
     }
 }
 

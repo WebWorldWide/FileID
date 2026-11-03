@@ -508,10 +508,10 @@ public sealed partial class MainWindow : Window
         AddAccelerator(VirtualKey.O, VirtualKeyModifiers.Control, async (_, args) =>
         {
             var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
             if (result.Path is not null)
             {
-                AppViewModel.Instance.FolderPath = result.Path;
+                await AppViewModel.Instance.ChooseFolderAsync(result.Path);
             }
             args.Handled = true;
         });
@@ -965,8 +965,8 @@ public sealed partial class MainWindow : Window
                     DebugLog.Warn($"Drag-drop: File.GetAttributes failed: {ex.Message}");
                     return;
                 }
-                AppViewModel.Instance.FolderPath = canonical;
                 DebugLog.Info($"Drag-drop folder: {PathRedactor.Redact(canonical)}");
+                await AppViewModel.Instance.ChooseFolderAsync(canonical);
                 return;
             }
         }

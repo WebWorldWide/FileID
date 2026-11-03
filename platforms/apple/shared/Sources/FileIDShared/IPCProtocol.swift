@@ -766,12 +766,14 @@ public struct DeepAnalyzeFileDone: Codable, Sendable {
     public let description: String
     public let proposedName: String?
     public let modelKind: String
+    public let inheritedFromFileID: Int64?
 
-    public init(fileID: Int64, description: String, proposedName: String?, modelKind: String) {
+    public init(fileID: Int64, description: String, proposedName: String?, modelKind: String, inheritedFromFileID: Int64? = nil) {
         self.fileID = fileID
         self.description = description
         self.proposedName = proposedName
         self.modelKind = modelKind
+        self.inheritedFromFileID = inheritedFromFileID
     }
 }
 

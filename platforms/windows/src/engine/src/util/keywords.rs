@@ -37,12 +37,14 @@ pub(crate) fn extract(text: &str) -> Vec<(String, f32)> {
     // RAKE word scoring: degree = total co-occurrence count (Σ phrase length),
     // freq = how often the word appears, score(word) = degree / freq.
     let mut word_freq: HashMap<String, u32> = HashMap::new();
-    let mut word_degree: HashMap<String, u32> = HashMap::new();
+    let mut word_degree: HashMap<String, u64> = HashMap::new();
     for phrase in &phrases {
-        let n = phrase.len() as u32;
+        let n = phrase.len() as u64;
         for w in phrase {
-            *word_freq.entry(w.clone()).or_insert(0) += 1;
-            *word_degree.entry(w.clone()).or_insert(0) += n;
+            let freq = word_freq.entry(w.clone()).or_insert(0);
+            *freq = freq.saturating_add(1);
+            let degree = word_degree.entry(w.clone()).or_insert(0);
+            *degree = degree.saturating_add(n);
         }
     }
 

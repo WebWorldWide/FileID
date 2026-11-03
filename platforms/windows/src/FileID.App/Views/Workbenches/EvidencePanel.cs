@@ -30,7 +30,7 @@ internal sealed class EvidencePanel : StackPanel
         _open.Click += async (_, _) =>
         {
             try { await OpenAsync(); }
-            catch (Exception) { _status("This catalog file is offline, unavailable, or cannot be opened."); }
+            catch (Exception) { _status("This file can't be opened. Its drive may be disconnected."); }
         };
         _reveal = new Button { Content = "Show in Explorer", IsEnabled = false };
         _reveal.Click += (_, _) => DebugLog.SafeRun("Evidence.Reveal", () =>
@@ -43,15 +43,27 @@ internal sealed class EvidencePanel : StackPanel
     }
 
     public static string Label(CatalogHit hit) =>
-        $"{hit.Path}\n{(hit.Kind == "sampledFrame" ? "Unverified sampled frame" : hit.Kind)}"
+        $"{hit.Path}\n{KindLabel(hit.Kind)}"
         + (hit.StartSeconds is { } seconds ? $" · {seconds:0.0} s" : "")
         + (hit.Page is { } page ? $" · Page {page}" : "") + $"\n{hit.Text}";
+
+    private static string KindLabel(string kind) => kind switch
+    {
+        "sampledFrame" => "Video frame, not checked",
+        "chapter" => "Chapter",
+        "passage" => "Speech or text",
+        "person" => "Person",
+        "documentText" => "Text in document",
+        "ocrText" => "Text in image",
+        "handwrittenText" => "Handwritten text",
+        _ => kind,
+    };
 
     public void Select(CatalogHit? hit)
     {
         Stop();
         _hit = hit;
-        _label.Text = hit is null ? "Select catalog evidence." : Label(hit);
+        _label.Text = hit is null ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : Label(hit);
         _open.IsEnabled = hit is not null;
         _reveal.IsEnabled = hit is not null;
         _open.Content = hit is null || !IsMedia(hit.Path)
@@ -76,7 +88,7 @@ internal sealed class EvidencePanel : StackPanel
         var hit = _hit;
         if (hit is null) return;
         var revision = _revision;
-        if (!File.Exists(hit.Path)) { _status("This catalog file is offline or unavailable."); return; }
+        if (!File.Exists(hit.Path)) { _status("This file can't be found. Its drive may be disconnected."); return; }
         if (IsMedia(hit.Path))
         {
             double seconds = hit.StartSeconds is { } s && double.IsFinite(s) && s >= 0 ? s : 0;

@@ -1,7 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
-    OnboardingSplash — 6-step pipeline diagram on the empty Detail when no
-    folder is picked.
+    OnboardingSplash — the "How it works" first-run page on the empty Detail
+    when no folder is chosen (macOS Detail.swift EmptyState).
 
     All FontIcon glyphs use numeric XML escapes so the bytes survive
     encoding pipelines.
@@ -14,21 +14,23 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid Padding="60,80">
-        <StackPanel HorizontalAlignment="Center"
-                    VerticalAlignment="Center"
-                    Spacing="24"
-                    MaxWidth="560">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Padding="60,60"
+                    HorizontalAlignment="Center"
+                    Spacing="20"
+                    MaxWidth="620">
 
-            <StackPanel Spacing="8" HorizontalAlignment="Center">
-                <!-- Rainbow-shimmering title — 1:1 with macOS Detail.swift:159-178.
+            <StackPanel Spacing="8">
+                <TextBlock Text="FILEID / GET STARTED"
+                           Style="{StaticResource ShellSectionLabelStyle}" />
+                <!-- Rainbow-shimmering title — 1:1 with macOS Detail.swift.
                      The LinearGradientBrush's EndPoint is animated by code-behind
                      over 12 s; ReducedMotion freezes it on solid gold. -->
                 <TextBlock x:Name="TitleText"
                            Text="FileID"
+                           FontFamily="{StaticResource DisplayFontFamily}"
                            FontSize="56"
                            FontWeight="Bold"
-                           HorizontalAlignment="Center"
                            AutomationProperties.HeadingLevel="Level1">
                     <TextBlock.Foreground>
                         <LinearGradientBrush x:Name="TitleBrush"
@@ -42,151 +44,264 @@
                         </LinearGradientBrush>
                     </TextBlock.Foreground>
                 </TextBlock>
-                <TextBlock Text="On-device AI file organization."
-                           Style="{StaticResource SubtitleTextBlockStyle}"
-                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                           HorizontalAlignment="Center" />
+                <TextBlock Text="Organizes your photos, videos and documents. Everything runs on this PC, and your files never leave it."
+                           FontFamily="{StaticResource BodyFontFamily}"
+                           FontSize="15"
+                           Foreground="{ThemeResource Text2Brush}"
+                           TextWrapping="Wrap" />
             </StackPanel>
 
-            <!-- Pick a folder CTA — mirrors macOS Detail.swift:208-219 "Pick a folder"
-                 button. Ctrl+O accelerator wired in code-behind. -->
-            <Button x:Name="PickFolderButton"
-                    HorizontalAlignment="Center"
-                    Padding="18,10"
-                    CornerRadius="10"
-                    Background="{ThemeResource GoldBrush}"
-                    Foreground="Black"
-                    Click="OnPickFolderClicked"
-                    AutomationProperties.Name="Pick a folder"
-                    AutomationProperties.HelpText="Choose a library folder to scan (Ctrl+O)">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <FontIcon Glyph="&#xE8B7;" FontSize="14" Foreground="Black"
-                              AutomationProperties.AccessibilityView="Raw" />
-                    <TextBlock Text="Pick a folder" FontWeight="SemiBold" />
+            <Border CornerRadius="{StaticResource CornerRadiusL}"
+                    Background="{StaticResource PanelBrush}"
+                    BorderBrush="{ThemeResource HairlineBrush}"
+                    BorderThickness="1">
+                <StackPanel>
+                    <Border Padding="14,10"
+                            Background="{StaticResource PanelHeaderBrush}"
+                            BorderBrush="{ThemeResource HairlineStrongBrush}"
+                            BorderThickness="0,0,0,1">
+                        <TextBlock Text="How it works"
+                                   FontFamily="{StaticResource BodyFontFamily}"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Foreground="{ThemeResource Text1Brush}"
+                                   AutomationProperties.HeadingLevel="Level2" />
+                    </Border>
+                    <Grid Padding="14,10"
+                          ColumnSpacing="14"
+                          BorderBrush="{ThemeResource HairlineSoftBrush}"
+                          BorderThickness="0,0,0,1"
+                          AutomationProperties.Name="Step 1: Scan a folder. FileID reads each file, tags what's in your photos and finds faces. Nothing is moved or changed.">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="18"
+                                Height="18"
+                                Margin="0,1,0,0"
+                                VerticalAlignment="Top"
+                                CornerRadius="{StaticResource CornerRadiusS}"
+                                BorderBrush="{StaticResource GoldBrush}"
+                                BorderThickness="1">
+                            <TextBlock Text="1"
+                                       FontFamily="{StaticResource MonoFontFamily}"
+                                       FontSize="10.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource GoldBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Scan a folder"
+                                           FontFamily="{StaticResource BodyFontFamily}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="{ThemeResource Text1Brush}" />
+                                <TextBlock Text="LIBRARY"
+                                           Style="{StaticResource ShellMetaTextStyle}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="FileID reads each file, tags what's in your photos and finds faces. Nothing is moved or changed."
+                                       FontFamily="{StaticResource BodyFontFamily}"
+                                       FontSize="13"
+                                       Foreground="{ThemeResource Text3Brush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Padding="14,10"
+                          ColumnSpacing="14"
+                          BorderBrush="{ThemeResource HairlineSoftBrush}"
+                          BorderThickness="0,0,0,1"
+                          AutomationProperties.Name="Step 2: Name the people. Faces are grouped by person. Type a name once and FileID finds that person everywhere.">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="18"
+                                Height="18"
+                                Margin="0,1,0,0"
+                                VerticalAlignment="Top"
+                                CornerRadius="{StaticResource CornerRadiusS}"
+                                BorderBrush="{StaticResource GoldBrush}"
+                                BorderThickness="1">
+                            <TextBlock Text="2"
+                                       FontFamily="{StaticResource MonoFontFamily}"
+                                       FontSize="10.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource GoldBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Name the people"
+                                           FontFamily="{StaticResource BodyFontFamily}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="{ThemeResource Text1Brush}" />
+                                <TextBlock Text="PEOPLE"
+                                           Style="{StaticResource ShellMetaTextStyle}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="Faces are grouped by person. Type a name once and FileID finds that person everywhere."
+                                       FontFamily="{StaticResource BodyFontFamily}"
+                                       FontSize="13"
+                                       Foreground="{ThemeResource Text3Brush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Padding="14,10"
+                          ColumnSpacing="14"
+                          BorderBrush="{ThemeResource HairlineSoftBrush}"
+                          BorderThickness="0,0,0,1"
+                          AutomationProperties.Name="Step 3: Describe files (optional). A local AI writes a sentence about each file and suggests a clearer name. You approve every rename.">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="18"
+                                Height="18"
+                                Margin="0,1,0,0"
+                                VerticalAlignment="Top"
+                                CornerRadius="{StaticResource CornerRadiusS}"
+                                BorderBrush="{StaticResource GoldBrush}"
+                                BorderThickness="1">
+                            <TextBlock Text="3"
+                                       FontFamily="{StaticResource MonoFontFamily}"
+                                       FontSize="10.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource GoldBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Describe files (optional)"
+                                           FontFamily="{StaticResource BodyFontFamily}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="{ThemeResource Text1Brush}" />
+                                <TextBlock Text="DESCRIBE FILES"
+                                           Style="{StaticResource ShellMetaTextStyle}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="A local AI writes a sentence about each file and suggests a clearer name. You approve every rename."
+                                       FontFamily="{StaticResource BodyFontFamily}"
+                                       FontSize="13"
+                                       Foreground="{ThemeResource Text3Brush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Padding="14,10"
+                          ColumnSpacing="14"
+                          BorderBrush="{ThemeResource HairlineSoftBrush}"
+                          BorderThickness="0,0,0,1"
+                          AutomationProperties.Name="Step 4: Search and ask. Find a photo, video or document by what's in it, or ask a question in Chat.">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="18"
+                                Height="18"
+                                Margin="0,1,0,0"
+                                VerticalAlignment="Top"
+                                CornerRadius="{StaticResource CornerRadiusS}"
+                                BorderBrush="{StaticResource GoldBrush}"
+                                BorderThickness="1">
+                            <TextBlock Text="4"
+                                       FontFamily="{StaticResource MonoFontFamily}"
+                                       FontSize="10.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource GoldBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Search and ask"
+                                           FontFamily="{StaticResource BodyFontFamily}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="{ThemeResource Text1Brush}" />
+                                <TextBlock Text="SEARCH &amp; MOMENTS · CHAT"
+                                           Style="{StaticResource ShellMetaTextStyle}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="Find a photo, video or document by what's in it, or ask a question in Chat."
+                                       FontFamily="{StaticResource BodyFontFamily}"
+                                       FontSize="13"
+                                       Foreground="{ThemeResource Text3Brush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid Padding="14,10"
+                          ColumnSpacing="14"
+                          BorderBrush="{ThemeResource HairlineSoftBrush}"
+                          BorderThickness="0"
+                          AutomationProperties.Name="Step 5: Tidy up. Move extra copies to Trash and preview a tidier folder layout before anything moves.">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="18"
+                                Height="18"
+                                Margin="0,1,0,0"
+                                VerticalAlignment="Top"
+                                CornerRadius="{StaticResource CornerRadiusS}"
+                                BorderBrush="{StaticResource GoldBrush}"
+                                BorderThickness="1">
+                            <TextBlock Text="5"
+                                       FontFamily="{StaticResource MonoFontFamily}"
+                                       FontSize="10.5"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource GoldBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center" />
+                        </Border>
+                        <StackPanel Grid.Column="1" Spacing="3">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Tidy up"
+                                           FontFamily="{StaticResource BodyFontFamily}"
+                                           FontSize="14"
+                                           FontWeight="SemiBold"
+                                           Foreground="{ThemeResource Text1Brush}" />
+                                <TextBlock Text="DUPLICATES · ORGANIZE FOLDERS"
+                                           Style="{StaticResource ShellMetaTextStyle}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center" />
+                            </StackPanel>
+                            <TextBlock Text="Move extra copies to Trash and preview a tidier folder layout before anything moves."
+                                       FontFamily="{StaticResource BodyFontFamily}"
+                                       FontSize="13"
+                                       Foreground="{ThemeResource Text3Brush}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Grid>
                 </StackPanel>
-            </Button>
+            </Border>
 
-            <StackPanel Spacing="10">
-                <!-- Step 1 — Pick a folder (current next action, gold accent) -->
-                <Border Padding="16,14"
-                        CornerRadius="12"
-                        BorderBrush="{ThemeResource GoldSelectedStrokeBrush}"
-                        BorderThickness="1"
-                        Background="{ThemeResource GoldSelectedBackgroundBrush}"
-                        AutomationProperties.Name="Step 1: Pick a folder. Choose a library on your machine. FileID won't touch the files.">
-                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE8B7;" FontSize="20" Foreground="{ThemeResource GoldBrush}" />
-                        <StackPanel Spacing="3" VerticalAlignment="Center">
-                            <TextBlock Text="1.   Pick a folder" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="Choose a library on your machine. FileID won't touch the files."
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="12">
+                <Button x:Name="PickFolderButton"
+                        Style="{StaticResource ShellPrimaryButtonStyle}"
+                        Click="OnPickFolderClicked"
+                        AutomationProperties.Name="Choose a folder to scan"
+                        AutomationProperties.HelpText="Choose a folder for FileID to scan (Ctrl+O). Nothing in it is moved or changed.">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon Glyph="&#xE8F4;" FontSize="13"
+                                  AutomationProperties.AccessibilityView="Raw" />
+                        <TextBlock Text="Choose a folder to scan" />
                     </StackPanel>
-                </Border>
-
-                <!-- Step 2 — Scan -->
-                <Border Padding="16,14"
-                        CornerRadius="12"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        AutomationProperties.Name="Step 2: Scan. FileID reads every image, video, PDF, and document inside.">
-                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE773;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <StackPanel Spacing="3" VerticalAlignment="Center">
-                            <TextBlock Text="2.   Scan" Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="FileID reads every image, video, PDF, and document inside."
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <!-- Step 3 — Group people -->
-                <Border Padding="16,14"
-                        CornerRadius="12"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        AutomationProperties.Name="Step 3: Group people. Faces cluster into cards. Name them once and they stay named.">
-                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE716;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <StackPanel Spacing="3" VerticalAlignment="Center">
-                            <TextBlock Text="3.   Group people" Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="Faces cluster into cards. Name them once and they stay named."
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <!-- Step 4 — Find duplicates -->
-                <Border Padding="16,14"
-                        CornerRadius="12"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        AutomationProperties.Name="Step 4: Find duplicates. Visually-similar files get grouped. Pick the keepers, trash the rest.">
-                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE74D;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <StackPanel Spacing="3" VerticalAlignment="Center">
-                            <TextBlock Text="4.   Find duplicates" Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="Visually-similar files get grouped. Pick the keepers, trash the rest."
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <!-- Step 5 — Deep Analyze (AI accent) -->
-                <Border Padding="16,14"
-                        CornerRadius="12"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        AutomationProperties.Name="Step 5: Deep Analyze. A local vision-language model writes captions and proposes filenames.">
-                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xE945;" FontSize="20" Foreground="{ThemeResource AiBrush}" />
-                        <StackPanel Spacing="3" VerticalAlignment="Center">
-                            <TextBlock Text="5.   Deep Analyze" Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="A local vision-language model writes captions and proposes filenames."
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <!-- Step 6 — Reorganize -->
-                <Border Padding="16,14"
-                        CornerRadius="12"
-                        BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
-                        BorderThickness="1"
-                        Background="{ThemeResource ControlFillColorDefaultBrush}"
-                        AutomationProperties.Name="Step 6: Reorganize. Folder reorganization previews as shortcuts before anything moves.">
-                    <StackPanel Orientation="Horizontal" Spacing="14" VerticalAlignment="Center">
-                        <FontIcon Glyph="&#xED25;" FontSize="20" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        <StackPanel Spacing="3" VerticalAlignment="Center">
-                            <TextBlock Text="6.   Reorganize" Style="{StaticResource BodyStrongTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="Folder reorganization previews as shortcuts before anything moves."
-                                       Style="{StaticResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
+                </Button>
+                <TextBlock Text="Or drag a folder onto this window (Ctrl+O)."
+                           Style="{StaticResource ShellMetaTextStyle}"
+                           VerticalAlignment="Center"
+                           TextWrapping="Wrap" />
             </StackPanel>
-
         </StackPanel>
-    </Grid>
+    </ScrollViewer>
 </UserControl>

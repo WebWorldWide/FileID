@@ -186,7 +186,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         {
             InstallCudaLlamaButton.Content = "Installed";
             InstallCudaLlamaButton.IsEnabled = false;
-            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp is installed. Deep Analyze uses it on the next run.";
+            CudaLlamaStatusText.Text = "✓ CUDA llama.cpp is installed. Describe Files uses it on the next run.";
         }
         // Gate on the ORT CUDA provider (the pack that actually enables the
         // CUDA EP); cuDNN alone never flipped scanning off DirectML.
@@ -765,7 +765,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
     {
         Services.ModelInstallStatus.Downloading => "Cancel",
         Services.ModelInstallStatus.Failed => "Retry",
-        _ => "Install",
+        _ => "Download",
     };
 
     // Sticky once started — see WelcomeSheet.ShowRateEta. Avoids flapping the
@@ -849,7 +849,7 @@ public sealed partial class SettingsView : UserControl, INotifyPropertyChanged
         catch (Exception ex)
         {
             DebugLog.Warn("Verify cuDNN failed: " + ex.Message);
-            CudnnDiagnosticsText.Text = "Couldn't re-probe (engine not ready): " + ex.Message;
+            CudnnDiagnosticsText.Text = "Couldn't check: " + ex.Message;
             CudnnDiagnosticsText.Visibility = Visibility.Visible;
         }
         finally

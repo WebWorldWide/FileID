@@ -1,6 +1,7 @@
 // RAM++ (Recognize Anything Plus) multi-label image tagger — Swin-Large @ 384px,
-// 4585-tag English vocabulary, Apache-2.0. Run via ONNX Runtime with the CoreML
-// execution provider (ANE/GPU on Apple Silicon). 1:1 port of the Windows engine
+// 4585-tag English vocabulary, Apache-2.0. Runs on the GPU through MLX (RamPlusMLX)
+// when the Metal library is present, else ONNX Runtime with the CoreML execution
+// provider (FILEID_RAMPLUS_BACKEND=onnx forces it). 1:1 port of the Windows engine
 // reference (models/ram_plus.rs) so macOS tags match the Windows commercial-clean
 // stack instead of the weaker Apple Vision classifier.
 //
@@ -28,7 +29,7 @@ public final class RamPlusService: @unchecked Sendable {
     // Defaults mirror ram_plus.rs (DEFAULT_THRESHOLD / DEFAULT_MAX_TAGS /
     // DEFAULT_PRECISION_FLOOR). Env overrides match the Windows knobs so a
     // threshold sweep behaves identically on both platforms.
-    private static let inputSize = 384
+    static let inputSize = 384
     private static let defaultThreshold: Float = 0.68
     private static let defaultMaxTags = 8
     private static let defaultPrecisionFloor: Float = 0.62
@@ -36,10 +37,19 @@ public final class RamPlusService: @unchecked Sendable {
     private static let mean: [Float] = [0.485, 0.456, 0.406]
     private static let std: [Float] = [0.229, 0.224, 0.225]
     // Built-in suppress list — byte-identical to ram_plus.rs SUPPRESSED_TAGS.
-    private static let suppressedBuiltin: Set<String> = [
+    // The second group was measured on 100 photos from the owner's camera
+    // library (2026-10-21): colours, body parts and "person/play/game" were
+    // 93 of 790 tags and never helped search.
+    static let suppressedBuiltin: Set<String> = [
         "image", "photo", "photograph", "photography", "picture", "face", "catch",
         "stand", "sit", "lay", "pose", "wear",
+        "person", "people", "hair", "head", "hand", "play", "game", "make", "fill", "dark",
+        "blue", "red", "white", "black", "green", "brown", "yellow", "pink", "gray", "grey", "purple",
     ]
+    /// Generic people words; at most one survives per image (the most likely).
+    static let peopleWords: Set<String> = ["man", "woman", "boy", "girl", "child", "couple"]
+    /// A broader tag dropped when its more specific partner is also present.
+    static let redundantWith: [String: String] = ["goggles": "sunglasses"]
 
     private let lock = NSLock()
     private let loadLock = NSLock()
@@ -52,6 +62,10 @@ public final class RamPlusService: @unchecked Sendable {
     private var precisionFloor: Float = RamPlusService.defaultPrecisionFloor
     private var maxTags: Int = RamPlusService.defaultMaxTags
     private var suppressExtra: Set<String> = []
+    private var gpuModel: RamPlusMLX?
+    private var gpuBatcher: GPURequestBatcher?
+    private var gpuFailed = false
+    private static let gpuMaxBatch = 8
     // Match ArcFace's ANE-thrash cap: defaults to 4, raise on high-core Macs via FILEID_INFERENCE_CONCURRENCY.
     private static let inferenceConcurrency: Int =
         ProcessInfo.processInfo.environment["FILEID_INFERENCE_CONCURRENCY"]
@@ -81,15 +95,10 @@ public final class RamPlusService: @unchecked Sendable {
     /// back to the CLIP/Vision scene tags, so tagging still works without RAM++.
     @discardableResult
     public func load() -> Bool {
-        lock.lock()
-        if session != nil, !tags.isEmpty { lock.unlock(); return true }
-        lock.unlock()
-
+        if isReady { return true }
         loadLock.lock()
         defer { loadLock.unlock() }
-        lock.lock()
-        if session != nil, !tags.isEmpty { lock.unlock(); return true }
-        lock.unlock()
+        if isReady { return true }
 
         guard Self.isInstalled else {
             JSONLog.shared.warn(ev: "ramplus_model_missing",
@@ -97,7 +106,47 @@ public final class RamPlusService: @unchecked Sendable {
                                 error: "RAM++ ONNX/tag list not present; tagging falls back to CLIP scene tags")
             return false
         }
+        guard loadVocabulary() else { return false }
+        if Self.useGPU, loadGPU() { return true }
+        return loadSession()
+    }
 
+    /// MLX aborts the process without its Metal library, so the GPU path also
+    /// requires the library beside the engine; otherwise ONNX Runtime runs.
+    static let useGPU = ProcessInfo.processInfo.environment["FILEID_RAMPLUS_BACKEND"] != "onnx"
+        && DeepAnalyzeCapability.metallibPresent()
+
+    func loadGPU() -> Bool {
+        lock.lock()
+        if gpuBatcher != nil { lock.unlock(); return true }
+        if gpuFailed { lock.unlock(); return false }
+        lock.unlock()
+        let started = CFAbsoluteTimeGetCurrent()
+        do {
+            let model = try RamPlusMLX(onnxURL: Self.onnxURL)
+            let batcher = GPURequestBatcher(label: "fileid.ramplus.gpu", maxBatch: Self.gpuMaxBatch, gather: .milliseconds(5)) {
+                model.logits(pixels: $0, count: $1)
+            }
+            lock.lock()
+            gpuModel = model
+            gpuBatcher = batcher
+            lock.unlock()
+            JSONLog.shared.info(ev: "ramplus_model_loaded",
+                                extra: ["backend": AnyCodable("mlx"), "classes": AnyCodable(model.classCount),
+                                        "ms": AnyCodable((CFAbsoluteTimeGetCurrent() - started) * 1000)])
+            return true
+        } catch {
+            lock.lock(); gpuFailed = true; lock.unlock()
+            JSONLog.shared.warn(ev: "ramplus_gpu_unavailable", error: "\(error)")
+            return false
+        }
+    }
+
+    private func loadVocabulary() -> Bool {
+        lock.lock()
+        let loaded = !tags.isEmpty
+        lock.unlock()
+        if loaded { return true }
         do {
             let tagsText = try String(contentsOf: Self.tagsURL, encoding: .utf8)
             // Grapheme-safe newline split. The installed sidecars use CRLF, and
@@ -157,9 +206,31 @@ public final class RamPlusService: @unchecked Sendable {
                 }
             }
 
+
             lock.lock()
-            let cachedEnv = self.env
+            self.tags = trimmedTags
+            self.perClassThreshold = perClass
+            self.globalThreshold = globalT
+            self.precisionFloor = floor
+            self.suppressExtra = extra
             lock.unlock()
+            JSONLog.shared.info(ev: "ramplus_vocabulary_loaded",
+                                extra: ["tags": AnyCodable(trimmedTags.count),
+                                        "perClassThresholds": AnyCodable(perClass != nil)])
+            return true
+        } catch {
+            JSONLog.shared.error(ev: "ramplus_model_load_failed",
+                                 path: redactPathForLog(Self.tagsURL.path), error: "\(error)")
+            return false
+        }
+    }
+
+    func loadSession() -> Bool {
+        lock.lock()
+        if session != nil { lock.unlock(); return true }
+        let cachedEnv = self.env
+        lock.unlock()
+        do {
             let ortEnv: ORTEnv
             if let existing = cachedEnv { ortEnv = existing }
             else { ortEnv = try ORTEnv(loggingLevel: ORTLoggingLevel.warning) }
@@ -188,16 +259,9 @@ public final class RamPlusService: @unchecked Sendable {
             self.env = ortEnv
             self.session = ortSession
             self.inputName = firstInput
-            self.tags = trimmedTags
-            self.perClassThreshold = perClass
-            self.globalThreshold = globalT
-            self.precisionFloor = floor
-            self.suppressExtra = extra
             lock.unlock()
             JSONLog.shared.info(ev: "ramplus_model_loaded",
-                                extra: ["tags": AnyCodable(trimmedTags.count),
-                                        "perClassThresholds": AnyCodable(perClass != nil),
-                                        "input": AnyCodable(firstInput)])
+                                extra: ["backend": AnyCodable("onnx"), "input": AnyCodable(firstInput)])
             return true
         } catch {
             JSONLog.shared.error(ev: "ramplus_model_load_failed",
@@ -208,7 +272,7 @@ public final class RamPlusService: @unchecked Sendable {
 
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
-        return session != nil
+        return !tags.isEmpty && (session != nil || gpuBatcher != nil)
     }
 
     // MARK: - Inference
@@ -217,11 +281,38 @@ public final class RamPlusService: @unchecked Sendable {
     /// thresholded, sorted desc, capped at maxTags. Empty if not loaded / on error.
     public func tag(_ image: CGImage) -> [(tag: String, score: Float)] {
         lock.lock()
+        let batcher = gpuBatcher
+        let tagCount = tags.count
+        lock.unlock()
+        guard tagCount > 0, let tensor = Self.imageTensor(image) else { return [] }
+        let output = if let batcher { batcher.submit(tensor) } else { onnxLogits(tensor) }
+        guard let logits = output else { return [] }
+        guard logits.count == tagCount else {
+            JSONLog.shared.error(ev: "ramplus_inference_failed",
+                                 error: "RAM++ output dim \(logits.count) != tag list \(tagCount) — ONNX and tag list out of sync")
+            return []
+        }
+        return selectTags(logits)
+    }
+
+    var mlxModel: RamPlusMLX? {
+        lock.lock(); defer { lock.unlock() }
+        return gpuModel
+    }
+
+    func gpuLogits(_ tensor: [Float]) -> [Float]? {
+        lock.lock()
+        let model = gpuModel
+        lock.unlock()
+        return model?.logits(pixels: tensor, count: 1).first
+    }
+
+    func onnxLogits(_ tensor: [Float]) -> [Float]? {
+        lock.lock()
         let s = session
         let name = inputName
         lock.unlock()
-        guard let s, let name else { return [] }
-        guard let tensor = makeImageNetTensor(image, side: Self.inputSize) else { return [] }
+        guard let s, let name else { return nil }
 
         inferenceSem.wait()
         defer { inferenceSem.signal() }
@@ -235,26 +326,12 @@ public final class RamPlusService: @unchecked Sendable {
             let outputs = try s.run(withInputs: [name: value],
                                     outputNames: Set(try s.outputNames()),
                                     runOptions: nil)
-            guard let first = outputs.values.first else { return [] }
+            guard let first = outputs.values.first else { return nil }
             let outData = try first.tensorData() as Data
-            let count = outData.count / MemoryLayout<Float>.stride
-            var logits = [Float](repeating: 0, count: count)
-            outData.withUnsafeBytes { raw in
-                guard let src = raw.baseAddress?.assumingMemoryBound(to: Float.self) else { return }
-                for i in 0..<count { logits[i] = src[i] }
-            }
-            lock.lock()
-            let tagList = tags
-            lock.unlock()
-            guard logits.count == tagList.count else {
-                JSONLog.shared.error(ev: "ramplus_inference_failed",
-                                     error: "RAM++ output dim \(logits.count) != tag list \(tagList.count) — ONNX and tag list out of sync")
-                return []
-            }
-            return selectTags(logits)
+            return outData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         } catch {
             JSONLog.shared.error(ev: "ramplus_inference_failed", error: "\(error)")
-            return []
+            return nil
         }
     }
 
@@ -274,7 +351,7 @@ public final class RamPlusService: @unchecked Sendable {
 
     // MARK: - Selection (port of ram_plus.rs select_tags)
 
-    private func selectTags(_ logits: [Float]) -> [(tag: String, score: Float)] {
+    func selectTags(_ logits: [Float]) -> [(tag: String, score: Float)] {
         lock.lock()
         let tagList = tags
         let perClass = perClassThreshold
@@ -294,8 +371,33 @@ public final class RamPlusService: @unchecked Sendable {
         }
         // Sort by probability descending (total order, matches Rust total_cmp).
         hits.sort { $0.1 > $1.1 }
-        if hits.count > cap { hits.removeLast(hits.count - cap) }
-        return hits.map { (tagList[$0.0], $0.1) }
+        var refined = Self.refine(hits.map { (tagList[$0.0], $0.1) })
+        if refined.count > cap { refined.removeLast(refined.count - cap) }
+        return refined
+    }
+
+    /// Collapse redundancy before the cap so freed slots go to useful tags:
+    /// "bat" goes when "baseball bat" is present (a tag whose last word is
+    /// another tag), `redundantWith` pairs collapse, and only the strongest
+    /// people word survives. Input is sorted by score. Mirrors ram_plus.rs
+    /// `refine_tags`.
+    static func refine(_ hits: [(tag: String, score: Float)]) -> [(tag: String, score: Float)] {
+        let names = Set(hits.map { $0.tag.lowercased() })
+        let heads = Set(names.compactMap { name -> String? in
+            guard let space = name.lastIndex(of: " ") else { return nil }
+            return String(name[name.index(after: space)...])
+        })
+        var keptPeopleWord = false
+        return hits.filter { hit in
+            let name = hit.tag.lowercased()
+            if !name.contains(" "), heads.contains(name) { return false }
+            if let partner = redundantWith[name], names.contains(partner) { return false }
+            if peopleWords.contains(name) {
+                if keptPeopleWord { return false }
+                keptPeopleWord = true
+            }
+            return true
+        }
     }
 
     private static func isSuppressed(_ tag: String, extra: Set<String>) -> Bool {
@@ -312,7 +414,8 @@ public final class RamPlusService: @unchecked Sendable {
     /// normalization: v = pixel/255; out = (v - mean[c]) / std[c]. Layout
     /// [1, 3, side, side], C-major. CGContext bilinear (.high) ≈ the Windows
     /// Triangle resampling; tag output is robust to the minor resampler delta.
-    private func makeImageNetTensor(_ src: CGImage, side: Int) -> [Float]? {
+    static func imageTensor(_ src: CGImage) -> [Float]? {
+        let side = inputSize
         let bytesPerPixel = 4
         let bytesPerRow = side * bytesPerPixel
         var rgba = [UInt8](repeating: 0, count: side * side * bytesPerPixel)
@@ -328,7 +431,6 @@ public final class RamPlusService: @unchecked Sendable {
 
         let pixelCount = side * side
         var planes = [Float](repeating: 0, count: pixelCount * 3)
-        let mean = Self.mean, std = Self.std
         for i in 0..<pixelCount {
             let r = (Float(rgba[i * 4 + 0]) / 255.0 - mean[0]) / std[0]
             let g = (Float(rgba[i * 4 + 1]) / 255.0 - mean[1]) / std[1]

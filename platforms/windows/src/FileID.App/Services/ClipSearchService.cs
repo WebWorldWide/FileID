@@ -205,7 +205,7 @@ internal sealed class ClipSearchService : IDisposable, INotifyPropertyChanged
             // caller (LibraryView search) treats null as "fall through to
             // FTS5" so the user still gets results.
             DebugLog.Warn("[CLIP] embed-await: engine respawned; returning null.");
-            LastSearchError = "Search paused — engine restarting.";
+            LastSearchError = "Search paused while FileID restarts. Try again in a moment.";
             return null;
         }
         catch (Exception ex)

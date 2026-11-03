@@ -24,10 +24,15 @@
 //             decode (best-effort; needs the HEVC decoder plugin
 //             `libheif-plugin-libde265`, else the file is cleanly skipped)
 //
-// macOS / other Unix keep a graceful stub
-// (`cfg(all(not(windows), not(target_os = "linux")))`) so the macOS build
-// still compiles. `thumbnail` has no non-Windows caller (each app thumbnails
-// itself), so it stays a stub on every non-Windows OS.
+// macOS (`cfg(all(not(windows), not(target_os = "linux")))`, where the CLI
+// and TUI run this engine) uses system tools where they always exist:
+//
+//   reveal  → `open -R`
+//   heic    → `sips` (ImageIO) → temp PNG → `image` decode
+//   video   → FileID's vetted FFmpeg runtime, as on Linux
+//   ocr     → unavailable: empty text, one notice per process
+//   trash / tags → refuse with a message naming the macOS app; the Rust
+//             engine has no Finder Trash or Finder-tag writer
 
 #[cfg(windows)] pub mod tags;
 #[cfg(windows)] pub mod thumbnail;
@@ -456,10 +461,23 @@ pub mod reveal {
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub mod reveal {
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use std::path::Path;
-    pub fn reveal(_path: &Path) -> Result<()> {
-        anyhow::bail!("shell::reveal::reveal not implemented on this platform")
+    use std::process::{Command, Stdio};
+
+    /// Select the file in Finder.
+    pub fn reveal(path: &Path) -> Result<()> {
+        anyhow::ensure!(path.is_absolute(), "reveal needs an absolute path");
+        let status = Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("start Finder reveal")?;
+        anyhow::ensure!(status.success(), "Finder could not reveal the file");
+        Ok(())
     }
 }
 
@@ -617,10 +635,22 @@ pub mod tags {
 pub mod tags {
     use anyhow::Result;
     use std::path::Path;
+    pub const UNSUPPORTED: &str = "Writing tags into files is not supported by the FileID \
+        engine on macOS; tags stay in the FileID catalog (the FileID macOS app writes Finder tags)";
     pub fn write_tags(_path: &Path, _tags: &[String]) -> Result<()> {
-        anyhow::bail!("shell::tags::write_tags not implemented on this platform")
+        anyhow::bail!(UNSUPPORTED)
     }
     pub fn move_sidecar(_old: &Path, _new: &Path) {}
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn write_tags_refuses_with_a_user_facing_reason() {
+            let error = super::write_tags(std::path::Path::new("/tmp/x.jpg"), &["a".into()])
+                .unwrap_err();
+            assert_eq!(error.to_string(), super::UNSUPPORTED);
+        }
+    }
 }
 
 /// Image-rs thumbnails for the Linux app; the WinUI app renders its own.
@@ -1176,10 +1206,94 @@ pub mod trash {
             )
         };
         if result == 0 {
-            Ok(())
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // NFS and some FUSE filesystems reject the flag (EINVAL); kernels
+        // before 3.15 have no renameat2 (ENOSYS).
+        if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::ENOSYS)) {
+            return renameat_no_replace_emulated(source_dir, source, destination_dir, destination);
+        }
+        Err(error)
+    }
+
+    fn stat_at(parent: i32, leaf: &CString) -> std::io::Result<libc::stat> {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let result =
+            unsafe { libc::fstatat(parent, leaf.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) };
+        if result == 0 {
+            Ok(stat)
         } else {
             Err(std::io::Error::last_os_error())
         }
+    }
+
+    /// Directory-relative twin of `util::path_safety::rename_no_replace_emulated`:
+    /// claim the destination with an exclusive create, then rename over that
+    /// empty placeholder only.
+    fn renameat_no_replace_emulated(
+        source_dir: i32,
+        source: &CString,
+        destination_dir: i32,
+        destination: &CString,
+    ) -> std::io::Result<()> {
+        let occupied = || std::io::Error::from_raw_os_error(libc::EEXIST);
+        let source_stat = stat_at(source_dir, source)?;
+        match stat_at(destination_dir, destination) {
+            Ok(existing) => {
+                let same_entry = existing.st_dev == source_stat.st_dev
+                    && existing.st_ino == source_stat.st_ino
+                    && source_stat.st_nlink == 1;
+                if !same_entry {
+                    return Err(occupied());
+                }
+                let result = unsafe {
+                    libc::renameat(source_dir, source.as_ptr(), destination_dir, destination.as_ptr())
+                };
+                return if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+            }
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+            Err(error) => return Err(error),
+        }
+        let fd = unsafe {
+            libc::openat(
+                destination_dir,
+                destination.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600_u32,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let placeholder = unsafe { std::fs::File::from_raw_fd(fd) };
+        let claimed = placeholder.metadata()?;
+        drop(placeholder);
+        let still_claimed = || {
+            use std::os::unix::fs::MetadataExt;
+            stat_at(destination_dir, destination).is_ok_and(|current| {
+                current.st_mode & libc::S_IFMT == libc::S_IFREG
+                    && current.st_size == 0
+                    && current.st_dev == claimed.dev()
+                    && current.st_ino == claimed.ino()
+            })
+        };
+        if !still_claimed() {
+            return Err(occupied());
+        }
+        let result = unsafe {
+            libc::renameat(source_dir, source.as_ptr(), destination_dir, destination.as_ptr())
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if still_claimed() {
+                unsafe {
+                    libc::unlinkat(destination_dir, destination.as_ptr(), 0);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn identity_at(parent: i32, leaf: &CString) -> Result<crate::platform::FileIdentity> {
@@ -1500,6 +1614,28 @@ pub mod trash {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn emulated_directory_relative_rename_never_clobbers() {
+            let base = std::env::temp_dir()
+                .join(format!("fileid-renameat-emulated-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&base).unwrap();
+            let dir = std::fs::File::open(&base).unwrap();
+            let fd = dir.as_raw_fd();
+            let name = |text: &str| CString::new(text).unwrap();
+            std::fs::write(base.join("source"), b"source").unwrap();
+            std::fs::write(base.join("occupant"), b"occupant").unwrap();
+            let error =
+                renameat_no_replace_emulated(fd, &name("source"), fd, &name("occupant")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+            assert_eq!(std::fs::read(base.join("occupant")).unwrap(), b"occupant");
+            renameat_no_replace_emulated(fd, &name("source"), fd, &name("moved")).unwrap();
+            assert_eq!(std::fs::read(base.join("moved")).unwrap(), b"source");
+            assert!(!base.join("source").exists());
+            assert!(renameat_no_replace_emulated(fd, &name("missing"), fd, &name("target")).is_err());
+            assert!(!base.join("target").exists());
+            let _ = std::fs::remove_dir_all(&base);
+        }
 
         #[test]
         fn trashes_file_and_writes_info() {
@@ -1881,8 +2017,12 @@ pub mod trash {
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub mod trash {
     use std::path::{Path, PathBuf};
-    /// Fallback stub: returns all-false so the caller logs failure cleanly
-    /// rather than silently claiming a successful trash.
+
+    pub const UNSUPPORTED: &str = "Moving files to the Trash is not supported by the FileID \
+        engine on macOS; nothing was moved (use the FileID macOS app, or `fileid dedupe --delete` \
+        for permanent removal)";
+
+    /// Returns all-false so callers report failure rather than claim a trash.
     pub fn trash(paths: &[PathBuf]) -> Vec<bool> {
         vec![false; paths.len()]
     }
@@ -1892,7 +2032,24 @@ pub mod trash {
         _original_path: &Path,
         _expected: crate::platform::FileIdentity,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("shell::trash::trash_path_as not implemented on this platform")
+        anyhow::bail!(UNSUPPORTED)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn trash_refuses_with_a_user_facing_reason_and_moves_nothing() {
+            let dir = std::env::temp_dir().join(format!("fileid-mac-trash-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("keep.txt");
+            std::fs::write(&file, b"keep").unwrap();
+            let identity = crate::platform::file_identity(&file).unwrap();
+            assert_eq!(super::trash(std::slice::from_ref(&file)), vec![false]);
+            let error = super::trash_path_as(&file, &file, identity).unwrap_err();
+            assert_eq!(error.to_string(), super::UNSUPPORTED);
+            assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -1946,8 +2103,24 @@ pub mod ocr {
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub mod ocr {
     use anyhow::Result;
+
+    /// No OCR backend ships with the Rust engine on macOS. Empty text keeps
+    /// scans quiet (an error here was logged once per image) while one notice
+    /// says why images have no OCR text.
     pub fn recognize(_rgb: &[u8], _width: u32, _height: u32) -> Result<String> {
-        anyhow::bail!("shell::ocr::recognize not implemented on this platform")
+        static NOTICE: std::sync::Once = std::sync::Once::new();
+        NOTICE.call_once(|| {
+            tracing::info!("OCR is not available in the FileID engine on macOS; images are catalogued without OCR text");
+        });
+        Ok(String::new())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn recognize_returns_empty_text_instead_of_an_error_per_image() {
+            assert_eq!(super::recognize(&[0; 12], 2, 2).unwrap(), "");
+        }
     }
 }
 
@@ -2126,8 +2299,36 @@ pub mod video {
         /// Tightly packed RGB8.
         pub rgb: Vec<u8>,
     }
-    pub fn keyframe_25pct(_path: &Path) -> Result<VideoFrame> {
-        anyhow::bail!("shell::video::keyframe_25pct not implemented on this platform")
+    /// Keyframe at ~25% of duration through FileID's vetted FFmpeg runtime
+    /// (`FILEID_FFMPEG_DIR`, or `media/` beside the engine), as on Linux.
+    pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
+        use anyhow::Context;
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let probe = crate::commands::video_export::analysis_probe(path, &never)
+            .context("video frames need FileID's FFmpeg runtime")?;
+        let (width, height) =
+            crate::commands::video_export::fitted_size(probe.width, probe.height, 1280);
+        let rgb = crate::commands::video_export::frame_rgb(
+            path,
+            (probe.duration * 0.25).max(0.0),
+            width,
+            height,
+            &never,
+        )?;
+        Ok(VideoFrame { width, height, rgb })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn missing_runtime_is_a_clear_error() {
+            if std::env::var_os("FILEID_FFMPEG_DIR").is_some() {
+                return;
+            }
+            let error = super::keyframe_25pct(std::path::Path::new("/nonexistent/clip.mp4"))
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("FFmpeg runtime"), "{error:#}");
+        }
     }
 }
 
@@ -2326,9 +2527,103 @@ pub mod heic {
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
 pub mod heic {
-    use anyhow::Result;
-    use std::path::Path;
-    pub fn decode(_path: &Path) -> Result<(Vec<u8>, u32, u32)> {
-        anyhow::bail!("shell::heic::decode not implemented on this platform")
+    use anyhow::{Context, Result};
+    use std::os::unix::fs::DirBuilderExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const MAX_HEIC_PIXELS: u64 = 50_000_000;
+    const MAX_CONVERTED_PNG_BYTES: u64 = 256 * 1024 * 1024;
+
+    /// HEIC/HEIF decode through the system `sips` tool (ImageIO). The PNG it
+    /// writes lives in a private temp directory removed on every path.
+    pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
+        anyhow::ensure!(path.is_absolute(), "heic decode needs an absolute path");
+        let outputs = TempOutputDir::create()?;
+        let out = outputs.0.join("frame.png");
+        let mut child = Command::new("/usr/bin/sips")
+            .args(["-s", "format", "png"])
+            .arg(path)
+            .arg("--out")
+            .arg(&out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("start sips")?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match child.try_wait().context("wait for sips")? {
+                Some(status) => {
+                    anyhow::ensure!(status.success(), "sips could not convert the image");
+                    break;
+                }
+                None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!("sips timed out converting the image");
+                }
+            }
+        }
+        let size = std::fs::metadata(&out).context("sips produced no output")?.len();
+        anyhow::ensure!(size <= MAX_CONVERTED_PNG_BYTES, "converted image exceeds decode limits");
+        let (width, height) =
+            image::image_dimensions(&out).context("read converted image dimensions")?;
+        anyhow::ensure!(
+            width > 0 && height > 0 && u64::from(width) * u64::from(height) <= MAX_HEIC_PIXELS,
+            "converted image exceeds the pixel limit"
+        );
+        let rgb = image::open(&out).context("decode converted image")?.into_rgb8();
+        let (width, height) = rgb.dimensions();
+        Ok((rgb.into_raw(), width, height))
+    }
+
+    struct TempOutputDir(PathBuf);
+
+    impl TempOutputDir {
+        fn create() -> Result<Self> {
+            let path = std::env::temp_dir()
+                .join(format!("fileid-heic-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .context("create heic output directory")?;
+            Ok(Self(path))
+        }
+    }
+
+    impl Drop for TempOutputDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn decodes_a_heic_written_by_sips() {
+            let dir = std::env::temp_dir().join(format!("fileid-heic-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let png = dir.join("source.png");
+            let heic = dir.join("photo.heic");
+            image::RgbImage::from_pixel(64, 48, image::Rgb([200, 40, 10])).save(&png).unwrap();
+            let converted = std::process::Command::new("/usr/bin/sips")
+                .args(["-s", "format", "heic"])
+                .arg(&png)
+                .arg("--out")
+                .arg(&heic)
+                .output()
+                .is_ok_and(|output| output.status.success() && heic.exists());
+            if converted {
+                let (rgb, width, height) = super::decode(&heic).unwrap();
+                assert_eq!((width, height), (64, 48));
+                assert_eq!(rgb.len(), 64 * 48 * 3);
+                assert!(rgb[0] > 150 && rgb[1] < 100, "colour survived: {:?}", &rgb[..3]);
+            }
+            assert!(super::decode(&dir.join("missing.heic")).is_err());
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }

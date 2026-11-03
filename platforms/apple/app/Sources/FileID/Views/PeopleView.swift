@@ -65,6 +65,8 @@ struct PeopleView: View {
         .onAppear { reload() }
         .onChange(of: store.version) { _, _ in reload() }
         .onChange(of: engine.lastFaceClustering?.durationSeconds) { _, _ in reload() }
+        .onChange(of: activeSheet) { _, sheet in publishSelection(sheet) }
+        .onChange(of: mergeChecked) { _, _ in publishSelection(activeSheet) }
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case .personDetail(let pid):
@@ -569,6 +571,16 @@ struct PeopleView: View {
     }
 
     // MARK: - Reload
+
+    /// The person open in detail, or the people checked for merging, so Chat
+    /// can resolve "this person" and "these people".
+    private func publishSelection(_ sheet: ActiveSheet?) {
+        if case .personDetail(let id) = sheet {
+            ChatHandoff.shared.selectedPersonIDs = [id]
+        } else {
+            ChatHandoff.shared.selectedPersonIDs = mergeChecked.sorted()
+        }
+    }
 
     private func reload() {
         let includeUnknown = showHiddenUnknowns

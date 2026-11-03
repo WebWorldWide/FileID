@@ -53,8 +53,8 @@
             <CheckBox Grid.Row="1"
                       Grid.ColumnSpan="5"
                       x:Name="IsUnknownCheckBox"
-                      Content="Mark this person as unknown"
-                      AutomationProperties.HelpText="Hide this person's name from People suggestions and summaries." />
+                      Content="I don't know who this is"
+                      AutomationProperties.HelpText="Hides this person and leaves them out of descriptions. Their photos stay in the library." />
         </Grid>
 
         <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled">

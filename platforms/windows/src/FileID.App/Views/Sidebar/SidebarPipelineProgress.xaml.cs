@@ -18,11 +18,11 @@ public sealed partial class SidebarPipelineProgress : UserControl
 {
     private static readonly (string Label, int Index)[] Stages =
     {
-        ("Scan",     0),
-        ("Tag",      1),
-        ("Faces",    2),
-        ("Captions", 3),
-        ("Done",     4),
+        ("Find files", 0),
+        ("Tag", 1),
+        ("Faces", 2),
+        ("Describe (optional)", 3),
+        ("Done", 4),
     };
 
     private readonly Border[] _segments = new Border[Stages.Length];

@@ -46,10 +46,16 @@ pub(crate) fn build_with_search_limit<V: Clone + Send + Sync>(points: Vec<(Vec<f
     // entropy seed makes identities hop on every re-cluster. Pin it.
     // A fixed RNG seed does not order instant-distance's parallel insertions.
     // Keep construction local to one worker; queries retain their caller's pool.
-    static BUILDER_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
-    let pool = BUILDER_POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1)
-        .build().expect("HNSW construction worker must be available"));
-    pool.install(|| Builder::default().ef_search(limit).seed(0xF11E_1D00).build(embeds, values))
+    static BUILDER_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    let build = || Builder::default().ef_search(limit).seed(0xF11E_1D00).build(embeds, values);
+    match BUILDER_POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(1).build().ok()) {
+        Some(pool) => pool.install(build),
+        // The OS refused a thread: an unpinned build beats aborting clustering.
+        None => {
+            tracing::warn!("HNSW construction worker unavailable; building on the caller's pool");
+            build()
+        }
+    }
 }
 
 /// Reusable kNN searcher: owns the `instant-distance` scratch buffer so a

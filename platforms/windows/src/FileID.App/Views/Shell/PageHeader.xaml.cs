@@ -71,7 +71,6 @@ public sealed partial class PageHeader : UserControl
             "library" when engine.LastScanProcessedFiles > 0 => $"{engine.LastScanProcessedFiles:N0} files",
             "deepanalyze" when engine.DeepAnalyzeProgress is { } progress => $"{progress.Processed:N0} / {progress.Total:N0}",
             "restructure" => vm.FolderDisplay ?? string.Empty,
-            "settings" => "Windows",
             _ => string.Empty,
         };
         if (PageMetaText.Text != meta)

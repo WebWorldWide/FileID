@@ -673,9 +673,62 @@ struct FaceQualitySuppressionTests {
 
     @Test("env overrides parse + clamp")
     func envKnobsClampAndDefault() {
-        // Defaults when unset (the validated 407→~285 operating point).
+        // Defaults when unset (calibrated on the owner's labelled library, 2026-10-21).
         #expect(FaceClustering.minClusterSizeToKeep == 3)
-        #expect(abs(FaceClustering.soloQualityFloor - 0.12) < 1e-9)
+        #expect(abs(FaceClustering.soloQualityFloor - 0.50) < 1e-9)
+        #expect(abs(FaceClustering.attachMinCosine - 0.55) < 1e-6)
+        #expect(abs(FaceClustering.attachMinMargin - 0.05) < 1e-6)
+    }
+
+    private static func unit(_ v: [Float]) -> [Float] {
+        let n = v.reduce(0) { $0 + $1 * $1 }.squareRoot()
+        return v.map { $0 / n }
+    }
+
+    @Test("held faces attach only to an established, unambiguous person")
+    func attachHeldFaces() {
+        let a = Self.unit([1, 0, 0]), b = Self.unit([0, 1, 0])
+        let vectors: [[Float]] = [a, a, Self.unit([1, 0.05, 0]), b, b, Self.unit([0, 1, 0.05]),
+                                  Self.unit([1, 0.1, 0.1]), Self.unit([1, 1, 0]), Self.unit([0, 0.1, 1]), Self.unit([1, 0.1, 0])]
+        let held = [false, false, false, false, false, false, true, true, true, true]
+        // Faces 6 and 9 come from file 102; 9 shares a photo with cluster 0's face 2.
+        let files: [Int64] = [100, 101, 102, 103, 104, 105, 106, 107, 108, 102]
+        let ids = (1...10).map(Int64.init)
+        let r = FaceClustering.attachHeldFaces(
+            [0: [0, 1, 2], 1: [3, 4, 5]], candidates: [6, 7, 8, 9], vectors: vectors, held: held,
+            fileOf: files, faceIDs: ids, differentPairs: [], minClusterSize: 3, minCosine: 0.55, minMargin: 0.05)
+        #expect(r.clusters[0] == [0, 1, 2, 6], "close + clear margin attaches")
+        #expect(r.clusters[1] == [3, 4, 5], "an equidistant face (7) and a far face (8) stay unsure; 9 shares a photo with cluster 0")
+        #expect(r.attached == 1)
+
+        let blocked = FaceClustering.attachHeldFaces(
+            [0: [0, 1, 2]], candidates: [6], vectors: vectors, held: held, fileOf: files, faceIDs: ids,
+            differentPairs: [.init(7, 1)], minClusterSize: 3, minCosine: 0.55, minMargin: 0.05)
+        #expect(blocked.attached == 0, "a 'different people' verdict blocks attaching")
+
+        let tooSmall = FaceClustering.attachHeldFaces(
+            [0: [0, 1]], candidates: [6], vectors: vectors, held: held, fileOf: files, faceIDs: ids,
+            differentPairs: [], minClusterSize: 3, minCosine: 0.55, minMargin: 0.05)
+        #expect(tooSmall.attached == 0, "a person needs minClusterSize good faces before anything attaches")
+    }
+
+    @Test("two faces in one photo never share a person, even through a bridge")
+    func sameFileCannotLinks() {
+        let a = Self.unit([1, 0]), mid = Self.unit([1, 0.3]), b = Self.unit([1, 0.6])
+        let embeddings = [a, mid, b]
+        let searcher: (Int) -> [(neighbor: Int, similarity: Float)] = { i in
+            (0..<3).filter { $0 != i }.map { j in
+                (j, zip(embeddings[i], embeddings[j]).reduce(0) { $0 + $1.0 * $1.1 })
+            }
+        }
+        let links = FaceClustering.sameFileCannotLinks([7, 8, 7])
+        #expect(links.count == 1 && links[0] == (0, 2))
+        let free = IdentityClustering.cluster(embeddings: embeddings, searcher: searcher,
+                                              params: .init(pass1Cosine: 0.9))
+        #expect(Set(free.clusterIDs).count == 1)
+        let constrained = IdentityClustering.cluster(embeddings: embeddings, searcher: searcher,
+                                                     params: .init(pass1Cosine: 0.9), cannotLinks: links)
+        #expect(constrained.clusterIDs[0] != constrained.clusterIDs[2])
     }
 
 

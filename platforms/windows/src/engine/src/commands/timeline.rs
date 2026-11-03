@@ -264,7 +264,7 @@ pub(crate) fn schedule(job_id: String, sink: Sink, database: Arc<Mutex<Connectio
 }
 
 async fn publish(job_id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) {
-    let jobs = super::catalog::jobs(&database.lock());
+    let jobs = with_db(database, |conn| super::catalog::jobs(conn)).await;
     if let Ok(jobs) = jobs {
         let mut response = super::catalog::response(job_id, "ok", None);
         response.jobs = jobs;
@@ -316,7 +316,8 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     *worker().running.lock() = Some((id.to_owned(), cancel.clone()));
     let frames = frames_root().join(id);
     let outcome = async {
-        let Some(job) = start(&database.lock(), id)? else {
+        let owned = id.to_owned();
+        let Some(job) = with_db(database, move |conn| start(conn, &owned)).await? else {
             return Ok(());
         };
         publish(id, sink, database).await;
@@ -341,28 +342,61 @@ async fn run(id: &str, sink: &Sink, database: &Arc<Mutex<Connection>>) -> bool {
     .await;
     let _ = std::fs::remove_dir_all(&frames);
     *worker().running.lock() = None;
-    {
-        let conn = database.lock();
-        match outcome {
-            Ok(()) => {
-                let _ = conn.execute("UPDATE catalog_jobs SET state='completed',progress=1,updated_at=?1 WHERE id=?2 AND state='running'", params![now(), id]);
+    let terminal = match outcome {
+        Ok(()) => Some(None),
+        Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => None,
+        Err(error) => Some(Some(format!("{error:#}").chars().take(2_000).collect::<String>())),
+    };
+    let owned = id.to_owned();
+    let _ = with_db(database, move |conn| {
+        match terminal {
+            Some(None) => {
+                conn.execute("UPDATE catalog_jobs SET state='completed',progress=1,updated_at=?1 WHERE id=?2 AND state='running'", params![now(), owned])?;
             }
-            Err(error) if error.is::<Interrupted>() || cancel.load(Ordering::Acquire) => {}
-            Err(error) => {
-                let _ = conn.execute(
+            Some(Some(error)) => {
+                conn.execute(
                     "UPDATE catalog_jobs SET state='failed',error=?1,updated_at=?2 WHERE id=?3 AND state='running'",
-                    params![format!("{error:#}").chars().take(2_000).collect::<String>(), now(), id],
-                );
+                    params![error, now(), owned],
+                )?;
             }
+            None => {}
         }
-    }
+        Ok(())
+    })
+    .await;
     publish(id, sink, database).await;
-    database
-        .lock()
-        .query_row("SELECT state FROM catalog_jobs WHERE id=?1", [id], |r| {
-            r.get::<_, String>(0)
-        })
-        .is_ok_and(|state| state == "queued")
+    let owned = id.to_owned();
+    with_db(database, move |conn| {
+        Ok(conn.query_row("SELECT state FROM catalog_jobs WHERE id=?1", [owned], |r| r.get::<_, String>(0))?)
+    })
+    .await
+    .is_ok_and(|state| state == "queued")
+}
+
+/// Confirms the job is still running, then loads and re-verifies its source.
+async fn running_source(database: &Arc<Mutex<Connection>>, id: &str, file_id: i64) -> Result<Source> {
+    let id = id.to_owned();
+    with_db(database, move |conn| {
+        require_running(conn, &id)?;
+        let source = Source::load(conn, file_id)?;
+        source.verify(conn, file_id)?;
+        Ok(source)
+    })
+    .await
+}
+
+/// Confirms the job is still running and runs `query` in the same lock turn.
+async fn while_running<T: Send + 'static>(
+    database: &Arc<Mutex<Connection>>,
+    id: &str,
+    query: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let id = id.to_owned();
+    with_db(database, move |conn| {
+        require_running(conn, &id)?;
+        query(conn)
+    })
+    .await
 }
 
 fn require_running(conn: &Connection, id: &str) -> Result<()> {
@@ -402,6 +436,7 @@ fn on_disk_matches(path: &Path, size: i64, modified: Option<f64>) -> bool {
     metadata.len() as i64 == size && matches!((modified, disk), (Some(a), Some(b)) if (a - b).abs() < 0.000_001)
 }
 
+#[derive(Clone)]
 struct Source {
     path: PathBuf,
     size: i64,
@@ -432,6 +467,17 @@ impl Source {
         }
         Ok(())
     }
+}
+
+/// Runs `work` against the writer on the blocking pool. A scan flush or face
+/// clustering can hold the writer for seconds; locking it on an async worker
+/// would park a runtime thread, and enough of those stall every command.
+pub(crate) async fn with_db<T: Send + 'static>(
+    database: &Arc<Mutex<Connection>>,
+    work: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let database = database.clone();
+    blocking(move || work(&mut database.lock())).await
 }
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
@@ -532,9 +578,7 @@ async fn process<M: FrameModel>(
     std::fs::create_dir_all(frames)?;
     let total = job.ids.len().max(1);
     for (index, &file_id) in job.ids.iter().enumerate().skip(job.index) {
-        require_running(&database.lock(), id)?;
-        let source = Source::load(&database.lock(), file_id)?;
-        source.verify(&database.lock(), file_id)?;
+        let source = running_source(database, id, file_id).await?;
         let probe = {
             let (path, flag) = (source.path.clone(), cancel.clone());
             blocking(move || video_export::analysis_probe(&path, &flag))
@@ -543,32 +587,32 @@ async fn process<M: FrameModel>(
         };
         let duration = probe.duration;
         let version = job.recipe.model_version.as_str();
-        upsert_coverage(
-            &database.lock(),
-            &format!("{id}-{file_id}-coverage"),
-            file_id,
-            0.0,
-            duration,
-            "incomplete",
-            &source.revision,
-            version,
-        )?;
+        {
+            let (coverage, revision, model_version) = (format!("{id}-{file_id}-coverage"), source.revision.clone(), version.to_owned());
+            with_db(database, move |conn| {
+                upsert_coverage(conn, &coverage, file_id, 0.0, duration, "incomplete", &revision, &model_version)
+            })
+            .await?;
+        }
 
         let signals = scan_signals(id, file_id, &source, duration, cancel, database).await?;
         let size = video_export::fitted_size(probe.width, probe.height, FRAME_SIDE);
         let caption_prompt = crate::models::vlm::caption_prompt_with_faces(&[]);
         for seconds in analysis::sample_times(duration, job.recipe.interval_seconds, &signals) {
-            require_running(&database.lock(), id)?;
             let evidence = format!(
                 "frame:{file_id}:{}:{version}:{}",
                 source.revision,
                 analysis::millis(seconds)
             );
-            let exists: bool = database.lock().query_row(
-                "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
-                params![evidence, source.revision],
-                |r| r.get(0),
-            )?;
+            let (lookup, revision) = (evidence.clone(), source.revision.clone());
+            let exists: bool = while_running(database, id, move |conn| {
+                Ok(conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM catalog_passages WHERE id=?1 AND source_revision=?2 AND stale=0)",
+                    params![lookup, revision],
+                    |r| r.get(0),
+                )?)
+            })
+            .await?;
             if exists {
                 continue;
             }
@@ -589,23 +633,25 @@ async fn process<M: FrameModel>(
             if caption.is_empty() {
                 return Err(unreadable());
             }
-            let conn = database.lock();
-            require_running(&conn, id)?;
-            source.verify(&conn, file_id)?;
-            conn.execute(
-                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
-                params![evidence, file_id, seconds, caption.chars().take(4_000).collect::<String>(), source.revision, version],
-            )?;
-            upsert_coverage(
-                &conn,
-                &evidence,
-                file_id,
-                seconds,
-                duration.min(seconds + 0.001).max(seconds + 0.000_001),
-                "sampled",
-                &source.revision,
-                version,
-            )?;
+            let (caption, checked, model_version) = (caption.chars().take(4_000).collect::<String>(), source.clone(), version.to_owned());
+            while_running(database, id, move |conn| {
+                checked.verify(conn, file_id)?;
+                conn.execute(
+                    "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?3,?4,?5,?6,0)",
+                    params![evidence, file_id, seconds, caption, checked.revision, model_version],
+                )?;
+                upsert_coverage(
+                    conn,
+                    &evidence,
+                    file_id,
+                    seconds,
+                    duration.min(seconds + 0.001).max(seconds + 0.000_001),
+                    "sampled",
+                    &checked.revision,
+                    &model_version,
+                )
+            })
+            .await?;
         }
 
         if job.recipe.timeline_mode.as_deref() == Some("moments") {
@@ -627,20 +673,21 @@ async fn process<M: FrameModel>(
             )
             .await?;
         }
-        require_running(&database.lock(), id)?;
-        persist_chapter_suggestions(&database.lock(), file_id, &source, version, duration)?;
-        {
-            let conn = database.lock();
+        let (checked, model_version, job_id) = (source.clone(), version.to_owned(), id.to_owned());
+        while_running(database, id, move |conn| {
+            persist_chapter_suggestions(conn, file_id, &checked, &model_version, duration)?;
             conn.execute(
                 "UPDATE catalog_jobs SET checkpoint_json=?1,progress=?2,updated_at=?3 WHERE id=?4 AND state='running'",
                 params![
                     (index + 1).to_string(),
                     share * (index + 1) as f64 / total as f64,
                     now(),
-                    id
+                    job_id
                 ],
             )?;
-        }
+            Ok(())
+        })
+        .await?;
         publish(id, sink, database).await;
     }
     Ok(())
@@ -658,23 +705,17 @@ async fn scan_signals(
     let mut previous: Option<Vec<u8>> = None;
     let mut start = 0.0;
     while start < duration {
-        require_running(&database.lock(), id)?;
         let end = duration.min(start + SIGNAL_CHUNK_SECONDS);
         let coverage = format!(
             "visual-change:{file_id}:{}:signal-v1:{}",
             source.revision,
             analysis::millis(start)
         );
-        upsert_coverage(
-            &database.lock(),
-            &coverage,
-            file_id,
-            start,
-            end,
-            "incomplete",
-            &source.revision,
-            analysis::SIGNAL_MODEL_VERSION,
-        )?;
+        let (pending, revision) = (coverage.clone(), source.revision.clone());
+        while_running(database, id, move |conn| {
+            upsert_coverage(conn, &pending, file_id, start, end, "incomplete", &revision, analysis::SIGNAL_MODEL_VERSION)
+        })
+        .await?;
         let (path, flag) = (source.path.clone(), cancel.clone());
         let chunk = match blocking(move || video_export::signal_frames(&path, start, end, &flag)).await {
             Ok(chunk) => chunk,
@@ -683,17 +724,12 @@ async fn scan_signals(
             // recorded as incomplete signal coverage.
             Err(_) => break,
         };
-        source.verify(&database.lock(), file_id)?;
-        upsert_coverage(
-            &database.lock(),
-            &coverage,
-            file_id,
-            start,
-            end,
-            "sampled",
-            &source.revision,
-            analysis::SIGNAL_MODEL_VERSION,
-        )?;
+        let checked = source.clone();
+        with_db(database, move |conn| {
+            checked.verify(conn, file_id)?;
+            upsert_coverage(conn, &coverage, file_id, start, end, "sampled", &checked.revision, analysis::SIGNAL_MODEL_VERSION)
+        })
+        .await?;
         signals.extend(analysis::signals_from_frames(&chunk, previous.as_deref()));
         previous = chunk.last().map(|(_, pixels)| pixels.clone());
         start = end;
@@ -851,31 +887,28 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
 ) -> Result<()> {
     let version = format!("timeline-moment-sequence-v1/{frame_version}");
     for (index, window) in windows.iter().enumerate() {
-        require_running(&database.lock(), id)?;
         let coverage = format!(
             "moment-window:{file_id}:{}:{version}:{}",
             source.revision,
             analysis::millis(window.start)
         );
-        let processed: bool = database.lock().query_row(
-            "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=?1 AND status='sampled' AND source_revision=?2 AND model_version=?3)",
-            params![coverage, source.revision, version],
-            |r| r.get(0),
-        )?;
+        let (lookup, revision, model_version) = (coverage.clone(), source.revision.clone(), version.clone());
+        let processed: bool = while_running(database, id, move |conn| {
+            Ok(conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=?1 AND status='sampled' AND source_revision=?2 AND model_version=?3)",
+                params![lookup, revision, model_version],
+                |r| r.get(0),
+            )?)
+        })
+        .await?;
         if !processed {
             {
-                let conn = database.lock();
-                source.verify(&conn, file_id)?;
-                upsert_coverage(
-                    &conn,
-                    &coverage,
-                    file_id,
-                    window.start,
-                    window.end,
-                    "incomplete",
-                    &source.revision,
-                    &version,
-                )?;
+                let (pending, checked, model_version, (start, end)) = (coverage.clone(), source.clone(), version.clone(), (window.start, window.end));
+                with_db(database, move |conn| {
+                    checked.verify(conn, file_id)?;
+                    upsert_coverage(conn, &pending, file_id, start, end, "incomplete", &checked.revision, &model_version)
+                })
+                .await?;
             }
             let (kept, plan) = window_plan(window, duration, frames)?;
             let pending = prefetched.take();
@@ -914,35 +947,31 @@ async fn moment_windows<M: FrameModel, D: FrameDecoder>(
             let raw = raw.map_err(|error| interrupted_or(cancel, error.context(unreadable())))?;
             let moments = analysis::parse_moments(&raw, kept.len())?;
             let chapters = analysis::moment_chapters(&moments, &kept, window, file_id, &source.revision, &version);
-            let mut conn = database.lock();
-            let tx = conn.transaction()?;
-            require_running(&tx, id)?;
-            source.verify(&tx, file_id)?;
             let prefix = analysis::moment_prefix(file_id, &source.revision, window.start);
-            tx.execute(
-                "DELETE FROM catalog_chapters WHERE file_id=?1 AND user_edited=0 AND substr(id,1,?2)=?3",
-                params![file_id, prefix.chars().count() as i64, prefix],
-            )?;
-            for chapter in &chapters {
-                if !user_edited(&tx, &chapter.id)? {
-                    upsert_chapter(&tx, chapter)?;
+            let (job_id, checked, model_version, (start, end)) = (id.to_owned(), source.clone(), version.clone(), (window.start, window.end));
+            with_db(database, move |conn| {
+                let tx = conn.transaction()?;
+                require_running(&tx, &job_id)?;
+                checked.verify(&tx, file_id)?;
+                tx.execute(
+                    "DELETE FROM catalog_chapters WHERE file_id=?1 AND user_edited=0 AND substr(id,1,?2)=?3",
+                    params![file_id, prefix.chars().count() as i64, prefix],
+                )?;
+                for chapter in &chapters {
+                    if !user_edited(&tx, &chapter.id)? {
+                        upsert_chapter(&tx, chapter)?;
+                    }
                 }
-            }
-            upsert_coverage(
-                &tx,
-                &coverage,
-                file_id,
-                window.start,
-                window.end,
-                "sampled",
-                &source.revision,
-                &version,
-            )?;
-            tx.commit()?;
+                upsert_coverage(&tx, &coverage, file_id, start, end, "sampled", &checked.revision, &model_version)?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
         }
         let progress =
             share * (file_index as f64 + 0.7 * (index + 1) as f64 / windows.len() as f64) / total_files as f64;
-        set_progress(&database.lock(), id, progress)?;
+        let job_id = id.to_owned();
+        with_db(database, move |conn| set_progress(conn, &job_id, progress)).await?;
         publish(id, sink, database).await;
     }
     Ok(())
@@ -967,9 +996,7 @@ async fn transcribe<M: FrameModel>(
     let version = format!("timeline-speech-v1/{speech_model}");
     let total = job.ids.len().max(1);
     for (index, &file_id) in job.ids.iter().enumerate() {
-        require_running(&database.lock(), id)?;
-        let source = Source::load(&database.lock(), file_id)?;
-        source.verify(&database.lock(), file_id)?;
+        let source = running_source(database, id, file_id).await?;
         let probe = {
             let (path, flag) = (source.path.clone(), cancel.clone());
             blocking(move || video_export::analysis_probe(&path, &flag))
@@ -980,24 +1007,23 @@ async fn transcribe<M: FrameModel>(
             continue;
         }
         let coverage = format!("speech-coverage:{file_id}:{}:{version}", source.revision);
-        conn_coverage_if_absent(
-            &database.lock(),
-            &coverage,
-            file_id,
-            probe.duration,
-            &source.revision,
-            &version,
-        )?;
+        {
+            let (pending, revision, model_version, duration) = (coverage.clone(), source.revision.clone(), version.clone(), probe.duration);
+            with_db(database, move |conn| conn_coverage_if_absent(conn, &pending, file_id, duration, &revision, &model_version)).await?;
+        }
         let chunks = analysis::speech_chunks(probe.duration, analysis::SPEECH_CHUNK_SECONDS);
         let mut complete = true;
         for (chunk_index, &(start, end)) in chunks.iter().enumerate() {
-            require_running(&database.lock(), id)?;
             let chunk_id = format!("{coverage}:chunk:{chunk_index}");
-            let verified: bool = database.lock().query_row(
-                "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=?1 AND status='verified' AND source_revision=?2 AND model_version=?3)",
-                params![chunk_id, source.revision, version],
-                |r| r.get(0),
-            )?;
+            let (lookup, revision, model_version) = (chunk_id.clone(), source.revision.clone(), version.clone());
+            let verified: bool = while_running(database, id, move |conn| {
+                Ok(conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM catalog_coverage WHERE id=?1 AND status='verified' AND source_revision=?2 AND model_version=?3)",
+                    params![lookup, revision, model_version],
+                    |r| r.get(0),
+                )?)
+            })
+            .await?;
             if !verified {
                 let (path, flag) = (source.path.clone(), cancel.clone());
                 let audio = blocking(move || video_export::audio_wav(&path, start, end - start, &flag)).await;
@@ -1014,54 +1040,42 @@ async fn transcribe<M: FrameModel>(
                     Err(_) if cancel.load(Ordering::Acquire) => return Err(Interrupted.into()),
                     Err(_) => None,
                 };
-                let conn = database.lock();
-                require_running(&conn, id)?;
-                source.verify(&conn, file_id)?;
-                match text {
-                    Some(text) => {
-                        if !text.is_empty() {
-                            conn.execute(
-                                "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?4,?5,?6,?7,0.5)",
-                                params![format!("speech:{file_id}:{}:{version}:{}", source.revision, analysis::millis(start)), file_id, start, end, text, source.revision, version],
-                            )?;
+                complete &= text.is_some();
+                let (checked, model_version) = (source.clone(), version.clone());
+                while_running(database, id, move |conn| {
+                    checked.verify(conn, file_id)?;
+                    let status = match text {
+                        Some(text) => {
+                            if !text.is_empty() {
+                                conn.execute(
+                                    "INSERT OR REPLACE INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence) VALUES(?1,?2,?3,?4,?5,?6,?7,0.5)",
+                                    params![format!("speech:{file_id}:{}:{model_version}:{}", checked.revision, analysis::millis(start)), file_id, start, end, text, checked.revision, model_version],
+                                )?;
+                            }
+                            "verified"
                         }
-                        upsert_coverage(
-                            &conn,
-                            &chunk_id,
-                            file_id,
-                            start,
-                            end,
-                            "verified",
-                            &source.revision,
-                            &version,
-                        )?;
-                    }
-                    None => {
-                        complete = false;
-                        upsert_coverage(
-                            &conn,
-                            &chunk_id,
-                            file_id,
-                            start,
-                            end,
-                            "incomplete",
-                            &source.revision,
-                            &version,
-                        )?;
-                    }
-                }
+                        None => "incomplete",
+                    };
+                    upsert_coverage(conn, &chunk_id, file_id, start, end, status, &checked.revision, &model_version)
+                })
+                .await?;
             }
             let progress = visual_share
                 + (1.0 - visual_share) * (index as f64 + (chunk_index + 1) as f64 / chunks.len() as f64) / total as f64;
-            set_progress(&database.lock(), id, progress)?;
+            let job_id = id.to_owned();
+            with_db(database, move |conn| set_progress(conn, &job_id, progress)).await?;
             publish(id, sink, database).await;
         }
-        let conn = database.lock();
-        source.verify(&conn, file_id)?;
-        conn.execute(
-            "UPDATE catalog_coverage SET status=?1 WHERE id=?2",
-            params![if complete { "verified" } else { "incomplete" }, coverage],
-        )?;
+        let checked = source.clone();
+        with_db(database, move |conn| {
+            checked.verify(conn, file_id)?;
+            conn.execute(
+                "UPDATE catalog_coverage SET status=?1 WHERE id=?2",
+                params![if complete { "verified" } else { "incomplete" }, coverage],
+            )?;
+            Ok(())
+        })
+        .await?;
     }
     Ok(())
 }

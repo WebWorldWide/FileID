@@ -1337,7 +1337,8 @@ public final class ReadStore: @unchecked Sendable {
             vlmModel: r["vlm_model"],
             vlmFullModel: r["vlm_full_model"],
             vlmAnalyzedAt: (r["vlm_analyzed_at"] as Double?).map { Date(timeIntervalSince1970: $0) },
-            tags: finalTags
+            tags: finalTags,
+            vlmInheritedFrom: r["vlm_inherited_from"]
         )
     }
 

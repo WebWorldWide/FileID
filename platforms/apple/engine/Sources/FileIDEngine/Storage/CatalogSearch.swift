@@ -4,9 +4,36 @@ import GRDB
 import FileIDShared
 
 enum CatalogSearch {
-    enum RequestError: Error { case invalid }
+    enum RequestError: Error, LocalizedError {
+        case invalid, needsVisualModel
+        var errorDescription: String? {
+            switch self {
+            case .invalid: "That search request wasn't valid."
+            case .needsVisualModel: "Searching by what is in photos needs the Search by description model, which isn't installed. Use Keyword search, or install the model in Settings."
+            }
+        }
+    }
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+        guard request.capturedFrom != nil || request.capturedTo != nil else { return try await run(request, database: database) }
+        let from = request.capturedFrom ?? 0
+        let to = request.capturedTo ?? Double.greatestFiniteMagnitude
+        guard from.isFinite, from >= 0, to >= from, request.capturedTo.map({ $0.isFinite }) ?? true else { throw RequestError.invalid }
+        let limit = request.limit ?? 100
+        guard (1...100).contains(limit) else { throw RequestError.invalid }
+        var wide = request
+        wide.limit = 100
+        var response = try await run(wide, database: database)
+        guard !response.hits.isEmpty else { return response }
+        let ids = String(decoding: try JSONEncoder().encode(Set(response.hits.map(\.fileID)).sorted()), as: UTF8.self)
+        let inside = try await database.pool.read { db in
+            Set(try Int64.fetchAll(db, sql: "SELECT id FROM files WHERE id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?", arguments: [ids, from, to]))
+        }
+        response.hits = Array(response.hits.filter { inside.contains($0.fileID) }.prefix(limit))
+        return response
+    }
+
+    private static func run(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
         let mode = request.searchMode ?? "keyword"
         let limit = request.limit ?? 100
         let scope = request.resultScope ?? "all"
@@ -19,6 +46,7 @@ enum CatalogSearch {
             return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
         }
         guard mode != "hybrid" || !query.isEmpty else { throw RequestError.invalid }
+        guard request.queryVector != nil || request.fileID != nil else { throw RequestError.needsVisualModel }
         let vector: [Float]
         if let supplied = request.queryVector {
             guard request.fileID == nil, request.embeddingModel == CLIPEmbeddingSpace.modelID,

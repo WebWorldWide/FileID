@@ -285,11 +285,11 @@ jobs:
           $size = (Get-Item $exe).Length / 1MB
           Write-Host ("FileIDEngine.exe size: {0:F1} MB" -f $size)
 
-      - name: Verify command-channel health probes
+      - name: Engine conformance
         if: matrix.cross == false
         shell: pwsh
-        timeout-minutes: 2
-        run: python "${{ github.workspace }}/shared/scripts/conformance.py" --engine "target/${{ matrix.target }}/release/FileIDEngine.exe" --case "health-*"
+        timeout-minutes: 15
+        run: python "${{ github.workspace }}/shared/scripts/conformance.py" --engine "target/${{ matrix.target }}/release/FileIDEngine.exe"
 
       # Per-vendor EP smoke: launch the engine, let it emit `ready` on stdout
       # (carrying HardwareInfo + the chosen executionProvider), then send EOF

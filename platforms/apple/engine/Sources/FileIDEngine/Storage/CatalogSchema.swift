@@ -296,4 +296,40 @@ CREATE TABLE face_refresh_failures (
 );
 CREATE INDEX face_refresh_retry ON face_refresh_failures(retry_after);
 """#
+    static let v25 = #"""
+ALTER TABLE ocr_text ADD COLUMN source TEXT NOT NULL DEFAULT 'ocr' CHECK(source IN ('ocr','vlm'));
+ALTER TABLE ocr_text ADD COLUMN handwritten INTEGER NOT NULL DEFAULT 0 CHECK(handwritten IN (0,1));
+CREATE TRIGGER ocr_text_vlm_invalidate AFTER UPDATE OF size_bytes,modified_at ON files
+ WHEN old.size_bytes != new.size_bytes OR old.modified_at IS NOT new.modified_at BEGIN
+ DELETE FROM ocr_text WHERE file_id=new.id AND source='vlm';
+END;
+"""#
+    static let v26 = #"""
+ALTER TABLE files ADD COLUMN vlm_inherited_from INTEGER;
+"""#
+    static let v27 = #"""
+CREATE TABLE catalog_tag_vocab(tag TEXT PRIMARY KEY) WITHOUT ROWID;
+INSERT OR IGNORE INTO catalog_tag_vocab(tag) SELECT DISTINCT tag FROM tags;
+CREATE TRIGGER catalog_tag_vocab_insert AFTER INSERT ON tags BEGIN
+ INSERT OR IGNORE INTO catalog_tag_vocab(tag) VALUES(new.tag);
+END;
+CREATE TRIGGER catalog_tag_vocab_update AFTER UPDATE OF tag ON tags BEGIN
+ INSERT OR IGNORE INTO catalog_tag_vocab(tag) VALUES(new.tag);
+END;
+CREATE INDEX catalog_files_twins ON files(content_hash,size_bytes,failed) WHERE content_hash IS NOT NULL;
+CREATE INDEX catalog_files_size ON files(size_bytes);
+CREATE INDEX catalog_files_taken ON files(COALESCE(created_at,modified_at));
+CREATE INDEX catalog_files_kind_totals ON files(kind,failed,size_bytes,COALESCE(created_at,modified_at));
+"""#
+    static let v28 = #"""
+CREATE TABLE take_quality (file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,source_revision TEXT NOT NULL,version TEXT NOT NULL,signals_json TEXT NOT NULL,computed_at REAL NOT NULL);
+CREATE TABLE take_group_decisions (group_key TEXT PRIMARY KEY,decision TEXT NOT NULL CHECK(decision IN ('keepAll','skip')),file_ids_json TEXT NOT NULL,decided_at REAL NOT NULL);
+"""#
+    static let v29 = #"""
+CREATE TABLE library_roots (id INTEGER PRIMARY KEY,path TEXT NOT NULL UNIQUE,display TEXT NOT NULL,kind TEXT NOT NULL DEFAULT 'internal' CHECK(kind IN ('internal','external','network')),enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),added_at REAL NOT NULL,last_scan_at REAL,last_status TEXT);
+INSERT OR IGNORE INTO library_roots(path,display,kind,added_at,last_scan_at,last_status) SELECT root_path,root_path,CASE WHEN root_path LIKE '/Volumes/%' THEN 'external' ELSE 'internal' END,MIN(started_at),MAX(COALESCE(completed_at,started_at)),'completed' FROM scan_sessions WHERE status='completed' GROUP BY root_path;
+"""#
+    static let v30 = #"""
+CREATE INDEX catalog_files_dir ON files(rtrim(replace(path_text,char(92),'/'),replace(replace(path_text,char(92),'/'),'/','')),failed,size_bytes);
+"""#
 }

@@ -624,13 +624,13 @@ internal sealed class ModelInstallerService : INotifyPropertyChanged
             // load on a slow disk / ARM box), NOT that it crashed — tell the
             // user to wait a moment and retry rather than implying a failure.
             DebugLog.Warn($"[INSTALL] WaitForReadyAsync timed out for '{modelKind}': {ex.Message}");
-            slot.Fail("Engine still starting up — give it a moment, then retry.");
+            slot.Fail("FileID is still getting ready. Try again in a moment.");
             return;
         }
         catch (Exception ex)
         {
             DebugLog.Warn($"[INSTALL] WaitForReadyAsync threw for '{modelKind}': {ex.Message}");
-            slot.Fail("Engine not ready: " + ex.Message);
+            slot.Fail("FileID is still getting ready. Try again in a moment.");
             return;
         }
 

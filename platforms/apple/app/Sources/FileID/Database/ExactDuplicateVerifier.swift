@@ -139,3 +139,68 @@ enum ExactDuplicateVerifier {
         return Int64(bitPattern: value)
     }
 }
+
+/// One copy to move to the Trash. `exactKeeper` is the copy that stays; when
+/// set, the victim is re-hashed against it immediately before the move.
+struct DuplicateTrashItem: Sendable {
+    let id: Int64
+    let url: URL
+    let size: Int64
+    let exactKeeper: URL?
+}
+
+struct DuplicateTrashResult: Sendable {
+    let id: Int64
+    let size: Int64
+    let success: Bool
+    let verificationFailed: Bool
+}
+
+extension ExactDuplicateVerifier {
+    /// The Cleanup trash path, shared with Chat: verify each copy byte by
+    /// byte against its keeper, refuse protected locations, then move it to
+    /// the Trash. Up to 8 files at once.
+    static func trash(_ work: [DuplicateTrashItem], progress: (@MainActor @Sendable (Int) -> Void)? = nil) async -> [DuplicateTrashResult] {
+        await withTaskGroup(of: DuplicateTrashResult.self) { group in
+            var inFlight = 0
+            var i = 0
+            var collected: [DuplicateTrashResult] = []
+            collected.reserveCapacity(work.count)
+            let maxConcurrency = 8
+            while i < work.count {
+                if inFlight >= maxConcurrency, let r = await group.next() {
+                    collected.append(r); inFlight -= 1
+                    if let progress { await progress(collected.count) }
+                }
+                let item = work[i]
+                group.addTask {
+                    if let keeper = item.exactKeeper {
+                        guard let verifiedVictim = await ExactDuplicateVerifier.matchesImmediately(
+                            keeper: keeper, victim: item.url, expectedSize: item.size),
+                              ExactFileDigest.pathStillMatches(verifiedVictim) else {
+                            return DuplicateTrashResult(id: item.id, size: item.size, success: false, verificationFailed: true)
+                        }
+                    }
+                    do {
+                        try ReadOnlyLocations.requireSourceMutation(item.url)
+                        try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
+                        return DuplicateTrashResult(id: item.id, size: item.size, success: true, verificationFailed: false)
+                    } catch {
+                        // NSError descriptions embed the full path — log
+                        // domain+code only, beside the redacted copy.
+                        let ns = error as NSError
+                        NSLog("FileID v2 cleanup: could not trash %@: %@ (%ld)", redactPathForLog(item.url.path), ns.domain, ns.code)
+                        return DuplicateTrashResult(id: item.id, size: item.size, success: false, verificationFailed: false)
+                    }
+                }
+                inFlight += 1
+                i += 1
+            }
+            for await r in group {
+                collected.append(r)
+                if let progress { await progress(collected.count) }
+            }
+            return collected
+        }
+    }
+}

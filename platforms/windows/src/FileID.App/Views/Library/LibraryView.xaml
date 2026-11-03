@@ -54,10 +54,10 @@
             <TextBox x:Name="SearchBox"
                      Grid.Column="0"
                      Height="36"
-                     PlaceholderText="Search filenames + OCR text — Ctrl+F"
+                     PlaceholderText="Filter by name, tag, description or person"
                      TextChanged="OnSearchChanged"
                      AutomationProperties.Name="Search files"
-                     AutomationProperties.HelpText="Search across filenames, OCR text, and CLIP semantic embeddings"/>
+                     AutomationProperties.HelpText="Find files by name, tag, description, person or text inside them (Ctrl+F)"/>
 
             <ComboBox x:Name="KindFilter"
                       Grid.Column="1"
@@ -137,10 +137,11 @@
                               VerticalAlignment="Top" Margin="0,1,0,0" />
                     <TextBlock Grid.Column="1" TextWrapping="Wrap"
                                Style="{StaticResource CaptionTextBlockStyle}"
-                               Text="Install MobileCLIP for semantic image search — your typed words can match what's in each photo, not just the filename." />
-                    <Button Grid.Column="2" Content="Install" Click="OnInstallClipFromBannerClicked" VerticalAlignment="Center"
-                            AutomationProperties.Name="Install MobileCLIP"
-                            AutomationProperties.HelpText="Installs the MobileCLIP model to enable semantic image search" />
+                               Text="To search by what's in a photo (&quot;sunset at the beach&quot;, &quot;red car&quot;), download the Search by description model." />
+                    <Button Grid.Column="2" Content="Download" Click="OnInstallClipFromBannerClicked" VerticalAlignment="Center"
+                            ToolTipService.ToolTip="Download the Search by description model (CLIP)"
+                            AutomationProperties.Name="Download the Search by description model"
+                            AutomationProperties.HelpText="Downloads the CLIP model so you can search photos by what's in them" />
                 </Grid>
             </Border>
             <Border x:Name="DeepAnalyzeBanner"
@@ -162,7 +163,7 @@
                                VerticalAlignment="Center"
                                Style="{StaticResource CaptionTextBlockStyle}"
                                TextTrimming="CharacterEllipsis"
-                               Text="Deep Analyze running…" />
+                               Text="Describing files…" />
                 </Grid>
             </Border>
             <Border x:Name="FaceClusteringBanner"
@@ -181,7 +182,7 @@
                                   Foreground="{ThemeResource AiBrush}" VerticalAlignment="Center" />
                     <TextBlock Grid.Column="1" VerticalAlignment="Center"
                                Style="{StaticResource CaptionTextBlockStyle}"
-                               Text="Grouping faces into people clusters…" />
+                               Text="Grouping faces… Finding the same person across photos. They will appear on the People page." />
                 </Grid>
             </Border>
         </StackPanel>
@@ -208,7 +209,7 @@
                        VerticalAlignment="Center"
                        Style="{StaticResource BodyStrongTextBlockStyle}" />
             <Button Grid.Column="1" Click="OnTagSelectedClicked"
-                    ToolTipService.ToolTip="Apply tags to selected files"
+                    ToolTipService.ToolTip="Add tags to the chosen files"
                     AutomationProperties.Name="Tag selected files">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8EC;" FontSize="13"/>
@@ -216,7 +217,7 @@
                 </StackPanel>
             </Button>
             <Button Grid.Column="2" Click="OnRenameSelectedClicked"
-                    ToolTipService.ToolTip="Rename selected files"
+                    ToolTipService.ToolTip="Rename the chosen files"
                     AutomationProperties.Name="Rename selected files">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE8AC;" FontSize="13"/>
@@ -224,7 +225,7 @@
                 </StackPanel>
             </Button>
             <Button Grid.Column="3" Click="OnTrashSelectedClicked"
-                    ToolTipService.ToolTip="Move selected files to the Recycle Bin"
+                    ToolTipService.ToolTip="Move the chosen files to the Recycle Bin"
                     AutomationProperties.Name="Move selected files to the Recycle Bin">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                     <FontIcon Glyph="&#xE74D;" FontSize="13"/>

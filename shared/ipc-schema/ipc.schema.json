@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.16.0",
+  "version": "1.17.0",
 
   "$defs": {
     "IPCCommand": {
@@ -904,7 +904,8 @@
               "fileID":       { "type": "integer" },
               "description":  { "type": "string" },
               "proposedName": { "type": ["string", "null"] },
-              "modelKind":    { "type": "string" }
+              "modelKind":    { "type": "string" },
+              "inheritedFromFileID": { "type": ["integer", "null"], "description": "Set when this file shares the caption and tags of a near-identical file (burst frame or RAW+JPEG pair) that the model analyzed; the value is that file's files.id. Absent or null when the model analyzed this file itself." }
             }
           }
         }
@@ -1382,6 +1383,87 @@
         "reason": {"type": "string"}
       }
     },
+    "CatalogTakeBox": {
+      "type": "object", "additionalProperties": false,
+      "description": "Normalized rectangle, top-left origin.",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "width": {"type": "number", "minimum": 0, "maximum": 1}, "height": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "CatalogTakeShot": {
+      "type": "object", "additionalProperties": false,
+      "description": "One try: every file of one shot (a RAW and its JPEG share a shot). primaryFileID is the file shown and scored.",
+      "required": ["primaryFileID", "fileIDs", "path"],
+      "properties": {
+        "primaryFileID": {"type": "integer"},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 8},
+        "path": {"type": "string"},
+        "capturedAt": {"type": "number"}
+      }
+    },
+    "CatalogTakeAutoGroup": {
+      "type": "object", "additionalProperties": false,
+      "description": "A suggested group of tries of the same shot, found from capture time and look. status skipped means the person chose Skip group.",
+      "required": ["groupKey", "kind", "status", "capturedAt", "similarity", "shots"],
+      "properties": {
+        "groupKey": {"type": "string", "minLength": 1, "maxLength": 200},
+        "kind": {"type": "string", "enum": ["photos", "videos"]},
+        "status": {"type": "string", "enum": ["open", "skipped"]},
+        "capturedAt": {"type": "number"},
+        "similarity": {"type": "number", "minimum": 0, "maximum": 1},
+        "shots": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeShot"}, "minItems": 2, "maxItems": 100}
+      }
+    },
+    "CatalogTakeQuality": {
+      "type": "object", "additionalProperties": false,
+      "description": "Model-free score of one shot within its group (relative to the other tries) with short plain reasons.",
+      "required": ["primaryFileID", "fileIDs", "path", "score", "rank", "recommended", "reasons", "faces"],
+      "properties": {
+        "primaryFileID": {"type": "integer"},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 8},
+        "path": {"type": "string"},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "rank": {"type": "integer", "minimum": 1},
+        "recommended": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        "sharpness": {"type": "number", "minimum": 0, "maximum": 1},
+        "exposure": {"type": "number", "minimum": 0, "maximum": 1},
+        "motionBlur": {"type": "boolean"},
+        "faceCount": {"type": "integer", "minimum": 0},
+        "eyesClosed": {"type": "boolean"},
+        "faceCutOff": {"type": "boolean"},
+        "stability": {"type": "number", "minimum": 0, "maximum": 1},
+        "action": {"type": "number", "minimum": 0, "maximum": 1},
+        "peakSeconds": {"type": "number", "minimum": 0},
+        "subject": {"$ref": "#/$defs/CatalogTakeBox"},
+        "faces": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeBox"}, "maxItems": 16}
+      }
+    },
+    "CatalogTakeGoalRanking": {
+      "type": "object", "additionalProperties": false,
+      "description": "One local-model pass over a whole group against a goal. order is best first (primaryFileIDs); metFileIDs visibly meet the goal. unavailable means no description model is loaded.",
+      "required": ["goal", "status", "order", "metFileIDs", "summary"],
+      "properties": {
+        "goal": {"type": "string", "maxLength": 500},
+        "status": {"type": "string", "enum": ["ranked", "unclear", "unavailable"]},
+        "order": {"type": "array", "items": {"type": "integer"}, "maxItems": 100},
+        "metFileIDs": {"type": "array", "items": {"type": "integer"}, "maxItems": 100},
+        "summary": {"type": "string"},
+        "model": {"type": "string"}
+      }
+    },
+    "CatalogTakeDecision": {
+      "type": "object", "additionalProperties": false,
+      "description": "keepAll hides a suggested group for good, skip moves it to Skipped, reopen forgets either choice. fileIDs are every file of the group.",
+      "required": ["groupKey", "decision", "fileIDs"],
+      "properties": {
+        "groupKey": {"type": "string", "minLength": 1, "maxLength": 200},
+        "decision": {"type": "string", "enum": ["keepAll", "skip", "reopen"]},
+        "fileIDs": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 800}
+      }
+    },
     "CatalogRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -1395,6 +1477,8 @@
         "queryVector": { "type": "array", "items": { "type": "number" }, "minItems": 512, "maxItems": 512 },
         "embeddingModel": { "type": "string", "maxLength": 200 },
         "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "capturedFrom": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time (created_at, else modified_at) is at or after this Unix time in seconds. Applied to the top 100 candidates." },
+        "capturedTo": { "type": "number", "minimum": 0, "description": "Search only: keep files whose capture time is at or before this Unix time in seconds. Must be >= capturedFrom." },
         "requestID": {
           "type": "string"
         },
@@ -1418,7 +1502,11 @@
             "undoEventEdit",
             "takeGroup",
             "setTakeFeedback",
-            "undoTakeFeedback"
+            "undoTakeFeedback",
+            "autoTakeGroups",
+            "scoreTakes",
+            "rankTakesWithGoal",
+            "decideTakeGroup"
           ]
         },
         "query": {
@@ -1447,6 +1535,7 @@
         "event": {"$ref": "#/$defs/CatalogEvent"},
         "eventID": {"type": "string", "maxLength": 200},
         "takeFeedback": {"$ref": "#/$defs/CatalogTakeFeedback"},
+        "takeDecision": {"$ref": "#/$defs/CatalogTakeDecision"},
         "timelineMode": {
           "type": "string",
           "enum": [
@@ -1497,6 +1586,9 @@
         "takes": {"type": "array", "items": {"$ref": "#/$defs/CatalogTake"}},
         "recommendation": {"$ref": "#/$defs/CatalogTakeRecommendation"},
         "suggestedTakeGroups": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeGroupSuggestion"}, "maxItems": 100},
+        "takeGroups": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeAutoGroup"}, "maxItems": 100},
+        "takeQualities": {"type": "array", "items": {"$ref": "#/$defs/CatalogTakeQuality"}, "maxItems": 100},
+        "takeGoalRanking": {"$ref": "#/$defs/CatalogTakeGoalRanking"},
         "jobs": {
           "type": "array",
           "items": {
@@ -1570,6 +1662,82 @@
           "type": "string",
           "maxLength": 300,
           "description": "Optional registered local model selection. Summarize only when this model is already loaded; never download from a chat send."
+        },
+        "context": {
+          "$ref": "#/$defs/ChatContext"
+        },
+        "queryVector": {
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 512,
+          "maxItems": 512,
+          "description": "Optional L2-normalized CLIP text embedding of text, computed by the client. Requires embeddingModel. Engines that embed queries themselves may omit it."
+        },
+        "embeddingModel": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    },
+    "ChatContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the user is looking at, so a send can resolve 'this person', 'these files' or 'this folder'. Context only scopes proposals; it never runs anything.",
+      "properties": {
+        "page": { "$ref": "#/$defs/ChatPage" },
+        "fileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000 },
+        "personIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 50 },
+        "folder": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "libraryRoot": { "type": "string", "minLength": 1, "maxLength": 32768 }
+      }
+    },
+    "ChatPage": {
+      "enum": ["library", "people", "cleanup", "deepAnalyze", "restructure", "settings", "search", "tools", "chat"]
+    },
+    "ChatAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A proposed FileID action. The client runs it only through the existing command it names. requiresConfirmation is true for every kind that changes, moves, renames or deletes files or user identities (moveDuplicatesToTrash, applyFolderLayout, undoLastMove, renameToSuggested, namePerson, mergePeople); clients must show a confirmation card with the counts, examples and undo story before sending anything. Other kinds start read-only views or jobs and may run directly.",
+      "required": ["id", "kind", "title", "detail", "requiresConfirmation", "source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "kind": {
+          "enum": [
+            "scanFolder", "rescan", "describeFiles", "stopJob", "findDuplicates", "moveDuplicatesToTrash",
+            "suggestFolderLayout", "applyFolderLayout", "undoLastMove", "renameToSuggested", "namePerson",
+            "mergePeople", "findMoments", "exportFiles", "openPage", "search", "changeSetting"
+          ],
+          "description": "scanFolder/rescan → startScan; describeFiles → deepAnalyzeAll (fileIDs in batches of 100) or deepAnalyzeFolder; stopJob → cancelScan, deepAnalyzeCancel, cancelRestructure or catalog cancelJob; findDuplicates → the Cleanup page; moveDuplicatesToTrash → the platform's Cleanup trash path with byte verification against keeperFileIDs; suggestFolderLayout → planRestructure; applyFolderLayout → applyRestructure of the current plan; undoLastMove → undoRestructure; renameToSuggested → renameFiles or the platform's suggested-name apply path; namePerson → renamePerson; mergePeople → mergeClusters into personID; findMoments → Search & Moments; exportFiles → File Tools with the selection, whose own preview confirms before writing; openPage/search → navigation; changeSetting → a whitelisted client setting."
+        },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Primary button label in plain language, e.g. Move 42 extra copies to Trash." },
+        "detail": { "type": "string", "maxLength": 2000, "description": "What will happen, with counts." },
+        "requiresConfirmation": { "type": "boolean" },
+        "source": { "enum": ["parser", "model"], "description": "parser: the deterministic phrase parser; model: a validated proposal from the loaded local model." },
+        "undo": { "type": "string", "maxLength": 500, "description": "How to reverse the action, or that it cannot be undone." },
+        "fileCount": { "type": "integer", "minimum": 0 },
+        "byteCount": { "type": "integer", "minimum": 0 },
+        "examples": { "type": "array", "items": { "type": "string" }, "maxItems": 5 },
+        "fileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000 },
+        "keeperFileIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 10000, "description": "moveDuplicatesToTrash only: the copy kept for each fileIDs entry, at the same index." },
+        "path": { "type": "string", "minLength": 1, "maxLength": 32768 },
+        "query": { "type": "string", "maxLength": 2000 },
+        "kinds": { "type": "array", "items": { "enum": ["image", "video", "pdf", "doc", "audio", "other", "model"] } },
+        "page": { "$ref": "#/$defs/ChatPage" },
+        "personID": { "type": "integer", "minimum": 1 },
+        "personIDs": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "maxItems": 50 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "job": { "enum": ["scan", "describe", "organize", "moments", "all"] },
+        "setting": { "enum": ["cleanupAutoTag", "backgroundMotion", "chatSummaries"], "description": "Only these client preferences may change from Chat." },
+        "value": { "type": "boolean" },
+        "renames": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["fileID", "newName"],
+            "properties": { "fileID": { "type": "integer", "minimum": 1 }, "newName": { "type": "string", "minLength": 1, "maxLength": 255 } }
+          }
         }
       }
     },
@@ -1615,6 +1783,14 @@
           "items": {
             "$ref": "#/$defs/CatalogHit"
           }
+        },
+        "actions": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/ChatAction"
+          },
+          "description": "Proposed actions, omitted when there are none. Parsed only from the user's own message (or a validated model proposal gated by it), never from retrieved file text."
         }
       }
     },

@@ -11,17 +11,20 @@ public enum FileTypes {
     // Conservative starting set; expand in M3 as we test more formats.
     public static let images: Set<String> = [
         "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "webp", "gif", "bmp",
-        "raw", "cr2", "nef", "arw", "dng", "orf", "rw2", "raf"
+        "raw", "cr2", "nef", "arw", "dng", "orf", "rw2", "raf",
+        "avif", "cr3", "srw", "pef", "3fr", "erf", "kdc", "mef", "mos", "mrw", "rwl", "srf", "x3f"
     ]
     public static let videos: Set<String> = [
-        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "mts", "m2ts", "3gp"
+        "mp4", "mov", "m4v", "avi", "mkv", "webm", "wmv", "flv", "mpg", "mpeg", "mts", "m2ts", "3gp",
+        "3g2", "mxf", "ogv", "vob", "f4v", "asf", "divx"
     ]
     public static let pdfs: Set<String> = ["pdf"]
     public static let documents: Set<String> = [
         "pdf", "doc", "docx", "odt", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "md", "pages", "numbers", "key"
     ]
     public static let audio: Set<String> = [
-        "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff"
+        "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff",
+        "mp2", "mp1", "oga", "m4b", "aif", "aifc", "caf", "mka", "spx", "wma", "amr", "ape", "wv"
     ]
     /// Source code + prose markup — read as UTF-8 text and clustered by content (BGE),
     /// classified as `.doc`. Lockstep with the Rust engine's FileKind::from_extension.
@@ -30,6 +33,11 @@ public enum FileTypes {
         "cc", "cxx", "hpp", "hh", "cs", "go", "rs", "php", "sh", "bash", "zsh", "sql",
         "scala", "m", "mm", "r", "jl", "lua", "dart", "vue", "pl", "pm", "ps1",
         "tex", "bib", "rst", "org", "adoc"
+    ]
+    /// Plain-text data and logs — read as UTF-8 and clustered by content as `.doc`.
+    /// Lockstep with the Rust engine's FileKind::from_extension.
+    public static let textData: Set<String> = [
+        "csv", "tsv", "log", "markdown", "text", "json", "yaml", "yml", "toml", "xml", "html", "htm"
     ]
     /// E-books — extracted to text and clustered as `.doc`. EPUB only (zip of XHTML);
     /// MOBI is proprietary (low ROI). Lockstep with the Rust engine.
@@ -47,7 +55,7 @@ public enum FileTypes {
         if images.contains(e)    { return .image }
         if videos.contains(e)    { return .video }
         if pdfs.contains(e)      { return .pdf }
-        if documents.contains(e) || code.contains(e) || ebooks.contains(e) { return .doc }
+        if documents.contains(e) || code.contains(e) || textData.contains(e) || ebooks.contains(e) { return .doc }
         if audio.contains(e)     { return .audio }
         if models.contains(e)    { return .model }
         return .other
@@ -56,7 +64,7 @@ public enum FileTypes {
     public static func isTaggable(_ ext: String) -> Bool {
         let e = ext.lowercased()
         return images.contains(e) || videos.contains(e) || documents.contains(e)
-            || code.contains(e) || ebooks.contains(e)
+            || code.contains(e) || textData.contains(e) || ebooks.contains(e)
             || audio.contains(e) || models.contains(e)
     }
 

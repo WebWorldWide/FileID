@@ -102,6 +102,8 @@ impl SFace {
             );
         }
         l2_normalize(&mut emb);
+        // l2_normalize's max(1e-8) floor passes NaN through; never persist one.
+        anyhow::ensure!(emb.iter().all(|v| v.is_finite()), "SFace produced a non-finite embedding");
         Ok(emb)
     }
 }

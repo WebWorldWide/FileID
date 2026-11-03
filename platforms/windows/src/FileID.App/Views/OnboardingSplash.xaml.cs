@@ -1,5 +1,5 @@
 ﻿// OnboardingSplash code-behind. Drives the rainbow-drift animation on the
-// "FileID" title and routes the "Pick a folder" CTA to the same
+// "FileID" title and routes the "Choose a folder to scan" button to the same
 // FolderPickerService the sidebar uses.
 //
 // Animation is a 1:1 port of macOS Detail.swift:171-177 — `shimmer` driven
@@ -105,7 +105,7 @@ public sealed partial class OnboardingSplash : UserControl
             var hwnd = App.HostWindow is { } window
                 ? WinRT.Interop.WindowNative.GetWindowHandle(window)
                 : IntPtr.Zero;
-            var result = await FolderPickerService.PickFolderAsync(hwnd);
+            var result = await FolderPickerService.PickFolderAsync(hwnd, FolderPickerService.ScanCommitText);
             if (result.FailureReason is not null)
             {
                 // The picker opened but the selected folder couldn't be used
@@ -125,7 +125,7 @@ public sealed partial class OnboardingSplash : UserControl
                 // User cancelled the picker — not an error, no surfacing.
                 return;
             }
-            AppViewModel.Instance.FolderPath = result.Path;
+            await AppViewModel.Instance.ChooseFolderAsync(result.Path);
         }
         catch (Exception ex)
         {

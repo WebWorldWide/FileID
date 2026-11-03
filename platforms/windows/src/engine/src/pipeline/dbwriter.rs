@@ -359,10 +359,10 @@ impl DbWriter {
             // AFTER DELETE trigger only when recursive triggers are enabled,
             // which would strand the old text's FTS postings.
             let mut ocr_text_stmt = tx
-                .prepare_cached("INSERT INTO ocr_text (file_id, text) VALUES (?1, ?2)")
+                .prepare_cached("INSERT INTO ocr_text (file_id, text) SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM ocr_text WHERE file_id = ?1)")
                 .context("preparing ocr_text insert")?;
             let mut ocr_text_delete = tx
-                .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1")
+                .prepare_cached("DELETE FROM ocr_text WHERE file_id = ?1 AND source = 'ocr'")
                 .context("preparing ocr_text delete")?;
             let mut doc_text_stmt = tx
                 .prepare_cached("INSERT INTO doc_text (file_id, text) VALUES (?1, ?2)")
@@ -579,7 +579,9 @@ impl DbWriter {
                 // skip path. This clears stale ocr_text (and, via the v15
                 // triggers, ocr_fts) when a re-process now yields empty text
                 // (phantom FTS hits, #11) while leaving valid prior text
-                // untouched on the common skipped sessions.
+                // untouched on the common skipped sessions. A Deep Analyze
+                // transcription (source 'vlm') outlives rescans of an unchanged
+                // file; the v25 trigger drops it when the file changes.
                 if f.ocr_stage_ran {
                     ocr_text_delete
                         .execute(params![file_id])
@@ -2079,6 +2081,41 @@ mod tests {
     // flushes the same content at a new path. The heal can only fire if `flush`
     // read the legacy digest off disk and matched it via the `?6` fallback —
     // exercising the hoisted (pre-lock) read path end-to-end.
+    #[test]
+    fn a_full_database_fails_the_batch_whole_and_the_writer_recovers() {
+        let conn = Arc::new(Mutex::new(crate::db::test_support::memory_db()));
+        {
+            let c = conn.lock();
+            let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
+            c.execute_batch(&format!("PRAGMA max_page_count = {pages}")).unwrap();
+        }
+        let writer = DbWriter::new(conn.clone(), ScanCoordinator::new());
+        let batch = || -> Vec<TaggedFile> {
+            (0..200)
+                .map(|i| {
+                    let mut file = fixture(&format!("/lib/full/{i}.txt"));
+                    file.kind = FileKind::Doc;
+                    file.doc_text = Some("words ".repeat(400));
+                    file
+                })
+                .collect()
+        };
+        let mut buffer = batch();
+        let (mut total, mut failed) = (0u64, 0u64);
+        assert!(writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 0).is_err(), "SQLITE_FULL must surface");
+        {
+            let c = conn.lock();
+            assert!(c.is_autocommit(), "the failed batch must not leave a transaction open");
+            let rows: i64 = c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 0, "a failed batch commits nothing");
+            c.execute_batch("PRAGMA max_page_count = 1073741823").unwrap();
+        }
+        let mut buffer = batch();
+        writer.flush(&mut buffer, &mut total, &mut 0u64, &mut failed, 1).expect("writer works once space frees");
+        let rows: i64 = conn.lock().query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 200);
+    }
+
     #[test]
     fn over_cap_legacy_hash_heal_runs_via_prelock_read() {
         let dir = unique_tmp_dir("overcap_legacy");

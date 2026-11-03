@@ -248,6 +248,29 @@ enum VideoFrameWorker {
         }
     }
 
+    /// Runs the `--sample-video-pool` helper once for the whole video.
+    static func samplePool(source: URL, durationHint: Double, interval: Double = VideoSceneSelection.poolInterval) async throws -> VideoFramePool.Pool {
+        let directory = try VideoFramePool.newDirectory()
+        let process = Process()
+        var executable = CommandLine.arguments[0]
+#if DEBUG
+        executable = ProcessInfo.processInfo.environment["FILEID_TEST_ENGINE_PATH"] ?? executable
+#endif
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["--sample-video-pool", source.path, String(interval), String(VideoFramePool.maxPixelSize), directory.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            let status = try await CancellableProcess.wait(process, timeoutSeconds: UInt64(min(3_600, 60 + max(0, durationHint) * 2)))
+            if status == 4 { throw SourceRevisionChanged() }
+            guard status == 0 else { throw WorkerFailure() }
+            return VideoFramePool.Pool(directory: directory, manifest: try VideoFramePool.readManifest(in: directory))
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+
     static func scanSignals(source: URL, start: Double, end: Double, interval: Double) async throws -> [TimelineSignalAnalysis.Signal] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])

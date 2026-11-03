@@ -149,10 +149,10 @@ public sealed partial class RestructureView : UserControl
             var folder = AppViewModel.Instance.FolderPath;
             if (string.IsNullOrEmpty(folder))
             {
-                PlanStatusText.Text = "Pick a library folder in the sidebar to plan a reorganization.";
+                PlanStatusText.Text = "Choose a folder first. Choose and scan a folder; FileID then suggests a tidier layout inside that same folder, and nothing moves until you check it and press Move.";
                 return;
             }
-            PlanStatusText.Text = "Computing plan...";
+            PlanStatusText.Text = PlanningStatus;
             RefreshStepStrip();
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
@@ -166,7 +166,7 @@ public sealed partial class RestructureView : UserControl
                 // this the status freezes on "Computing plan..." forever (the
                 // plan event never arrives). Recover to a clear message.
                 DebugLog.Warn("PlanRestructure (OnLoaded) send failed: " + ex.Message);
-                PlanStatusText.Text = "Couldn't start planning - the engine isn't responding. Try restarting the app.";
+                PlanStatusText.Text = "FileID is still getting ready. Open this page again in a moment to see your plan.";
             }
         });
 
@@ -385,13 +385,13 @@ public sealed partial class RestructureView : UserControl
         TreeDiff.SetPlan(plan);
         int srcCount = DistinctAllSourceFolders(plan);
         int dstCount = plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
-        SankeyHeroStat.Text = $"{srcCount} source{(srcCount == 1 ? "" : "s")} -> {dstCount} destination{(dstCount == 1 ? "" : "s")}";
+        SankeyHeroStat.Text = $"{srcCount} folder{(srcCount == 1 ? "" : "s")} → {dstCount} folder{(dstCount == 1 ? "" : "s")}";
 
         bool hasContent = moveCount > 0 || keepFolders > 0 || StaysPutFiles(plan) > 0;
         bool hasMoves = moveCount > 0;
         PlanStatusText.Text = moveCount == 0
-            ? "Your library is already organized - nothing to move."
-            : $"{moveCount:N0} files to reorganize across {plan.CategoryCounts.Count} categories.";
+            ? "This folder is already tidy. Nothing to move."
+            : $"{moveCount:N0} file{(moveCount == 1 ? "" : "s")} to move into {plan.CategoryCounts.Count:N0} folder{(plan.CategoryCounts.Count == 1 ? "" : "s")}.";
         StatHero.Visibility = hasContent ? Visibility.Visible : Visibility.Collapsed;
         ViewModeToggle.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
         UnifiedSurface.Visibility = hasMoves ? Visibility.Visible : Visibility.Collapsed;
@@ -532,11 +532,11 @@ public sealed partial class RestructureView : UserControl
         ApplyBarSelectedCount.Text = selected.ToString("N0");
         ApplySymlinkButtonText.Text = hasWork ? $"Apply as shortcuts ({selected:N0})" : "Apply as shortcuts";
         ApplyStatusText.Text = hasWork
-            ? $"Ready to apply {selected:N0} of {total:N0} into '{plan?.LibraryRoot}'."
-            : "Select at least one file to apply.";
+            ? $"{selected:N0} of {total:N0} files chosen, inside '{plan?.LibraryRoot}'."
+            : "Choose at least one file to move.";
         ApplyBarHint.Text = total > 0
             ? "Originals stay put - applying creates shortcuts you can review."
-            : "Generate a plan to enable Apply.";
+            : "Press Suggest a layout first.";
         StepChip1Bg.Background = hasWork
             ? FileID.Services.ThemeHelper.GetBrushSafe("GoldBrush")
             : new SolidColorBrush(Windows.UI.Color.FromArgb(0x44, 0xFF, 0xCC, 0x00));
@@ -571,27 +571,33 @@ public sealed partial class RestructureView : UserControl
 
     private void SyncStepStrip(RestructurePlan? plan, int selected, int total)
     {
-        bool planning = PlanStatusText.Text.StartsWith("Computing plan", StringComparison.Ordinal);
+        bool planning = PlanStatusText.Text.StartsWith(PlanningStatus, StringComparison.Ordinal);
         bool moved = EngineClient.Instance.CanUndoRestructure;
         var states = StepStates(plan is not null, planning, selected, _applying, moved);
 
         int sources = plan is null ? 0 : DistinctAllSourceFolders(plan);
         int destinations = plan is null ? 0 : plan.Moves.Select(m => m.Category).Distinct(StringComparer.OrdinalIgnoreCase).Count();
         PreviewStepDetail.Text = plan is null
-            ? "FileID proposes a tidier home for loose files. Nothing moves yet."
-            : $"{total:N0} move{(total == 1 ? "" : "s")} planned · {sources:N0} source{(sources == 1 ? "" : "s")} → {destinations:N0} destination{(destinations == 1 ? "" : "s")}";
-        PreviewStepPlanButton.Content = plan is null ? "Plan" : "Plan again";
+            ? planning ? "Reading every folder and choosing a home for each file…" : "FileID suggests a tidier layout for this folder. Nothing moves yet."
+            : $"{total:N0} file{(total == 1 ? "" : "s")} to move · {sources:N0} folder{(sources == 1 ? "" : "s")} → {destinations:N0} folder{(destinations == 1 ? "" : "s")}";
+        PreviewStepPlanButton.Content = plan is null ? "Suggest a layout" : "Suggest again";
+        ToolTipService.SetToolTip(PreviewStepPlanButton, _applying
+            ? "Wait for the move to finish"
+            : "Work out a new plan from the files as they are now");
         if (ThemeHelper.GetStyleSafe(plan is null ? "ShellPrimaryButtonStyle" : "ShellGhostButtonStyle") is { } planStyle)
         {
             PreviewStepPlanButton.Style = planStyle;
         }
         PreviewStepProgress.Visibility = planning ? Visibility.Visible : Visibility.Collapsed;
         ReviewStepDetail.Text = plan is null
-            ? "Check each group below; skip any you want left alone."
+            ? "Check each group of moves and skip any you don't want."
             : $"{selected:N0} of {total:N0} move{(total == 1 ? "" : "s")} selected";
         MoveStepDetail.Text = moved && !_applying
-            ? "Files moved. Undo puts every file back."
-            : _applying ? "Moving files…" : "Moves the selected files on disk. You confirm first.";
+            ? "Files were moved. Undo move puts them back."
+            : _applying ? "Moving files on disk…" : "Moves the chosen files into their new folders.";
+        ToolTipService.SetToolTip(MoveStepButton, selected > 0
+            ? "Move the chosen files into their new folders. You confirm first, and you can undo."
+            : plan is null ? "Press Suggest a layout first" : "Choose at least one group to move");
         MoveStepButton.Content = selected > 0 ? $"Move {selected:N0} file{(selected == 1 ? "" : "s")}" : "Move files";
         MoveStepButton.IsEnabled = selected > 0 && !_applying;
         MoveStepUndoButton.Visibility = moved && !_applying ? Visibility.Visible : Visibility.Collapsed;
@@ -797,7 +803,7 @@ public sealed partial class RestructureView : UserControl
             TreeModeToggle.IsChecked = tree;
             Sankey.Visibility = tree ? Visibility.Collapsed : Visibility.Visible;
             TreeDiff.Visibility = tree ? Visibility.Visible : Visibility.Collapsed;
-            VisualizationHeader.Text = tree ? "Current vs proposed tree" : "Folder map";
+            VisualizationHeader.Text = tree ? "Current and after" : "Folder map";
         });
 
     // ---- Deep Analyze nudge ---------------------------------------------
@@ -854,11 +860,11 @@ public sealed partial class RestructureView : UserControl
         if (!show) return;
         bool installed = ClipModelInstalled;
         MissingContentModelsTitle.Text = installed
-            ? "Rescan so Restructure can see what's in your photos"
-            : "Sorting by date only: the image model isn't installed";
+            ? "Rescan so FileID can see what's in your photos"
+            : "Sorting by date only";
         MissingContentModelsBody.Text = installed
-            ? "The image model is installed, but this library was scanned before it was. A rescan reads the photos; files already up to date are skipped."
-            : "Without the image (CLIP) and document (BGE) models FileID can't see what files contain, so loose files fall back to year and month folders. Install them in Settings, then rescan.";
+            ? "This folder was scanned before the Search by description model was downloaded. A rescan looks at the photos again; files already up to date are skipped."
+            : "Without the Search by description and Documents models, FileID can't see what files contain, so loose files go into year and month folders. Download them in Settings, then rescan.";
         MissingContentModelsActionText.Text = installed ? "Rescan" : "Open Settings";
         MissingContentModelsActionGlyph.Glyph = installed ? "\uE72C" : "\uE713";
     }
@@ -884,14 +890,14 @@ public sealed partial class RestructureView : UserControl
         if (engine.DeepAnalyzeCommandInFlight || engine.DeepAnalyzeProgress != null)
         {
             DeepAnalyzeHintBanner.Visibility = Visibility.Visible;
-            DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
-            DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
+            DeepAnalyzeHintTitle.Text = "Describing files…";
+            DeepAnalyzeHintBody.Text = "Suggestions get better as more files are described.";
             RunDeepAnalyzeButton.IsEnabled = false;
         }
         else
         {
-            DeepAnalyzeHintTitle.Text = "Sharper proposals with Deep Analyze";
-            DeepAnalyzeHintBody.Text = "Deep Analyze reads the contents of each file - captions, OCR text, scene tags - so receipts go to Documents, screenshots to Photos, and people are recognized by name.";
+            DeepAnalyzeHintTitle.Text = "Better suggestions with descriptions";
+            DeepAnalyzeHintBody.Text = "Right now files are sorted by folder name and people. Describing files lets FileID see what each one shows, so receipts go to Documents and screenshots to Photos.";
             RunDeepAnalyzeButton.IsEnabled = true;
             _ = RefreshDeepAnalyzeHintAsync();
         }
@@ -979,8 +985,8 @@ public sealed partial class RestructureView : UserControl
         {
             if (EngineClient.Instance.DeepAnalyzeCommandInFlight) return;
             var model = AppViewModel.Instance.Settings.SelectedVlmModelKind;
-            DeepAnalyzeHintTitle.Text = "Deep Analyze running...";
-            DeepAnalyzeHintBody.Text = "Analyzing your library - proposals will sharpen as it runs.";
+            DeepAnalyzeHintTitle.Text = "Describing files…";
+            DeepAnalyzeHintBody.Text = "Suggestions get better as more files are described.";
             RunDeepAnalyzeButton.IsEnabled = false;
             await EngineClient.Instance.DeepAnalyzeAllAsync(model, skipExisting: true);
         });
@@ -1000,10 +1006,10 @@ public sealed partial class RestructureView : UserControl
             var folder = AppViewModel.Instance.FolderPath;
             if (string.IsNullOrEmpty(folder))
             {
-                PlanStatusText.Text = "Pick a library folder in the sidebar first.";
+                PlanStatusText.Text = "Choose a folder first.";
                 return;
             }
-            PlanStatusText.Text = "Computing plan...";
+            PlanStatusText.Text = PlanningStatus;
             RefreshStepStrip();
             // A freshly computed plan supersedes any prior selection intent.
             _deselectedFileIds.Clear();
@@ -1014,7 +1020,7 @@ public sealed partial class RestructureView : UserControl
             catch (Exception ex)
             {
                 DebugLog.Warn("PlanRestructure (OnPlanClicked) send failed: " + ex.Message);
-                PlanStatusText.Text = "Couldn't start planning - the engine isn't responding. Try restarting the app.";
+                PlanStatusText.Text = "FileID is still getting ready. Open this page again in a moment to see your plan.";
             }
         });
 
@@ -1037,6 +1043,12 @@ public sealed partial class RestructureView : UserControl
             if (_allFileRows.TryGetValue(m.FileId, out var row) && row.IsSelected) sel.Add(m);
         }
         if (sel.Count == 0) return;
+        if (!useSymlinks && !await ConfirmMoveAsync(sel.Count)) return;
+        if (_applying || _undoRequestInFlight || ChangeLog.Instance.IsUndoInFlight
+            || !IsFrozenPlanCurrent(plan, EngineClient.Instance.LastRestructurePlan, _renderedPlan))
+        {
+            return;
+        }
         _applying = true;
         RefreshStepStrip();
         _applyingPlan = plan;   // Record the in-flight plan (see SyncPlan)
@@ -1046,8 +1058,8 @@ public sealed partial class RestructureView : UserControl
         ApplySymlinkButton.IsEnabled = false;
         ApplyMovesButton.IsEnabled = false;
         ApplyStatusText.Text = useSymlinks
-            ? $"Creating {sel.Count:N0} symlinks..."
-            : $"Moving {sel.Count:N0} files...";
+            ? $"Creating {sel.Count:N0} shortcuts…"
+            : $"Moving {sel.Count:N0} files…";
         // Arm the apply watchdog. The engine replies with RestructureApplyResult
         // which SyncApplyResult cancels; if nothing arrives within ApplyTimeout
         // (engine crash / pipe death) the timer fires, releases _applying, and
@@ -1066,7 +1078,7 @@ public sealed partial class RestructureView : UserControl
             DebugLog.Warn("ApplyRestructure send failed: " + ex.Message);
             ReleaseApplyGuard();
             RecomputeSelection();
-            ApplyStatusText.Text = "Couldn't apply - the engine isn't responding. Try restarting the app.";
+            ApplyStatusText.Text = "FileID is still getting ready. Try again in a moment.";
             await ShowAlertAsync("Couldn't apply changes",
                 "FileID couldn't tell the engine to apply your reorganization (it isn't responding). " +
                 "Some files may already have moved. Review your files before restarting the app and trying again.");
@@ -1204,7 +1216,7 @@ public sealed partial class RestructureView : UserControl
                 // A faulted send (engine respawning) — re-enable so the button
                 // isn't stuck, mirroring the apply path's fault handling.
                 DebugLog.Warn("Undo restructure send failed: " + ex.Message);
-                ApplyStatusText.Text = "Engine is unavailable — try again in a moment.";
+                ApplyStatusText.Text = "FileID is still getting ready. Try again in a moment.";
                 UndoButton.IsEnabled = true;
             }
         });
@@ -1312,10 +1324,10 @@ public sealed partial class RestructureView : UserControl
         }
         if (IsPlanRestructureErrorKind(err.Kind))
         {
-            PlanStatusText.Text = "Planning didn't complete - try again, or run a fresh scan.";
-            _ = ShowAlertAsync("Couldn't plan the reorganization",
+            PlanStatusText.Text = "FileID couldn't work out a plan. Try again.";
+            _ = ShowAlertAsync("Couldn't suggest a layout",
                 string.IsNullOrWhiteSpace(err.Message)
-                    ? "FileID couldn't compute a reorganization plan. Try again, or run a fresh scan first."
+                    ? "FileID couldn't work out a plan. Try again, or rescan the folder first."
                     : err.Message);
         }
         else if (err.Kind == "undo_restructure")
@@ -1345,6 +1357,31 @@ public sealed partial class RestructureView : UserControl
 
     private static string Count(int n, string noun)
         => $"{n:N0} {noun}{(n == 1 ? "" : "s")}";
+
+    private const string PlanningStatus = "Planning… Looking at every folder, deciding which to keep, and choosing a home for every other file.";
+
+    private async Task<bool> ConfirmMoveAsync(int count)
+    {
+        if (XamlRoot is null) return false;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                Title = $"Move {count:N0} file{(count == 1 ? "" : "s")}?",
+                Content = "The files move into the new folders. Nothing is deleted, and Undo move puts every file back where it was.",
+                PrimaryButtonText = "Move files",
+                CloseButtonText = "Cancel",
+                DefaultButton = ContentDialogButton.Close,
+            };
+            return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("ConfirmMoveAsync threw: " + ex.Message);
+            return false;
+        }
+    }
 
     // Mirrors SidebarProcessingControl.ShowAlertAsync: a dismissible ContentDialog
     // that never escalates to App.UnhandledException on a broken XamlRoot.

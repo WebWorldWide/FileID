@@ -45,7 +45,8 @@ fn control(action: &str) -> CatalogRequest {
     request(serde_json::json!({"requestID":"control","action":action,"jobID":CatalogIndex::job_id()}))
 }
 fn wait(index: &CatalogIndex) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    // The Intel macOS runner needed more than 20 s under the full parallel suite.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut state = index.state.lock();
     while state.worker.is_some() {
         assert!(std::time::Instant::now() < deadline, "catalog worker timed out");
@@ -589,4 +590,27 @@ fn bounded_corrupt_graph_with_compatible_manifest_rebuilds_under_constrained_mem
     assert_eq!(clip_space::digest(&std::fs::read(&graph).unwrap()), manifest.graph_hash);
     index.close();
     original.close();
+}
+#[test]
+fn capture_window_keeps_files_inside_it_and_rejects_backwards_ranges() {
+    let (_directory, index) = fixture();
+    {
+        let conn = index.writer.lock();
+        conn.execute("UPDATE files SET created_at=1000 WHERE id=1", []).unwrap();
+        conn.execute("UPDATE files SET created_at=2000 WHERE id=3", []).unwrap();
+    }
+    let ids = |extra: serde_json::Value| {
+        let mut body = serde_json::json!({"requestID":"window","action":"search","query":"fixture"});
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let mut hits = index.search(&request(body)).unwrap().hits.iter().map(|h| h.file_id).collect::<Vec<_>>();
+        hits.sort_unstable();
+        hits
+    };
+    assert_eq!(ids(serde_json::json!({})), vec![1, 3, 5]);
+    assert_eq!(ids(serde_json::json!({"capturedFrom": 500, "capturedTo": 1500})), vec![1]);
+    assert_eq!(ids(serde_json::json!({"capturedTo": 1500})), vec![1, 5]);
+    assert_eq!(ids(serde_json::json!({"capturedFrom": 1500})), vec![3]);
+    assert_eq!(ids(serde_json::json!({"capturedFrom": 0, "capturedTo": 9999, "limit": 2})).len(), 2);
+    let backwards = request(serde_json::json!({"requestID":"bad","action":"search","query":"fixture","capturedFrom":5000,"capturedTo":1000}));
+    assert!(index.search(&backwards).is_err());
 }

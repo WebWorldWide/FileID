@@ -2,6 +2,32 @@
 
 Short, current priorities only. History lives in `STATE.md` (newest first) and git; release gates live in `SHIP.md`; the feature ledger lives in `NEXT_VERSION.md`; model choices live in `MODELS.md`.
 
+## Backlog plan (2026-11-03, from four read-only gap analyses)
+
+Done: Mac orphan-sweep mount guard; text-data and html indexing on both engines; Mac large video/audio kept; Chat history in the model prompt (both engines); catalog v29 `library_roots` registry fed by scans; `capturedFrom`/`capturedTo` search window (engines + schema, no UI yet); Rust chat retrieval off the writer lock; chat summary no longer blocks Describe on macOS; Mac document text cap 32k.
+
+Open and needs the Windows GPU PC (blind edit refused): the Rust Describe batch holds the resident-model lease for the whole run, so a chat summary waits unbounded (`commands/deep_analyze.rs` ~677, `models/resident_service.rs`). Add a waiter count and release/reacquire the lease between files.
+Windows/Linux parity still open: Windows Moments timeline lanes and playhead; look at the new Best Takes pages on real WinUI/GTK displays; Windows springs coverage audit; fold or document the extra Windows Models page.
+Adlon-run follow-ups (2026-11-03): 3,408 `.fileid-tags.json` sidecar files and ~1,300 other unindexed extensions (zip, rpt, one, gdoc, ...) are still skipped, so "Other files" counts 0 and nothing indexes archive names. 19 tiny placeholder GIFs (43-385 bytes) fail with "Could not decode image" and should become a quiet "unreadable image" status, not a failed scan row. Install CLIP + SFace on the test Mac and rerun Best Takes (CLIP grouping), hybrid search, People on the baseball set. Moments: see the run notes below once finished.
+Needs the owner's session (cannot be done headlessly): grant Accessibility to the terminal/agent app and Screen Recording so the Mac app can be driven and screenshotted, then walk all pages against `DESIGN_V3_PORT.md`; take matching screenshots on a Windows 11 host and a GTK host and diff them against the Mac set (palette and springs already match in code; layout, font metrics and blur cannot be proven from source). The Prototype v3 import still needs `/design-login`. Rust engine on macOS/Linux: accept the Swift app's flat model layout (or add the sentinel-free sha check) so models installed once work for both engines; install YuNet to get faces from the Rust engine.
+Open UI wiring: date pickers in Search & Moments for the capture window; Locations panel, "All locations" scope and OFFLINE badge on top of `library_roots`.
+
+Safety and quick wins:
+- [ ] Chat gets its own job category so a queued summary no longer blocks Describe (`deep_analyze_already_running`); schema first (`JobCategory`, ipc.schema.json:1174), then Swift, Rust, C# DTOs.
+- [ ] Status text while a parked model reloads or waits behind a job; filename-only hits for `failed=1` rows labelled "unreadable".
+- [ ] Mac indexed text cap 4000 chars toward Rust's 256 KiB; html/htm need a Rust extractor before they can be admitted on both engines.
+- [ ] Index unknown extensions as metadata-only `kind='other'` rows; archive entry names; surface skip/failure reasons (schema first).
+
+Locations (schema first): `v29` `library_roots`; IPC list/add/remove/rescan roots and `rootID` on scan events; mount check before scans; soft-hide in place of delete on Mac; Mac "All locations" scope, per-root bookmarks, OFFLINE tile badge (required by DESIGN_V3.md, missing on all three apps); WinUI/GTK ports; root filter chip in Search/Chat/Moments.
+
+Search and Moments: from/to capture-time filters on `CatalogRequest`; automatic event grouping (needs owner thresholds); rank moment chapters above frame captions; populated-panel and playback checks on Mac and Windows.
+
+Performance (needs a quiet Mac / the Windows GPU PC): route `analyzeSequence` through `VLMGreedyDecoder` with early stop; pooled frame helper for moments; A/B `FILEID_VLM_PROMPT_LOOKUP` and the per-file `MLX.GPU.clearCache()`; Rust chat semantic step off the writer lock and BGE brute-force scan replaced by an index; Windows streaming + early stop and `cache_prompt` check; park CLIP/RAM++/BGE/face models when idle; charge VRAM in the Rust scheduler from measured numbers.
+
+Parity: Best Takes pages for WinUI and GTK; Windows Moments timeline lanes; fold or document the Windows Models page; audit Windows springs.
+
+Models: keep about 10-15 curated defaults (2-3 per hardware tier); wire the existing 333-entry portable catalog into the Windows/Linux pickers filtered by RAM/VRAM; build text-chat, speech and embedding consumers; promote catalog entries only after a measured benchmark. Gemma 4's license is unverified.
+
 ## Where things stand (2026-10-20)
 
 - `main` is the only branch. Unmerged checkpoint work is recoverable from `archive/2026-10-13/*` tags; the pre-merge Mac completion checkpoint (including its dropped portable face-refresh Rust slice) is commit `03c50bcd`.
@@ -10,6 +36,8 @@ Short, current priorities only. History lives in `STATE.md` (newest first) and g
 - Test hosts: the Linux VM (`adlon-ci-linux`), the Windows 11 VM (`ADLON-CI-WIN`, also a self-hosted CI runner) and the owner's Mac (headless `swift build`/`swift test` over SSH only; the owner does interactive macOS testing and package signing locally).
 
 ## In flight
+
+- **Chat control (IPC v1.17, catalog v27, branch `agent/chat-control`)**: on the Mac, try the action cards on a real library (scan, describe, duplicates → Trash, organize → apply → undo, rename, name/merge people) and check they read clearly with VoiceOver. Measure Chat with CLIP and BGE installed (semantic lists were not exercised in the 100k benchmark). Port the cards to WinUI and GTK per the port note in `CHAT.md`; both apps already receive `ChatResponse.actions` and ignore it.
 
 0. **Finish the August-rollback restore** (engine landed first): restore the GTK app (paged restructure plans, engine client, settings) and the WinUI app (47 conflicted files) area by area, each as its own PR verified on its host. The macOS engine now implements `reassignFace`; the remaining portable-only commands (`findMergeSuggestions`, `embedTextQuery`, `embedImageQuery`, `restoreFromTrash`, `revertMerge`, `generateVideoThumbnail`) are served in-app on macOS and stay `not_implemented_yet` in its engine.
 1. **Redesign** (FileID Prototype v3, contract in `DESIGN_V3.md`, numbers in `DESIGN_V3_PORT.md`): every macOS page is on v3; the GTK and WinUI shells landed. Port the pages next, then check both on their hosts. Keep the grain fine (2× multi-octave).
@@ -88,6 +116,14 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 - [ ] Chat at scale and in control (agent/chat-control): hybrid retrieval (FTS5 + CLIP/BGE vectors, reciprocal-rank fusion) and a fixed structured-question planner (counts, sizes, dates, people, folders, duplicates) in both engines, target first evidence < 300 ms on 100k files; a schema-defined action vocabulary (scan, describe, stop, duplicates, trash, organize/undo, rename, name/merge people, moments, export, open page, search, safe settings) mapped to existing engine commands, a deterministic intent parser plus validated model tool calls, confirmation cards for anything that changes files, and no acting on instructions found inside file contents.
 - [ ] Best Takes (agent/best-takes): groups suggested automatically after a scan (bursts and repeated clips), model-free subject sharpness/blur/exposure/eyes/framing scoring with plain reasons, optional one-pass goal scoring, side-by-side compare with keyboard, "Keep the best, move the other N to Trash" with Undo; shared engine gets the same grouping and scoring.
 - [ ] Describe Files faster again (agent/describe-faster): target ≥3× on top of 214 s / 300 photos at equal blinded quality — shorter outputs with early stop, speculative/prompt-lookup decoding, Qwen3-VL 2B as a fast choice, parallel or pipelined instances, template descriptions for files tags+OCR already describe, and an accurate time estimate.
+
+## Best Takes follow-ups (from agent/best-takes, 2026-10-21)
+
+- [ ] WinUI and GTK Best Takes pages per the port spec in `DESIGN_V3_PORT.md` (engine side is done in the shared Rust engine).
+- [ ] On-screen check of the macOS page: keyboard (← → Space Z Return), VoiceOver labels, Undo after Trash, a populated video group.
+- [ ] Eye openness in the shared engine once the face-quality gate from the accuracy work lands (`TakeFaceAnalyzer`); swap the macOS Vision judgement for the same gate.
+- [ ] Capture time with sub-seconds (EXIF SubSecTimeOriginal) at scan time would let bursts split at the real 0.1 s gaps instead of 2 s file times.
+- [ ] Goal ranking on the shared engine (llama.cpp VLM, one contact-sheet pass).
 
 ## Owner focus (2026-10-20 evening): usable by anyone, 50–200× faster AI, hardened core
 

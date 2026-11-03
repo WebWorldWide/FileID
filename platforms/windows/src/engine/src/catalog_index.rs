@@ -21,6 +21,7 @@ use std::{
 };
 
 const MAX_FILES: usize = 200_000;
+static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
 const MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct Revision {
@@ -61,7 +62,13 @@ pub struct CatalogIndex {
 }
 impl CatalogIndex {
     pub fn new(writer: Arc<Mutex<Connection>>, database: PathBuf, directory: PathBuf) -> Arc<Self> {
-        Self::with_scheduler(writer, database, directory, ResourceScheduler::shared())
+        let index = Self::with_scheduler(writer, database, directory, ResourceScheduler::shared());
+        *CURRENT.lock() = Arc::downgrade(&index);
+        index
+    }
+    /// The engine's live index, for Chat's visual retrieval.
+    pub fn current() -> Option<Arc<Self>> {
+        CURRENT.lock().upgrade()
     }
     fn with_scheduler(
         writer: Arc<Mutex<Connection>>,
@@ -153,6 +160,41 @@ impl CatalogIndex {
         Ok(())
     }
     pub fn search(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
+        if request.captured_from.is_none() && request.captured_to.is_none() {
+            return self.search_unfiltered(request);
+        }
+        let from = request.captured_from.unwrap_or(0.0);
+        let to = request.captured_to.unwrap_or(f64::MAX);
+        if !from.is_finite() || from < 0.0 || to < from || to.is_nan() {
+            bail!("Invalid catalog search")
+        }
+        let limit = request.limit.unwrap_or(100);
+        if !(1..=100).contains(&limit) {
+            bail!("Invalid catalog search")
+        }
+        let mut wide = request.clone();
+        wide.limit = Some(100);
+        let mut response = self.search_unfiltered(&wide)?;
+        if response.hits.is_empty() {
+            return Ok(response);
+        }
+        let conn = db::open_read(&self.database)?;
+        let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
+        let mut inside = std::collections::HashSet::new();
+        for hit in &response.hits {
+            if inside.contains(&hit.file_id) {
+                continue;
+            }
+            if statement.exists(rusqlite::params![hit.file_id, from, to])? {
+                inside.insert(hit.file_id);
+            }
+        }
+        response.hits.retain(|hit| inside.contains(&hit.file_id));
+        response.hits.truncate(limit);
+        Ok(response)
+    }
+
+    fn search_unfiltered(self: &Arc<Self>, request: &CatalogRequest) -> Result<CatalogResponse> {
         let (mode, query, limit, files_only) = crate::commands::catalog_search::validate(request)?;
         let retrieval_lease = if mode == "semantic" {
             None
@@ -185,6 +227,9 @@ impl CatalogIndex {
             takes: None,
             recommendation: None,
             suggested_take_groups: None,
+            take_groups: None,
+            take_qualities: None,
+            take_goal_ranking: None,
         };
         if mode == "keyword" {
             response.hits = crate::commands::catalog_search::select(keyword, limit, files_only);

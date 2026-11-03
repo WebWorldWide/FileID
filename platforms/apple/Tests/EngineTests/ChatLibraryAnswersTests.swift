@@ -1,0 +1,104 @@
+import Foundation
+import GRDB
+import Testing
+@testable import FileIDEngine
+
+@Suite("Chat library answers")
+struct ChatLibraryAnswersTests {
+    private func catalog() async throws -> (FileIDEngine.Database, URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            let rows: [(Int, String, String, Int, Double)] = [
+                (1, "/Volumes/Adlon/Camera/Game/a.jpg", "image", 3_000, 1_000_000),
+                (2, "/Volumes/Adlon/Camera/Game/b.arw", "image", 9_000, 1_000_100),
+                (3, "/Volumes/Adlon/Camera/Game/c.JPG", "image", 3_000, 1_000_200),
+                (4, "/Volumes/Adlon/Cabinet/clip.mp4", "video", 50_000, 2_000_000),
+                (5, "C:\\Users\\a\\Pictures\\d.png", "image", 1_000, 3_000_000),
+            ]
+            for (id, path, kind, size, created) in rows {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension) VALUES(?,?,?,?,?,0,?,?)", arguments: [id, path, id, size, created, kind, (path as NSString).pathExtension])
+            }
+        }
+        return (database, directory)
+    }
+
+    private func answer(_ text: String, _ database: FileIDEngine.Database) async throws -> String {
+        let question = ChatIntent.question(text)
+        return try await database.pool.read { db in try ChatFacts.answer(db, question, ChatFacts.Filter()).0 }
+    }
+
+    @Test func overviewNamesKindsDatesAndBusiestFolders() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let message = try await answer("what is in my library", database)
+        #expect(message.hasPrefix("Your library has 5 files using 66.0 KB: 4 photos, 1 video."))
+        #expect(message.contains("Dates run from 1970-01-12 to 1970-02-"))
+        #expect(message.contains("Busiest folders: Game (3 files, 15.0 KB), Cabinet (1 file, 50.0 KB), Pictures (1 file, 1.0 KB)."))
+    }
+
+    @Test func folderQuestionsRankByCountOrSizeAndFoldWindowsSeparators() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(try await answer("which folder has the most files", database).hasPrefix("Folders with the most files: Game (3 files, 15.0 KB), Cabinet (1 file, 50.0 KB)"))
+        #expect(try await answer("what are my biggest folders", database).hasPrefix("Biggest folders: Cabinet (1 file, 50.0 KB), Game (3 files, 15.0 KB)"))
+        #expect(try await answer("which folder has the most files", database).contains("Pictures (1 file, 1.0 KB)"))
+    }
+
+    @Test func foldersWithTheSameNameAreToldApartByTheirParent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for (id, path) in [(1, "/a/Videos/Downloads/x.mov"), (2, "/a/Videos/Downloads/y.mov"), (3, "/a/Photos/Downloads/z.jpg"), (4, "/a/Docs/n.txt")] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,1000,0,'image','x')", arguments: [id, path, id])
+            }
+        }
+        let names = try await database.pool.read { try ChatFacts.folders($0, bySize: false, limit: 5).map(\.name) }
+        #expect(names == ["Videos/Downloads", "Docs", "Photos/Downloads"])
+    }
+
+    @Test func foldersThatStillCollideGetMoreOfTheirPath() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for (id, path) in [(1, "/a/2019/Videos/Downloads/x.mov"), (2, "/a/2019/Videos/Downloads/y.mov"), (3, "/a/2020/Videos/Downloads/z.mov")] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,1000,0,'video','x')", arguments: [id, path, id])
+            }
+        }
+        let names = try await database.pool.read { try ChatFacts.folders($0, bySize: false, limit: 5).map(\.name) }
+        #expect(names == ["2019/Videos/Downloads", "2020/Videos/Downloads"])
+    }
+
+    @Test func folderTotalsWalkTheDirectoryIndex() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = "replace(f.path_text,char(92),'/')"
+        let plan = try await database.pool.read { db in
+            try Row.fetchAll(db, sql: "EXPLAIN QUERY PLAN SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*),COALESCE(SUM(f.size_bytes),0) FROM files f WHERE f.failed=0 GROUP BY dir").map { $0["detail"] as String }
+        }
+        #expect(plan.contains { $0.contains("catalog_files_dir") })
+        #expect(!plan.contains { $0.contains("TEMP B-TREE FOR GROUP BY") })
+    }
+
+    @Test func formatWordsFilterByExtension() async throws {
+        let (database, directory) = try await catalog()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func ask(_ text: String) async throws -> String {
+            let question = ChatIntent.question(text)
+            let filter = ChatFacts.Filter(kinds: question.reduced.lowercased().contains("photo") ? ["image"] : [], extensions: question.formats ?? [])
+            return try await database.pool.read { db in try ChatFacts.answer(db, question, filter).0 }
+        }
+        #expect(try await ask("how many RAW photos are there") == "Found 1 photo in RAW format, using 9.0 KB.")
+        #expect(try await ask("how many jpgs") == "Found 2 files in JPG format, using 6.0 KB.")
+        #expect(try await ask("how many pngs") == "Found 1 file in PNG format, using 1.0 KB.")
+    }
+
+    @Test func ordinaryQuestionsAreNotCapturedAsLibraryQuestions() {
+        #expect(ChatIntent.question("how many files in my library").measure == "count")
+        #expect(ChatIntent.question("photos of my library dog").measure == "list")
+        #expect(ChatIntent.question("what is the biggest file").measure == "list")
+        #expect(ChatIntent.question("show me the folder from Downloads").measure == "list")
+    }
+}

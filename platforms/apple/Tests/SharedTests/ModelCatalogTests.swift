@@ -29,7 +29,7 @@ struct ModelCatalogTests {
         #expect(ModelManifest.vlmPin(forRepo: "attacker/arbitrary") == nil)
         #expect(AIModelKind.migrated(rawValue: "qwen2_vl_7b") == .qwen2VL7B)
         #expect(AIModelKind.visionModels.allSatisfy { $0.supportsVision })
-        #expect(AIModelKind.favorites.count == 8)
+        #expect(AIModelKind.favorites.count == 9)
     }
     @Test(arguments: ["license", "revision", "weights", "duplicate", "lineage", "architecture", "quantization"])
     func tamperedCatalogFailsClosed(fault: String) throws {

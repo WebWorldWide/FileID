@@ -17,13 +17,15 @@ enum DocText {
 
     /// Extract up to `maxChars` of a document's text, or nil if unsupported / empty /
     /// unreadable. Bounded in time + size.
+    static let embeddingChars = 4000
+
     static func extract(path: String, maxChars: Int = 4000) -> String? {
         let url = URL(fileURLWithPath: path)
         let ext = url.pathExtension.lowercased()
         if ["docx", "pptx", "xlsx", "odt", "epub"].contains(ext), !hasZIPHeader(url) { return nil }
         let raw: String?
         switch ext {
-        case "txt", "md", "markdown", "csv", "log", "text":
+        case "txt", "md", "markdown", "csv", "tsv", "log", "text", "json", "yaml", "yml", "toml", "xml":
             raw = boundedRead(url)
         case "pdf":
             raw = pdfText(url, maxChars: maxChars)
