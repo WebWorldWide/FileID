@@ -1,3 +1,4 @@
+import FileIDShared
 import Testing
 @testable import FileIDEngine
 
