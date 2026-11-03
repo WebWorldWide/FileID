@@ -70,13 +70,17 @@ actor ChatService {
                 if request.useModel == true, !hits.isEmpty, case .ready(let model) = await DeepAnalyze.shared.loadState,
                    request.modelKind == nil || request.modelKind == model.rawValue {
                     active[request.conversationID] = request.requestID
-                    await emit(request, status: "queued", message: "Results are ready. The loaded local model will summarize their evidence when its current work finishes.", hits: hits, database: database, sink: sink)
+                    let busy = await JobQueue.shared.hasActive(category: .deepAnalyze)
+                    let wait = busy ? "Results are ready. The local model will write its answer after the current Describe or video job finishes." : "Results are ready. The local model is writing its answer; a model that was resting can take a few seconds to wake."
+                    await emit(request, status: "queued", message: wait, hits: hits, database: database, sink: sink)
                     guard active[request.conversationID] == request.requestID else { return }
                     await JobQueue.shared.enqueue(.init(id: "chat-" + request.requestID, category: .deepAnalyze, title: "Chat evidence summary", etaSeconds: nil, priority: .interactive) {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
                 } else {
-                    let modelNote = hits.isEmpty ? "" : " Load a local AI model for a written answer; these are the matching files."
+                    var loading = false
+                    if case .loading = await DeepAnalyze.shared.loadState { loading = true }
+                    let modelNote = hits.isEmpty ? "" : (loading ? " The local AI model is still loading, so these are the matching files; ask again in a moment for a written answer." : " Load a local AI model for a written answer; these are the matching files.")
                     let message = explanation + (request.useModel == true ? modelNote + " Nothing was downloaded." : "")
                     try await Self.save(message, role: "assistant", conversation: request.conversationID, database: database)
                     guard active[request.conversationID] == request.requestID else { return }
