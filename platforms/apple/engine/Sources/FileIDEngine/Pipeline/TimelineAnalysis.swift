@@ -496,7 +496,7 @@ actor TimelineAnalysis {
             if exists { continue }
             let frameURL = pool.url(pool.manifest.frames[scene.representative])
             let result = await DeepAnalyze.shared.runCancellableAnalysis {
-                await DeepAnalyze.shared.analyze(imageURL: frameURL, mediaKind: .video, proposeFilename: false)
+                await DeepAnalyze.shared.analyze(imageURL: frameURL, mediaKind: .video, proposeFilename: false, sceneCaption: true)
             }
             try await requireRunning(jobID, database: database)
             guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
