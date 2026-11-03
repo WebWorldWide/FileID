@@ -17,6 +17,8 @@ enum DocText {
 
     /// Extract up to `maxChars` of a document's text, or nil if unsupported / empty /
     /// unreadable. Bounded in time + size.
+    static let embeddingChars = 4000
+
     static func extract(path: String, maxChars: Int = 4000) -> String? {
         let url = URL(fileURLWithPath: path)
         let ext = url.pathExtension.lowercased()

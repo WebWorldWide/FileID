@@ -501,13 +501,15 @@ public enum Tagging {
     /// even when BGE isn't installed (blob nil), so doc_fts keyword search still works —
     /// mirrors the Windows decoder-thread extract + optional BGE embed (tagging.rs). Bounded
     /// by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
+    static let storedTextChars = 32_000
+
     static func bgeTextAndEmbedding(url: URL) -> (text: String?, blob: Data?) {
-        guard let text = DocText.extract(path: url.path),
+        guard let text = DocText.extract(path: url.path, maxChars: storedTextChars),
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return (nil, nil)
         }
         guard BGETextService.shared.load(modelDir: BGETextService.defaultModelDir),
-              let emb = BGETextService.shared.embed(text) else {
+              let emb = BGETextService.shared.embed(String(text.prefix(DocText.embeddingChars))) else {
             return (text, nil)
         }
         return (text, FloatBlob.encode(emb))
