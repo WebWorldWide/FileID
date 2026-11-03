@@ -122,6 +122,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
             crate::tabs::deep_analyze::build_deep_analyze_tab(engine.clone()),
         ),
         ("chat", crate::tabs::chat::chat(engine.clone())),
+        ("takes", crate::tabs::takes::takes(engine.clone())),
         (
             "cleanup",
             crate::tabs::cleanup::build_cleanup_tab(engine.clone()),

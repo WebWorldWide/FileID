@@ -15,6 +15,8 @@ mod restructure_map;
 mod restructure_map_layout;
 mod restructure_model;
 pub mod settings;
+pub mod takes;
+mod takes_model;
 pub(crate) mod util;
 
 mod workbench_state;

@@ -62,7 +62,7 @@ impl Area {
     pub fn shortcut_hint(self) -> &'static str {
         match self {
             Area::Browse => "Ctrl+1–3",
-            Area::Analyze => "Ctrl+4–5",
+            Area::Analyze => "Ctrl+4–6",
             Area::Act => "Ctrl+7–9",
         }
     }
@@ -94,11 +94,11 @@ pub struct Page {
     pub summary: &'static str,
     pub icon: &'static str,
     pub area: Option<Area>,
-    /// Ctrl+N, numbered like macOS ⌘1–9 (6 is Best Takes, not on Linux yet).
+    /// Ctrl+N, numbered like macOS ⌘1–9 (6 is Best Takes).
     pub shortcut: Option<u32>,
 }
 
-pub const PAGES: [Page; 9] = [
+pub const PAGES: [Page; 10] = [
     Page {
         id: "library",
         title: "Library",
@@ -138,6 +138,14 @@ pub const PAGES: [Page; 9] = [
         icon: "chat-symbolic",
         area: Some(Area::Analyze),
         shortcut: Some(5),
+    },
+    Page {
+        id: "takes",
+        title: "Best Takes",
+        summary: "Compare several tries of the same shot and pick the best",
+        icon: "emblem-favorite-symbolic",
+        area: Some(Area::Analyze),
+        shortcut: Some(6),
     },
     Page {
         id: "cleanup",
@@ -298,7 +306,7 @@ mod tests {
     fn areas_hold_the_v3_pages_in_order() {
         let ids = |area: Area| area.pages().map(|page| page.id).collect::<Vec<_>>();
         assert_eq!(ids(Area::Browse), ["library", "people", "moments"]);
-        assert_eq!(ids(Area::Analyze), ["deep-analyze", "chat"]);
+        assert_eq!(ids(Area::Analyze), ["deep-analyze", "chat", "takes"]);
         assert_eq!(ids(Area::Act), ["cleanup", "restructure", "tools"]);
         assert!(page("settings").unwrap().area.is_none());
     }
@@ -309,7 +317,8 @@ mod tests {
         assert_eq!(page("settings").unwrap().crumb(), "FileID / Settings");
         assert_eq!(page_for_shortcut(4).unwrap().id, "deep-analyze");
         assert_eq!(page_for_shortcut(9).unwrap().id, "tools");
-        assert!(page_for_shortcut(6).is_none());
+        assert_eq!(page_for_shortcut(6).unwrap().id, "takes");
+        assert_eq!(page("takes").unwrap().crumb(), "Analyze / Best Takes");
         assert_eq!(page("cleanup").unwrap().search_hint(), "Act · Ctrl+7");
         assert_eq!(
             page("settings").unwrap().tooltip(),
