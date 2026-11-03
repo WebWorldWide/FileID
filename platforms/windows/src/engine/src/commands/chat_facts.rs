@@ -466,6 +466,17 @@ mod tests {
     }
 
     #[test]
+    fn per_type_questions_get_the_library_breakdown() {
+        let measure = |text: &str| super::super::chat_intent::parse_question(text).measure;
+        for text in ["how many files are there and how many of each file type", "break down my files by type", "what file types do I have", "how many of every kind of file"] {
+            assert_eq!(measure(text), "overview", "{text}");
+        }
+        for text in ["photos by Kyle", "what kind of camera took this", "how many photos from the type of event", "how many files in my Downloads folder by type"] {
+            assert_ne!(measure(text), "overview", "{text}");
+        }
+    }
+
+    #[test]
     fn format_words_filter_by_extension() {
         let conn = crate::db::test_support::memory_db();
         for (id, path, kind, size, ext) in [

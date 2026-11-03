@@ -447,6 +447,12 @@ struct ChatIntent: Codable, Equatable, Sendable {
         if words.allSatisfy({ overviewWords.contains($0) }), has(words, ["library", "collection", "overview", "summary", "summarize", "summarise"]) {
             return ("overview", "newest")
         }
+        // "how many of each file type", "break down my files by type", "what file types do I have"
+        if has(words, ["type", "types", "kind", "kinds"]), has(words, ["each", "every", "per", "by", "breakdown", "different"])
+            || (has(words, ["type", "types", "kinds"]) && has(words, ["what", "which"]) && has(words, ["files", "file"])),
+           !has(words, ["folder", "folders", "in", "inside", "under", "from"]) {
+            return ("overview", "newest")
+        }
         if has(words, ["folder", "folders", "directory", "directories"]), has(words, ["most", "biggest", "largest", "top", "fullest", "heaviest"]),
            !has(words, ["in", "inside", "under", "from"]) {
             return ("folders", has(words, ["biggest", "largest", "heaviest"]) ? "largest" : "newest")

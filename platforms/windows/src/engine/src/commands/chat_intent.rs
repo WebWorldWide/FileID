@@ -619,6 +619,13 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     {
         return Some(("overview", "newest"));
     }
+    // "how many of each file type", "break down my files by type", "what file types do I have"
+    if (has(&words, &["type", "types", "kind", "kinds"]) && has(&words, &["each", "every", "per", "by", "breakdown", "different"])
+        || has(&words, &["type", "types", "kinds"]) && has(&words, &["what", "which"]) && has(&words, &["files", "file"]))
+        && !has(&words, &["folder", "folders", "in", "inside", "under", "from"])
+    {
+        return Some(("overview", "newest"));
+    }
     if has(&words, &["folder", "folders", "directory", "directories"])
         && has(&words, &["most", "biggest", "largest", "top", "fullest", "heaviest"])
         && !has(&words, &["in", "inside", "under", "from"])
