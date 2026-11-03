@@ -101,6 +101,6 @@ public sealed class SidebarTabShortcutTests
         Assert.Equal("Analyze", SidebarTab.Takes.Area);
         Assert.Equal(new[] { "deepanalyze", "chat", "takes", "models" }, SidebarTab.InArea("Analyze").Select(t => t.Id).ToArray());
         Assert.Equal("Analyze / Best Takes", SidebarTab.Takes.Crumb);
-        Assert.Same(SidebarTab.All.First(t => t.Id == "takes").Id, SidebarTab.ById("takes").Id);
+        Assert.Equal("takes", SidebarTab.ById("takes").Id);
     }
 }
