@@ -34,7 +34,7 @@ public enum FileTypes {
     /// Plain-text data and logs — read as UTF-8 and clustered by content as `.doc`.
     /// Lockstep with the Rust engine's FileKind::from_extension.
     public static let textData: Set<String> = [
-        "csv", "tsv", "log", "markdown", "text", "json", "yaml", "yml", "toml", "xml"
+        "csv", "tsv", "log", "markdown", "text", "json", "yaml", "yml", "toml", "xml", "html", "htm"
     ]
     /// E-books — extracted to text and clustered as `.doc`. EPUB only (zip of XHTML);
     /// MOBI is proprietary (low ROI). Lockstep with the Rust engine.
