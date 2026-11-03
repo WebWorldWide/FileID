@@ -98,6 +98,18 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
         let Some(database) = database else {
             bail!("The catalog database is unavailable")
         };
+        if request.action == "send" {
+            validate(&request)?;
+            let prepared = prepare_unlocked(&database, &request)?;
+            let mut conn = database.lock();
+            let message = if request.use_model == Some(true) && prepared.summarize {
+                format!("{}{}", prepared.message, model_note(prepared.hits.is_empty()))
+            } else {
+                prepared.message
+            };
+            save_turn(&mut conn, &request.conversation_id, &[("user", &prepared.text), ("assistant", &message)])?;
+            return respond(&conn, &request, "completed", message, prepared.hits, prepared.actions);
+        }
         let result = execute_with(&mut database.lock(), &request, &live_semantic);
         result
     })
@@ -150,6 +162,17 @@ fn summary_model(requested: Option<&str>) -> Option<String> {
     }
 }
 
+/// Retrieval embeds the query and scans stored vectors; that must not hold the
+/// single writer connection, so it runs on a fresh read-only one when the
+/// database has a file path (in-memory test databases fall back to the writer).
+fn prepare_unlocked(database: &Mutex<Connection>, request: &ChatRequest) -> Result<Prepared> {
+    let path = database.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
+    match path {
+        Some(path) => prepare_send(&crate::db::open_read(&path)?, request, &live_semantic),
+        None => prepare_send(&database.lock(), request, &live_semantic),
+    }
+}
+
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(work).await.map_err(|error| anyhow!(error))?
 }
@@ -160,8 +183,8 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     let _claim = Claim::take(&request, &cancel)?;
     let (db, req) = (database.clone(), request.clone());
     let (prepared, queued, history) = blocking(move || {
+        let prepared = prepare_unlocked(&db, &req)?;
         let mut conn = db.lock();
-        let prepared = prepare_send(&conn, &req, &live_semantic)?;
         if prepared.hits.is_empty() || !prepared.summarize {
             let message = if prepared.summarize { format!("{}{}", prepared.message, model_note(true)) } else { prepared.message.clone() };
             save_turn(&mut conn, &req.conversation_id, &[("user", &prepared.text), ("assistant", &message)])?;
@@ -809,6 +832,27 @@ mod tests {
         assert!(cancel.load(Ordering::Acquire));
         drop(claim);
         assert!(!summary_running("summary-cancel"));
+    }
+
+    #[test]
+    fn retrieval_reads_through_its_own_connection_without_the_writer_lock() {
+        let dir = std::env::temp_dir().join(format!("fileid-chat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("catalog.db");
+        let _ = std::fs::remove_file(&path);
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+        crate::db::migrations::apply(&writer).unwrap();
+        writer.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'/lib/dog.jpg',1,10,0,'image','jpg','A dog in a park')", []).unwrap();
+        let database = Mutex::new(writer);
+        let request = ChatRequest { request_id: "r".into(), conversation_id: "c".into(), action: "send".into(), text: Some("dog".into()), ..Default::default() };
+        let held = database.lock();
+        let reader = crate::db::open_read(std::path::Path::new(held.path().unwrap())).unwrap();
+        let prepared = prepare_send(&reader, &request, &no_semantic).unwrap();
+        drop(held);
+        assert!(prepared.hits.iter().any(|hit| hit.file_id == 1));
+        assert!(prepare_unlocked(&database, &request).unwrap().hits.iter().any(|hit| hit.file_id == 1));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
