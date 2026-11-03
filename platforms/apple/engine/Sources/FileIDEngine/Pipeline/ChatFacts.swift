@@ -182,18 +182,24 @@ enum ChatFacts {
         return "Found \(ChatIntent.countLabel(extras.count)) \(extras.count == 1 ? "extra copy" : "extra copies") of \(ChatIntent.countLabel(extras.groups)) \(extras.groups == 1 ? "file" : "files")\(qualifiers), using \(ChatIntent.bytesLabel(extras.bytes)). Cleanup checks every copy byte by byte before anything moves."
     }
 
-    struct FolderTotal: Sendable { let name: String; let count: Int64; let bytes: Int64 }
+    struct FolderTotal: Sendable { var name: String; let path: String; let count: Int64; let bytes: Int64 }
 
     /// Folders holding the most files (or bytes), from the stored paths. Both path
     /// separators are folded so a catalog scanned on Windows reads the same.
     static func folders(_ db: GRDB.Database, bySize: Bool, limit: Int) throws -> [FolderTotal] {
         let path = "replace(f.path_text,char(92),'/')"
         let order = bySize ? "b DESC,c DESC" : "c DESC,b DESC"
-        return try Row.fetchAll(db, sql: "SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 GROUP BY dir ORDER BY \(order),dir ASC LIMIT ?", arguments: [limit]).map { row in
+        var found = try Row.fetchAll(db, sql: "SELECT rtrim(\(path),replace(\(path),'/','')) AS dir,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE f.failed=0 GROUP BY dir ORDER BY \(order),dir ASC LIMIT ?", arguments: [limit]).map { row -> FolderTotal in
             var dir: String = row["dir"]
             while dir.count > 1, dir.hasSuffix("/") { dir.removeLast() }
-            return FolderTotal(name: dir.split(separator: "/").last.map(String.init) ?? dir, count: row["c"], bytes: row["b"])
+            return FolderTotal(name: dir.split(separator: "/").last.map(String.init) ?? dir, path: dir, count: row["c"], bytes: row["b"])
         }
+        let repeated = Dictionary(grouping: found, by: \.name).filter { $0.value.count > 1 }.keys
+        for index in found.indices where repeated.contains(found[index].name) {
+            let parts = found[index].path.split(separator: "/")
+            if parts.count > 1 { found[index].name = parts.suffix(2).joined(separator: "/") }
+        }
+        return found
     }
 
     static func folderPhrase(_ folder: FolderTotal) -> String {

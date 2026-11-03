@@ -267,6 +267,7 @@ pub(crate) fn duplicates_sentence(extras: &Extras, qualifiers: &str) -> String {
 
 pub(crate) struct FolderTotal {
     pub name: String,
+    pub path: String,
     pub count: i64,
     pub bytes: i64,
 }
@@ -283,9 +284,22 @@ pub(crate) fn folders(conn: &Connection, by_size: bool, limit: i64) -> Result<Ve
         while dir.len() > 1 && dir.ends_with('/') {
             dir.pop();
         }
-        Ok(FolderTotal { name: dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(&dir).to_owned(), count: row.get(1)?, bytes: row.get(2)? })
+        Ok(FolderTotal { name: dir.rsplit('/').find(|part| !part.is_empty()).unwrap_or(&dir).to_owned(), path: dir, count: row.get(1)?, bytes: row.get(2)? })
     })?;
-    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    let mut found = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let repeated: std::collections::HashSet<String> = {
+        let mut seen = std::collections::HashSet::new();
+        found.iter().filter(|folder| !seen.insert(folder.name.clone())).map(|folder| folder.name.clone()).collect()
+    };
+    for folder in &mut found {
+        if repeated.contains(&folder.name) {
+            let parts: Vec<&str> = folder.path.split('/').filter(|part| !part.is_empty()).collect();
+            if parts.len() > 1 {
+                folder.name = parts[parts.len() - 2..].join("/");
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn folder_phrase(folder: &FolderTotal) -> String {
@@ -398,6 +412,16 @@ pub(crate) fn restrict(conn: &Connection, hits: Vec<CatalogHit>, filter: &Filter
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn folders_with_the_same_name_are_told_apart_by_their_parent() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path) in [(1, "/a/Videos/Downloads/x.mov"), (2, "/a/Videos/Downloads/y.mov"), (3, "/a/Photos/Downloads/z.jpg"), (4, "/a/Docs/n.txt")] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'image','x')", rusqlite::params![id, path]).unwrap();
+        }
+        let names: Vec<String> = folders(&conn, false, 5).unwrap().into_iter().map(|folder| folder.name).collect();
+        assert_eq!(names, vec!["Videos/Downloads", "Docs", "Photos/Downloads"]);
+    }
+
     #[test]
     fn format_words_filter_by_extension() {
         let conn = crate::db::test_support::memory_db();

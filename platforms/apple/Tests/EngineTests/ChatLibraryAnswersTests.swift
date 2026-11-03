@@ -45,6 +45,19 @@ struct ChatLibraryAnswersTests {
         #expect(try await answer("which folder has the most files", database).contains("Pictures (1 file, 1.0 KB)"))
     }
 
+    @Test func foldersWithTheSameNameAreToldApartByTheirParent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for (id, path) in [(1, "/a/Videos/Downloads/x.mov"), (2, "/a/Videos/Downloads/y.mov"), (3, "/a/Photos/Downloads/z.jpg"), (4, "/a/Docs/n.txt")] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,1000,0,'image','x')", arguments: [id, path, id])
+            }
+        }
+        let names = try await database.pool.read { try ChatFacts.folders($0, bySize: false, limit: 5).map(\.name) }
+        #expect(names == ["Videos/Downloads", "Docs", "Photos/Downloads"])
+    }
+
     @Test func formatWordsFilterByExtension() async throws {
         let (database, directory) = try await catalog()
         defer { try? FileManager.default.removeItem(at: directory) }
