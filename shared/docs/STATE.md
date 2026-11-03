@@ -1,5 +1,15 @@
 # FileID — State
 
+## 2026-11-03 — Adlon drive runs (isolated catalogs, read-only source) and what they found
+
+Every run used a throwaway catalog via `FILEID_DATABASE_PATH`; the Adlon drive was only read. Catalog 1 = `Camera/Kyle Baseball Game 9-19-26` (721 files: 382 ARW + 339 JPG, 25 GB). Catalog 2 = `File Cabinet/Audio` + `File Cabinet/Jeff` (11,347 files, 75.9 GB, two registered roots). Scan speed: 721 files in 138 s (~5 files/s, RAW previews + Vision, no CLIP/RAM++ installed); 11,045 mixed files in 543 s (~20 files/s).
+
+Found and fixed: Best Takes found 0 groups in 721 photos because grouping needed CLIP vectors, which this Mac does not have installed (now groups on capture time + pHash when vectors are missing: 63 groups, 24-shot burst scored in 3.3 s); `.wma` (123 files) and other audio/RAW/video formats the Rust engine knew were skipped by the Mac; Chat could not answer "what is in my library", "which folder has the most files" or "how many RAW photos" (now answered from totals/extension filters on both engines; same-named folders are told apart by parent); hybrid search without a vector returned an opaque error; a second chat send during a summary returned "catalog request is invalid"; a chat question during a Describe batch waited for the entire batch (65 s measured; now answered between files, 17 s).
+
+Describe with Qwen3-VL 2B on 12 Adlon photos: 4.35 s/file steady (library decoder 2.6 s/file on 4 photos, likely a warm-cache effect, not a regression: the A/B is unmeasured on a quiet machine, load average 7-14 throughout). Descriptions read normally.
+
+Not exercised and why: face clustering (SFace model not installed), CLIP/hybrid search, RAM++ tags (models not installed), Restructure apply, trash/restore, File Tools exports (all mutate the source; the drive is read-only by instruction). The Restructure plan call returned 0 moves for the baseball folder. Fresh scans print "Deep Analyze unavailable: mlx.metallib missing" until the metallib is copied beside the engine (done locally; `scripts/ensure_mlx_metallib.sh` built it in 4.4 min).
+
 ## 2026-11-03 — Convergence into one branch, merge fixes, first backlog items
 
 All ten `agent/*` branches and `integrate/owner-review` were merged with `main` into `converge/all` (PR #274). Chat control and Best Takes both claimed catalog v27 / IPC 1.17; resolved as v27 = chat retrieval, v28 = take quality. Fixed after the merge: Swift type-checker timeouts (`ChatActions.valid`, `TakeScoring.Luma`) and a shadowed `plan()` in `ChatService`; stale migration/favorites counts in Rust and Swift tests (28 migrations, 9 favorites); `tokio` 1.54.1 to clear the cargo-deny `AsyncFd` advisory.
