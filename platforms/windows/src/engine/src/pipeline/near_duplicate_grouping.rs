@@ -16,6 +16,9 @@ pub struct Thresholds {
     pub min_seed_cosine: f32,
     pub max_hamming: u32,
     pub max_group_size: usize,
+    /// Join on capture time plus pHash alone when a CLIP vector is missing. Only Best Takes
+    /// (which suggests groups for the user to check) may use it; Describe shares text across a group.
+    pub phash_fallback: bool,
 }
 
 pub const NEAR_DUPLICATE: Thresholds = Thresholds {
@@ -25,6 +28,7 @@ pub const NEAR_DUPLICATE: Thresholds = Thresholds {
     min_seed_cosine: 0.955,
     max_hamming: 8,
     max_group_size: 24,
+    phash_fallback: false,
 };
 pub const TAKES: Thresholds = Thresholds {
     max_gap_seconds: 4.0,
@@ -33,6 +37,7 @@ pub const TAKES: Thresholds = Thresholds {
     min_seed_cosine: 0.88,
     max_hamming: 12,
     max_group_size: 60,
+    phash_fallback: true,
 };
 pub const CLIPS: Thresholds = Thresholds {
     max_gap_seconds: 900.0,
@@ -41,6 +46,7 @@ pub const CLIPS: Thresholds = Thresholds {
     min_seed_cosine: 0.86,
     max_hamming: 0,
     max_group_size: 24,
+    phash_fallback: false,
 };
 
 pub const MAX_GAP_SECONDS: f64 = NEAR_DUPLICATE.max_gap_seconds;
@@ -180,7 +186,8 @@ fn joins(item: &Item, current: &[&Item], limits: &Thresholds) -> bool {
     let (Some(embedding), Some(last_embedding), Some(seed)) =
         (item.embedding.as_deref(), last.embedding.as_deref(), current[0].embedding.as_deref())
     else {
-        return false;
+        return limits.phash_fallback
+            && matches!((item.phash, last.phash), (Some(p), Some(q)) if p != 0 && q != 0 && (p ^ q).count_ones() <= limits.max_hamming);
     };
     let to_last = cosine(embedding, last_embedding);
     if cosine(embedding, seed) < limits.min_seed_cosine {
@@ -366,6 +373,21 @@ mod tests {
 
     fn item(id: i64, path: &str, time: Option<f64>, angle: Option<f32>) -> Item {
         Item { id, path: path.into(), time, phash: None, embedding: angle.map(vector) }
+    }
+
+    #[test]
+    fn best_takes_groups_on_phash_alone_but_describe_does_not() {
+        let with_hash = |id: i64, time: f64, phash: u64| Item { id, path: format!("/c/DSC00{id}.JPG"), time: Some(time), phash: Some(phash), embedding: None };
+        let items = vec![
+            with_hash(1, 100.0, 0xF0F0_F0F0_F0F0_F0F0),
+            with_hash(2, 101.0, 0xF0F0_F0F0_F0F0_F0F1),
+            with_hash(3, 102.0, 0x0F0F_0F0F_0F0F_0F0F),
+            with_hash(4, 103.0, 0),
+        ];
+        let members = |t: Thresholds| groups_with(&items, &t).iter().map(|g| g.members.clone()).collect::<Vec<_>>();
+        assert_eq!(members(TAKES), vec![vec![1, 2], vec![3], vec![4]]);
+        assert_eq!(members(NEAR_DUPLICATE), vec![vec![1], vec![2], vec![3], vec![4]]);
+        assert_eq!(members(CLIPS), vec![vec![1], vec![2], vec![3], vec![4]]);
     }
 
     #[test]
