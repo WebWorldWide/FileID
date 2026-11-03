@@ -74,7 +74,7 @@ actor ChatService {
                     let wait = busy ? "Results are ready. The local model will write its answer after the current Describe or video job finishes." : "Results are ready. The local model is writing its answer; a model that was resting can take a few seconds to wake."
                     await emit(request, status: "queued", message: wait, hits: hits, database: database, sink: sink)
                     guard active[request.conversationID] == request.requestID else { return }
-                    await JobQueue.shared.enqueue(.init(id: "chat-" + request.requestID, category: .deepAnalyze, title: "Chat evidence summary", etaSeconds: nil, priority: .interactive) {
+                    await JobQueue.shared.enqueue(.init(id: "chat-" + request.requestID, category: .deepAnalyze, title: "Chat evidence summary", etaSeconds: nil, priority: .interactive, blocksExclusiveCommands: false) {
                         await ChatService.shared.summarize(request, hits: hits, model: model, fallback: explanation, database: database, sink: sink)
                     })
                 } else {
