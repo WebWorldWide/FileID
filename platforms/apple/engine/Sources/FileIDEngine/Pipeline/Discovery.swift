@@ -266,7 +266,8 @@ public actor Discovery {
             let ext = url.pathExtension
             guard FileTypes.isTaggable(ext) else { continue }
             let size = Int64(values?.fileSize ?? 0)
-            if size > maxBytes {
+            let streamed = FileTypes.kind(forExtension: ext) == .video || FileTypes.kind(forExtension: ext) == .audio
+            if size > maxBytes, !streamed {
                 JSONLog.shared.info(ev: "skip_large_file", path: redactPathForLog(url.path),
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
                 continue

@@ -4,6 +4,7 @@
 import Testing
 import Foundation
 import GRDB
+import FileIDShared
 @testable import FileIDEngine
 // Disambiguate from GRDB.Database (both modules export `Database`).
 private typealias Database = FileIDEngine.Database
@@ -97,25 +98,36 @@ struct DiscoveryTests {
         #expect(capture.snapshot() == [1, 17])
     }
 
-    @Test("Skips files larger than the size cap")
+    @Test("Skips large documents and images but keeps large streamed video")
     func skipsLargeFiles() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("FileIDLargeTest-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
-        // Tiny taggable file.
-        let small = tmp.appendingPathComponent("small.jpg")
-        try Data("x".utf8).write(to: small)
-        // 2 MB "video" with size cap 1 MB.
-        let big = tmp.appendingPathComponent("big.mp4")
-        try Data(repeating: 0, count: 2 * 1024 * 1024).write(to: big)
+        try Data("x".utf8).write(to: tmp.appendingPathComponent("small.jpg"))
+        let twoMB = Data(repeating: 0, count: 2 * 1024 * 1024)
+        try twoMB.write(to: tmp.appendingPathComponent("big.mp4"))
+        try twoMB.write(to: tmp.appendingPathComponent("big.tif"))
 
         let discovery = Discovery()
         let result = await discovery.walk(root: tmp, maxSizeMB: 1)
 
-        #expect(result.count == 1)
-        #expect(result.first?.url.lastPathComponent == "small.jpg")
+        #expect(Set(result.map { $0.url.lastPathComponent }) == ["small.jpg", "big.mp4"])
+    }
+
+    @Test("Plain-text data files are discovered as documents")
+    func discoversTextData() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDTextTest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        for name in ["a.csv", "b.json", "c.yaml", "d.log", "e.toml"] {
+            try Data("x".utf8).write(to: tmp.appendingPathComponent(name))
+        }
+        let result = await Discovery().walk(root: tmp)
+        #expect(result.count == 5)
+        #expect(FileTypes.kind(forExtension: "json") == .doc)
     }
 
     @Test("Prunes user-excluded folders while keeping siblings")

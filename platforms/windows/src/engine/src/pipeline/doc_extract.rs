@@ -53,7 +53,8 @@ pub(crate) fn extract(path: &Path, bytes: Option<&[u8]>) -> Result<Option<String
         "txt" | "md" | "swift" | "py" | "rb" | "js" | "jsx" | "ts" | "tsx" | "java" | "kt"
         | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
         | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua" | "dart"
-        | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org" | "adoc" => {
+        | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org" | "adoc" | "csv" | "tsv" | "log" | "markdown"
+        | "text" | "json" | "yaml" | "yml" | "toml" | "xml" => {
             Some(read_plain(path, bytes)?)
         }
         "docx" => Some(extract_zip_xml(path, bytes, &["word/document.xml"], &["w:t"])?),

@@ -23,7 +23,7 @@ enum DocText {
         if ["docx", "pptx", "xlsx", "odt", "epub"].contains(ext), !hasZIPHeader(url) { return nil }
         let raw: String?
         switch ext {
-        case "txt", "md", "markdown", "csv", "log", "text":
+        case "txt", "md", "markdown", "csv", "tsv", "log", "text", "json", "yaml", "yml", "toml", "xml":
             raw = boundedRead(url)
         case "pdf":
             raw = pdfText(url, maxChars: maxChars)

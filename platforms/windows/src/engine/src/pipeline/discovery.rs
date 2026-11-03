@@ -152,7 +152,8 @@ impl FileKind {
             | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "cs" | "go" | "rs" | "php"
             | "sh" | "bash" | "zsh" | "sql" | "scala" | "m" | "mm" | "r" | "jl" | "lua"
             | "dart" | "vue" | "pl" | "pm" | "ps1" | "tex" | "bib" | "rst" | "org"
-            | "adoc" => FileKind::Doc,
+            | "adoc" | "csv" | "tsv" | "log" | "markdown" | "text" | "json" | "yaml" | "yml"
+            | "toml" | "xml" => FileKind::Doc,
             "mp3" | "mp2" | "mp1" | "wav" | "flac" | "ogg" | "oga" | "m4a" | "m4b"
             | "aac" | "opus" | "aiff" | "aif" | "aifc" | "caf" | "mka" | "spx" => {
                 FileKind::Audio

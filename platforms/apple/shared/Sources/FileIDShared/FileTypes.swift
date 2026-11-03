@@ -31,6 +31,11 @@ public enum FileTypes {
         "scala", "m", "mm", "r", "jl", "lua", "dart", "vue", "pl", "pm", "ps1",
         "tex", "bib", "rst", "org", "adoc"
     ]
+    /// Plain-text data and logs — read as UTF-8 and clustered by content as `.doc`.
+    /// Lockstep with the Rust engine's FileKind::from_extension.
+    public static let textData: Set<String> = [
+        "csv", "tsv", "log", "markdown", "text", "json", "yaml", "yml", "toml", "xml"
+    ]
     /// E-books — extracted to text and clustered as `.doc`. EPUB only (zip of XHTML);
     /// MOBI is proprietary (low ROI). Lockstep with the Rust engine.
     public static let ebooks: Set<String> = ["epub"]
@@ -47,7 +52,7 @@ public enum FileTypes {
         if images.contains(e)    { return .image }
         if videos.contains(e)    { return .video }
         if pdfs.contains(e)      { return .pdf }
-        if documents.contains(e) || code.contains(e) || ebooks.contains(e) { return .doc }
+        if documents.contains(e) || code.contains(e) || textData.contains(e) || ebooks.contains(e) { return .doc }
         if audio.contains(e)     { return .audio }
         if models.contains(e)    { return .model }
         return .other
@@ -56,7 +61,7 @@ public enum FileTypes {
     public static func isTaggable(_ ext: String) -> Bool {
         let e = ext.lowercased()
         return images.contains(e) || videos.contains(e) || documents.contains(e)
-            || code.contains(e) || ebooks.contains(e)
+            || code.contains(e) || textData.contains(e) || ebooks.contains(e)
             || audio.contains(e) || models.contains(e)
     }
 
