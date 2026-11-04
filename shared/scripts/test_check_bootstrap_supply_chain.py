@@ -135,8 +135,8 @@ class BootstrapSupplyChainTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         setup = (root / "shared" / "scripts" / "setup-dev.sh").read_text(encoding="utf-8")
         toolchain = (root / "rust-toolchain.toml").read_text(encoding="utf-8")
-        self.assertIn('channel = "1.90"', toolchain)
-        self.assertIn("RUST_MAJOR == 1 && RUST_MINOR < 90", setup)
+        self.assertIn('channel = "1.98"', toolchain)
+        self.assertIn("RUST_MAJOR == 1 && RUST_MINOR < 98", setup)
 
     def test_appimage_allowlist_rejects_second_downloaded_executable(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -310,7 +310,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
             "shared/scripts/build_ffmpeg_lgpl_windows_x64.sh": "9f1a958f27fcf20ec3ff762ca84528e0b4fcda1f88f81ccb988bf36ea3f10d46",
             "shared/scripts/install_onnxruntime_macos.sh": "d5c4f189b2bd770e1454fec5cc813b252a626b98c45bb8c3d7593f948d3ecb97",
             "shared/scripts/run_local_audit_gate.sh": "96f0d2d77eddece17aba99229b92d7385d2c06bbead05f275b890e3eec99a2a7",
-            "shared/scripts/setup-dev.sh": "a0fc33122370e895ca2ecb2528d1d5ef8e3ef0458874eafa33e42f2e2770b1d5",
+            "shared/scripts/setup-dev.sh": "51fabe91e0068235e818599df6f3658976c7c074c4f80620643e549f3a59d971",
             "tools/git-hooks/pre-commit": "30ce0c4982fb3b163e84948dd3c84f268761e03ace1428346f21f79b59e9da5b",
         })
 

@@ -72,12 +72,12 @@ if have rustc && have cargo; then
   fi
   RUST_MAJOR="${BASH_REMATCH[1]}"
   RUST_MINOR="${BASH_REMATCH[2]}"
-  if (( RUST_MAJOR < 1 || (RUST_MAJOR == 1 && RUST_MINOR < 90) )); then
-    die "Rust 1.90 or newer is required by rust-toolchain.toml; found $RUST_VERSION. Install the pinned toolchain separately, then rerun."
+  if (( RUST_MAJOR < 1 || (RUST_MAJOR == 1 && RUST_MINOR < 98) )); then
+    die "Rust 1.98 or newer is required by rust-toolchain.toml; found $RUST_VERSION. Install the pinned toolchain separately, then rerun."
   fi
   ok "Rust already present ($(rustc --version))"
 else
-  die "Rust and Cargo are required. Install the 1.90 toolchain pinned by rust-toolchain.toml separately from a reviewed, trusted source, then rerun; FileID will not pipe a remote installer into a shell."
+  die "Rust and Cargo are required. Install the 1.98 toolchain pinned by rust-toolchain.toml separately from a reviewed, trusted source, then rerun; FileID will not pipe a remote installer into a shell."
 fi
 
 # --- RAM++ export venv (pinned) --------------------------------------------
