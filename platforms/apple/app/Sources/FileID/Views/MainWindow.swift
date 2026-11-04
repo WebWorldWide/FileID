@@ -154,6 +154,7 @@ struct MainWindow: View {
             .animation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.8), value: chatPresented)
             .accentColor(Theme.gold)
             .background { shortcutHost }
+            .onReceive(NotificationCenter.default.publisher(for: .fileIDChooseFolder)) { _ in pickFolder() }
             .onAppear {
                 store.openIfPossible()
                 restorePickedFolderIfPossible()

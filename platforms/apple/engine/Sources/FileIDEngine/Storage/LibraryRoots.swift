@@ -15,6 +15,13 @@ enum LibraryRoots {
         return (trimmed, trimmed + String(separator), trimmed + (windows ? "]" : "0"))
     }
 
+    /// Scans record the full path as the display name; show the folder's own name instead.
+    static func displayName(path: String, stored: String) -> String {
+        guard stored == path else { return stored }
+        let name = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
+        return name.isEmpty ? stored : name
+    }
+
     static func list(_ db: GRDB.Database, online: (String) -> Bool = { ScanRootGuard.isReachable($0) }) throws -> [LibraryRoot] {
         let rows = try Row.fetchAll(db, sql: "SELECT id,path,display,kind,enabled,last_scan_at,last_status FROM library_roots ORDER BY added_at,id")
         return try rows.map { row in
@@ -25,7 +32,7 @@ enum LibraryRoots {
                 WHERE failed=0 AND (path_text=? OR (path_text>=? AND path_text<?))
                 """, arguments: [bounds.exact, bounds.low, bounds.high])
             return LibraryRoot(
-                id: row["id"], path: path, display: row["display"], kind: row["kind"], enabled: (row["enabled"] as Int64) != 0,
+                id: row["id"], path: path, display: Self.displayName(path: path, stored: row["display"]), kind: row["kind"], enabled: (row["enabled"] as Int64) != 0,
                 online: online(path), fileCount: totals?["c"] ?? 0, totalBytes: totals?["b"] ?? 0,
                 lastScanAt: row["last_scan_at"], lastStatus: row["last_status"]
             )

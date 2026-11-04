@@ -621,7 +621,7 @@ struct DashedNotice: View {
     var body: some View {
         VStack(spacing: 6) {
             Text(title).font(Theme.Font.display(28)).foregroundStyle(Theme.text1)
-            if let subtitle { MetaText(subtitle) }
+            if let subtitle { MetaText(subtitle).multilineTextAlignment(.center).frame(maxWidth: 520) }
         }
         .frame(maxWidth: .infinity)
         .padding(40)

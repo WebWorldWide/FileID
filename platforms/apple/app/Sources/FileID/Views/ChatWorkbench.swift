@@ -124,12 +124,15 @@ struct ChatWorkbench: View {
                 .buttonStyle(.dsGhost)
                 .help(messages.isEmpty && hits.isEmpty ? "Nothing to clear yet" : "Start a new conversation. This one is deleted.")
                 .disabled(messages.isEmpty && hits.isEmpty)
+                // The ghost style insets its label 6 pt; cancel it so the text meets the page edge.
+                .padding(.trailing, onClose == nil ? -6 : 0)
             if let onClose {
                 DSIconButton("Close chat", systemImage: "xmark") { onClose() }
                     .keyboardShortcut(.cancelAction)
             }
         }
-        .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, 10)
+        .padding(.horizontal, isPage ? Theme.Metrics.pageInsetX : 16).padding(.vertical, isPage ? 0 : 10)
+        .frame(minHeight: isPage ? Theme.Metrics.paneHeaderHeight : nil)
     }
 
     private var emptyState: some View {
@@ -245,7 +248,8 @@ struct ChatWorkbench: View {
                 Spacer()
                 MetaText(hits.isEmpty ? "None yet" : "\(hits.count)", size: 12)
             }
-            .padding(.horizontal, 14).padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .frame(height: Theme.Metrics.paneHeaderHeight)
             Hairline()
             if let player {
                 NativeVideoPlayer(player: player)

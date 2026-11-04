@@ -117,7 +117,7 @@ struct CatalogWorkbench: View {
                         .help(hits.count < 2 ? "Find at least two clips first" : "Compare these clips as tries of the same shot and pick the best one")
                 }
             }
-            .padding(14)
+            .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 14)
             Hairline()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
@@ -167,7 +167,7 @@ struct CatalogWorkbench: View {
         case "documentText": parts.append("Text in document")
         case "ocrText": parts.append("Text in image")
         case "handwrittenText": parts.append("Handwritten text")
-        default: parts.append(hit.kind.capitalized)
+        default: parts.append(FileKindLabel.title(hit.kind))
         }
         return parts.joined(separator: " · ")
     }

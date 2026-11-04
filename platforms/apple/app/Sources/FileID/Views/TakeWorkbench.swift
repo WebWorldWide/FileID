@@ -122,20 +122,20 @@ struct TakeWorkbench: View {
                         DSIconButton("Look again", systemImage: "arrow.clockwise", tint: Theme.text3) { reloadAuto(after: nil) }
                             .disabled(autoLoading)
                     }
-                    .padding(.leading, 14).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
+                    .padding(.leading, Theme.Metrics.railInset).padding(.trailing, 8).padding(.top, 10).padding(.bottom, 2)
                     MetaText("Bursts and repeated clips from your scans. Biggest and newest first.", size: 11.5)
-                        .padding(.horizontal, 14).padding(.bottom, 6)
+                        .padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 6)
                         .fixedSize(horizontal: false, vertical: true)
                     if autoLoaded && autoGroups.isEmpty {
                         MetaText("None yet. Scan a folder with photo bursts or several tries of a clip.", size: 12)
-                            .padding(.horizontal, 14).padding(.vertical, 6)
+                            .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     ForEach(autoGroups) { group in
                         AutoGroupRow(group: group, selected: selectedAutoKey == group.groupKey) { openAuto(group) }
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
-                    SectionLabel("Your groups · \(events.count)").padding(.horizontal, 14).padding(.bottom, 4)
+                    SectionLabel("Your groups · \(events.count)").padding(.horizontal, Theme.Metrics.railInset).padding(.bottom, 4)
                     ForEach(events, id: \.id) { event in
                         RailRow(selected: selectedEvent?.id == event.id && selectedAutoKey == nil, action: { open(event) }) {
                             VStack(alignment: .leading, spacing: 3) {
@@ -147,7 +147,7 @@ struct TakeWorkbench: View {
                         .accessibilityLabel("\(event.title), \(event.fileIDs.count) clips, goal: \(event.goal)")
                     }
                     if events.isEmpty {
-                        MetaText("Groups you make by hand, with a goal, show up here.", size: 12).padding(.horizontal, 14).padding(.vertical, 6)
+                        MetaText("Groups you make by hand, with a goal, show up here.", size: 12).padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 6)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Hairline(color: Theme.hairlineSoft).padding(.vertical, 8)
@@ -163,7 +163,7 @@ struct TakeWorkbench: View {
                     Button("Undo") { send("undoEventEdit", eventID: lastDeletedEventID) }
                         .buttonStyle(DSAccentOutlineButtonStyle(height: Theme.Metrics.hitTarget))
                 }
-                .padding(.horizontal, 14).padding(.vertical, 8)
+                .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 8)
             }
         }
     }
@@ -199,7 +199,7 @@ struct TakeWorkbench: View {
                 }
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, Theme.Metrics.railInset)
     }
 
     private var emptyDetail: some View {
@@ -542,13 +542,18 @@ private struct AutoGroupRow: View {
         let noun = group.kind == "videos" ? "clips" : "photos"
         RailRow(selected: selected, action: action) {
             HStack(spacing: 10) {
-                HStack(spacing: 2) {
-                    ForEach(group.shots.prefix(3), id: \.primaryFileID) { shot in
+                // A fanned stack in a fixed-width slot, so names line up whether a group shows 2 or 3 shots.
+                ZStack(alignment: .leading) {
+                    ForEach(Array(group.shots.prefix(3).enumerated()), id: \.element.primaryFileID) { index, shot in
                         AsyncThumbnail(url: URL(fileURLWithPath: shot.path), size: 96) { Color.white.opacity(0.05) }
                             .frame(width: 28, height: 28)
                             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Theme.bg1, lineWidth: 1.5))
+                            .offset(x: CGFloat(index) * 16)
+                            .zIndex(Double(-index))
                     }
                 }
+                .frame(width: 60, height: 28, alignment: .leading)
                 .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(group.shots.count) \(noun)").font(Theme.Font.body(13, .medium))

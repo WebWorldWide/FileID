@@ -55,7 +55,6 @@ struct Sidebar: View {
                         } else {
                             Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
                                 .buttonStyle(DSPrimaryButtonStyle(height: 30))
-                                .keyboardShortcut("o", modifiers: .command)
                         }
                         MetaText("Or drag a folder onto this window.")
                     }
@@ -140,7 +139,10 @@ struct Sidebar: View {
             let running = engine.catalogJobs.filter { $0.state == "running" }.count
             return running > 0 ? ("\(running)", Theme.ai) : nil
         case .restructure:
-            return engine.restructurePlan != nil ? ("Ready", Theme.gold) : nil
+            // A count, like the other badges, and nothing when the plan moves no files.
+            guard let plan = engine.restructurePlan else { return nil }
+            let moves = plan.totalMoves ?? plan.moves.count
+            return moves > 0 ? (compact(moves), Theme.gold) : nil
         default:
             return nil
         }

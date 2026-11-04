@@ -54,7 +54,10 @@ struct FileIDApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             SidebarCommands()
-            CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .newItem) {
+                Button("Choose Folder…") { NotificationCenter.default.post(name: .fileIDChooseFolder, object: nil) }
+                    .keyboardShortcut("o", modifiers: .command)
+            }
             CommandGroup(replacing: .help) {
                 Button("FileID Help") { NSWorkspace.shared.open(URL(string: "https://github.com/WebWorldWide/FileID#readme")!) }
                 Button("Show Welcome Sheet…") { showWelcome = true }
@@ -117,4 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.styleMask.insert(.fullSizeContentView)
         }
     }
+}
+
+extension Notification.Name {
+    /// File ▸ Choose Folder… (⌘O): the main window opens its folder picker.
+    static let fileIDChooseFolder = Notification.Name("FileID.chooseFolder")
 }

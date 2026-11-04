@@ -80,7 +80,18 @@ struct TitleBar: View {
             .buttonStyle(.plain)
             .help("Choose, rescan or close the folder FileID is working on")
             .popover(isPresented: $folderOpen, arrowEdge: .bottom) { folderPopover }
+            .onChange(of: folderOpen) { _, open in if open { engine.refreshLibraryRoots() } }
         }
+    }
+
+    /// Files cataloged under this folder (from the engine's location list), never the
+    /// whole catalog: a library can hold several folders, or none of this one yet.
+    private func folderCountText(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        let resolved = url.resolvingSymlinksInPath().path
+        guard let root = engine.libraryRoots.first(where: { [path, resolved].contains(URL(fileURLWithPath: $0.path).resolvingSymlinksInPath().path) || $0.path == path }),
+              root.fileCount > 0 else { return "Not scanned" }
+        return "\(root.fileCount.formatted()) files"
     }
 
     private var folderPopover: some View {
@@ -94,7 +105,7 @@ struct TitleBar: View {
                         Text(url.path).font(Theme.Font.meta).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
                     }
                     Spacer(minLength: 8)
-                    MetaText(store.totalFiles > 0 ? "\(store.totalFiles.formatted()) files" : "Not scanned", color: Theme.text2)
+                    MetaText(folderCountText(url), color: Theme.text2)
                 }
                 .padding(.horizontal, 12).padding(.vertical, 9)
                 .overlay(alignment: .top) { Hairline(color: Theme.hairlineSoft) }
@@ -102,7 +113,7 @@ struct TitleBar: View {
                 MetaText("No folder chosen yet.").padding(.horizontal, 12).padding(.bottom, 10)
             }
             HStack(spacing: 8) {
-                Button(pickedURL == nil ? "Choose folder…" : "Choose another folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("o", modifiers: .command)
+                Button(pickedURL == nil ? "Choose folder…" : "Choose another folder…") { folderOpen = false; pickFolder() }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 if let url = pickedURL {
                     Button("Rescan \(url.lastPathComponent)") { folderOpen = false; engine.startScan(rootURL: url) }
                         .buttonStyle(DSSecondaryButtonStyle(height: 28)).keyboardShortcut("r", modifiers: .command)

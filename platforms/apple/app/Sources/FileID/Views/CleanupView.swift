@@ -262,6 +262,7 @@ struct CleanupView: View {
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(Theme.warning.opacity(0.10)))
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.warning.opacity(0.35), lineWidth: 1))
@@ -277,6 +278,7 @@ struct CleanupView: View {
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).fill(
                         (exactPreviewPartial ? Theme.warning : Theme.delight).opacity(0.08)))
@@ -664,20 +666,21 @@ private struct CopyTile: View {
                     }
                 }
             Text(file.url.lastPathComponent)
-                .font(.system(size: 10, weight: .medium))
+                .font(Theme.Font.body(12, .medium))
+                .foregroundStyle(Theme.text1)
                 .lineLimit(1).truncationMode(.middle)
-                .frame(width: 132, alignment: .center)
+                .frame(width: 132, alignment: .leading)
+                .padding(.top, 2)
             HStack(spacing: 4) {
                 Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(Theme.text3)
-                Spacer()
+                Spacer(minLength: 4)
                 if let date = file.displayDate {
                     Text(date.formatted(date: .numeric, time: .omitted))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Theme.text3)
                 }
             }
+            .font(Theme.Font.body(11.5))
+            .monospacedDigit()
+            .foregroundStyle(Theme.text3)
             .frame(width: 132)
         }
         .accessibilityElement(children: .combine)

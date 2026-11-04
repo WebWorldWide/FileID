@@ -18,6 +18,18 @@ pub(crate) fn is_online(path: &str) -> bool {
 
 /// Half-open range matching every stored path under `root`: `root/` up to `root0`
 /// (`0` is the character after `/`; `]` follows `\`).
+/// Scans record the full path as the display name; show the folder's own name instead.
+fn display_name(path: &str, stored: String) -> String {
+    if stored != path {
+        return stored;
+    }
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .map_or(stored.clone(), str::to_owned)
+}
+
 fn subtree_bounds(root: &str) -> (String, String, String) {
     let (separator, next) = if root.contains('\\') && !root.contains('/') { ('\\', ']') } else { ('/', '0') };
     let trimmed = root.trim_end_matches(separator);
@@ -48,6 +60,7 @@ pub(crate) fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let online = is_online(&path);
+        let display = display_name(&path, display);
         roots.push(LibraryRoot { id, path, display, kind, enabled, online, file_count, total_bytes, last_scan_at, last_status });
     }
     Ok(roots)
@@ -120,6 +133,15 @@ mod tests {
         assert!(is_online(dir.to_str().unwrap()));
         assert!(!is_online(dir.join("missing").to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn display_name_is_the_folder_name_unless_one_was_chosen() {
+        assert_eq!(display_name("/Volumes/Adlon", "/Volumes/Adlon".into()), "Adlon");
+        assert_eq!(display_name("/Users/a/Pictures/", "/Users/a/Pictures/".into()), "Pictures");
+        assert_eq!(display_name(r"D:\Photos\2024", r"D:\Photos\2024".into()), "2024");
+        assert_eq!(display_name("/Volumes/Adlon", "Camera".into()), "Camera");
+        assert_eq!(display_name("/", "/".into()), "/");
     }
 
     #[test]

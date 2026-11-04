@@ -75,6 +75,10 @@ enum Theme {
         static let pageInsetX: CGFloat = 26
         static let pageInsetY: CGFloat = 20
         static let sidePane: CGFloat = 300
+        /// Shared height for side-by-side pane headers so their bottom hairlines meet.
+        static let paneHeaderHeight: CGFloat = 58
+        /// Content inset inside a side pane: matches RailRow (6 pt outer + 10 pt inner).
+        static let railInset: CGFloat = 16
     }
 
     enum Font {

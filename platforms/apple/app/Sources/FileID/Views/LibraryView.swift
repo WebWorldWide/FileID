@@ -1104,7 +1104,7 @@ private struct FileDetailRows: View {
     let file: FileRow
     let people: [String]
     var body: some View {
-        DetailRow("Kind", file.kind.capitalized + " · " + file.extension.uppercased())
+        DetailRow("Kind", FileKindLabel.title(file.kind) + " · " + file.extension.uppercased())
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
         if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }

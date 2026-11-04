@@ -357,7 +357,7 @@ struct PeopleView: View {
                 continueToDeepAnalyzeRow
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, Theme.Metrics.pageInsetX)
         .padding(.vertical, 14)
     }
 
@@ -490,7 +490,8 @@ struct PeopleView: View {
                                   ))
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, Theme.Metrics.pageInsetX)
+                .padding(.vertical, 16)
                 // Animate on count to avoid the per-render array
                 // allocation that mapping IDs would cause.
                 .animation(reduceMotion
@@ -526,7 +527,7 @@ struct PeopleView: View {
                 .font(Theme.Font.body(12))
                 .help("People you marked as unknown are hidden here. Show them to change your mind.")
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, Theme.Metrics.pageInsetX)
             .padding(.vertical, 8)
         }
     }
