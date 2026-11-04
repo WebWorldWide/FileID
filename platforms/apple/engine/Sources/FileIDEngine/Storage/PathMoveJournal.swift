@@ -78,7 +78,8 @@ enum PathMoveJournal {
     }
 
     private static func unfinished(at url: URL) -> [Intent] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        guard let data = FileManager.default.contents(atPath: url.path) else { return [] }
+        let text = String(decoding: data, as: UTF8.self)
         var intents: [Intent] = [], done = Set<String>()
         for raw in text.split(separator: "\n") {
             guard let line = try? JSONDecoder().decode(Line.self, from: Data(raw.utf8)) else { continue }
