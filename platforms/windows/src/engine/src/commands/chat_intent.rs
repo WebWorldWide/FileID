@@ -555,6 +555,7 @@ pub fn parse_question(text: &str) -> Question {
             "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
             "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
             "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
+            "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all",
         ];
         for (index, word) in words.iter().enumerate() {
             if filler.contains(&word.as_str()) {
@@ -643,6 +644,14 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
                 return Some(("overview", "newest"));
             }
         }
+    }
+    // "what file formats do I have", "which extensions are in my library"
+    if has(&words, &["format", "formats", "extension", "extensions"])
+        && has(&words, &["what", "which", "each", "every", "per", "by", "breakdown", "different", "list"])
+        && !has(&words, &["folder", "folders", "directory"])
+        && (!has(&words, &["in", "inside", "under", "from"]) || has(&words, &["library", "collection"]))
+    {
+        return Some(("formats", "newest"));
     }
     // "how many of each file type", "break down my files by type", "what file types do I have"
     if (has(&words, &["type", "types", "kind", "kinds"]) && has(&words, &["each", "every", "per", "by", "breakdown", "different"])

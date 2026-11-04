@@ -327,6 +327,30 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
         let list = top.iter().map(folder_phrase).collect::<Vec<_>>().join(", ");
         return Ok((format!("{}: {list}.", if by_size { "Biggest folders" } else { "Folders with the most files" }), hits));
     }
+    if question.measure == "formats" {
+        let mut statement = conn.prepare(
+            "SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0 \
+             GROUP BY lower(COALESCE(NULLIF(f.extension,''),'none')) ORDER BY c DESC,e ASC",
+        )?;
+        let formats = statement
+            .query_map([], |row| {
+                let (ext, n): (String, i64) = (row.get(0)?, row.get(1)?);
+                Ok(format!("{} {ext}", count_label(n)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let more = if formats.len() > 10 { format!(" and {} more", formats.len() - 10) } else { String::new() };
+        return Ok((
+            format!(
+                "Your {} {} {} {}: {}{more}.",
+                count_label(count),
+                if count == 1 { "file uses" } else { "files use" },
+                formats.len(),
+                if formats.len() == 1 { "format" } else { "formats" },
+                formats.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+            ),
+            hits,
+        ));
+    }
     let mut statement = conn.prepare("SELECT f.kind,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,f.kind ASC")?;
     let kinds = statement
         .query_map([], |row| {
@@ -364,7 +388,7 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
 
 /// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
-    if question.measure == "overview" || question.measure == "folders" {
+    if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
         return library_answer(conn, question);
     }
     let qualifiers = filter.qualifiers();
