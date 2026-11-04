@@ -151,7 +151,7 @@ REVIEWED_NETWORK_SOURCE_SHA256 = {
   "platforms/windows/src/FileID.App/Program.cs": "e013f7f02ad596093072b50200555b1c63ce89f6e41dddd28a2f57e01dc28e47",
   "platforms/windows/src/FileID.App/Services/FolderPickerService.cs": "b23698d76e9f5bf37117477b9d541fb8577e54c1e1bb59a709225064ce78c7c0",
   "platforms/windows/src/FileID.App/Services/SafeOpen.cs": "48373698174ed4c43575b05e85a563fd7485207819d9737c4fed9f92e0b2dd44",
-  "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "c50846c16a67365d48caa6e6206f4aa291a384ac93b17a1d85923fdc5449f117",
+  "platforms/windows/src/FileID.App/Services/WinVerifyTrustChecker.cs": "3193b3308a99d19f10479ae9d1485c088a55880b6862161213ec8d1415c86731",
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.Commands.cs": "be537ebd7df1c8d426b32e0c4b974a2f1821cf6f75329d3be652be0e3b0eb172",
   "platforms/windows/src/FileID.App/ViewModels/EngineClient.cs": "c417280dcbd93d8705456b887b8eb89476f1f40dd0b86abb9ef6d827a103636e",
   "platforms/windows/src/FileID.App/Views/Settings/SettingsView.xaml.cs": "562c38646bd8eac394e0a04aa78b863777ed42a8f720a287ee5bdf514fc278ab",
