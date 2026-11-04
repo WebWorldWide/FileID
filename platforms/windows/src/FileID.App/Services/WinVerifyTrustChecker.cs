@@ -187,11 +187,19 @@ internal static class WinVerifyTrustChecker
         return IntegrityVerdict.Untrusted;
     }
 
+    // X509CertificateLoader cannot read the signer out of an Authenticode-signed binary;
+    // SYSLIB0057's guidance for CreateFromSignedFile is a scoped suppression. The chain itself
+    // is verified by WinVerifyTrust before any of these identity checks run.
+#pragma warning disable SYSLIB0057
+    private static System.Security.Cryptography.X509Certificates.X509Certificate SignerCertificate(string path) =>
+        System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
+#pragma warning restore SYSLIB0057
+
     private static bool CertificateThumbprintMatches(string path, string expectedHex)
     {
         try
         {
-            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
+            using var cert = SignerCertificate(path);
             using var cert2 = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
             var actualHex = cert2.Thumbprint;
             return string.Equals(actualHex, NormalizeHex(expectedHex), StringComparison.OrdinalIgnoreCase);
@@ -207,7 +215,7 @@ internal static class WinVerifyTrustChecker
     {
         try
         {
-            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
+            using var cert = SignerCertificate(path);
             using var cert2 = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
             return string.Equals(cert2.Subject, expectedSubject.Trim(), StringComparison.OrdinalIgnoreCase);
         }
@@ -222,12 +230,12 @@ internal static class WinVerifyTrustChecker
     {
         try
         {
-            var cert = System.Security.Cryptography.X509Certificates.X509Certificate.CreateFromSignedFile(path);
+            using var cert = SignerCertificate(path);
             using var cert2 = new System.Security.Cryptography.X509Certificates.X509Certificate2(cert);
             var publicKeyIdentity = string.Join(
                 '|',
                 cert2.PublicKey.Oid.Value,
-                Convert.ToBase64String(cert2.PublicKey.EncodedParameters.RawData),
+                Convert.ToBase64String(cert2.PublicKey.EncodedParameters?.RawData ?? []),
                 Convert.ToBase64String(cert2.PublicKey.EncodedKeyValue.RawData));
             return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(publicKeyIdentity)));
