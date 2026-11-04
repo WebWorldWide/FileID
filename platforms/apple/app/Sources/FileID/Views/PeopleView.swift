@@ -868,10 +868,9 @@ private struct PersonDetailSheet: View {
                     Text(headerTitle)
                         .font(Theme.Font.body(20, .semibold))
                     Spacer()
-                    Text("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
-                        .font(Theme.Font.mono(11))
-                        .foregroundStyle(Theme.text3)
+                    MetaText("\(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") · \(person.faceCount) face\(person.faceCount == 1 ? "" : "s")")
                     Button("Done") { dismiss() }
+                        .buttonStyle(.dsPrimary)
                         .keyboardShortcut(.defaultAction)
                 }
                 Toggle(isOn: $isUnknown) {
@@ -898,10 +897,11 @@ private struct PersonDetailSheet: View {
                         }
                     }
                     Text("Descriptions will call this person **“\(deepAnalyzeRef)”**.")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.Font.body(11.5))
                         .foregroundStyle(Theme.text3)
                 }
-                if !isUnknown && person.fileCount > 0 {
+                // Only a real name is worth writing into Finder tags; "Person 1" is a placeholder.
+                if !isUnknown && person.fileCount > 0 && hasTypedName {
                     tagAllPhotosButton
                 }
             }
@@ -932,7 +932,7 @@ private struct PersonDetailSheet: View {
                             }
                     }
                 }
-                .padding(12)
+                .padding(16)
             }
         }
         .sheet(isPresented: $showMoveTargetPicker) {
@@ -979,8 +979,7 @@ private struct PersonDetailSheet: View {
                           : "Tag all \(person.fileCount) photo\(person.fileCount == 1 ? "" : "s") with \"\(tagName)\"",
                           systemImage: "tag.fill")
                 }
-                .buttonStyle(.dsPrimary)
-                .tint(Theme.gold)
+                .buttonStyle(.dsSecondary)
                 .disabled(tagBatchInFlight || tagName.isEmpty)
                 .help("Adds the Finder tag \"\(tagName)\" to every photo of this person. Visible in Finder, Spotlight, and Smart Folders.")
 
@@ -1041,6 +1040,10 @@ private struct PersonDetailSheet: View {
                 BulkRenameSheet.recordPersonTag(personID: person.id, tag: newTag)
             }
         }
+    }
+
+    private var hasTypedName: Bool {
+        [title, firstName, lastName].contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 
     private var primaryTagName: String {
@@ -1194,6 +1197,7 @@ private struct MovePhotosTargetPicker: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .buttonStyle(.dsSecondary)
                     .keyboardShortcut(.cancelAction)
             }
             .padding(16)
@@ -1272,6 +1276,7 @@ private struct SuggestedMergesSheet: View {
                 }
                 Spacer()
                 Button("Done", action: onDismiss)
+                    .buttonStyle(.dsPrimary)
                     .keyboardShortcut(.defaultAction)
             }
             Text("These pairs were close enough to look like the same person, but not close enough to merge automatically. Review and merge the ones that match.")
@@ -1430,6 +1435,7 @@ private struct MergeTargetPickerSheet: View {
                     .font(Theme.Font.body(14, .semibold))
                 Spacer()
                 Button("Cancel", action: onCancel)
+                    .buttonStyle(.dsSecondary)
                     .keyboardShortcut(.cancelAction)
             }
             Text("Choose the card to keep. Photos from the other cards move into it, and those cards go away.")

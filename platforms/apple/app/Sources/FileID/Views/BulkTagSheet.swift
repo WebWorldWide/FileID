@@ -26,6 +26,7 @@ struct BulkTagSheet: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
+                    .buttonStyle(.dsSecondary)
                     .keyboardShortcut(.cancelAction)
             }
             TextField("e.g. Vacation, Family, Important", text: $rawTags)
