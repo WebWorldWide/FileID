@@ -17,9 +17,14 @@ enum EngineStateRoot {
 
     /// A per-process temporary state folder when running inside a test bundle.
     static let testRoot: URL? = {
-        let inTests = Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
-            || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || ProcessInfo.processInfo.processName.contains("xctest")
+        // SwiftPM runs tests in `xctest` or `swiftpm-testing-helper` (Swift Testing), passing the
+        // `.xctest` bundle as an argument; the app and engine never load XCTest.
+        let process = ProcessInfo.processInfo
+        let inTests = ["xctest", "swiftpm-testing-helper"].contains(process.processName)
+            || CommandLine.arguments.contains { $0.contains(".xctest") }
+            || process.environment["XCTestConfigurationFilePath"] != nil
+            || Bundle.allBundles.contains { $0.bundlePath.hasSuffix(".xctest") }
+            || NSClassFromString("XCTestCase") != nil
         guard inTests else { return nil }
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("FileIDTestState-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
