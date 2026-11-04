@@ -8,6 +8,8 @@
     {"text": "scan the library again", "intent": {"kind": "rescan", "folder": "library"}},
     {"text": "refresh my library", "intent": {"kind": "rescan", "folder": "library"}},
     {"text": "check for new files", "intent": {"kind": "rescan", "folder": "library"}},
+    {"text": "rescan /Volumes/Photos/2024", "intent": {"kind": "rescan", "folder": "/Volumes/Photos/2024"}},
+    {"text": "re-index my Downloads", "intent": {"kind": "rescan", "folder": "downloads"}},
     {"text": "describe the photos from Sept 19", "intent": {"kind": "describeFiles", "scope": "the photos from sept 19"}},
     {"text": "Could you describe everything not described yet?", "intent": {"kind": "describeFiles", "scope": "everything not described yet"}},
     {"text": "write descriptions for these files", "intent": {"kind": "describeFiles", "scope": "these files"}},

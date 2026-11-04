@@ -86,6 +86,7 @@ enum VideoConversionWorker {
             }
             if arguments[0] == "export" {
                 exporter.metadata = []
+                exporter.metadataItemFilter = .forSharing()
                 exporter.shouldOptimizeForNetworkUse = true
                 try await exporter.export(to: output, as: .mp4)
                 var after = try await inspect(AVURLAsset(url: output, options: [AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue, AVURLAssetOverrideMIMETypeKey: "video/mp4"]))
@@ -140,6 +141,9 @@ enum VideoConversionWorker {
             switch track.mediaType {
             case .video: videos.append(track)
             case .audio: audioCount += 1; audio = track
+            // Phones and cameras add timed metadata (iPhone `mebx`) and timecode tracks to
+            // nearly every clip; the `.forSharing()` filter strips location and device keys from them.
+            case .metadata, .timecode: continue
             default: throw MediaTools.Failure(text: "Subtitle, metadata and auxiliary tracks require a future export adapter.")
             }
         }

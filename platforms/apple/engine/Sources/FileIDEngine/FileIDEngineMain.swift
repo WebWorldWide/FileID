@@ -994,6 +994,10 @@ struct FileIDEngineMain {
         case .mergeClusters(let sourcePersonID, let destinationPersonID):
             guard let database else { await emitDbUnavailable(sink, action: "mergeClusters"); return }
             await sink.emit(.bulkActionResult(await mergeClusters(database: database, source: sourcePersonID, destination: destinationPersonID)))
+        case .revertMerge(let sourcePersonID, let destinationPersonID, let faceIDsToRevert):
+            guard let database else { await emitDbUnavailable(sink, action: "revertMerge"); return }
+            await sink.emit(.bulkActionResult(await revertMerge(
+                database: database, source: sourcePersonID, destination: destinationPersonID, faceIDs: faceIDsToRevert)))
         case .renamePerson(let personID, let title, let firstName, let middleName, let lastName, let suffix):
             guard let database else { await emitDbUnavailable(sink, action: "renamePerson"); return }
             await sink.emit(.bulkActionResult(await renamePerson(database: database, personID: personID, title: title, firstName: firstName, middleName: middleName, lastName: lastName, suffix: suffix)))
@@ -1022,7 +1026,6 @@ struct FileIDEngineMain {
         case .findMergeSuggestions,
              .embedTextQuery,
              .embedImageQuery,
-             .revertMerge,
              .generateVideoThumbnail:
             await sink.emit(.error(EngineError(
                 kind: "not_implemented_yet",
@@ -1181,12 +1184,31 @@ struct FileIDEngineMain {
         return fileIDs.filter { seen.insert($0).inserted }
     }
 
-    static func trashFiles(database: Database, fileIDs: [Int64]) async -> BulkActionResult {
+    static func trashFiles(
+        database: Database, fileIDs: [Int64], journal journalURL: URL = TrashJournal.defaultURL,
+        trash: (URL) throws -> URL? = { url in
+            var landed: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
+            return landed as URL?
+        }
+    ) async -> BulkActionResult {
         SleepGuard.shared.begin(reason: "Bulk trash")
         defer { SleepGuard.shared.end() }
         let uniqueIDs = orderedUniqueFileIDs(fileIDs)
         var messages: [BulkActionItem] = []
         var journal: [TrashJournal.Item] = []
+        let batchID = UUID().uuidString.lowercased(), createdAt = Date().timeIntervalSince1970
+        var journaled = false
+        var journaledCount = 0
+        var lastJournalWrite = Date.distantPast
+        func writeJournal() {
+            guard journal.count > journaledCount else { return }
+            if (try? TrashJournal.upsert(TrashJournal.Batch(id: batchID, createdAt: createdAt, items: journal), at: journalURL)) != nil {
+                journaled = true
+                journaledCount = journal.count
+            }
+            lastJournalWrite = Date()
+        }
         let states: [Int64: BulkFileState]
         do {
             states = try await fetchBulkStates(database: database, fileIDs: uniqueIDs)
@@ -1209,10 +1231,11 @@ struct FileIDEngineMain {
             do {
                 try ReadOnlyLocations.requireSourceMutation(url)
                 let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
-                var landed: NSURL?
-                try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
-                if let landed = landed as URL? {
+                if let landed = try trash(url) {
                     journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: landed.path, rows: rows))
+                    // Each rewrite is O(batch); past the first files, cap it at ~4/s so a
+                    // thousands-file batch stays linear. Finder Put Back covers the gap.
+                    if journal.count <= 64 || Date().timeIntervalSince(lastJournalWrite) >= 0.25 { writeJournal() }
                 }
                 try await database.pool.write { db in
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
@@ -1225,11 +1248,8 @@ struct FileIDEngineMain {
                 messages.append(item(id, ok: false, error.localizedDescription))
             }
         }
-        var action = "trashFiles"
-        if !journal.isEmpty {
-            let batch = TrashJournal.Batch(id: UUID().uuidString.lowercased(), createdAt: Date().timeIntervalSince1970, items: journal)
-            if (try? TrashJournal.append(batch)) != nil { action += ":" + batch.id }
-        }
+        writeJournal()
+        let action = journaled ? "trashFiles:" + batchID : "trashFiles"
         return BulkActionResult(action: action, succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
     }
 
@@ -1242,6 +1262,80 @@ struct FileIDEngineMain {
             return BulkActionResult(action: "mergeClusters", succeeded: 1, failed: 0, messages: [item(source, ok: true)])
         } catch {
             return BulkActionResult(action: "mergeClusters", succeeded: 0, failed: 1, messages: [item(source, ok: false, error.localizedDescription)])
+        }
+    }
+
+    /// Mirrors the shared engine's `apply_revert_merge`: faces still owned by the
+    /// destination move back to the source (recreated under its old id when the
+    /// merge deleted it), faces already back count as restored, anything else is
+    /// stale. The merge's `user-merged` verdict is dropped once any face returns.
+    static func revertMerge(database: Database, source: Int64, destination: Int64, faceIDs: [Int64]) async -> BulkActionResult {
+        let requested = Array(Set(faceIDs)).sorted()
+        guard !requested.isEmpty, source != destination else {
+            return BulkActionResult(action: "revertMerge", succeeded: 0, failed: 1,
+                                    messages: [item(ok: false, "The merge undo has no faces to move back.")])
+        }
+        do {
+            let (personID, restored, stale): (Int64?, Int, Int) = try await database.pool.write { db in
+                let sourceExists = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM persons WHERE id = ?)", arguments: [source]) ?? false
+                let owners = try requested.map { face in
+                    (face, try Int64.fetchOne(db, sql: "SELECT person_id FROM face_prints WHERE id = ?", arguments: [face]))
+                }
+                let alreadySource = owners.contains { $0.1 == source }
+                let destinationOwned = owners.contains { $0.1 == destination }
+                let now = Date().timeIntervalSince1970
+                let newPerson: Int64?
+                if sourceExists && alreadySource {
+                    newPerson = source
+                } else if !destinationOwned {
+                    newPerson = nil
+                } else if !sourceExists {
+                    try db.execute(sql: "INSERT INTO persons (id, is_unknown, created_at) VALUES (?, 0, ?)", arguments: [source, now])
+                    newPerson = source
+                } else {
+                    try db.execute(sql: "INSERT INTO persons (is_unknown, created_at) VALUES (0, ?)", arguments: [now])
+                    newPerson = db.lastInsertedRowID
+                }
+                var restored = 0, stale = 0
+                for (face, owner) in owners {
+                    if let newPerson, owner == newPerson {
+                        restored += 1
+                    } else if let newPerson, owner == destination {
+                        try db.execute(sql: "UPDATE face_prints SET person_id = ? WHERE id = ? AND person_id = ?",
+                                       arguments: [newPerson, face, destination])
+                        if db.changesCount == 1 { restored += 1 } else { stale += 1 }
+                    } else {
+                        stale += 1
+                    }
+                }
+                if restored > 0 {
+                    try db.execute(sql: """
+                        DELETE FROM face_verifications
+                        WHERE person_a = ? AND person_b = ? AND same_person = 1 AND vlm_model = 'user-merged'
+                        """, arguments: [min(source, destination), max(source, destination)])
+                }
+                for person in Set([destination, newPerson].compactMap { $0 }) {
+                    try db.execute(sql: """
+                        UPDATE persons
+                        SET file_count = (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?1),
+                            representative_face_id = COALESCE(
+                                (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1 AND fp.arcface_embedding IS NOT NULL
+                                 ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1),
+                                (SELECT fp.id FROM face_prints fp WHERE fp.person_id = ?1
+                                 ORDER BY COALESCE(fp.face_quality, 0) DESC LIMIT 1))
+                        WHERE id = ?1
+                        """, arguments: [person])
+                }
+                return (newPerson, restored, stale)
+            }
+            let target = personID.map { "person #\($0)" } ?? "a restored person"
+            let message = stale == 0
+                ? "Restored \(restored) face print(s) to \(target)"
+                : "Restored \(restored) face print(s) to \(target); skipped \(stale) stale or missing face(s)"
+            return BulkActionResult(action: "revertMerge", succeeded: stale == 0 ? 1 : 0, failed: stale == 0 ? 0 : 1,
+                                    messages: [item(ok: stale == 0, message)])
+        } catch {
+            return BulkActionResult(action: "revertMerge", succeeded: 0, failed: 1, messages: [item(ok: false, error.localizedDescription)])
         }
     }
 
@@ -1488,7 +1582,7 @@ struct FileIDEngineMain {
         excludedPaths: [String]?, coordinator: ScanCoordinator, sink: IPCSink,
         database: Database
     ) async {
-        let url = URL(fileURLWithPath: rootPath)
+        let url = URL(fileURLWithPath: ScanRootGuard.canonicalPath(rootPath))
 
         // Hold a no-sleep assertion for the duration of the scan so the
         // system doesn't suspend mid-tag overnight. Released in defer.
@@ -1505,7 +1599,7 @@ struct FileIDEngineMain {
                         "effective": AnyCodable(effectiveExcludedPaths.count)])
         }
 
-        let session = await coordinator.startSession(rootDisplayPath: url.lastPathComponent, epoch: epoch)
+        let session = await coordinator.startSession(rootDisplayPath: (rootPath as NSString).lastPathComponent, epoch: epoch)
         await sink.emit(.phaseChanged(.discovering))
         JSONLog.shared.info(ev: "scan_started", sess: session.id, path: redactPathForLog(url.path))
 
@@ -1948,10 +2042,7 @@ struct FileIDEngineMain {
         for path in paths {
             let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            var normalized = URL(fileURLWithPath: trimmed)
-                .resolvingSymlinksInPath()
-                .standardizedFileURL
-                .path
+            var normalized = ScanRootGuard.canonicalPath(trimmed)
                 .precomposedStringWithCanonicalMapping
                 .lowercased()
             while normalized.count > 1, normalized.hasSuffix("/") {

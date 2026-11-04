@@ -54,6 +54,9 @@ public struct TaggedFile: Sendable {
     /// Windows `doc_text` row field (tagging.rs / dbwriter.rs).
     public var docText: String?
     public var cameraModel: String?
+    /// `createdAt` is the photo's EXIF capture time, so a rescan replaces the
+    /// stored value (a filesystem birth time never does). Mirrors Rust `captured_from_exif`.
+    public var capturedFromEXIF = false
     public var locationLat: Double?
     public var locationLon: Double?
     public var failed: Bool
@@ -542,6 +545,11 @@ public actor DBWriter {
                 """).execute(arguments: [file.errorMessage, Date().timeIntervalSince1970, fileID])
             return
         }
+        // Deleted or renamed after discovery listed it: a new row would name a missing file
+        // and, stamped with this scan's time, survive the orphan sweep.
+        if file.failed, existing == nil, !FileManager.default.fileExists(atPath: file.url.path) {
+            return
+        }
 
         let newModified = file.modifiedAt?.timeIntervalSince1970
         // "Unchanged" only when this isn't a forced rescan, the prior scan
@@ -599,7 +607,8 @@ public actor DBWriter {
                 failed        = excluded.failed,
                 error_message = excluded.error_message,
                 content_hash  = COALESCE(excluded.content_hash, content_hash),
-                file_ref      = COALESCE(excluded.file_ref, file_ref)
+                file_ref      = COALESCE(excluded.file_ref, file_ref),
+                created_at    = CASE WHEN ? THEN excluded.created_at ELSE created_at END
             """).execute(arguments: [
                 file.url.path,
                 pathHash,
@@ -628,7 +637,8 @@ public actor DBWriter {
                 // Plus COALESCE on phash/camera/GPS above. Mirrors the Rust engine's
                 // Hardening — was never ported to Swift.
                 file.facesEvaluated ? 1 : 0,
-                file.ocrStageRan ? 1 : 0
+                file.ocrStageRan ? 1 : 0,
+                file.capturedFromEXIF ? 1 : 0
             ])
         // last_insert_rowid() is NOT updated on the UPDATE branch of an upsert,
         // so resolve the id from the existing row when there was one. This

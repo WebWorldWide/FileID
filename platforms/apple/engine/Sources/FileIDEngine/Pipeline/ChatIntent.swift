@@ -308,8 +308,12 @@ struct ChatIntent: Codable, Equatable, Sendable {
             }
         }
         let libraryWords: Set<String> = ["the", "my", "library", "files", "scan", "index", "catalog", "everything", "again", "all"]
-        if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(verb), rest.allSatisfy({ libraryWords.contains($0) }) {
-            return with("rescan") { $0.folder = "library" }
+        if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(verb) {
+            if rest.allSatisfy({ libraryWords.contains($0) }) { return with("rescan") { $0.folder = "library" } }
+            if ["rescan", "re-scan", "reindex", "re-index"].contains(verb),
+               let folder = folderReference(Array(rest), Array(restCased), text), folder != "library" {
+                return with("rescan") { $0.folder = folder }
+            }
         }
         if starts(words, ["check", "for", "new", "files"]) { return with("rescan") { $0.folder = "library" } }
         if ["scan", "index", "add", "import"].contains(verb) {

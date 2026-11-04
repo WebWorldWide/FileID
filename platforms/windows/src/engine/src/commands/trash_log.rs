@@ -160,10 +160,100 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
     None
 }
 
+/// Puts back files a killed `trashFiles` left under their hidden claim name
+/// (claimed, but not yet in the Trash or renamed back). Returns how many.
+pub(crate) fn recover_stranded_claims() -> usize {
+    let Some(raw) = paths::trash_log_path().ok().and_then(|path| std::fs::read(path).ok()) else {
+        return 0;
+    };
+    hmac::log_hmac_key()
+        .map(|key| recover_claims_in(&raw, &key))
+        .unwrap_or(0)
+}
+
+/// Only signed entries count, the claim must still be the journaled file, and an
+/// occupied original is never replaced.
+fn recover_claims_in(raw: &[u8], key: &[u8]) -> usize {
+    let mut restored = 0;
+    for line in raw.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else {
+            continue;
+        };
+        let Some((payload, mac)) = line.trim_end_matches('\r').split_once('\t') else {
+            continue;
+        };
+        if !hmac::constant_time_eq_str(&hmac::hmac_sha256_hex(key, payload.as_bytes()), mac) {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload) else {
+            continue;
+        };
+        for item in entry.items {
+            let (Some(claim), Some(identity)) = (item.recycle_bin_id, item.source_identity) else {
+                continue;
+            };
+            let claim = std::path::Path::new(&claim);
+            if crate::platform::file_identity(claim) == Some(identity)
+                && crate::util::rename_no_replace(claim, std::path::Path::new(&item.original_path))
+                    .is_ok()
+            {
+                restored += 1;
+            }
+        }
+    }
+    restored
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::util::hmac::{hmac_sha256_hex, log_hmac_key};
+
+    fn claimed_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("fileid-claim-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("photo.jpg");
+        std::fs::write(&original, b"bytes").unwrap();
+        let identity = crate::platform::file_identity(&original).unwrap();
+        let claim = dir.join(format!(".fileid-trash-{}", uuid::Uuid::new_v4()));
+        std::fs::rename(&original, &claim).unwrap();
+        let mut entry = make_entry("claimed");
+        entry.items[0].original_path = original.to_string_lossy().into_owned();
+        entry.items[0].recycle_bin_id = Some(claim.to_string_lossy().into_owned());
+        entry.items[0].source_identity = Some(identity);
+        let json = serde_json::to_string(&entry).unwrap();
+        let mac = hmac_sha256_hex(&log_hmac_key().unwrap(), json.as_bytes());
+        (dir, original, claim, format!("{json}\t{mac}\n"))
+    }
+
+    // A kill between the claim rename and the Trash move left the file under a hidden name.
+    #[test]
+    fn startup_puts_a_stranded_trash_claim_back() {
+        let (dir, original, claim, raw) = claimed_fixture("back");
+        assert_eq!(recover_claims_in(raw.as_bytes(), &log_hmac_key().unwrap()), 1);
+        assert_eq!(std::fs::read(&original).unwrap(), b"bytes");
+        assert!(!claim.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn stranded_claim_never_replaces_an_occupied_original() {
+        let (dir, original, claim, raw) = claimed_fixture("occupied");
+        std::fs::write(&original, b"newer").unwrap();
+        assert_eq!(recover_claims_in(raw.as_bytes(), &log_hmac_key().unwrap()), 0);
+        assert_eq!(std::fs::read(&original).unwrap(), b"newer");
+        assert_eq!(std::fs::read(&claim).unwrap(), b"bytes");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn unsigned_claim_record_is_ignored() {
+        let (dir, original, claim, raw) = claimed_fixture("forged");
+        let forged = raw.replace('\t', "\tff");
+        assert_eq!(recover_claims_in(forged.as_bytes(), &log_hmac_key().unwrap()), 0);
+        assert!(!original.exists() && claim.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     fn make_entry(batch_id: &str) -> TrashLogEntry {
         TrashLogEntry {

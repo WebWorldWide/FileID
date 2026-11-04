@@ -91,4 +91,29 @@ struct ReassignFaceTests {
         #expect(noop.succeeded == 1 && noop.messages.first?.message == nil)
         #expect(try await owner(db, face: a.faceIDs[0]) == a.person)
     }
+
+    @Test func revertMergeRestoresTheMergedFacesUnderTheOldPerson() async throws {
+        let db = try makeDB()
+        let a = try await insertPerson(db, firstName: "Ada", faces: 2)
+        let b = try await insertPerson(db, faces: 2)
+        let merged = await FileIDEngineMain.mergeClusters(database: db, source: b.person, destination: a.person)
+        #expect(merged.succeeded == 1)
+        #expect(try await person(db, b.person) == nil, "the merge deletes the source person")
+
+        let reverted = await FileIDEngineMain.revertMerge(database: db, source: b.person, destination: a.person, faceIDs: b.faceIDs)
+        #expect(reverted.succeeded == 1 && reverted.failed == 0, "\(reverted)")
+        for face in b.faceIDs { #expect(try await owner(db, face: face) == b.person) }
+        for face in a.faceIDs { #expect(try await owner(db, face: face) == a.person) }
+        #expect(try await person(db, b.person)?.fileCount == 2)
+        #expect(try await person(db, a.person)?.fileCount == 2)
+        let verdicts = try await db.pool.read { d in
+            try Int.fetchOne(d, sql: "SELECT COUNT(*) FROM face_verifications WHERE vlm_model = 'user-merged'") ?? 0
+        }
+        #expect(verdicts == 0)
+
+        let again = await FileIDEngineMain.revertMerge(database: db, source: b.person, destination: a.person, faceIDs: b.faceIDs)
+        #expect(again.succeeded == 1, "a repeated undo reports the faces as already restored")
+        let stale = await FileIDEngineMain.revertMerge(database: db, source: b.person, destination: a.person, faceIDs: [999_999])
+        #expect(stale.failed == 1, "a face that no longer exists is reported as stale")
+    }
 }

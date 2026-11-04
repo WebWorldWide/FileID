@@ -231,6 +231,14 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
             proposed.path = Some(path);
             finish(proposed, vec![])
         }
+        "rescan" if intent.folder.as_deref().is_some_and(|folder| folder != "library") => {
+            let Some(path) = folder(intent.folder.as_ref())?.filter(|path| Path::new(path).is_absolute() && Path::new(path).is_dir()) else {
+                return Ok(Resolution::say("I couldn't find that folder. Choose it in Library to rescan it."));
+            };
+            let mut proposed = action(context, "rescan", format!("Rescan {}", display(&path)), format!("Checks {path} for new and changed files. Nothing is moved or changed."));
+            proposed.path = Some(path);
+            finish(proposed, vec![])
+        }
         "rescan" => {
             let Some(root) = library_root(conn, context)? else {
                 return Ok(Resolution::say("Scan a folder first; there is no library to rescan yet."));

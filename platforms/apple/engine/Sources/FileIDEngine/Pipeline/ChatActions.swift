@@ -164,6 +164,15 @@ enum ChatActions {
             var proposed = action(context, "scanFolder", "Scan \(display(path))", "Adds the files in \(path) to the library. Nothing is moved or changed.")
             proposed.path = path
             return finish(proposed)
+        case "rescan" where intent.folder != nil && intent.folder != "library":
+            var isDirectory: ObjCBool = false
+            guard let path = try folder(intent.folder), path.hasPrefix("/"),
+                  FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                return say("I couldn't find that folder. Choose it in Library to rescan it.")
+            }
+            var proposed = action(context, "rescan", "Rescan \(display(path))", "Checks \(path) for new and changed files. Nothing is moved or changed.")
+            proposed.path = path
+            return finish(proposed)
         case "rescan":
             guard let root = try libraryRoot(db, context) else { return say("Scan a folder first; there is no library to rescan yet.") }
             var proposed = action(context, "rescan", "Rescan the library", "Checks \(root) for new and changed files. Nothing is moved or changed.")

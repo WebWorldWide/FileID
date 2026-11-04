@@ -4019,3 +4019,11 @@ Structured questions use fixed SQL templates rather than a text-to-SQL model: de
 
 - **Qwen3-VL 2B uses the one-line `description | filename | tags` reply; every other model keeps DESCRIPTION/FILENAME/TAGS sections.** The format is a per-model behaviour, not a global preference: 2B ignores the one-sentence rule in sections form (5 sentences, 6 of 20 photos looped, 6 lost TAGS) and is 33-43% faster per photo in compact form; 4B writes one sentence in sections form and in compact form scatters the fields over labelled lines, sometimes returning only the filename as the description. `FILEID_VLM_FORMAT=sections|compact` forces one for every model. A new model should get the compact form only after a side-by-side run.
 - **448 px stays the caption image side.** 384 px was 12-17% faster on 2B but invented jersey text and objects in a 20-photo sample; jersey numbers were wrong at both sizes on some photos.
+
+## 2026-11-03 — Capture dates, scan-root canonical form, trash journal cadence
+
+- **`files.created_at` is the EXIF capture time when a photo has one** (`DateTimeOriginal`, then `DateTimeDigitized`), with `OffsetTime*` if present, else read in the machine's zone; pre-1990, future (>1 day) and placeholder values fall back to the filesystem birth time. A rescan replaces `created_at` only when the new value came from EXIF (`?23` / `capturedFromEXIF`), so copy dates never overwrite capture dates. Both engines share the rule and test vectors.
+- **Every scan-root-derived key on the Mac uses realpath** (`ScanRootGuard.canonicalPath`), because `FileManager.enumerator` reports children in realpath form and yields nothing for a symlinked root, while `standardizedFileURL`/`resolvingSymlinksInPath` strip `/private`. Per-file exclusion checks only fold case/Unicode; no per-file symlink resolution.
+- **Trash journal: written after each of the first 64 files, then at most every 0.25 s, and once at the end.** Each rewrite is O(batch); per-file writes made thousands-file duplicate batches quadratic. Files in the unjournaled window remain in the macOS Trash (Finder Put Back).
+- **File Tools video export allows timed-metadata and timecode tracks** and strips identifying keys with `metadataItemFilter = .forSharing()`; subtitle and caption tracks are still refused rather than silently dropped.
+

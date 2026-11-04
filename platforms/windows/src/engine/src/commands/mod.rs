@@ -36,3 +36,8 @@ pub mod benchmark;
 pub mod timeline;
 pub(crate) mod video_export;
 
+/// Whether FileID's vetted FFmpeg runtime is installed (macOS video frames need it).
+#[cfg(all(not(windows), not(target_os = "linux")))]
+pub(crate) fn ffmpeg_runtime_available() -> bool {
+    video_export::available()
+}

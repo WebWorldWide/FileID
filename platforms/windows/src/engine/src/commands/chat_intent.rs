@@ -395,8 +395,15 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         }
     }
     let library_words = ["the", "my", "library", "files", "scan", "index", "catalog", "everything", "again", "all"];
-    if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(&verb) && rest.iter().all(|word| library_words.contains(&word.as_str())) {
-        return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
+    if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(&verb) {
+        if rest.iter().all(|word| library_words.contains(&word.as_str())) {
+            return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
+        }
+        if ["rescan", "re-scan", "reindex", "re-index"].contains(&verb) {
+            if let Some(folder) = folder_reference(rest, &cased[1..], text).filter(|folder| folder != "library") {
+                return Some(Intent { folder: Some(folder), ..Intent::new("rescan") });
+            }
+        }
     }
     if starts(&words, &["check", "for", "new", "files"]) {
         return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });

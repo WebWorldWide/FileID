@@ -128,6 +128,7 @@ struct DBWriterStageGateTests {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
         let fileURL = tmp.appendingPathComponent("IMG_RETRY.jpg")
+        try Data("abcd".utf8).write(to: fileURL)
 
         func newWriter() -> DBWriter {
             DBWriter(db: db, sink: IPCSink(), coordinator: ScanCoordinator(),
