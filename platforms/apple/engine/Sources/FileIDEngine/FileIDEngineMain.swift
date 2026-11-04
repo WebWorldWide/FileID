@@ -118,6 +118,7 @@ struct FileIDEngineMain {
             await TimelineAnalysis.shared.recover(database: database)
             await MediaTools.shared.recover(database: database)
             try? await database.vectorIndex.recover()
+            await TrashJournal.reconcile(database: database)
         }
 
         // Engine ready handshake. App waits for this before sending the first
@@ -1199,13 +1200,13 @@ struct FileIDEngineMain {
         var journal: [TrashJournal.Item] = []
         let batchID = UUID().uuidString.lowercased(), createdAt = Date().timeIntervalSince1970
         var journaled = false
-        var journaledCount = 0
+        var dirty = false
         var lastJournalWrite = Date.distantPast
         func writeJournal() {
-            guard journal.count > journaledCount else { return }
+            guard dirty else { return }
             if (try? TrashJournal.upsert(TrashJournal.Batch(id: batchID, createdAt: createdAt, items: journal), at: journalURL)) != nil {
-                journaled = true
-                journaledCount = journal.count
+                journaled = !journal.isEmpty
+                dirty = false
             }
             lastJournalWrite = Date()
         }
@@ -1231,12 +1232,21 @@ struct FileIDEngineMain {
             do {
                 try ReadOnlyLocations.requireSourceMutation(url)
                 let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
-                if let landed = try trash(url) {
-                    journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: landed.path, rows: rows))
-                    // Each rewrite is O(batch); past the first files, cap it at ~4/s so a
-                    // thousands-file batch stays linear. Finder Put Back covers the gap.
-                    if journal.count <= 64 || Date().timeIntervalSince(lastJournalWrite) >= 0.25 { writeJournal() }
+                // Write-ahead: record the file before it moves, so a kill right after the move
+                // still leaves an entry; restore finds it in the Trash by inode. Each rewrite is
+                // O(batch), so past the first files it is capped at ~4/s to keep thousands-file
+                // batches linear (Finder Put Back covers that gap).
+                journal.append(TrashJournal.Item(fileID: id, originalPath: state.path, trashedPath: "", rows: rows))
+                dirty = true
+                if journal.count <= 64 || Date().timeIntervalSince(lastJournalWrite) >= 0.25 { writeJournal() }
+                let landed: URL?
+                do { landed = try trash(url) } catch { journal.removeLast(); throw error }
+                if let landed {
+                    journal[journal.count - 1].trashedPath = landed.path
+                } else {
+                    journal.removeLast()
                 }
+                dirty = true
                 try await database.pool.write { db in
                     try db.execute(sql: "DELETE FROM files WHERE id = ?", arguments: [id])
                     guard db.changesCount == 1 else {

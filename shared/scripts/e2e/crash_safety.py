@@ -43,10 +43,14 @@ def sha(path):
     return h.hexdigest()
 
 
+LABS = []
+
+
 class Lab:
     """A scratch library of clones plus its isolated engine state directory."""
 
     def __init__(self, name, count=COUNT):
+        LABS.append(self)
         stamp = str(int(time.time() * 1000))[-9:]
         self.tag = f"fidcrash{stamp}"
         self.dir = os.path.join(ROOT, f"crash-{name}-{stamp}")
@@ -109,13 +113,25 @@ class Lab:
         except (OSError, ValueError):
             return []
 
-    def check(self, label, catalog_complete=True, allow_trash=False, layout=None):
+    def check(self, label, catalog_complete=True, allow_trash=False, layout=None, before_restart=False):
         """Assert the invariants. `layout=True` also demands every file back at its original path."""
         problems, notes = [], []
         on_disk = {}
         for rel in self.tree():
             on_disk.setdefault(sha(os.path.join(self.lib, rel)), []).append(rel)
-        journaled = {i["trashedPath"] for b in self.journal() for i in b["items"]}
+        items = [i for b in self.journal() for i in b["items"]]
+        journaled = {i["trashedPath"] for i in items if i["trashedPath"]}
+        # A write-ahead entry (killed before its Trash location was saved) is found by inode.
+        pending_inodes = set()
+        for i in items:
+            if not i["trashedPath"]:
+                for row in i.get("rows", []):
+                    ref = row.get("columns", {}).get("file_ref", {}).get("int") if row.get("table") == "files" else None
+                    if ref is not None:
+                        pending_inodes.add(ref & 0xFFFFFFFFFFFFFFFF)
+        for p in self.trashed():
+            if os.stat(p).st_ino in pending_inodes:
+                journaled.add(p)
         in_trash = {}
         for p in self.trashed():
             in_trash.setdefault(sha(p), []).append(p)
@@ -154,6 +170,11 @@ class Lab:
                 problems.append(f"integrity_check: {ok}")
             rows = self.sql("SELECT id, path_text FROM files WHERE path_text LIKE ?", (self.lib + "/%",))
             ghosts = [p for _, p in rows if not os.path.exists(p)]
+            if ghosts and before_restart:
+                # The engine repairs rows of journaled Trash items when it next starts; the
+                # post-restart check below must then find none.
+                trashed_names = {os.path.basename(t) for t in self.trashed()}
+                ghosts = [g for g in ghosts if os.path.basename(g) not in trashed_names]
             if ghosts:
                 problems.append(f"{len(ghosts)} catalog rows for missing files: {[os.path.relpath(g, self.lib) for g in ghosts[:4]]}")
             if catalog_complete:
@@ -280,8 +301,9 @@ def exp_trash_kill():
         ids = dup_ids(lab)
         e.send("trashFiles", {"fileIDs": ids})
         time.sleep(delay); kill(e)
-        lab.check(f"2 trash dups SIGKILL +{delay * 1000:.0f}ms: after kill", catalog_complete=False, allow_trash=True)
+        lab.check(f"2 trash dups SIGKILL +{delay * 1000:.0f}ms: after kill", catalog_complete=False, allow_trash=True, before_restart=True)
         e = restart(lab, "2 trash dups")
+        lab.check(f"2 trash dups +{delay * 1000:.0f}ms: after restart", catalog_complete=False, allow_trash=True)
         restore_everything(e, lab, f"2 trash dups +{delay * 1000:.0f}ms")
         e.close()
     lab = Lab("trash-batch")
@@ -289,8 +311,9 @@ def exp_trash_kill():
     ids = [r[0] for r in lab.sql("SELECT id FROM files WHERE path_text LIKE ? ORDER BY id", (lab.lib + "/Trip/%",))]
     e.send("trashFiles", {"fileIDs": ids})
     kill_on_disk(e, lambda: len(lab.trashed()) >= len(ids) // 2)
-    lab.check(f"2 trash batch of {len(ids)} SIGKILL mid-way: after kill ({len(lab.trashed())} in Trash)", catalog_complete=False, allow_trash=True)
+    lab.check(f"2 trash batch of {len(ids)} SIGKILL mid-way: after kill ({len(lab.trashed())} in Trash)", catalog_complete=False, allow_trash=True, before_restart=True)
     e = restart(lab, "2 trash batch")
+    lab.check("2 trash batch: after restart", catalog_complete=False, allow_trash=True)
     restore_everything(e, lab, "2 trash batch")
     e.close()
 
@@ -567,9 +590,17 @@ EXPERIMENTS = {"claim": exp_claim_kill, "conc": exp_concurrency, "scan": exp_sca
 
 if __name__ == "__main__":
     chosen = sys.argv[1:] or list(EXPERIMENTS)
-    for name in chosen:
-        print(f"== {name}", flush=True)
-        EXPERIMENTS[name]()
+    try:
+        for name in chosen:
+            print(f"== {name}", flush=True)
+            EXPERIMENTS[name]()
+    finally:
+        # Never leave scratch clones in the owner's Trash, whatever an experiment did.
+        swept = sum(lab.restore_trash_by_hand() for lab in LABS)
+        stray = [p for lab in LABS for p in lab.trashed()]
+        for p in stray:
+            os.rename(p, os.path.join(ROOT, os.path.basename(p)))
+        print(f"cleanup: {swept} put back into their labs, {len(stray)} moved out of the Trash to {ROOT}", flush=True)
     failed = [r for r in RESULTS if r[1] == "FAIL"]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed")
     sys.exit(1 if failed else 0)
