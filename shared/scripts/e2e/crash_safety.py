@@ -174,7 +174,15 @@ class Lab:
                 # The engine repairs rows of journaled Trash items when it next starts; the
                 # post-restart check below must then find none.
                 trashed_names = {os.path.basename(t) for t in self.trashed()}
-                ghosts = [g for g in ghosts if os.path.basename(g) not in trashed_names]
+                pending_moves = set()
+                try:
+                    for raw in open(os.path.join(self.state, "path-moves.ndjson")):
+                        intent = json.loads(raw).get("intent")
+                        if intent:
+                            pending_moves.add(intent["from"])
+                except (OSError, ValueError):
+                    pass
+                ghosts = [g for g in ghosts if os.path.basename(g) not in trashed_names and g not in pending_moves]
             if ghosts:
                 problems.append(f"{len(ghosts)} catalog rows for missing files: {[os.path.relpath(g, self.lib) for g in ghosts[:4]]}")
             if catalog_complete:
@@ -404,8 +412,9 @@ def exp_rename_tools_kill():
     newpath = lambda n, p: os.path.join(os.path.dirname(p), f"{lab.tag}_renamed_{n}.JPG")
     done = lambda: sum(1 for n, (_, p) in enumerate(rows) if os.path.exists(newpath(n, p)))
     kill_on_disk(e, lambda: done() >= 5)
-    lab.check(f"4 rename 12 SIGKILL after {done()} renamed: after kill", catalog_complete=False)
+    lab.check(f"4 rename 12 SIGKILL after {done()} renamed: after kill", catalog_complete=False, before_restart=True)
     e = restart(lab, "4 rename")
+    lab.check("4 rename: after restart (catalog follows the files)", catalog_complete=False)
     stale = [(i, p) for n, (i, p) in enumerate(rows) if os.path.exists(newpath(n, p))
              and lab.sql("SELECT path_text FROM files WHERE id=?", (i,))[0][0] != newpath(n, p)]
     if stale:

@@ -119,6 +119,7 @@ struct FileIDEngineMain {
             await MediaTools.shared.recover(database: database)
             try? await database.vectorIndex.recover()
             await TrashJournal.reconcile(database: database)
+            await PathMoveJournal.reconcile(database: database)
         }
 
         // Engine ready handshake. App waits for this before sending the first
@@ -1158,14 +1159,11 @@ struct FileIDEngineMain {
             do {
                 try ReadOnlyLocations.requireSourceMutation(oldURL)
                 try ReadOnlyLocations.requireSourceMutation(newURL)
+                let intent = PathMoveJournal.begin(fileID: rename.fileID, from: state.path, to: newURL.path, fileRef: Discovery.inode(of: oldURL))
+                defer { PathMoveJournal.finish(intent) }
                 try FileManager.default.moveItem(at: oldURL, to: newURL)
-                let ext = newURL.pathExtension.lowercased()
                 try await database.pool.write { db in
-                    try db.execute(
-                        sql: "UPDATE OR ABORT files SET path_text = ?, path_hash = ?, path_search = ?, extension = ? WHERE id = ? AND path_text = ?",
-                        arguments: [newURL.path, StablePathHash.hash(newURL.path),
-                                    newURL.path.precomposedStringWithCanonicalMapping,
-                                    ext.isEmpty ? nil : ext, rename.fileID, state.path])
+                    try PathMoveJournal.updatePath(db, fileID: rename.fileID, from: state.path, to: newURL.path)
                     guard db.changesCount == 1 else {
                         throw CocoaError(.fileWriteUnknown)
                     }

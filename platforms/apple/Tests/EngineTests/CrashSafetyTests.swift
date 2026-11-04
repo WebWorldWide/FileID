@@ -276,4 +276,51 @@ struct CrashSafetyTests {
         #expect(kept == 1, "a file that never left keeps its row")
         #expect(TrashJournal.load(at: journal).isEmpty, "nothing left to restore once the only file is home")
     }
+
+    @Test("A rename killed between the move and the catalog update is repaired at startup")
+    func renameKilledBeforeTheCatalogUpdateIsRepaired() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let old = root.appendingPathComponent("IMG_1.jpg"), new = root.appendingPathComponent("Beach.jpg")
+        try Data("x".utf8).write(to: old)
+        try await insert(db, id: 1, path: old.path)
+        let log = root.appendingPathComponent("moves.ndjson")
+        let ref = Discovery.inode(of: old)
+        // Simulate the kill: the intent was logged and the file moved, but the row still names the old path.
+        PathMoveJournal.begin(fileID: 1, from: old.path, to: new.path, fileRef: ref, at: log)
+        try FileManager.default.moveItem(at: old, to: new)
+        await PathMoveJournal.reconcile(database: db, at: log)
+        let path = try await db.pool.read { try String.fetchOne($0, sql: "SELECT path_text FROM files WHERE id = 1") }
+        #expect(path == new.path)
+        #expect(PathMoveJournal.pending(at: log).isEmpty, "the log is cleared once repaired")
+    }
+
+    @Test("A rename intent whose file never moved, or moved somewhere else, changes nothing")
+    func renameIntentWithoutTheMoveIsIgnored() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let old = root.appendingPathComponent("IMG_2.jpg")
+        try Data("y".utf8).write(to: old)
+        try await insert(db, id: 1, path: old.path)
+        let log = root.appendingPathComponent("moves.ndjson")
+        PathMoveJournal.begin(fileID: 1, from: old.path, to: root.appendingPathComponent("Never.jpg").path, fileRef: Discovery.inode(of: old), at: log)
+        // A different file now sits where a second intent pointed.
+        let other = root.appendingPathComponent("Other.jpg")
+        try Data("z".utf8).write(to: other)
+        PathMoveJournal.begin(fileID: 1, from: old.path, to: other.path, fileRef: Discovery.inode(of: old), at: log)
+        await PathMoveJournal.reconcile(database: db, at: log)
+        let path = try await db.pool.read { try String.fetchOne($0, sql: "SELECT path_text FROM files WHERE id = 1") }
+        #expect(path == old.path)
+    }
+
+    @Test("A finished rename leaves nothing pending")
+    func finishedRenameClearsItsIntent() {
+        let log = FileManager.default.temporaryDirectory.appendingPathComponent("moves-\(UUID().uuidString).ndjson")
+        defer { try? FileManager.default.removeItem(at: log) }
+        let id = PathMoveJournal.begin(fileID: 7, from: "/a/x.jpg", to: "/a/y.jpg", fileRef: 42, at: log)
+        PathMoveJournal.finish(id, at: log)
+        #expect(PathMoveJournal.pending(at: log).isEmpty)
+    }
 }
