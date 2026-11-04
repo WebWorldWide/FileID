@@ -144,10 +144,27 @@ public final class ArcFaceService: @unchecked Sendable {
         return session != nil
     }
 
+    /// The installed embedder's version, read from the file when the model has not been
+    /// loaded yet: naming matches stored embeddings against it right after launch, and the
+    /// scan no longer loads the embedder it never uses.
     public var modelVersion: String? {
-        lock.lock(); defer { lock.unlock() }
-        return loadedModelVersion
+        lock.lock()
+        if let loadedModelVersion { lock.unlock(); return loadedModelVersion }
+        lock.unlock()
+        guard let kind = FaceEmbedderKind.installedKinds().first else { return nil }
+        let url = Self.modelURL(for: kind)
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > 0,
+              let key = ExactFileDigest.cacheKey(url: url, expectedSize: Int64(size)) else { return nil }
+        lock.lock()
+        if let cached = installedVersionCache, cached.key == key { lock.unlock(); return cached.version }
+        lock.unlock()
+        guard let fingerprint = ExactFileDigest.computeWithIdentity(url: url, expectedSize: Int64(size)),
+              fingerprint.identity == key else { return nil }
+        let version = "sface128-sha256:" + fingerprint.digest.map { String(format: "%02x", $0) }.joined()
+        lock.lock(); installedVersionCache = (key, version); lock.unlock()
+        return version
     }
+    private var installedVersionCache: (key: ExactFileDigest.CacheKey, version: String)?
 
     public var currentKind: FaceEmbedderKind? {
         lock.lock(); defer { lock.unlock() }

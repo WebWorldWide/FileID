@@ -1670,12 +1670,9 @@ struct FileIDEngineMain {
             // RAM++ primary tagger (macOS lockstep) — no-op if not installed, in
             // which case Tagging falls back to the Vision scene classifier.
             RamPlusService.shared.preWarm()
-            // Pick whichever ArcFace variant the user has on disk —
-            // iResNet50 takes precedence when both are present.
-            for kind in FaceEmbedderKind.installedKinds() {
-                ArcFaceService.shared.preWarm(kind)
-                break
-            }
+            // The face embedder is not loaded here: the scan only stores face boxes, and
+            // building its CoreML session delayed the first file by about 2 s.
+            // Face clustering loads it when it runs.
         }.value
 
         // Unbuffered (rendezvous) async channels: each `send` suspends until a

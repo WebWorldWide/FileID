@@ -8,7 +8,7 @@ enum ScanTaggingAdmission {
     ) async throws -> T {
         let requestedAt = ProcessInfo.processInfo.systemUptime
         return try await scheduler.withReservation(
-            ResourceScheduler.Demand(cpuUnits: 1),
+            .acceleratedHalfCore,
             priority: .background,
             waitForCapacity: true,
             isCancelled: isCancelled
