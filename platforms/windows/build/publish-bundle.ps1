@@ -123,7 +123,7 @@ Require-Command "python" "Install Python 3 and add it to PATH"
 $SignTool = if ($SkipSign) { $null } else { Resolve-SignTool }
 
 $rustVersion = & rustup run 1.98 rustc --version 2>$null
-if ($LASTEXITCODE -ne 0 -or $rustVersion -notmatch '^rustc 1\.90\.') {
+if ($LASTEXITCODE -ne 0 -or $rustVersion -notmatch '^rustc 1\.98\.') {
     Write-Host "ERROR: Rust 1.98 is required, but 'rustup run 1.98 rustc --version' did not return a 1.98 toolchain." -ForegroundColor Red
     Write-Host "       Install it with: rustup toolchain install 1.98 --profile minimal" -ForegroundColor Yellow
     exit 1

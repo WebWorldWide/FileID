@@ -303,7 +303,7 @@ class BootstrapSupplyChainTests(unittest.TestCase):
             "platforms/apple/scripts/release.sh": "edb1fee77bdfc03b108ece894c52cce87f2551ffae04ed29d43b60533cdbec04",
             "platforms/apple/scripts/wipe_local_state.sh": "3f522f095384110849c618f10f62f75025eb6cabe4f6e66488aaea21a716df69",
             "platforms/linux/build/build.sh": "12c0b2cf760248b5737bf2d680de0456300ebc8217f3660fdf9d1b5372c10795",
-            "scripts/build-tools.sh": "44846aea1eadbe97166bacc47486701894542681114effddcb895762e7c81bf6",
+            "scripts/build-tools.sh": "a51e97da6eea88eda05eb211ee62f80d4274b683bf7aaba921ad06c71f3323ee",
             "shared/scripts/check_tls_pins.sh": "3096b3be8c3e93030cb5c69c1157c76413e51a333c785e70392feaf46c527024",
             "shared/scripts/compare_face_clustering.sh": "79af61febba1cfbe7eae6fcd4e4450b149ab32d35ef73aa13a4dfb5c6abd7d9f",
             "shared/scripts/build_ffmpeg_lgpl_linux.sh": "18b235201c4fa3740f7c31b8bd429558520d6084a57b0a7f94beb880098be7db",

@@ -37,7 +37,7 @@ if ($Rustup) {
     $script:CargoProgram = $Rustup.Source
     $script:CargoPrefix = @('run', '1.98', 'cargo')
     $rustcVersion = & $Rustup.Source run 1.98 rustc --version
-    if ($LASTEXITCODE -ne 0 -or $rustcVersion -notmatch '^rustc 1\.90\.') {
+    if ($LASTEXITCODE -ne 0 -or $rustcVersion -notmatch '^rustc 1\.98\.') {
         throw 'Rust 1.98 is required; install it with: rustup toolchain install 1.98'
     }
 } else {
@@ -45,7 +45,7 @@ if ($Rustup) {
     $script:CargoProgram = $Cargo.Source
     $script:CargoPrefix = @()
     $cargoVersion = & $Cargo.Source --version
-    if ($LASTEXITCODE -ne 0 -or $cargoVersion -notmatch '^cargo 1\.90\.') {
+    if ($LASTEXITCODE -ne 0 -or $cargoVersion -notmatch '^cargo 1\.98\.') {
         throw "Rust/Cargo 1.98 is required; found: $cargoVersion"
     }
 }

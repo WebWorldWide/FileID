@@ -18,7 +18,7 @@
 # `cargo install` precisely to reuse each crate's existing target dir.
 #
 # Cargo is invoked from the repo root with --manifest-path so all three
-# standalone workspaces use the root Rust 1.90 pin while building for the native
+# standalone workspaces use the root Rust 1.98 pin while building for the native
 # host. The engine's Windows-only target list and .cargo config are therefore
 # not imposed on macOS/Linux tool installs.
 
@@ -34,15 +34,15 @@ cd "$REPO_ROOT"
 # rust-toolchain.toml. Invoke the product MSRV explicitly when rustup exists;
 # otherwise fail unless the ambient compiler is already the required version.
 if command -v rustup >/dev/null 2>&1; then
-    CARGO=(rustup run 1.90 cargo)
-    rustup run 1.90 rustc --version | grep -q '^rustc 1\.90\.' || {
-        echo "ERROR: Rust 1.90 is required; run: rustup toolchain install 1.90" >&2
+    CARGO=(rustup run 1.98 cargo)
+    rustup run 1.98 rustc --version | grep -q '^rustc 1\.98\.' || {
+        echo "ERROR: Rust 1.98 is required; run: rustup toolchain install 1.98" >&2
         exit 1
     }
 else
     CARGO=(cargo)
-    cargo --version | grep -q '^cargo 1\.90\.' || {
-        echo "ERROR: Rust/Cargo 1.90 is required." >&2
+    cargo --version | grep -q '^cargo 1\.98\.' || {
+        echo "ERROR: Rust/Cargo 1.98 is required." >&2
         exit 1
     }
 fi
