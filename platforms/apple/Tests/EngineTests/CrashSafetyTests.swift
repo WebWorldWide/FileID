@@ -323,4 +323,17 @@ struct CrashSafetyTests {
         PathMoveJournal.finish(id, at: log)
         #expect(PathMoveJournal.pending(at: log).isEmpty)
     }
+
+    @Test("Tests never write engine state into the user's real Application Support folder")
+    func testStateIsIsolated() {
+        let real = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("FileID", isDirectory: true)
+        if ProcessInfo.processInfo.environment["FILEID_DATABASE_PATH"] == nil {
+            #expect(EngineStateRoot.testRoot != nil, "the test process is detected")
+            #expect(EngineStateRoot.directory != real)
+        }
+        #expect(!PathMoveJournal.defaultURL.path.hasPrefix(real.path + "/"))
+        #expect(!TrashJournal.defaultURL.path.hasPrefix(real.path + "/"))
+        #expect(!(Restructure.defaultUndoJournalURL?.path.hasPrefix(real.path + "/") ?? false))
+    }
 }
