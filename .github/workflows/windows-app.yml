@@ -80,12 +80,12 @@ jobs:
             $path | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           }
 
-      - name: Setup .NET 8
+      - name: Setup .NET 10
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         env:
           DOTNET_INSTALL_DIR: ${{ runner.tool_cache }}/dotnet
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       # V15.2.1: WinUI 3's MrtCore.PriGen targets require Visual Studio's
       # AppxPackage MSBuild tooling (Microsoft.Build.Packaging.Pri.Tasks.dll).
@@ -142,7 +142,7 @@ jobs:
           -p:Platform=${{ matrix.arch }}
           -p:RuntimeIdentifier=win-${{ matrix.arch }}
           -p:SelfContained=true
-          -p:PublishDir=bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish/
+          -p:PublishDir=bin/${{ matrix.arch }}/Release/net10.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish/
           -restore
           -m
         shell: pwsh
@@ -176,7 +176,7 @@ jobs:
           $coverageVersion = $packageProps.Project.PropertyGroup.MicrosoftCodeCoverageVersion
           $xunitRunnerVersion = $packageProps.Project.ItemGroup.PackageVersion | Where-Object { $_.Include -eq 'xunit.runner.visualstudio' } | Select-Object -First 1 -ExpandProperty Version
           $relativeShim = "microsoft.codecoverage/$coverageVersion/lib/netcoreapp3.1/Microsoft.VisualStudio.CodeCoverage.Shim.dll"
-          $depsFile = 'FileID.App.Tests/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64/FileID.App.Tests.deps.json'
+          $depsFile = 'FileID.App.Tests/bin/x64/Debug/net10.0-windows10.0.19041.0/win-x64/FileID.App.Tests.deps.json'
           $deps = Get-Content $depsFile -Raw | ConvertFrom-Json
           $stagedShim = Join-Path (Split-Path -Parent $depsFile) "Microsoft.CodeCoverage/$coverageVersion/lib/netcoreapp3.1/Microsoft.VisualStudio.CodeCoverage.Shim.dll"
           $shimSource = Join-Path $env:NUGET_PACKAGES $relativeShim
@@ -202,7 +202,7 @@ jobs:
           dotnet test FileID.IpcSchema.Tests/FileID.IpcSchema.Tests.csproj --no-build --no-restore -c Debug -p:Platform=x64 --logger "console;verbosity=minimal"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $testOutputRoot = Split-Path -Parent $depsFile
-          $appOutputRoot = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net8.0-windows10.0.19041.0/win-x64'
+          $appOutputRoot = Join-Path $PWD '../src/FileID.App/bin/x64/Debug/net10.0-windows10.0.19041.0/win-x64'
           $runtimeTarget = $deps.targets.PSObject.Properties[$deps.runtimeTarget.name].Value
           foreach ($library in $deps.libraries.PSObject.Properties) {
             if ($library.Value.type -ne 'package') { continue }
@@ -256,7 +256,7 @@ jobs:
           $testNativeSQLiteFlat = Join-Path $testOutputRoot 'e_sqlite3.dll'
           Copy-Item -LiteralPath $appNativeSQLite.FullName -Destination $testNativeSQLiteFlat -Force
           $testHostRuntimeConfig = Join-Path $testOutputRoot 'testhost.runtimeconfig.json'
-          $runtimeConfig = @{ runtimeOptions = @{ tfm = 'net8.0'; frameworks = @(@{ name = 'Microsoft.NETCore.App'; version = '8.0.0' }, @{ name = 'Microsoft.WindowsDesktop.App'; version = '8.0.0' }) } } | ConvertTo-Json -Depth 4
+          $runtimeConfig = @{ runtimeOptions = @{ tfm = 'net10.0'; frameworks = @(@{ name = 'Microsoft.NETCore.App'; version = '10.0.0' }, @{ name = 'Microsoft.WindowsDesktop.App'; version = '10.0.0' }) } } | ConvertTo-Json -Depth 4
           Set-Content -LiteralPath $testHostRuntimeConfig -Value $runtimeConfig -Encoding utf8
           $adapterPath = (Resolve-Path (Join-Path $env:NUGET_PACKAGES "xunit.runner.visualstudio/$xunitRunnerVersion/build/net6.0")).Path
           if (-not (Test-Path (Join-Path $adapterPath 'xunit.runner.visualstudio.testadapter.dll') -PathType Leaf)) { throw "xUnit VSTest adapter is missing: $adapterPath" }
@@ -386,7 +386,7 @@ jobs:
           # V15.2: the earlier step looked at the wrong path
           # (bin/Release/... not bin/${arch}/Release/...) and only at
           # FileID.dll. Verify the real distributable: both EXE + DLL.
-          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
+          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net10.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
           if (-not (Test-Path $publishDir)) {
             throw "Publish dir not found at $publishDir"
           }
@@ -408,7 +408,7 @@ jobs:
       - name: Privacy — telemetry-string scan
         shell: pwsh
         run: |
-          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
+          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net10.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
           python ../../shared/scripts/check_binary_privacy.py $publishDir
 
       # Launch smoke — verifies the published binary at least starts,
@@ -419,7 +419,7 @@ jobs:
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
-          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net8.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
+          $publishDir = "src/FileID.App/bin/${{ matrix.arch }}/Release/net10.0-windows10.0.19041.0/win-${{ matrix.arch }}/publish"
           $exe = Join-Path $publishDir "FileID.exe"
           if (-not (Test-Path $exe)) { throw "FileID.exe not found at $exe" }
           # Launch without redirecting stdin/stdout — the app expects to

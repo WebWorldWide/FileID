@@ -126,8 +126,8 @@ $StagingDir  = Join-Path $DistDir "FileID"
 # -File` runs in a child process, so this cwd change does not leak to your shell.)
 Set-Location $PlatformDir
 
-# Fixed target framework -- the .csproj pins net8.0-windows10.0.19041.0.
-$AppTfm      = "net8.0-windows10.0.19041.0"
+# Fixed target framework -- the .csproj pins net10.0-windows10.0.19041.0.
+$AppTfm      = "net10.0-windows10.0.19041.0"
 $AppRid      = $DotnetRid
 
 $Configuration = if ($Release) { "Release" } else { "Debug" }
@@ -167,7 +167,7 @@ if (-not $SkipEngine) {
 }
 
 if (-not $SkipApp) {
-    Require-Command "dotnet" "Install .NET 8 SDK: winget install Microsoft.DotNet.SDK.8"
+    Require-Command "dotnet" "Install .NET 10 SDK: winget install Microsoft.DotNet.SDK.10"
     # `dotnet` the host shim can be on PATH with NO SDK installed (runtime-only,
     # or a fresh box). In that case `dotnet --version` exits non-zero, which
     # $PSNativeCommandUseErrorActionPreference would turn into a raw
@@ -176,12 +176,12 @@ if (-not $SkipApp) {
     $dotnetVer = & dotnet --version 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dotnetVer)) {
         Write-Host "ERROR: 'dotnet' is on PATH but no .NET SDK is installed (host shim only)." -ForegroundColor Red
-        Write-Host "       Install the .NET 8 SDK: winget install Microsoft.DotNet.SDK.8" -ForegroundColor Yellow
+        Write-Host "       Install the .NET 10 SDK: winget install Microsoft.DotNet.SDK.10" -ForegroundColor Yellow
         exit 1
     }
     if (-not ($dotnetVer -match "^(8|9)\.")) {
         Write-Host "ERROR: dotnet SDK $dotnetVer found; need 8.x or 9.x." -ForegroundColor Red
-        Write-Host "       winget install Microsoft.DotNet.SDK.8" -ForegroundColor Yellow
+        Write-Host "       winget install Microsoft.DotNet.SDK.10" -ForegroundColor Yellow
         exit 1
     }
 }

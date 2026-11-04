@@ -103,7 +103,7 @@ Block release until all accepted feature milestones, held-out accuracy tests, 10
 An on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename
 tens of thousands of files locally. Two platforms ship at v1.0:
 
-- **Windows** — Rust engine (`fileid-engine`) + WinUI 3 / .NET 8 C# app.
+- **Windows** — Rust engine (`fileid-engine`) + WinUI 3 / .NET 10 C# app.
 - **macOS** — Swift / SwiftUI app + engine, MLX inference. The visual + UX reference.
 
 Linux is deferred. The two binaries on each platform talk newline-delimited JSON

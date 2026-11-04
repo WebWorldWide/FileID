@@ -42,12 +42,12 @@
     </BootstrapperApplication>
 
     <!-- Refuse to install on Win10 < 22H2 (build 19045) or earlier major
-         versions (Windows 7 / 8 / 8.1 are unsupported by .NET 8 + WinUI 3).
+         versions (Windows 7 / 8 / 8.1 are unsupported by .NET 10 + WinUI 3).
          VersionNT64 checks for 64-bit OS; VersionNT checks build number. -->
     <bal:Condition Condition="VersionNT64 AND (VersionNT >= v10.0.19045)"
                    Message="FileID requires 64-bit Windows 10 version 22H2 (build 19045) or Windows 11." />
 
-    <!-- Pure-32-bit x86 hosts are unsupported: neither the .NET 8 self-
+    <!-- Pure-32-bit x86 hosts are unsupported: neither the .NET 10 self-
          contained runtime nor the Rust ONNX/llama engine ship 32-bit x86. -->
     <bal:Condition Condition="VersionNT64 OR NativeMachine = 43620"
                    Message="FileID requires a 64-bit edition of Windows." />

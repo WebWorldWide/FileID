@@ -32,7 +32,7 @@ Verified in Partner Center on 2026-10-02. FileID already exists as an **MSIX or 
 
 ## Build and upload artifact
 
-From `platforms/windows`, with pinned Rust, .NET 8, Visual Studio WinUI build tools and Windows SDK available:
+From `platforms/windows`, with pinned Rust, .NET 10, Visual Studio WinUI build tools and Windows SDK available:
 
 ```powershell
 pwsh -NoProfile -File build/publish-store.ps1

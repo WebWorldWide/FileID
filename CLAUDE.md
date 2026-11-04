@@ -8,7 +8,7 @@ On-device AI file organizer: tag, dedupe, restructure, and rename tens of thousa
 FileID/
 ├── platforms/
 │   ├── apple/      ← macOS — Swift / SwiftUI / MLX / GRDB
-│   ├── windows/    ← Windows — Rust engine ('fileid-engine') + WinUI 3 / .NET 8
+│   ├── windows/    ← Windows — Rust engine ('fileid-engine') + WinUI 3 / .NET 10
 │   └── linux/      ← Rust engine + native GTK4 / libadwaita app
 ├── shared/
 │   ├── ipc-schema/ ← canonical IPC contract (JSON Schema → Swift/Rust/C# DTOs)

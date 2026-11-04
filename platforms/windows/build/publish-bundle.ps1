@@ -78,7 +78,7 @@ $SymbolsDir  = Join-Path $DistDir "symbols"
 $FetchRuntimeScript = Join-Path $ScriptDir "fetch-runtime-deps.ps1"
 $PrivacyScanner = Resolve-Path (Join-Path $PlatformDir "..\..\shared\scripts\check_binary_privacy.py")
 
-$AppTfm = "net8.0-windows10.0.19041.0"
+$AppTfm = "net10.0-windows10.0.19041.0"
 $WinAppRuntimeVersion = "1.7.250606001"
 $WinAppRuntimeX64Url = "https://aka.ms/windowsappsdk/1.7/$WinAppRuntimeVersion/windowsappruntimeinstall-x64.exe"
 $WinAppRuntimeArm64Url = "https://aka.ms/windowsappsdk/1.7/$WinAppRuntimeVersion/windowsappruntimeinstall-arm64.exe"
@@ -118,7 +118,7 @@ function Resolve-SignTool {
 
 Require-Command "cargo" "Install Rust via https://rustup.rs"
 Require-Command "rustup" "Install Rust via https://rustup.rs"
-Require-Command "dotnet" "winget install Microsoft.DotNet.SDK.8"
+Require-Command "dotnet" "winget install Microsoft.DotNet.SDK.10"
 Require-Command "python" "Install Python 3 and add it to PATH"
 $SignTool = if ($SkipSign) { $null } else { Resolve-SignTool }
 

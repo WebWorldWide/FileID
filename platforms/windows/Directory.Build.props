@@ -79,9 +79,9 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
 
-    <!-- The Windows project tree pins to .NET 8 LTS. The SDK pin lives
+    <!-- The Windows project tree pins to .NET 10 LTS. The SDK pin lives
          in global.json (8.0.100, rollForward = latestFeature) so any
-         bug-fix release of 8.0.x picks up automatically. -->
+         bug-fix release of 10.0.x picks up automatically. -->
     <Copyright>© FileID</Copyright>
     <Company>FileID</Company>
     <Product>FileID</Product>

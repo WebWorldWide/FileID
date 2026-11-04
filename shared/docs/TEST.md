@@ -6,7 +6,7 @@ Surfaces × OS:
 
 | Surface | macOS | Windows | Linux |
 |---|---|---|---|
-| Desktop app | Swift/SwiftUI + MLX/CoreML | WinUI 3 / .NET 8 | GTK4 + libadwaita |
+| Desktop app | Swift/SwiftUI + MLX/CoreML | WinUI 3 / .NET 10 | GTK4 + libadwaita |
 | CLI (`fileid`) | ✓ (engine, ONNX) | ✓ | ✓ |
 | TUI (`fileid-tui`) | ✓ (engine, ONNX) | ✓ | ✓ |
 | Engine (`FileIDEngine`) | ONNX Runtime¹ | ONNX Runtime (DirectML/CUDA) | ONNX Runtime |
@@ -67,7 +67,7 @@ cd platforms/tui && cargo build --release      # -> target/release/fileid-tui
 # Linux app (GTK4) — needs: sudo apt install libgtk-4-dev libadwaita-1-dev
 cd platforms/linux && cargo build --release    # -> target/release/fileid-linux
 
-# Windows app (.NET 8 / WinUI 3) — on Windows
+# Windows app (.NET 10 / WinUI 3) — on Windows
 cd platforms/windows && dotnet build           # + dotnet test, dotnet format --verify-no-changes
 
 # macOS app (Swift) — on macOS
@@ -189,7 +189,7 @@ These need the real OS + GPU/NPU; they cannot be verified headlessly. For each, 
 - E2E: pick a copied photo folder → scan → watch live progress (target throughput on the ref box; RAM++ Swin-L bounds it to ~1 file/s, that's expected) → tags appear (verify real RAM++ tags, not the 4585-count fallback) → People clusters faces → preview opens, **arrow-keys + click navigate between photos** → Cleanup finds dupes → Restructure previews a plan and **only moves on explicit apply** → Settings toggles persist.
 - This app uses MLX/CoreML, so it needs **no** ONNX runtime and no `fileid models download`.
 
-### Windows (WinUI 3 / .NET 8) — `platforms/windows`
+### Windows (WinUI 3 / .NET 10) — `platforms/windows`
 - `dotnet build`; run the packaged app. Engine auto-detects the execution provider (the current dev box has an RTX 5080; CPU fallback remains available).
 - E2E: same six-tab walk. Verify the Win2D `LavaLampBackground` port renders, springs feel right, and the gold palette. Run `iterate.ps1 -Corpus <path>` + `scan_assertions.py` against the current copied corpus for accuracy and throughput; record RTX 5080 DirectML and CUDA results separately (≥140 files/s remains the target, not a measured result).
 - Pre-push gate: `dotnet build` + `dotnet test` + `dotnet format --verify-no-changes`.
