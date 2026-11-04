@@ -1,4 +1,5 @@
 import Testing
+import FileIDShared
 @testable import FileID
 
 @Suite("Display labels")
@@ -18,5 +19,13 @@ struct DisplayLabelTests {
     @Test func pdfIsUppercase() {
         #expect(FileKindLabel.title("pdf") == "PDF")
         #expect(FileKindLabel.title("image") == "Image")
+    }
+
+    @Test func homePathsAreAbbreviated() {
+        let home = UserHome.path
+        #expect(PathText.abbreviated(home + "/Pictures/Trip") == "~/Pictures/Trip")
+        #expect(PathText.abbreviated(home) == "~")
+        #expect(PathText.abbreviated("/Volumes/Adlon/Camera") == "/Volumes/Adlon/Camera")
+        #expect(PathText.abbreviated(home + "other/x") == home + "other/x", "a sibling sharing the prefix is not home")
     }
 }

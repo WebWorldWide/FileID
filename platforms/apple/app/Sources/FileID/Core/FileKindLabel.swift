@@ -1,3 +1,5 @@
+import FileIDShared
+
 enum FileKindLabel {
     /// Display name for a catalog `files.kind` value ("pdf" reads as "PDF", not "Pdf").
     static func title(_ kind: String) -> String {
@@ -19,5 +21,15 @@ enum TagLabel {
     static func unique(_ tags: [String]) -> [String] {
         var seen = Set<String>()
         return tags.map(text).filter { seen.insert($0.lowercased()).inserted }
+    }
+}
+
+enum PathText {
+    /// A path for display: the home folder reads as "~" so the account name doesn't fill
+    /// every row (or every screenshot). The full path stays in tooltips and Finder.
+    static func abbreviated(_ path: String) -> String {
+        let home = UserHome.path
+        guard !home.isEmpty, path == home || path.hasPrefix(home + "/") else { return path }
+        return "~" + path.dropFirst(home.count)
     }
 }
