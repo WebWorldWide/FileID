@@ -174,14 +174,20 @@ def _():
     e2.send("startScan", {"rootPath": big})
     e2.wait(lambda p: seen["n"] >= 20 or kind(p) == "scanComplete", 300, on_event=track)
     e2.send("pauseScan", {})
-    time.sleep(2)
-    a = seen["n"]
+    # Files already being decoded when pause lands (up to one per worker) finish and are
+    # written; after that drains, nothing new may start.
     try:
-        e2.wait(lambda p: kind(p) == "scanComplete", 4, on_event=track)
+        e2.wait(lambda p: kind(p) == "scanComplete", 6, on_event=track)
         finished = True
     except TimeoutError:
         finished = False
-    step("pause stops progress", not finished and seen["n"] - a <= 8, f"{a} -> {seen['n']} while paused")
+    a = seen["n"]
+    try:
+        e2.wait(lambda p: kind(p) == "scanComplete", 5, on_event=track)
+        finished = True
+    except TimeoutError:
+        pass
+    step("pause stops progress", not finished and seen["n"] == a, f"{a} -> {seen['n']} in the 5 s after in-flight files drained")
     e2.send("resumeScan", {})
     paused_at = seen["n"]
     e2.wait(lambda p: seen["n"] >= paused_at + 20 or kind(p) == "scanComplete", 300, on_event=track)

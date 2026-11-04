@@ -1050,7 +1050,7 @@ private struct FilePreviewSheet: View {
                 if !tags.isEmpty {
                     infoSection("Tags") {
                         FlowLayout(spacing: 6) {
-                            ForEach(tags, id: \.self) { tag in
+                            ForEach(TagLabel.unique(tags), id: \.self) { tag in
                                 Text(tag).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2).lineLimit(1)
                                     .padding(.horizontal, 8).frame(height: 22)
                                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
@@ -1497,7 +1497,7 @@ private struct LibrarySelectedPane: View {
 
                 if !tags.isEmpty {
                     FlowLayout(spacing: 6) {
-                        ForEach(tags.prefix(12), id: \.self) { tag in
+                        ForEach(TagLabel.unique(tags).prefix(12), id: \.self) { tag in
                             Text(tag)
                                 .font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2)
                                 .lineLimit(1).truncationMode(.tail)

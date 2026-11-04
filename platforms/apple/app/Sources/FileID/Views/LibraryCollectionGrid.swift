@@ -519,13 +519,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     /// Chip text: last segment of hierarchical labels,
     /// capitalised, de-duplicated, two at most.
     static func displayTags(_ raw: [String]) -> [String] {
-        var seen = Set<String>()
-        return Array(raw.map { tag -> String in
-            if tag.contains(" ") { return tag }
-            let last = (tag.split(separator: "_").last.map(String.init) ?? tag).replacingOccurrences(of: "-", with: " ")
-            guard let first = last.first else { return last }
-            return first.uppercased() + last.dropFirst()
-        }.filter { seen.insert($0.lowercased()).inserted }.prefix(2))
+        Array(TagLabel.unique(raw).prefix(2))
     }
 }
 
