@@ -54,6 +54,7 @@ struct BulkRenameSheet: View {
             }
             Spacer()
             Button("Done") { dismiss() }
+                .buttonStyle(.dsPrimary)
                 .keyboardShortcut(.defaultAction)
         }
         .padding(16)

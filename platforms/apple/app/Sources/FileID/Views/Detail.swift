@@ -134,7 +134,6 @@ private struct EmptyState: View {
                 HStack(spacing: 12) {
                     Button { onPickFolder() } label: { Label("Choose a folder to scan", systemImage: "folder.badge.plus") }
                         .buttonStyle(.dsPrimary)
-                        .keyboardShortcut("o", modifiers: .command)
                     MetaText("Or drag a folder onto this window (⌘O).")
                 }
             }

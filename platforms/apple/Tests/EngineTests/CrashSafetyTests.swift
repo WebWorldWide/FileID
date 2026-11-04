@@ -46,8 +46,12 @@ struct CrashSafetyTests {
             return landed
         }
         #expect(result.succeeded == 2)
-        // A kill at this moment must leave first.jpg restorable from the journal.
-        #expect(journalWhenSecondMoved.flatMap(\.items).map(\.fileID) == [1])
+        // A kill at this moment must leave first.jpg restorable (its Trash location is
+        // recorded) and second.jpg findable (it is journaled ahead of its move).
+        let items = journalWhenSecondMoved.flatMap(\.items)
+        #expect(items.map(\.fileID) == [1, 2])
+        #expect(items.first?.trashedPath.isEmpty == false)
+        #expect(items.last?.trashedPath.isEmpty == true)
         let batchID = try #require(result.action.split(separator: ":").last.map(String.init))
         #expect(TrashJournal.load(at: journal).map(\.id) == [batchID])
         #expect(TrashJournal.load(at: journal).first?.items.map(\.fileID) == [1, 2])
@@ -219,5 +223,104 @@ struct CrashSafetyTests {
         #expect(path == home.path)
         #expect(!FileManager.default.fileExists(atPath: journal.path))
         #expect(!FileManager.default.fileExists(atPath: group.path))
+    }
+
+    @Test("A file trashed just before a kill is journaled ahead of the move and restorable by identity")
+    func killRightAfterTheMoveStillRestores() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let bin = root.appendingPathComponent("FakeTrash")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let photo = root.appendingPathComponent("photo.jpg")
+        try Data("bytes".utf8).write(to: photo)
+        try await insert(db, id: 1, path: photo.path)
+        let journal = root.appendingPathComponent("trash-journal.json")
+        var journalAtTheMove: [TrashJournal.Batch] = []
+        _ = await FileIDEngineMain.trashFiles(database: db, fileIDs: [1], journal: journal) { url in
+            journalAtTheMove = TrashJournal.load(at: journal)
+            let landed = bin.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: landed)
+            return landed
+        }
+        let pending = try #require(journalAtTheMove.first?.items.first, "the file is journaled before it moves")
+        #expect(pending.trashedPath.isEmpty, "its Trash location is not known yet")
+
+        // Simulate the kill: only the write-ahead entry survives, and the catalog row was not deleted.
+        try TrashJournal.save(journalAtTheMove, at: journal)
+        try await insert(db, id: 1, path: photo.path)
+        await TrashJournal.reconcile(database: db, journal: journal, trashFolders: [bin])
+        let rows = try await db.pool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM files") ?? -1 }
+        #expect(rows == 0, "startup drops the row of a file that is provably in the Trash")
+        #expect(TrashJournal.load(at: journal).first?.items.first?.trashedPath == bin.appendingPathComponent("photo.jpg").path)
+
+        let restored = await TrashJournal.restore(batchID: journalAtTheMove[0].id, database: db, journal: journal)
+        #expect(restored.succeeded == 1, "\(restored)")
+        #expect(try String(contentsOf: photo, encoding: .utf8) == "bytes")
+    }
+
+    @Test("A write-ahead entry whose file never moved is completed as already home")
+    func killBeforeTheMoveLeavesTheFileInPlace() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let photo = root.appendingPathComponent("stay.jpg")
+        try Data("here".utf8).write(to: photo)
+        try await insert(db, id: 1, path: photo.path)
+        let rows = try await db.pool.read { try TrashJournal.snapshot($0, fileID: 1) }
+        let journal = root.appendingPathComponent("trash-journal.json")
+        let batch = TrashJournal.Batch(id: "b1", createdAt: 1, items: [TrashJournal.Item(fileID: 1, originalPath: photo.path, trashedPath: "", rows: rows)])
+        try TrashJournal.save([batch], at: journal)
+        await TrashJournal.reconcile(database: db, journal: journal, trashFolders: [root.appendingPathComponent("FakeTrash")])
+        let kept = try await db.pool.read { try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM files") ?? -1 }
+        #expect(kept == 1, "a file that never left keeps its row")
+        #expect(TrashJournal.load(at: journal).isEmpty, "nothing left to restore once the only file is home")
+    }
+
+    @Test("A rename killed between the move and the catalog update is repaired at startup")
+    func renameKilledBeforeTheCatalogUpdateIsRepaired() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let old = root.appendingPathComponent("IMG_1.jpg"), new = root.appendingPathComponent("Beach.jpg")
+        try Data("x".utf8).write(to: old)
+        try await insert(db, id: 1, path: old.path)
+        let log = root.appendingPathComponent("moves.ndjson")
+        let ref = Discovery.inode(of: old)
+        // Simulate the kill: the intent was logged and the file moved, but the row still names the old path.
+        PathMoveJournal.begin(fileID: 1, from: old.path, to: new.path, fileRef: ref, at: log)
+        try FileManager.default.moveItem(at: old, to: new)
+        await PathMoveJournal.reconcile(database: db, at: log)
+        let path = try await db.pool.read { try String.fetchOne($0, sql: "SELECT path_text FROM files WHERE id = 1") }
+        #expect(path == new.path)
+        #expect(PathMoveJournal.pending(at: log).isEmpty, "the log is cleared once repaired")
+    }
+
+    @Test("A rename intent whose file never moved, or moved somewhere else, changes nothing")
+    func renameIntentWithoutTheMoveIsIgnored() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let old = root.appendingPathComponent("IMG_2.jpg")
+        try Data("y".utf8).write(to: old)
+        try await insert(db, id: 1, path: old.path)
+        let log = root.appendingPathComponent("moves.ndjson")
+        PathMoveJournal.begin(fileID: 1, from: old.path, to: root.appendingPathComponent("Never.jpg").path, fileRef: Discovery.inode(of: old), at: log)
+        // A different file now sits where a second intent pointed.
+        let other = root.appendingPathComponent("Other.jpg")
+        try Data("z".utf8).write(to: other)
+        PathMoveJournal.begin(fileID: 1, from: old.path, to: other.path, fileRef: Discovery.inode(of: old), at: log)
+        await PathMoveJournal.reconcile(database: db, at: log)
+        let path = try await db.pool.read { try String.fetchOne($0, sql: "SELECT path_text FROM files WHERE id = 1") }
+        #expect(path == old.path)
+    }
+
+    @Test("A finished rename leaves nothing pending")
+    func finishedRenameClearsItsIntent() {
+        let log = FileManager.default.temporaryDirectory.appendingPathComponent("moves-\(UUID().uuidString).ndjson")
+        defer { try? FileManager.default.removeItem(at: log) }
+        let id = PathMoveJournal.begin(fileID: 7, from: "/a/x.jpg", to: "/a/y.jpg", fileRef: 42, at: log)
+        PathMoveJournal.finish(id, at: log)
+        #expect(PathMoveJournal.pending(at: log).isEmpty)
     }
 }

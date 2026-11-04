@@ -202,13 +202,13 @@ struct SettingsTab: View {
                 .foregroundStyle(s.status == "completed" ? Theme.delight
                                  : s.status == "running"  ? Theme.gold : Theme.danger)
             VStack(alignment: .leading, spacing: 2) {
-                Text(s.rootPath).font(Theme.Font.mono(11)).lineLimit(1).truncationMode(.middle)
+                Text(PathText.abbreviated(s.rootPath)).font(Theme.Font.mono(11.5)).lineLimit(1).truncationMode(.middle).help(s.rootPath)
                 HStack(spacing: 12) {
                     Text(s.startedAt.formatted(date: .abbreviated, time: .shortened))
                     Text(s.status)
                     if let n = s.lastFileIndex { Text("\(n) files") }
                 }
-                .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
+                .font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
             }
             Spacer()
         }
@@ -277,12 +277,13 @@ struct DeepAnalyzeExclusionsCard: View {
 
                 if settings.excludedFolders.isEmpty {
                     Text("No folders are skipped.")
-                        .font(Theme.Font.body(11)).foregroundStyle(Theme.text3)
+                        .font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
                 } else {
                     ForEach(settings.excludedFolders, id: \.self) { folder in
                         HStack(spacing: 8) {
-                            Text(folder)
-                                .font(Theme.Font.mono(11))
+                            Text(PathText.abbreviated(folder))
+                                .help(folder)
+                                .font(Theme.Font.mono(11.5))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
@@ -375,9 +376,10 @@ struct ModelInstallCard: View {
                 if let detail = row.detail {
                     Text(detail).font(Theme.Font.body(12)).foregroundStyle(Theme.text3)
                 }
-                Text(row.path.path)
-                    .font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
+                Text(PathText.abbreviated(row.path.path))
+                    .font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
                     .lineLimit(1).truncationMode(.middle)
+                    .help(row.path.path)
             }
             Spacer()
         }
@@ -414,9 +416,9 @@ struct ModelInstallCard: View {
                 if fraction > 0 { ProgressView(value: fraction) } else { ProgressView() }
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(message).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
+                        Text(message).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
                         if let rate = installer.status.rateAndETA, !rate.isEmpty {
-                            Text(rate).font(Theme.Font.mono(10.5)).foregroundStyle(Theme.text3)
+                            Text(rate).font(Theme.Font.mono(11.5)).foregroundStyle(Theme.text3)
                         }
                     }
                     Spacer()
@@ -436,8 +438,8 @@ struct ModelInstallCard: View {
                 Spacer()
                 openFolderButton
                 Button("Remove") { confirmRemove = true }
-                    .buttonStyle(.borderless).controlSize(.small)
-                    .foregroundStyle(Theme.danger)
+                    .buttonStyle(DSGhostButtonStyle(color: Theme.danger))
+                    .padding(.trailing, -6)
             }
         case .installFailed(let why):
             VStack(alignment: .leading, spacing: 6) {
@@ -472,8 +474,7 @@ struct ModelInstallCard: View {
         Button("Open Models folder") {
             NSWorkspace.shared.activateFileViewerSelecting([SettingsTab.modelsFolderURL])
         }
-        .buttonStyle(.borderless).controlSize(.small)
-        .foregroundStyle(Theme.text3)
+        .buttonStyle(DSGhostButtonStyle(color: Theme.text2))
     }
 }
 

@@ -1569,6 +1569,11 @@ public enum Restructure {
                 }
             }
 
+            // Write-ahead for the catalog row: a kill after the move but before the row
+            // update is repaired at the next start (PathMoveJournal.reconcile).
+            let pathIntent = PathMoveJournal.begin(fileID: p.fileID, from: oldURL.path, to: finalURL.path,
+                                                   fileRef: Discovery.inode(of: oldURL))
+            defer { PathMoveJournal.finish(pathIntent) }
             do {
                 try ReadOnlyLocations.requireSourceMutation(oldURL)
                 try ReadOnlyLocations.requireSourceMutation(finalURL)

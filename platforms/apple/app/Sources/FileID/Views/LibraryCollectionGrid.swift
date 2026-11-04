@@ -190,7 +190,7 @@ final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
         super.init()
         minimumInteritemSpacing = 12
         minimumLineSpacing = 16
-        sectionInset = NSEdgeInsets(top: 20, left: 20, bottom: 24, right: 20)
+        sectionInset = NSEdgeInsets(top: 20, left: Theme.Metrics.pageInsetX, bottom: 24, right: Theme.Metrics.pageInsetX)
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -399,7 +399,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         rowID = row.id
         self.isChosen = selected
         self.checked = checked
-        badge.text = row.kind.capitalized
+        badge.text = FileKindLabel.title(row.kind)
         let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         hasSmartName = !proposed.isEmpty
         name.text = hasSmartName ? (row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)") : row.url.lastPathComponent
@@ -519,13 +519,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     /// Chip text: last segment of hierarchical labels,
     /// capitalised, de-duplicated, two at most.
     static func displayTags(_ raw: [String]) -> [String] {
-        var seen = Set<String>()
-        return Array(raw.map { tag -> String in
-            if tag.contains(" ") { return tag }
-            let last = (tag.split(separator: "_").last.map(String.init) ?? tag).replacingOccurrences(of: "-", with: " ")
-            guard let first = last.first else { return last }
-            return first.uppercased() + last.dropFirst()
-        }.filter { seen.insert($0.lowercased()).inserted }.prefix(2))
+        Array(TagLabel.unique(raw).prefix(2))
     }
 }
 

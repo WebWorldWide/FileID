@@ -392,6 +392,7 @@ struct RestructureView: View {
                         .buttonStyle(planReady ? AnyButtonStyle(DSGhostButtonStyle()) : AnyButtonStyle(DSPrimaryButtonStyle(height: Theme.Metrics.hitTarget)))
                         .disabled(applying)
                         .help(applying ? "Wait for the move to finish" : "Work out a new plan from the files as they are now")
+                        .padding(.leading, planReady ? -6 : 0)
                 }
             }
             VHairline()

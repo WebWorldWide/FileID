@@ -155,6 +155,8 @@ struct TakeReview: View {
                 comparePane(right, title: right.primaryFileID == qualities[safe: focusedIndex]?.primaryFileID ? "THIS TRY" : "RUNNER-UP", tone: Theme.label)
             }
         }
+        // Equal-height cards even when one has more reason chips than the other.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func comparePane(_ q: CatalogTakeQuality, title: String, tone: Color) -> some View {
@@ -171,7 +173,8 @@ struct TakeReview: View {
                     Label("Keep", systemImage: "checkmark.circle.fill").font(Theme.Font.body(11.5, .semibold)).foregroundStyle(Theme.delight)
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 9)
+            .padding(.horizontal, 12)
+            .frame(height: 36)
             .overlay(alignment: .bottom) { Hairline() }
             ZStack {
                 Color.black.opacity(0.35)
@@ -207,6 +210,7 @@ struct TakeReview: View {
             }
             .padding(12)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.panel, in: RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous)

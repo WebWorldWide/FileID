@@ -43,10 +43,14 @@ def sha(path):
     return h.hexdigest()
 
 
+LABS = []
+
+
 class Lab:
     """A scratch library of clones plus its isolated engine state directory."""
 
     def __init__(self, name, count=COUNT):
+        LABS.append(self)
         stamp = str(int(time.time() * 1000))[-9:]
         self.tag = f"fidcrash{stamp}"
         self.dir = os.path.join(ROOT, f"crash-{name}-{stamp}")
@@ -109,13 +113,25 @@ class Lab:
         except (OSError, ValueError):
             return []
 
-    def check(self, label, catalog_complete=True, allow_trash=False, layout=None):
+    def check(self, label, catalog_complete=True, allow_trash=False, layout=None, before_restart=False):
         """Assert the invariants. `layout=True` also demands every file back at its original path."""
         problems, notes = [], []
         on_disk = {}
         for rel in self.tree():
             on_disk.setdefault(sha(os.path.join(self.lib, rel)), []).append(rel)
-        journaled = {i["trashedPath"] for b in self.journal() for i in b["items"]}
+        items = [i for b in self.journal() for i in b["items"]]
+        journaled = {i["trashedPath"] for i in items if i["trashedPath"]}
+        # A write-ahead entry (killed before its Trash location was saved) is found by inode.
+        pending_inodes = set()
+        for i in items:
+            if not i["trashedPath"]:
+                for row in i.get("rows", []):
+                    ref = row.get("columns", {}).get("file_ref", {}).get("int") if row.get("table") == "files" else None
+                    if ref is not None:
+                        pending_inodes.add(ref & 0xFFFFFFFFFFFFFFFF)
+        for p in self.trashed():
+            if os.stat(p).st_ino in pending_inodes:
+                journaled.add(p)
         in_trash = {}
         for p in self.trashed():
             in_trash.setdefault(sha(p), []).append(p)
@@ -154,6 +170,28 @@ class Lab:
                 problems.append(f"integrity_check: {ok}")
             rows = self.sql("SELECT id, path_text FROM files WHERE path_text LIKE ?", (self.lib + "/%",))
             ghosts = [p for _, p in rows if not os.path.exists(p)]
+            if ghosts and before_restart:
+                # The engine repairs rows of journaled Trash items when it next starts; the
+                # post-restart check below must then find none.
+                trashed_names = {os.path.basename(t) for t in self.trashed()}
+                pending_moves = set()
+                try:
+                    for raw in open(os.path.join(self.state, "path-moves.ndjson")):
+                        intent = json.loads(raw).get("intent")
+                        if intent:
+                            pending_moves.add(intent["from"])
+                except (OSError, ValueError):
+                    pass
+                # A restructure move logged as applied but not yet reflected in its row.
+                try:
+                    for raw in open(self.undo_journal):
+                        entry = json.loads(raw)
+                        for key in ("src", "dst", "source", "destination"):
+                            if entry.get(key):
+                                pending_moves.add(entry[key])
+                except (OSError, ValueError):
+                    pass
+                ghosts = [g for g in ghosts if os.path.basename(g) not in trashed_names and g not in pending_moves]
             if ghosts:
                 problems.append(f"{len(ghosts)} catalog rows for missing files: {[os.path.relpath(g, self.lib) for g in ghosts[:4]]}")
             if catalog_complete:
@@ -280,8 +318,9 @@ def exp_trash_kill():
         ids = dup_ids(lab)
         e.send("trashFiles", {"fileIDs": ids})
         time.sleep(delay); kill(e)
-        lab.check(f"2 trash dups SIGKILL +{delay * 1000:.0f}ms: after kill", catalog_complete=False, allow_trash=True)
+        lab.check(f"2 trash dups SIGKILL +{delay * 1000:.0f}ms: after kill", catalog_complete=False, allow_trash=True, before_restart=True)
         e = restart(lab, "2 trash dups")
+        lab.check(f"2 trash dups +{delay * 1000:.0f}ms: after restart", catalog_complete=False, allow_trash=True)
         restore_everything(e, lab, f"2 trash dups +{delay * 1000:.0f}ms")
         e.close()
     lab = Lab("trash-batch")
@@ -289,8 +328,9 @@ def exp_trash_kill():
     ids = [r[0] for r in lab.sql("SELECT id FROM files WHERE path_text LIKE ? ORDER BY id", (lab.lib + "/Trip/%",))]
     e.send("trashFiles", {"fileIDs": ids})
     kill_on_disk(e, lambda: len(lab.trashed()) >= len(ids) // 2)
-    lab.check(f"2 trash batch of {len(ids)} SIGKILL mid-way: after kill ({len(lab.trashed())} in Trash)", catalog_complete=False, allow_trash=True)
+    lab.check(f"2 trash batch of {len(ids)} SIGKILL mid-way: after kill ({len(lab.trashed())} in Trash)", catalog_complete=False, allow_trash=True, before_restart=True)
     e = restart(lab, "2 trash batch")
+    lab.check("2 trash batch: after restart", catalog_complete=False, allow_trash=True)
     restore_everything(e, lab, "2 trash batch")
     e.close()
 
@@ -338,7 +378,7 @@ def exp_restructure_kill():
         target = max(1, int(len(moves) * fraction))
         kill_on_disk(e, lambda: journal_lines(lab) >= target)
         moved = sum(1 for m in moves if os.path.exists(m["destination"]))
-        lab.check(f"3 apply {len(moves)} moves SIGKILL at journal {journal_lines(lab)} ({moved} moved): after kill", catalog_complete=False)
+        lab.check(f"3 apply {len(moves)} moves SIGKILL at journal {journal_lines(lab)} ({moved} moved): after kill", catalog_complete=False, before_restart=True)
         e = restart(lab, "3 apply")
         lab.check("3 apply: after restart", catalog_complete=False)
         e.send("undoRestructure", {"libraryRoot": lab.lib})
@@ -356,8 +396,9 @@ def exp_restructure_kill():
     e.send("undoRestructure", {"libraryRoot": lab.lib})
     home = lambda: sum(1 for m in moves if os.path.exists(m["source"]))
     kill_on_disk(e, lambda: home() >= len(moves) // 2)
-    lab.check(f"3 undo SIGKILL mid-undo ({home()}/{len(moves)} back): after kill", catalog_complete=False)
+    lab.check(f"3 undo SIGKILL mid-undo ({home()}/{len(moves)} back): after kill", catalog_complete=False, before_restart=True)
     e = restart(lab, "3 undo")
+    lab.check("3 undo: after restart, before the retry (catalog follows the files)", catalog_complete=False)
     e.send("undoRestructure", {"libraryRoot": lab.lib})
     k, r = wait_restructure(e)
     lab.check(f"3 undo retried after restart ({k} applied={r.get('applied')} failed={r.get('failed')})", catalog_complete=False, layout=True)
@@ -381,8 +422,9 @@ def exp_rename_tools_kill():
     newpath = lambda n, p: os.path.join(os.path.dirname(p), f"{lab.tag}_renamed_{n}.JPG")
     done = lambda: sum(1 for n, (_, p) in enumerate(rows) if os.path.exists(newpath(n, p)))
     kill_on_disk(e, lambda: done() >= 5)
-    lab.check(f"4 rename 12 SIGKILL after {done()} renamed: after kill", catalog_complete=False)
+    lab.check(f"4 rename 12 SIGKILL after {done()} renamed: after kill", catalog_complete=False, before_restart=True)
     e = restart(lab, "4 rename")
+    lab.check("4 rename: after restart (catalog follows the files)", catalog_complete=False)
     stale = [(i, p) for n, (i, p) in enumerate(rows) if os.path.exists(newpath(n, p))
              and lab.sql("SELECT path_text FROM files WHERE id=?", (i,))[0][0] != newpath(n, p)]
     if stale:
@@ -567,9 +609,17 @@ EXPERIMENTS = {"claim": exp_claim_kill, "conc": exp_concurrency, "scan": exp_sca
 
 if __name__ == "__main__":
     chosen = sys.argv[1:] or list(EXPERIMENTS)
-    for name in chosen:
-        print(f"== {name}", flush=True)
-        EXPERIMENTS[name]()
+    try:
+        for name in chosen:
+            print(f"== {name}", flush=True)
+            EXPERIMENTS[name]()
+    finally:
+        # Never leave scratch clones in the owner's Trash, whatever an experiment did.
+        swept = sum(lab.restore_trash_by_hand() for lab in LABS)
+        stray = [p for lab in LABS for p in lab.trashed()]
+        for p in stray:
+            os.rename(p, os.path.join(ROOT, os.path.basename(p)))
+        print(f"cleanup: {swept} put back into their labs, {len(stray)} moved out of the Trash to {ROOT}", flush=True)
     failed = [r for r in RESULTS if r[1] == "FAIL"]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed")
     sys.exit(1 if failed else 0)

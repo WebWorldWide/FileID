@@ -11,7 +11,7 @@ struct PipelineBlock: View {
     @State private var startRequested = false
 
     private enum Stage: Int, CaseIterable { case scan, tag, faces, captions, done
-        var label: String { ["Find files", "Tag", "Faces", "Describe (optional)", "Done"][rawValue] }
+        var label: String { ["Find files", "Tag", "Faces", "Describe", "Done"][rawValue] }
     }
 
     private var progress: ScanProgress? { engine.lastProgress }
@@ -163,26 +163,25 @@ struct PipelineBlock: View {
         HStack(spacing: 6) {
             if scanRunning {
                 if engine.isPaused {
-                    Button { engine.resume() } label: { Label("Resume", systemImage: "play.fill") }.buttonStyle(DSPrimaryButtonStyle(height: 28))
+                    Button { engine.resume() } label: { Label("Resume", systemImage: "play.fill").frame(maxWidth: .infinity) }.buttonStyle(DSPrimaryButtonStyle(height: 28))
                 } else {
-                    Button { engine.pause() } label: { Label("Pause", systemImage: "pause.fill") }.buttonStyle(DSSecondaryButtonStyle(height: 28))
+                    Button { engine.pause() } label: { Label("Pause", systemImage: "pause.fill").frame(maxWidth: .infinity) }.buttonStyle(DSSecondaryButtonStyle(height: 28))
                 }
                 Button("Stop") { engine.cancel() }.buttonStyle(DSGhostButtonStyle(color: Theme.text3)).help("Stop scanning. Scan again later to pick up where it left off.")
             } else if store.totalFiles > 0 || progress != nil {
-                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1) }
+                Button { engine.startScan(rootURL: pickedURL) } label: { Label(progress?.phase == .cancelled || progress?.phase == .failed ? "Scan again" : "Rescan", systemImage: "arrow.counterclockwise").lineLimit(1).frame(maxWidth: .infinity) }
                     .buttonStyle(DSSecondaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(startRequested || captionsRunning || engine.faceClusteringInFlight)
                     .help(captionsRunning || engine.faceClusteringInFlight ? "Wait for the current work to finish, then rescan." : "Look for new or changed files in \(pickedURL.lastPathComponent). Files already read are skipped.")
             } else {
-                Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1) }
+                Button { startRequested = true; engine.startScan(rootURL: pickedURL) } label: { Label("Scan \(pickedURL.lastPathComponent)", systemImage: "play.fill").lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity) }
                     .buttonStyle(DSPrimaryButtonStyle(height: 28))
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(startRequested)
                     .help("Read every file in this folder (⌘R). Nothing is moved or changed.")
             }
-            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
     }
 }

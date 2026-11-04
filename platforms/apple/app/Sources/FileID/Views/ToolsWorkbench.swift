@@ -300,7 +300,9 @@ struct ToolsWorkbench: View {
                     .aspectRatio(frameRatio, contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: 300)
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).stroke(Theme.gold, lineWidth: 1.5))
+                    // Gold marks a real preview; an empty frame keeps the neutral hairline.
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+                        .stroke(previewImage == nil ? Theme.hairlineStrong : Theme.gold, lineWidth: previewImage == nil ? 1 : 1.5))
                     .frame(maxWidth: .infinity)
                     .animation(Theme.springStandard, value: frameRatio)
                     .accessibilityLabel(selectedHits.first.map { "Preview of \(URL(fileURLWithPath: $0.path).lastPathComponent)" } ?? "No file selected")
@@ -365,12 +367,14 @@ struct ToolsWorkbench: View {
                         .help(session.outputs.contains(where: { $0.state == "completed" }) ? "Move the files this export created to Trash" : "Nothing exported yet")
                     }
                 }
-                HStack {
+                VStack(alignment: .leading, spacing: 6) {
                     Button("Show last export") { send(ToolRequest(requestID: UUID().uuidString, action: "history")) }
                         .buttonStyle(.dsGhost)
                         .disabled(busy)
-                    Spacer()
-                    MetaText("Check reframed videos before sharing them.", size: 11.5)
+                        .padding(.leading, -6)
+                    if session.kind == "video" {
+                        MetaText("Check reframed videos before sharing them.", size: 11.5)
+                    }
                 }
             }
             .padding(14)

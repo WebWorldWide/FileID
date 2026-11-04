@@ -79,6 +79,7 @@ struct ModelCatalogBrowser: View {
                         Image(systemName: "magnifyingglass").font(Theme.Font.display(28)).foregroundStyle(Theme.text3)
                         Text("No models match these filters").font(Theme.Font.body(14, .semibold))
                         Button("Reset filters") { query = ""; fitsOnly = false; installedOnly = false; role = "all" }
+                            .buttonStyle(.dsSecondary)
                     }
                 }
             }
@@ -117,6 +118,7 @@ struct ModelCatalogBrowser: View {
                         ProgressView(value: progress.fraction).tint(Theme.gold)
                     }
                     Button("Cancel") { engine.cancelPrewarm() }
+                        .buttonStyle(.dsSecondary)
                 }
             }
             if !statusMessage.isEmpty { Text(statusMessage).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).textSelection(.enabled) }

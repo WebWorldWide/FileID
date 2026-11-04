@@ -42,8 +42,8 @@ enum ChatActions {
     }
 
     private static func home() -> String? {
-        let environment = ProcessInfo.processInfo.environment
-        return [environment["HOME"], environment["USERPROFILE"]].compactMap { $0 }.first { !$0.isEmpty }
+        let home = UserHome.path
+        return home.isEmpty ? ProcessInfo.processInfo.environment["USERPROFILE"].flatMap { $0.isEmpty ? nil : $0 } : home
     }
 
     private static func libraryRoot(_ db: GRDB.Database, _ context: Context) throws -> String? {

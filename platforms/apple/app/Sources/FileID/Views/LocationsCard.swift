@@ -71,7 +71,7 @@ struct LocationRow: View {
                     if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
                 }
                 MetaText(LocationText.summary(root))
-                MetaText(root.path, size: 11).lineLimit(1).truncationMode(.middle)
+                MetaText(PathText.abbreviated(root.path)).lineLimit(1).truncationMode(.middle).help(root.path)
             }
             Spacer()
             Button("Rescan") { engine.startScan(rootURL: URL(fileURLWithPath: root.path)) }

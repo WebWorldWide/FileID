@@ -115,6 +115,90 @@ enum TrashJournal {
         try? save(leftover.isEmpty ? rest : rest + [Batch(id: batch.id, createdAt: batch.createdAt, items: leftover)], at: url)
     }
 
+    static func fileRef(_ item: Item) -> Int64? {
+        item.rows.first(where: { $0.table == "files" })?.columns["file_ref"]?.int
+    }
+
+    /// The Trash folders a file from `original` can land in: the user's Trash, and for other
+    /// volumes that volume's `.Trashes/<uid>`.
+    static func trashFolders(for original: URL) -> [URL] {
+        var folders = [UserHome.trashURL]
+        if let volume = (try? original.deletingLastPathComponent().resourceValues(forKeys: [.volumeURLKey]))?.volume,
+           volume.path != "/" {
+            folders.append(volume.appendingPathComponent(".Trashes/\(getuid())", isDirectory: true))
+        }
+        return folders
+    }
+
+    /// Where the item is in the Trash now: its recorded location, or for a write-ahead entry
+    /// (killed before the location was saved) the Trash entry with the file's own inode.
+    static func locate(_ item: Item, in folders: [URL]? = nil) -> URL? {
+        if !item.trashedPath.isEmpty, FileManager.default.fileExists(atPath: item.trashedPath) {
+            return URL(fileURLWithPath: item.trashedPath)
+        }
+        guard let ref = fileRef(item) else { return nil }
+        let original = URL(fileURLWithPath: item.originalPath)
+        let stem = original.deletingPathExtension().lastPathComponent
+        for folder in folders ?? trashFolders(for: original) {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { continue }
+            // Finder keeps the name or appends a counter ("photo 2.jpg"); only those are inode-checked.
+            for name in names where name.hasPrefix(stem) {
+                let candidate = folder.appendingPathComponent(name)
+                if Restructure.fileRefMatches(dbRef: ref, currentRef: Discovery.inode(of: candidate)) { return candidate }
+            }
+        }
+        return nil
+    }
+
+    /// Startup repair after a kill mid-`trashFiles`: completes write-ahead entries, drops catalog
+    /// rows of files that are provably in the Trash, and forgets entries for files that never left.
+    static func reconcile(database: Database, journal url: URL = defaultURL, trashFolders folders: [URL]? = nil) async {
+        let batches = loadLocked(at: url)
+        guard !batches.isEmpty else { return }
+        var changed = false
+        var repaired: [Batch] = []
+        var staleRows: [(Int64, String)] = []
+        for var batch in batches {
+            var items: [Item] = []
+            for var item in batch.items {
+                let original = URL(fileURLWithPath: item.originalPath)
+                if let found = locate(item, in: folders) {
+                    if found.path != item.trashedPath { item.trashedPath = found.path; changed = true }
+                    if !FileManager.default.fileExists(atPath: original.path) { staleRows.append((item.fileID, item.originalPath)) }
+                    items.append(item)
+                } else if item.trashedPath.isEmpty, Restructure.fileRefMatches(dbRef: fileRef(item), currentRef: Discovery.inode(of: original)) {
+                    changed = true
+                } else {
+                    items.append(item)
+                }
+            }
+            batch.items = items
+            if !items.isEmpty { repaired.append(batch) } else { changed = true }
+        }
+        if !staleRows.isEmpty {
+            let rows = staleRows
+            try? await database.pool.write { db in
+                for (id, path) in rows {
+                    try db.execute(sql: "DELETE FROM files WHERE id = ? AND path_text = ?", arguments: [id, path])
+                }
+            }
+        }
+        if changed { replace(batches.map(\.id), with: repaired, at: url) }
+    }
+
+    private static func loadLocked(at url: URL) -> [Batch] {
+        lock.lock(); defer { lock.unlock() }
+        return load(at: url)
+    }
+
+    /// Swaps the reconciled batches in, keeping any batch written since they were read.
+    private static func replace(_ ids: [String], with repaired: [Batch], at url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        let byID = Dictionary(repaired.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let known = Set(ids)
+        try? save(load(at: url).compactMap { known.contains($0.id) ? byID[$0.id] : $0 }, at: url)
+    }
+
     /// A killed restore can leave a file home with its rows not yet re-inserted; the
     /// snapshot's inode proves the file at the original path is that same file.
     static func alreadyRestored(_ item: Item, original: URL, trashed: URL) -> Bool {
@@ -135,7 +219,8 @@ enum TrashJournal {
         var messages: [BulkActionItem] = []
         var leftover: [Item] = []
         for item in batch.items {
-            let original = URL(fileURLWithPath: item.originalPath), trashed = URL(fileURLWithPath: item.trashedPath)
+            let original = URL(fileURLWithPath: item.originalPath)
+            let trashed = locate(item) ?? URL(fileURLWithPath: item.trashedPath.isEmpty ? "/nonexistent-\(UUID().uuidString)" : item.trashedPath)
             if FileManager.default.fileExists(atPath: original.path) {
                 guard alreadyRestored(item, original: original, trashed: trashed) else {
                     messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Cannot restore: another file is already at \(original.lastPathComponent)."))
