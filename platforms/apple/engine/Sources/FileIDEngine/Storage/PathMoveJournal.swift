@@ -26,12 +26,13 @@ enum PathMoveJournal {
     @discardableResult
     static func begin(fileID: Int64, from: String, to: String, fileRef: UInt64?, at url: URL = defaultURL) -> String {
         let intent = Intent(id: UUID().uuidString, fileID: fileID, from: from, to: to, fileRef: fileRef.map { Int64(bitPattern: $0) })
-        append(Line(intent: intent), at: url)
+        append(Line(intent: intent), at: url, sync: true)
         return intent.id
     }
 
     static func finish(_ id: String, at url: URL = defaultURL) {
-        append(Line(done: id), at: url)
+        // Unsynced: losing a "done" line only means one harmless check at the next start.
+        append(Line(done: id), at: url, sync: false)
     }
 
     static func pending(at url: URL = defaultURL) -> [Intent] {
@@ -62,7 +63,7 @@ enum PathMoveJournal {
                         ext.isEmpty ? nil : ext, fileID, from])
     }
 
-    private static func append(_ line: Line, at url: URL) {
+    private static func append(_ line: Line, at url: URL, sync: Bool) {
         guard var data = try? JSONEncoder().encode(line) else { return }
         data.append(0x0A)
         lock.lock(); defer { lock.unlock() }
@@ -74,7 +75,7 @@ enum PathMoveJournal {
         defer { try? handle.close() }
         _ = try? handle.seekToEnd()
         try? handle.write(contentsOf: data)
-        try? handle.synchronize()
+        if sync { try? handle.synchronize() }
     }
 
     private static func unfinished(at url: URL) -> [Intent] {

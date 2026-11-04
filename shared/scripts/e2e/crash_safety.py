@@ -182,6 +182,15 @@ class Lab:
                             pending_moves.add(intent["from"])
                 except (OSError, ValueError):
                     pass
+                # A restructure move logged as applied but not yet reflected in its row.
+                try:
+                    for raw in open(self.undo_journal):
+                        entry = json.loads(raw)
+                        for key in ("src", "dst", "source", "destination"):
+                            if entry.get(key):
+                                pending_moves.add(entry[key])
+                except (OSError, ValueError):
+                    pass
                 ghosts = [g for g in ghosts if os.path.basename(g) not in trashed_names and g not in pending_moves]
             if ghosts:
                 problems.append(f"{len(ghosts)} catalog rows for missing files: {[os.path.relpath(g, self.lib) for g in ghosts[:4]]}")
@@ -369,7 +378,7 @@ def exp_restructure_kill():
         target = max(1, int(len(moves) * fraction))
         kill_on_disk(e, lambda: journal_lines(lab) >= target)
         moved = sum(1 for m in moves if os.path.exists(m["destination"]))
-        lab.check(f"3 apply {len(moves)} moves SIGKILL at journal {journal_lines(lab)} ({moved} moved): after kill", catalog_complete=False)
+        lab.check(f"3 apply {len(moves)} moves SIGKILL at journal {journal_lines(lab)} ({moved} moved): after kill", catalog_complete=False, before_restart=True)
         e = restart(lab, "3 apply")
         lab.check("3 apply: after restart", catalog_complete=False)
         e.send("undoRestructure", {"libraryRoot": lab.lib})
@@ -387,8 +396,9 @@ def exp_restructure_kill():
     e.send("undoRestructure", {"libraryRoot": lab.lib})
     home = lambda: sum(1 for m in moves if os.path.exists(m["source"]))
     kill_on_disk(e, lambda: home() >= len(moves) // 2)
-    lab.check(f"3 undo SIGKILL mid-undo ({home()}/{len(moves)} back): after kill", catalog_complete=False)
+    lab.check(f"3 undo SIGKILL mid-undo ({home()}/{len(moves)} back): after kill", catalog_complete=False, before_restart=True)
     e = restart(lab, "3 undo")
+    lab.check("3 undo: after restart, before the retry (catalog follows the files)", catalog_complete=False)
     e.send("undoRestructure", {"libraryRoot": lab.lib})
     k, r = wait_restructure(e)
     lab.check(f"3 undo retried after restart ({k} applied={r.get('applied')} failed={r.get('failed')})", catalog_complete=False, layout=True)
