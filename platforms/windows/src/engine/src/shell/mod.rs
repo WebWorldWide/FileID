@@ -2356,11 +2356,9 @@ pub mod heic {
         let mut produced: Option<PathBuf> = None;
         for tool in ["heif-dec", "heif-convert"] {
             clear_output_dir(outputs.path()).context("clear heic output directory")?;
-            if run_converter_bounded(tool, path, &out, outputs.path()) {
-                if let Some(p) = resolve_output(&out) {
-                    produced = Some(p);
-                    break;
-                }
+            if run_converter_bounded(tool, path, &out, outputs.path()) && let Some(p) = resolve_output(&out) {
+                produced = Some(p);
+                break;
             }
         }
         let Some(png) = produced else {

@@ -397,12 +397,12 @@ fn prepare_scratch_dir(data_home: &Path) {
     #[cfg(not(target_os = "macos"))]
     {
         let link = root.join("Models");
-        if !link.exists() {
-            if let Ok(real) = fileid_engine::paths::models_dir() {
-                if real.is_dir() && real != link {
-                    let _ = symlink_dir(&real, &link);
-                }
-            }
+        if !link.exists()
+            && let Ok(real) = fileid_engine::paths::models_dir()
+            && real.is_dir()
+            && real != link
+        {
+            let _ = symlink_dir(&real, &link);
         }
     }
 }
