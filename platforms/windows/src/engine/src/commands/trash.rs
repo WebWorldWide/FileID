@@ -137,7 +137,7 @@ impl PlatformRestoreTarget {
         use std::os::windows::ffi::OsStrExt;
         use std::os::windows::io::{AsRawHandle, FromRawHandle};
         use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+        use windows::Win32::Foundation::HANDLE;
         use windows::Win32::Storage::FileSystem::{
             CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
             FILE_ATTRIBUTE_NORMAL, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_READ,
@@ -182,7 +182,7 @@ impl PlatformRestoreTarget {
         let parent_handle = self.parent.as_raw_handle();
         unsafe {
             (*rename).Anonymous = FILE_RENAME_INFO_0 {
-                ReplaceIfExists: BOOLEAN(0),
+                ReplaceIfExists: false,
             };
             (*rename).RootDirectory = HANDLE(parent_handle);
             (*rename).FileNameLength = u32::try_from(self.leaf.len() * 2)?;

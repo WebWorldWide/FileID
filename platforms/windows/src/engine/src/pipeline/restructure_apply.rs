@@ -2797,7 +2797,7 @@ fn remove_recorded_shortcut(
 ) -> Result<bool> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileAttributeTagInfo, FileDispositionInfo,
         GetFileInformationByHandleEx, SetFileInformationByHandle, FILE_ATTRIBUTE_TAG_INFO,
@@ -2885,7 +2885,7 @@ fn remove_recorded_shortcut(
     );
 
     let disposition = FILE_DISPOSITION_INFO {
-        DeleteFile: BOOLEAN(1),
+        DeleteFile: true,
     };
     unsafe {
         SetFileInformationByHandle(
@@ -3102,7 +3102,7 @@ fn rename_staged_shortcut(
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,
         FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -3183,7 +3183,7 @@ fn rename_staged_shortcut(
     let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*rename).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: BOOLEAN(0),
+            ReplaceIfExists: false,
         };
         (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
         (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
@@ -3247,7 +3247,7 @@ fn move_file(
 ) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, DELETE, OPEN_EXISTING,
@@ -3299,7 +3299,7 @@ fn move_file(
         let mut storage = vec![0u64; byte_len.div_ceil(std::mem::size_of::<u64>())];
         let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
-            (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: BOOLEAN(0) };
+            (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: false };
             (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
             (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
             std::ptr::copy_nonoverlapping(
@@ -3413,7 +3413,7 @@ fn make_symlink(
                 SYMBOLIC_LINK_FLAGS(flags.0),
             )
         };
-        if !created.as_bool() {
+        if !created {
             let error = std::io::Error::last_os_error();
             if std::fs::symlink_metadata(&dst_ext)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())

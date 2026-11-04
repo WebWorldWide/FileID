@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::sync::Once;
 
-use windows::core::{PCWSTR, PROPVARIANT, GUID};
-use windows::Win32::Foundation::TRUE;
+use windows::core::{PCWSTR, GUID};
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFMediaType, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromURL, MFStartup, MFVideoFormat_RGB32, MFMediaType_Video,
@@ -150,7 +150,7 @@ pub fn keyframe_25pct(path: &Path) -> Result<VideoFrame> {
             .context("set subtype")?;
 
         reader
-            .SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, TRUE)
+            .SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, true)
             .context("select video stream")?;
         let native = reader
             .GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32, 0)

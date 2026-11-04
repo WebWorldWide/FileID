@@ -17,8 +17,8 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 /// WinRT activation (DataWriter::new) was failing CO_E_NOTINITIALIZED and the
 /// error was silently swallowed by the caller — OCR produced nothing. MTA (not
 /// STA): these pool threads pump no message loop, and the blocking
-/// `RecognizeAsync(..).get()` wait below would risk an STA deadlock — the same
-/// reason `shell::heic`/`shell::video` pick MTA for their WinRT `.get()`s. The
+/// `RecognizeAsync(..).join()` wait below would risk an STA deadlock — the same
+/// reason `shell::heic`/`shell::video` pick MTA for their WinRT `.join()`s. The
 /// OcrEngine/SoftwareBitmap are agile, so MTA is sound. `is_ok()` is true for
 /// S_OK/S_FALSE (uninit to balance), false for RPC_E_CHANGED_MODE (thread
 /// already in another apartment; don't touch it). (audit recheck: OCR COM)
@@ -77,7 +77,7 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<String> {
     let result = engine
         .RecognizeAsync(&soft_bitmap)
         .context("RecognizeAsync")?
-        .get()
+        .join()
         .context("recognize result")?;
 
     Ok(result.Text().map(|s| s.to_string_lossy()).unwrap_or_default())

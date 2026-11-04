@@ -117,7 +117,7 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
         ..Default::default()
     };
 
-    let hdc = unsafe { CreateCompatibleDC(HDC::default()) };
+    let hdc = unsafe { CreateCompatibleDC(None) };
     if hdc.0.is_null() {
         anyhow::bail!("CreateCompatibleDC returned null");
     }

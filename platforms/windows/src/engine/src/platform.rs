@@ -692,7 +692,7 @@ pub fn storage_type_for_path(path: &Path) -> StorageType {
             // For now: treat all no-seek-penalty fixed drives as NVMe-class
             // (16-thread budget). The downside on SATA SSDs is moderate
             // over-parallelism, which still beats single-threaded walkdir.
-            if desc.IncursSeekPenalty.as_bool() { StorageType::Hdd } else { StorageType::Nvme }
+            if desc.IncursSeekPenalty { StorageType::Hdd } else { StorageType::Nvme }
         } else {
             StorageType::Unknown
         }

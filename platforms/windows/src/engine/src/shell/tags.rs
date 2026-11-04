@@ -133,13 +133,14 @@ mod windows_ipropertystore {
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
-    use windows::core::{PCWSTR, PROPVARIANT};
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::UI::Shell::PropertiesSystem::{
         IPropertyStore, SHGetPropertyStoreFromParsingName, GETPROPERTYSTOREFLAGS, GPS_READWRITE,
-        PROPERTYKEY,
     };
     #[cfg(test)]
     use windows::Win32::UI::Shell::PropertiesSystem::GPS_DEFAULT;

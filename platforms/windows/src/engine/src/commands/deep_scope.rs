@@ -179,7 +179,7 @@ fn contains_path(root: &Path, target: &Path) -> Result<bool, ScopeError> {
 fn contains_path(root: &Path, target: &Path) -> Result<bool, ScopeError> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn CompareStringOrdinal(
             a: *const u16,
             a_len: i32,

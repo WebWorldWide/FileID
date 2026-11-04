@@ -34,7 +34,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 /// silently dropping every HEIC/HEIF (the default iPhone format) from tagging/faces/
 /// CLIP/thumbnails even with the codec present. Every other WinRT shell module inits a
 /// COM apartment; heic.rs was the lone exception. MTA because these threads pump no
-/// message loop and the blocking `.get()` waits below would risk an STA deadlock;
+/// message loop and the blocking `.join()` waits below would risk an STA deadlock;
 /// `did_init` is true only when WE init'd (S_OK/S_FALSE) — on RPC_E_CHANGED_MODE an
 /// outer caller owns the apartment so we must NOT uninit. Mirrors `shell::video::ComScope`.
 /// (HEIC COM init)
@@ -104,22 +104,22 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     if wide.is_empty() {
         anyhow::bail!("heic decode: empty path");
     }
-    let hpath = HSTRING::from_wide(&wide).context("HSTRING::from_wide")?;
+    let hpath = HSTRING::from_wide(&wide);
 
     let file = StorageFile::GetFileFromPathAsync(&hpath)
         .context("StorageFile::GetFileFromPathAsync")?
-        .get()
+        .join()
         .context("await StorageFile open")?;
 
     let stream = file
         .OpenAsync(FileAccessMode::Read)
         .context("StorageFile::OpenAsync")?
-        .get()
+        .join()
         .context("await OpenAsync")?;
 
     let decoder_operation = BitmapDecoder::CreateAsync(&stream)
         .context("create HEIC/HEIF bitmap decoder operation")?;
-    let decoder = decoder_operation.get().map_err(decoder_creation_error)?;
+    let decoder = decoder_operation.join().map_err(decoder_creation_error)?;
 
     let pw = decoder.PixelWidth().context("PixelWidth")?;
     let ph = decoder.PixelHeight().context("PixelHeight")?;
@@ -148,7 +148,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
     let pixel_provider = decoder
         .GetPixelDataAsync()
         .context("GetPixelDataAsync")?
-        .get()
+        .join()
         .context("await pixel data")?;
 
     let bgra: Vec<u8> = pixel_provider
