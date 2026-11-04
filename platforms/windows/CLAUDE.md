@@ -20,7 +20,7 @@ Covers `platforms/windows/`. For the macOS reference see `platforms/apple/CLAUDE
 ## Stack
 
 - **Engine** — Rust (`fileid-engine`), single release `.exe` (LTO). Newline-delimited JSON over stdio; owns the SQLite WAL DB, scan pipeline, and ML inference (ONNX Runtime + llama.cpp).
-- **App** — WinUI 3 (Windows App SDK 1.6+, .NET 8, C#/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
+- **App** — WinUI 3 (Windows App SDK 1.6+, .NET 10, C# 14/XAML), unpackaged desktop. Self-contained `dotnet publish` — users don't install .NET.
 - **Distribution** — WiX v4 → `FileID-x64.msi` / `FileID-arm64.msi`, wrapped in a Burn bundle (`FileIDSetup.exe`); Authenticode-signed. The reserved Store product uses the separate x64 MSIX path in `build/publish-store.ps1`; see `shared/docs/WINDOWS_STORE.md` for identity and release gates.
 
 ## Layout

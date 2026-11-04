@@ -9,7 +9,7 @@
     Build with: dotnet test Tests/FileID.App.Tests/FileID.App.Tests.csproj
   -->
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>FileID.App.Tests</RootNamespace>
     <IsPackable>false</IsPackable>

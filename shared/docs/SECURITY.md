@@ -4,7 +4,7 @@ What we've audited, what's enforced today, and the hardening that gates the v1.0
 
 ## Threat model
 
-FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) and the app (WinUI 3 / .NET 8 on Windows, SwiftUI on macOS) — that talk newline-delimited JSON over stdio. The engine owns a single-writer SQLite WAL database and runs all ML inference on-device. The only network egress is user-initiated model and runtime downloads (see `PRIVACY.md` for the host list). Three attacker classes are in scope:
+FileID is two local binaries — the engine (Rust on Windows, Swift on macOS) and the app (WinUI 3 / .NET 10 on Windows, SwiftUI on macOS) — that talk newline-delimited JSON over stdio. The engine owns a single-writer SQLite WAL database and runs all ML inference on-device. The only network egress is user-initiated model and runtime downloads (see `PRIVACY.md` for the host list). Three attacker classes are in scope:
 
 - **Local untrusted process / privileged local adversary.** Can write to the user's filesystem or to FileID's install + data directories. Goals: swap the engine binary the app spawns, replace a model file on disk, or escalate via the engine's stdio IPC.
 - **Network MITM.** Intercepting a model or runtime download to substitute a malicious bundle.

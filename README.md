@@ -218,7 +218,7 @@ Dev guide: [`platforms/apple/CLAUDE.md`](platforms/apple/CLAUDE.md).
 
 ### Windows
 
-Needs Rust 1.98+ (`rustup`), the .NET 8 SDK and Visual Studio Build Tools 2022 with the UWP MSBuild component.
+Needs Rust 1.98+ (`rustup`), the .NET 10 SDK and Visual Studio Build Tools 2022 with the UWP MSBuild component.
 
 ```powershell
 .\platforms\windows\build\build-all.ps1                    # incremental engine + app
@@ -257,7 +257,7 @@ fileid-tui
 FileID/
 ├── platforms/
 │   ├── apple/      macOS: SwiftUI app + Swift engine (MLX, Core ML, Vision, GRDB)
-│   ├── windows/    WinUI 3 app (.NET 8) + the shared Rust engine (src/engine)
+│   ├── windows/    WinUI 3 app (.NET 10) + the shared Rust engine (src/engine)
 │   ├── linux/      GTK4 / libadwaita app on the shared engine
 │   ├── cli/        `fileid` command-line tool
 │   └── tui/        `fileid-tui` terminal UI

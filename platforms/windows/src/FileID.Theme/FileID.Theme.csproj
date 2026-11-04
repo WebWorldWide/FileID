@@ -10,7 +10,7 @@
     audited in isolation (a future Theme Gallery debug app references this).
   -->
   <PropertyGroup>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>FileID.Theme</RootNamespace>
     <AssemblyName>FileID.Theme</AssemblyName>

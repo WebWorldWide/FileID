@@ -40,7 +40,7 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
       - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce
       - name: Build and validate reserved Store package
         run: ./build/publish-store.ps1

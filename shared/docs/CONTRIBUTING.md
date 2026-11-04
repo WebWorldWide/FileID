@@ -2,7 +2,7 @@
 
 > The "you're new here" guide. Pair this with `TESTING.md` (how to test) and `COVERAGE.md` (per-module targets).
 
-FileID is an on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename tens of thousands of files locally. Two platforms ship today: **Windows** (Rust engine `fileid-engine` + WinUI 3 / .NET 8 C# app) and **macOS** (Swift/SwiftUI engine + app, MLX). Linux is deferred. On every platform two binaries talk newline-delimited JSON over stdio; the engine owns a SQLite WAL database (single writer). The project is Apache-2.0.
+FileID is an on-device, privacy-first AI file organizer — tag, dedupe, restructure, rename tens of thousands of files locally. Two platforms ship today: **Windows** (Rust engine `fileid-engine` + WinUI 3 / .NET 10 C# app) and **macOS** (Swift/SwiftUI engine + app, MLX). Linux is deferred. On every platform two binaries talk newline-delimited JSON over stdio; the engine owns a SQLite WAL database (single writer). The project is Apache-2.0.
 
 ## Setup
 

@@ -2,7 +2,7 @@
 
 FileID is on-device software. Your photos, documents, faces, OCR text, EXIF, file paths, and folder structure stay on your machine. This document spells out exactly what FileID *does not* do, so the product proposition is verifiable rather than rhetorical.
 
-It applies to both shipping platforms — Windows (Rust `fileid-engine` + WinUI 3 / .NET 8 app) and macOS (Swift/SwiftUI engine + app). Linux is deferred.
+It applies to both shipping platforms — Windows (Rust `fileid-engine` + WinUI 3 / .NET 10 app) and macOS (Swift/SwiftUI engine + app). Linux is deferred.
 
 ## What we do — Windows Store version
 

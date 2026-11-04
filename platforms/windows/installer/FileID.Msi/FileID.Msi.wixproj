@@ -47,8 +47,8 @@
          Pre-condition: dotnet publish FileID.App with the matching RID
          and self-contained=true has already produced the layout.
          publish-bundle.ps1 enforces the order. -->
-    <PublishRoot Condition="'$(Platform)' == 'x64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64\publish</PublishRoot>
-    <PublishRoot Condition="'$(Platform)' == 'arm64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\arm64\Release\net8.0-windows10.0.19041.0\win-arm64\publish</PublishRoot>
+    <PublishRoot Condition="'$(Platform)' == 'x64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\publish</PublishRoot>
+    <PublishRoot Condition="'$(Platform)' == 'arm64'">$(MSBuildThisFileDirectory)..\..\src\FileID.App\bin\arm64\Release\net10.0-windows10.0.19041.0\win-arm64\publish</PublishRoot>
 
     <!-- V14.7.3: source-of-truth path for the multi-resolution .ico
          used by ARPPRODUCTICON + Start Menu shortcut. References the

@@ -11,11 +11,11 @@
     reference it (FileID.App is a WinExe and not project-referenceable for
     test purposes).
 
-    Note: this is a plain net8.0 library — NOT WinUI. The IPC types have
+    Note: this is a plain net10.0 library — NOT WinUI. The IPC types have
     no UI dependency.
   -->
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RootNamespace>FileID.IpcSchema</RootNamespace>
     <AssemblyName>FileID.IpcSchema</AssemblyName>
   </PropertyGroup>

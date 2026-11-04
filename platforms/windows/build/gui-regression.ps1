@@ -41,7 +41,7 @@ $ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PlatformDir = Resolve-Path (Join-Path $ScriptDir "..")
 $AppDir      = Resolve-Path (Join-Path $PlatformDir "src/FileID.App")
 $Solution    = Join-Path $PlatformDir "FileID.sln"
-$AppTfm      = "net8.0-windows10.0.19041.0"
+$AppTfm      = "net10.0-windows10.0.19041.0"
 
 $LogsDir    = Join-Path $env:LOCALAPPDATA "FileID\logs"
 $AppLog     = Join-Path $LogsDir "app.log"
