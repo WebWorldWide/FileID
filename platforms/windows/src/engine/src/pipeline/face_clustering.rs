@@ -3139,7 +3139,6 @@ mod tests {
     fn automerge_threshold_clamps_and_defaults() {
         // Unset → default. (Other env-dependent cases aren't asserted here to
         // avoid process-global env races with parallel tests.)
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("FILEID_FACE_AUTOMERGE_COS") };
         assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
     }
@@ -3372,9 +3371,7 @@ mod tests {
 
     #[test]
     fn suppression_env_defaults() {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE") };
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("FILEID_FACE_SOLO_QUALITY") };
         assert_eq!(min_cluster_size(), 3);
         assert!((solo_quality_floor() - 0.40).abs() < 1e-6);

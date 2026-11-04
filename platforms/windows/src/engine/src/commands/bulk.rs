@@ -904,14 +904,12 @@ fn bind_windows_trash_receipts_with(
         entry.items[index].recycle_physical_path = Some(path.to_string_lossy().into_owned());
         verified.push(index);
     }
-    if !verified.is_empty() {
-        if let Err(error) = append(entry) {
-            for index in verified {
-                outcomes[index] = CheckedTrashOutcome::Failed(format!(
-                    "file moved to the Recycle Bin, but its identity receipt could not be journaled ({error}); the catalog row was retained"
-                ));
-                entry.items[index].recycle_physical_path = None;
-            }
+    if !verified.is_empty() && let Err(error) = append(entry) {
+        for index in verified {
+            outcomes[index] = CheckedTrashOutcome::Failed(format!(
+                "file moved to the Recycle Bin, but its identity receipt could not be journaled ({error}); the catalog row was retained"
+            ));
+            entry.items[index].recycle_physical_path = None;
         }
     }
 }

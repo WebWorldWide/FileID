@@ -167,7 +167,7 @@ pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
 
     // BGRA → RGB. Drop alpha + swap channel order in one pass.
     let mut rgb = Vec::with_capacity((pw as usize) * (ph as usize) * 3);
-    for chunk in bgra.chunks_exact(4).take((pw as usize) * (ph as usize)) {
+    for chunk in bgra.as_chunks::<4>().0.iter().take((pw as usize) * (ph as usize)) {
         rgb.push(chunk[2]); // R from BGRA[2]
         rgb.push(chunk[1]); // G from BGRA[1]
         rgb.push(chunk[0]); // B from BGRA[0]

@@ -729,18 +729,12 @@ fn preload_cuda_math_stack() -> bool {
     // shim we just loaded — the shim LoadLibrary's them lazily by bare name,
     // which would otherwise re-enter the unordered search set and could mix
     // cuDNN versions across directories.
-    if ok {
-        if let Some(shim) = locate_stack_dll("cudnn64_9.dll") {
-            if let Some(dir) = shim.parent() {
-                if let Ok(rd) = std::fs::read_dir(dir) {
-                    for entry in rd.flatten() {
-                        let name = entry.file_name();
-                        let name = name.to_string_lossy();
-                        if name.starts_with("cudnn_") && name.ends_with("64_9.dll") {
-                            let _ = crate::platform::preload_dll(&entry.path());
-                        }
-                    }
-                }
+    if ok && let Some(shim) = locate_stack_dll("cudnn64_9.dll") && let Some(dir) = shim.parent() && let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("cudnn_") && name.ends_with("64_9.dll") {
+                let _ = crate::platform::preload_dll(&entry.path());
             }
         }
     }
@@ -751,12 +745,9 @@ fn preload_cuda_math_stack() -> bool {
 #[cfg(windows)]
 fn locate_stack_dll(name: &str) -> Option<PathBuf> {
     let root = crate::paths::models_dir().ok();
-    if let Some(root) = &root {
-        if let Some(p) =
-            crate::platform::find_file_under(&root.join("packs").join("cuda"), name, 4)
-        {
-            return Some(p);
-        }
+    if let Some(root) = &root && let Some(p) =
+            crate::platform::find_file_under(&root.join("packs").join("cuda"), name, 4) {
+        return Some(p);
     }
     if let Some(bin) = system_cuda_toolkit_dir() {
         let p = bin.join(name);

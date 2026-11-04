@@ -51,7 +51,7 @@ pub fn recognize(rgb: &[u8], width: u32, height: u32) -> Result<String> {
     }
 
     let mut bgra = Vec::with_capacity(pixels * 4);
-    for chunk in rgb.chunks_exact(3) {
+    for chunk in rgb.as_chunks::<3>().0 {
         bgra.push(chunk[2]); // B
         bgra.push(chunk[1]); // G
         bgra.push(chunk[0]); // R

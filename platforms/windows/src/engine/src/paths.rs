@@ -23,10 +23,8 @@ use anyhow::{Context, Result};
 /// XDG path which is also the natural location for a cross-platform engine.
 #[cfg(windows)]
 pub fn root() -> Result<PathBuf> {
-    if let Ok(s) = std::env::var("LOCALAPPDATA") {
-        if !s.is_empty() {
-            return Ok(PathBuf::from(s).join("FileID"));
-        }
+    if let Ok(s) = std::env::var("LOCALAPPDATA") && !s.is_empty() {
+        return Ok(PathBuf::from(s).join("FileID"));
     }
     if let Ok(home) = std::env::var("USERPROFILE") {
         return Ok(PathBuf::from(home).join("AppData").join("Local").join("FileID"));
@@ -178,9 +176,7 @@ mod tests {
 
     fn restore(key: &str, val: Option<std::ffi::OsString>) {
         match val {
-            // FIXME: Audit that the environment access only happens in single-threaded code.
             Some(v) => unsafe { std::env::set_var(key, v) },
-            // FIXME: Audit that the environment access only happens in single-threaded code.
             None => unsafe { std::env::remove_var(key) },
         }
     }
@@ -197,11 +193,11 @@ mod tests {
         let profile = std::env::var_os("USERPROFILE")
             .expect("USERPROFILE must be set to exercise the fallback");
 
-        std::env::set_var("LOCALAPPDATA", "");
+        unsafe { std::env::set_var("LOCALAPPDATA", "") };
         let empty = root();
-        std::env::set_var("LOCALAPPDATA", r"D:\State\Local");
+        unsafe { std::env::set_var("LOCALAPPDATA", r"D:\State\Local") };
         let set = root();
-        std::env::remove_var("LOCALAPPDATA");
+        unsafe { std::env::remove_var("LOCALAPPDATA") };
         let unset = root();
 
         restore("LOCALAPPDATA", saved);
@@ -227,13 +223,10 @@ mod tests {
         let home = std::env::var_os("HOME")
             .expect("HOME must be set to exercise the fallback");
 
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("XDG_DATA_HOME", "") };
         let empty = root();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("XDG_DATA_HOME", "/data/xdg") };
         let set = root();
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         let unset = root();
 
@@ -252,17 +245,14 @@ mod tests {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("FILEID_DB");
         let default = {
-            // FIXME: Audit that the environment access only happens in single-threaded code.
             unsafe { std::env::remove_var("FILEID_DB") };
             db_path().unwrap()
         };
 
         let explicit = std::env::temp_dir().join("fileid-explicit.sqlite");
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("FILEID_DB", &explicit) };
         assert_eq!(db_path().unwrap(), explicit);
 
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("FILEID_DB", "") };
         assert_eq!(db_path().unwrap(), default);
         restore("FILEID_DB", saved);
@@ -273,7 +263,6 @@ mod tests {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let custom = std::env::temp_dir().join("fileid-model-root");
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("FILEID_MODELS_DIR", &custom) };
 
         assert_eq!(models_dir().unwrap(), custom);

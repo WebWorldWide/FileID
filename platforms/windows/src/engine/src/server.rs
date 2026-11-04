@@ -216,7 +216,7 @@ async fn async_main() -> Result<()> {
                             );
                         } else {
                             tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
-                            // FIXME: Audit that the environment access only happens in single-threaded code.
+                            // SAFETY: engine startup, before any ORT session or worker reads the environment.
                             unsafe { std::env::set_var("ORT_DYLIB_PATH", &dll) };
                         }
                     }
@@ -737,16 +737,14 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     //   * Some(ppid): still our parent — continue with the pinned wait.
     let pinned_creation = process_creation_time(handle);
     let resampled = platform::get_parent_pid();
-    if let Some(current) = resampled {
-        if current != ppid {
-            tracing::warn!(
-                "parent PID changed (was {ppid}, now {current}); treating original parent as gone"
-            );
-            // SAFETY: handle was a live, owned handle from OpenProcess above.
-            unsafe { let _ = CloseHandle(handle); }
-            shutdown.notify_waiters();
-            return;
-        }
+    if let Some(current) = resampled && current != ppid {
+        tracing::warn!(
+            "parent PID changed (was {ppid}, now {current}); treating original parent as gone"
+        );
+        // SAFETY: handle was a live, owned handle from OpenProcess above.
+        unsafe { let _ = CloseHandle(handle); }
+        shutdown.notify_waiters();
+        return;
     }
     if resampled.is_none() || pinned_creation.is_none() {
         tracing::warn!(

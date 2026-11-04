@@ -333,7 +333,7 @@ pub(crate) fn ensure_engine_models_dir() {
         return;
     }
     if let Ok(dir) = fileid_engine::paths::engine_models_dir() {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: runs on the CLI command thread before any engine work spawns threads.
         unsafe { std::env::set_var("FILEID_MODELS_DIR", dir) };
     }
 }

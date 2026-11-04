@@ -52,7 +52,7 @@ fn ensure_engine_models_dir() {
         return;
     }
     if let Ok(dir) = fileid_engine::paths::engine_models_dir() {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: called at the top of main, before any thread is spawned.
         unsafe { std::env::set_var("FILEID_MODELS_DIR", dir) };
     }
 }

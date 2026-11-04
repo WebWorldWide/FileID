@@ -16,7 +16,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
@@ -141,7 +141,7 @@ unsafe fn hbitmap_to_rgba(hbm: HBITMAP) -> Result<Thumbnail> {
     // alpha; Explorer renders correctly because it uses BGRA throughout.
     // We swap channels so callers see canonical RGBA.
     let mut rgba = bgra;
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
 

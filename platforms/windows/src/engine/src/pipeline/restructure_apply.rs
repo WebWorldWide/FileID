@@ -4018,10 +4018,8 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
     let root_norm = strip_extended_length(root);
     let mut cur = parent.to_path_buf();
     loop {
-        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
-            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-                return true;
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
         }
         // Stop once we reach (or pass) the root. Compared CASE-INSENSITIVELY and
         // component-wise: NTFS is case-insensitive, so a raw IPC parent that

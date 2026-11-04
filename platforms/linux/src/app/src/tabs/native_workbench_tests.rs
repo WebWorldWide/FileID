@@ -101,7 +101,6 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     workbenches::run_review_regressions();
     let fixture = std::env::temp_dir().join(super::workbench_state::request_id());
     let old_xdg = std::env::var_os("XDG_DATA_HOME");
-    // FIXME: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("XDG_DATA_HOME", fixture.join("state")) };
     fileid_engine::paths::ensure_state_dirs().unwrap();
     let library = fixture.join("library");
@@ -299,10 +298,8 @@ fn native_workbenches_round_trip_real_engine_in_disposable_xdg_state() {
     drop(read);
     window.close();
     if let Some(value) = old_xdg {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::set_var("XDG_DATA_HOME", value) };
     } else {
-        // FIXME: Audit that the environment access only happens in single-threaded code.
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
     }
     std::fs::remove_dir_all(fixture).unwrap();
