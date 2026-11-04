@@ -599,7 +599,7 @@ struct ChatActionCard: View {
                 }
                 if action.kind == "moveDuplicatesToTrash" {
                     Button("Open Trash") {
-                        NSWorkspace.shared.open(FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash"))
+                        NSWorkspace.shared.open(UserHome.trashURL)
                     }
                     .buttonStyle(DSSecondaryButtonStyle())
                 }

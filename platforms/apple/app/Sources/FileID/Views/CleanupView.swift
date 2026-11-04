@@ -308,10 +308,7 @@ struct CleanupView: View {
                             .font(Theme.Font.body(13.5))
                         Spacer()
                         Button("Open Trash") {
-                            NSWorkspace.shared.open(
-                                URL(fileURLWithPath: NSHomeDirectory())
-                                    .appendingPathComponent(".Trash")
-                            )
+                            NSWorkspace.shared.open(UserHome.trashURL)
                         }
                         .buttonStyle(.dsSecondary)
                         Button("Dismiss") {

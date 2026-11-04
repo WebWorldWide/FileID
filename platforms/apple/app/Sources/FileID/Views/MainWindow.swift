@@ -164,7 +164,7 @@ struct MainWindow: View {
                 handoff.activeTab = activeTab
                 handoff.libraryRoot = pickedURL
                 handoff.navigate = { activeTabBinding.wrappedValue = $0 }
-                handoff.chooseFolder = { choose($0) }
+                handoff.chooseFolder = { chooseProposed($0) }
             }
             .onChange(of: pickedURL) { _, newValue in
                 persistPickedFolder(newValue)
@@ -246,8 +246,21 @@ struct MainWindow: View {
 
     // MARK: - Folder picking
 
-    func pickFolder() {
+    func pickFolder() { pickFolder(startingAt: nil) }
+
+    /// A folder Chat proposed. The sandboxed build can read only folders the user picked, so
+    /// it opens the picker on that folder: one click both confirms it and grants access.
+    private func chooseProposed(_ url: URL) {
+        #if FILEID_APP_STORE
+        pickFolder(startingAt: url)
+        #else
+        choose(url)
+        #endif
+    }
+
+    private func pickFolder(startingAt start: URL?) {
         let panel = NSOpenPanel()
+        if let start { panel.directoryURL = start }
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
