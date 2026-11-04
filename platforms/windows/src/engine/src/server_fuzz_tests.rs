@@ -332,7 +332,8 @@ impl EnvGuard {
     fn set(vars: &[(&'static str, &std::path::Path)]) -> Self {
         let saved = vars.iter().map(|(key, _)| (*key, std::env::var_os(key))).collect();
         for (key, value) in vars {
-            std::env::set_var(key, value);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var(key, value) };
         }
         Self(saved)
     }
@@ -341,8 +342,10 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         for (key, value) in &self.0 {
             match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                None => unsafe { std::env::remove_var(key) },
             }
         }
     }

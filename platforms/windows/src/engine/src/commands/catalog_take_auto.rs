@@ -151,11 +151,10 @@ fn load_embeddings(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<f3
     let mut out = HashMap::new();
     let mut statement = conn.prepare_cached("SELECT embedding FROM clip_embeddings WHERE file_id=?1")?;
     for id in ids {
-        if let Some(blob) = statement.query_row([id], |r| r.get::<_, Vec<u8>>(0)).optional()? {
-            if let Some(vector) = ndg::decode_embedding(&blob) {
+        if let Some(blob) = statement.query_row([id], |r| r.get::<_, Vec<u8>>(0)).optional()?
+            && let Some(vector) = ndg::decode_embedding(&blob) {
                 out.insert(*id, vector);
             }
-        }
     }
     Ok(out)
 }
@@ -355,11 +354,10 @@ pub fn prepare(conn: &Connection, file_ids: &[i64], faces_id: &str) -> Result<Sc
             continue;
         };
         let revision = super::timeline::revision(conn, id)?;
-        if stored_revision.as_deref() == Some(revision.as_str()) && stored_version.as_deref() == Some(version.as_str()) {
-            if let Some(signals) = json.and_then(|j| serde_json::from_str::<Signals>(&j).ok()) {
+        if stored_revision.as_deref() == Some(revision.as_str()) && stored_version.as_deref() == Some(version.as_str())
+            && let Some(signals) = json.and_then(|j| serde_json::from_str::<Signals>(&j).ok()) {
                 cached.insert(id, signals);
             }
-        }
         items.push(Item { id, path: path.clone(), time, phash: None, embedding: None });
         rows.insert(id, FileRow { path, kind, revision });
     }
@@ -389,11 +387,10 @@ pub fn compute(job: ScoreJob, faces: &mut dyn TakeFaceAnalyzer) -> Scored {
             image_signals(Path::new(&row.path), faces)
         };
         if let Some((value, complete)) = measured {
-            if complete {
-                if let Ok(json) = serde_json::to_string(&value) {
+            if complete
+                && let Ok(json) = serde_json::to_string(&value) {
                     fresh.push((shot.primary_file_id, row.revision.clone(), json));
                 }
-            }
             signals.insert(shot.primary_file_id, value);
         }
     }

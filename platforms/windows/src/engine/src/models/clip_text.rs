@@ -51,11 +51,10 @@ impl ClipText {
         // truncated off the end, so the model pooled at a content token → a
         // wrong embedding. Force the original EOT into the last slot when
         // truncated so the pooling position is correct.
-        if tokens.len() > CONTEXT_LEN {
-            if let Some(&eot) = tokens.last() {
+        if tokens.len() > CONTEXT_LEN
+            && let Some(&eot) = tokens.last() {
                 padded[CONTEXT_LEN - 1] = eot as i64;
             }
-        }
         let input = Array2::<i64>::from_shape_vec((1, CONTEXT_LEN), padded)
             .context("CLIP text input shape")?;
         let tensor = Tensor::from_array(input).context("CLIP text input tensor")?;
@@ -104,11 +103,10 @@ impl ClipText {
                 flat[qi * CONTEXT_LEN + i] = *t as i64;
             }
             // ENG-65: preserve EOT for an over-length query (see embed()).
-            if tokens.len() > CONTEXT_LEN {
-                if let Some(&eot) = tokens.last() {
+            if tokens.len() > CONTEXT_LEN
+                && let Some(&eot) = tokens.last() {
                     flat[qi * CONTEXT_LEN + (CONTEXT_LEN - 1)] = eot as i64;
                 }
-            }
         }
         let input = Array2::<i64>::from_shape_vec((batch, CONTEXT_LEN), flat)
             .context("CLIP text batch input shape")?;

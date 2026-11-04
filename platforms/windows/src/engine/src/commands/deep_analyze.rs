@@ -253,11 +253,10 @@ pub(crate) async fn handle_deep_analyze_file(
             analyze_file_via_server(db, server, file_id, &model_kind, AnalyzeMode::Both, cancel.clone(), &face_names, on_token, None).await
         }
     };
-    if let SingleFileBackend::Server(server) = backend {
-        if let Err(error) = server.finish(outcome.is_ok() && !cancel.load(Ordering::Relaxed)).await {
+    if let SingleFileBackend::Server(server) = backend
+        && let Err(error) = server.finish(outcome.is_ok() && !cancel.load(Ordering::Relaxed)).await {
             tracing::warn!(?error, "[VLM-SERVER] single-file lease cleanup failed");
         }
-    }
 
     match outcome {
         Ok(out) => {
@@ -594,15 +593,14 @@ async fn run_deep_analyze_batch(
         })))).await;
         return;
     }
-    if let Some(scope) = &scope {
-        if let Err(error) = scope.validate_current_roots() {
+    if let Some(scope) = &scope
+        && let Err(error) = scope.validate_current_roots() {
             emit_scope_failure(&sink, DeepAnalyzeComplete {
                 processed: 0, failed: 1, total_seconds: 0.0,
                 model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
             }, error.to_string()).await;
             return;
         }
-    }
     // TagsOnly = one VLM call/file (background auto-tag, ~3× faster); Both =
     // caption + tags + rename (the manual Deep Analyze pass).
     let mode = if tags_only {
@@ -781,15 +779,14 @@ async fn run_deep_analyze_batch(
             return;
         }
 
-        if let Some(scope) = &scope {
-            if let Err(error) = scoped_catalog_path(&db, scope, file_id) {
+        if let Some(scope) = &scope
+            && let Err(error) = scoped_catalog_path(&db, scope, file_id) {
                 finalize_batch(&sink, &mut server, DeepAnalyzeComplete {
                     processed, failed: failed + 1, total_seconds: started_at.elapsed().as_secs_f64(),
                     model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
                 }, Some(error.to_string())).await;
                 return;
             }
-        }
 
         if skip_existing {
             let already = {
@@ -1064,15 +1061,14 @@ async fn run_deep_analyze_batch(
                         }
                     };
                     if server_dead {
-                        if let Some(srv) = server.take() {
-                            if let Err(cleanup) = srv.shutdown().await {
+                        if let Some(srv) = server.take()
+                            && let Err(cleanup) = srv.shutdown().await {
                                 emit_scope_failure(&sink, DeepAnalyzeComplete {
                                     processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
                                     model_kind: model_kind.to_owned(), cancelled: cancel.load(Ordering::Relaxed),
                                 }, cleanup.to_string()).await;
                                 return;
                             }
-                        }
                         if !crate::models::native_process::ProcessTracker::shared().allows_fallback() {
                             emit_scope_failure(&sink, DeepAnalyzeComplete {
                                 processed, failed, total_seconds: started_at.elapsed().as_secs_f64(),
@@ -1120,8 +1116,8 @@ mod tests {
         for c in chunks {
             append_caption_chunk(&buf, c);
         }
-        let result = buf.lock().clone();
-        result
+        
+        buf.lock().clone()
     }
 
     #[test]

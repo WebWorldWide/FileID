@@ -344,14 +344,13 @@ impl App {
         // AltGr reports as CONTROL|ALT on Windows, and it types real characters
         // on European layouts (@, €, ł). So this only claims CONTROL *without*
         // ALT — otherwise AltGr text would be silently swallowed.
-        if mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT) {
-            if let KeyCode::Char(c) = code {
+        if mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT)
+            && let KeyCode::Char(c) = code {
                 if c.eq_ignore_ascii_case(&'c') {
                     self.should_quit = true;
                 }
                 return;
             }
-        }
         if self.input_active {
             self.on_key_input(code);
             return;
@@ -1031,11 +1030,9 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
     } else if let Some(rest) = input
         .strip_prefix("~/")
         .or_else(|| input.strip_prefix("~\\"))
-    {
-        if let Some(h) = home {
+        && let Some(h) = home {
             return h.join(rest);
         }
-    }
     PathBuf::from(input)
 }
 

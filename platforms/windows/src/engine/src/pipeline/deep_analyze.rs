@@ -530,11 +530,10 @@ fn transcription_wanted(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connect
 /// The caption already persisted, so a failed transcription only logs; the next
 /// Deep Analyze run retries it.
 fn store_transcription_output(db: &std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>, file_id: i64, raw: &str) {
-    if let Some((text, handwritten)) = text_reading::parse_transcription(raw) {
-        if let Err(error) = text_reading::store_transcription(&db.lock(), file_id, &text, handwritten) {
+    if let Some((text, handwritten)) = text_reading::parse_transcription(raw)
+        && let Err(error) = text_reading::store_transcription(&db.lock(), file_id, &text, handwritten) {
             tracing::warn!(?error, "[DEEP] transcription persist failed");
         }
-    }
 }
 
 async fn complete_cancellable(
@@ -809,12 +808,11 @@ async fn analyze_metadata_named_file(
         tokio::task::spawn_blocking(move || metadata_naming_blocking(&source, &task_kind))
             .await
             .context("metadata naming task failed")??;
-    if may_transcribe && kind == "audio" && proposed_name.is_none() && mode.requests_rename() {
-        if let Some((name, transcript)) = transcribe_audio_name(&path, cancel).await {
+    if may_transcribe && kind == "audio" && proposed_name.is_none() && mode.requests_rename()
+        && let Some((name, transcript)) = transcribe_audio_name(&path, cancel).await {
             proposed_name = Some(name);
             description = description.or(Some(transcript));
         }
-    }
     let description = if mode.requests_caption() { description } else { None };
     let proposed_name = if mode.requests_rename() { proposed_name } else { None };
     let tags = if mode.requests_tags() { tags } else { Vec::new() };

@@ -4027,3 +4027,9 @@ Structured questions use fixed SQL templates rather than a text-to-SQL model: de
 - **Trash journal: written after each of the first 64 files, then at most every 0.25 s, and once at the end.** Each rewrite is O(batch); per-file writes made thousands-file duplicate batches quadratic. Files in the unjournaled window remain in the macOS Trash (Finder Put Back).
 - **File Tools video export allows timed-metadata and timecode tracks** and strips identifying keys with `metadataItemFilter = .forSharing()`; subtitle and caption tracks are still refused rather than silently dropped.
 
+## 2026-11-03 — Rust 1.98 + edition 2024; Dependabot rollup
+
+- **Every Rust crate (engine, CLI, TUI, GTK app) moves to Rust 1.98 (current stable) and edition 2024**, at the owner's request to use the newest language versions. MSRV = 1.98 in all `rust-toolchain.toml`, `rust-version` and CI pins. `cargo fix --edition` rewrote `if let` sites to keep their 2021 drop timing; the 2024 tail-expression rule only drops temporaries earlier, which releases guards sooner. `std::env::set_var` is now `unsafe` (called once at startup before worker threads exist). Clippy's let-chain suggestions were applied.
+- **Dependency bumps taken together**: rusqlite 0.41 (with `fallible_uint`, which keeps u64/usize column bindings), sysinfo 0.40 (needs Rust 1.95; `System::new()` is fallible), sha2 0.11, base64 0.23, kamadak-exif 0.6, windows 0.62, tokio, serde_json, uuid, libc, blake3, xunit 2.9.3, coverlet 10.1.
+- **Swift stays on swift-tools-version 6.0 with Swift 6 language mode**: that is already the newest language mode; raising the tools version would only narrow which Xcode can build it.
+

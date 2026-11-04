@@ -80,8 +80,8 @@ pub fn decode(blob: &[u8]) -> Option<Vec<f32>> {
         return None;
     }
     let vector: Vec<_> = blob
-        .chunks_exact(4)
-        .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        .as_chunks::<4>().0.iter()
+        .map(|bytes| f32::from_le_bytes(*bytes))
         .collect();
     valid(&vector).then_some(vector)
 }

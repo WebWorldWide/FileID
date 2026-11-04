@@ -151,11 +151,10 @@ impl OwnedProcess {
             let _ = ownership;
             let mut stopping = *receive.borrow();
             loop {
-                if stopping {
-                    if let Err(error) = child.start_kill() {
+                if stopping
+                    && let Err(error) = child.start_kill() {
                         status.send_modify(|s| s.failure = Some(format!("kill failed: {error}")));
                     }
-                }
                 let outcome = if stopping {
                     match tokio::time::timeout(wait_bound, child.wait()).await {
                         Ok(result) => result.map_err(|error| format!("wait failed: {error}")),

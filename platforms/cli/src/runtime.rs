@@ -451,13 +451,12 @@ fn download_artifact(url: &str, sha256: Option<&str>, dest: &std::path::Path) ->
 
     let cancel = Arc::new(AtomicBool::new(false));
     let progress: Arc<dyn Fn(DownloadProgress) + Send + Sync> = Arc::new(|p: DownloadProgress| {
-        if let Some(total) = p.bytes_total {
-            if total > 0 {
+        if let Some(total) = p.bytes_total
+            && total > 0 {
                 let pct = (p.bytes_done as f64 / total as f64 * 100.0).min(100.0);
                 eprint!("\r  {pct:.0}% \x1b[K");
                 let _ = std::io::Write::flush(&mut std::io::stderr());
             }
-        }
     });
     let r = download_file_blocking(url, dest, Some(sha256), cancel, progress);
     eprintln!();

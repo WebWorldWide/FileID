@@ -385,8 +385,7 @@ impl ShortcutUndoManifest {
             ..
         } = self;
         let staging_has_work = std::fs::read_dir(&staging_dir)
-            .ok()
-            .is_some_and(|mut entries| entries.next().is_some());
+            .is_ok_and(|mut entries| entries.next().is_some());
         if !staging_has_work {
             let staging_base = staging_dir.parent().map(Path::to_path_buf);
             let _ = std::fs::remove_dir(&staging_dir);
@@ -527,14 +526,13 @@ impl UndoJournal {
         } = self;
         drop(file);
         let _ = std::fs::remove_file(&path);
-        if let Some(backup) = prior_backup {
-            if let Err(error) = std::fs::rename(&backup, &path) {
+        if let Some(backup) = prior_backup
+            && let Err(error) = std::fs::rename(&backup, &path) {
                 tracing::error!(
                     ?error,
                     "[RESTRUCTURE] could not restore preserved prior undo journal"
                 );
             }
-        }
     }
 
     /// Durably append one inverse entry; returns the pre-append offset so a
@@ -765,8 +763,8 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
         }
         let had_newline = buf.last() == Some(&b'\n');
         let body_len = if had_newline { n - 1 } else { n };
-        if offset == 0 {
-            if let Ok(header) = serde_json::from_slice::<UndoJournalHeader>(&buf[..body_len]) {
+        if offset == 0
+            && let Ok(header) = serde_json::from_slice::<UndoJournalHeader>(&buf[..body_len]) {
                 if !matches!(header.version, 2 | UNDO_JOURNAL_VERSION) {
                     anyhow::bail!("unsupported undo journal version {}", header.version);
                 }
@@ -781,7 +779,6 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
                 }
                 continue;
             }
-        }
         let parses = serde_json::from_slice::<UndoEntry>(&buf[..body_len]).is_ok();
         if parses {
             if !had_newline {
@@ -1886,8 +1883,8 @@ impl RestructureApply {
             // planning) is skipped so we never move the wrong bytes or stamp
             // the row with a path that never held this file.
             let current_identity = current_identity_in_db(&self.db_conn, m.file_id);
-            if !record_undo {
-                if let Ok(Some((db_path, db_ref))) = &current_identity {
+            if !record_undo
+                && let Ok(Some((db_path, db_ref))) = &current_identity {
                     let source = Path::new(&m.source);
                     let destination = Path::new(&m.destination);
                     if paths_equal(db_path, &m.source)
@@ -1921,7 +1918,6 @@ impl RestructureApply {
                         continue;
                     }
                 }
-            }
             let db_file_ref = match current_identity {
                 Ok(Some((db_path, db_ref))) if paths_equal(&db_path, &m.source) => {
                     if record_undo && !planned_identity_matches(&self.db_conn, &m).unwrap_or(false) {
@@ -2017,13 +2013,12 @@ impl RestructureApply {
             // move starts, so repeating the path walk here only widens the
             // per-file TOCTOU surface. Forward, plan-generated destinations
             // still require the check immediately before mutation.
-            if record_undo {
-                if let Err(err) = ensure_inside_root(&dest, &canonical_root) {
+            if record_undo
+                && let Err(err) = ensure_inside_root(&dest, &canonical_root) {
                     tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
                     failed += 1;
                     continue;
                 }
-            }
 
             if let Some(parent) = dest.parent() {
                 // SEC-5: TOCTOU defense, pass 1. Check the EXISTING ancestor
@@ -2237,14 +2232,13 @@ impl RestructureApply {
             match result {
                 Ok(SymlinkOutcome::AlreadyPresent) => {}
                 Ok(SymlinkOutcome::Created) => {
-                    if let Some(journal) = journal.as_mut() {
-                        if let Err(error) = journal.commit_replacement() {
+                    if let Some(journal) = journal.as_mut()
+                        && let Err(error) = journal.commit_replacement() {
                             tracing::warn!(
                                 ?error,
                                 "[RESTRUCTURE] preserved prior undo journal cleanup will retry before returning"
                             );
                         }
-                    }
                     if !self.use_symlinks {
                         // Only update DB on real moves. Symlinks leave
                         // `path_text` pointing at the original.
@@ -5817,7 +5811,6 @@ mod tests {
         let ShortcutUndoManifest {
             mut file,
             path,
-            token: _,
             ..
         } = manifest;
         let entry = serde_json::to_vec(&ShortcutUndoEntry {

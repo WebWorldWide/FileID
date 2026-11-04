@@ -70,7 +70,8 @@ pub fn register() {
     let written = std::fs::create_dir_all(&config_dir)
         .and_then(|()| std::fs::write(&config_path, config_xml(&system_config, &fonts_dir)));
     match written {
-        Ok(()) => std::env::set_var("FONTCONFIG_FILE", &config_path),
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        Ok(()) => unsafe { std::env::set_var("FONTCONFIG_FILE", &config_path) },
         Err(error) => tracing::warn!(%error, "could not register the bundled fonts"),
     }
 }

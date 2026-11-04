@@ -45,9 +45,8 @@ impl ResidentService {
             Some(entry) if entry.root==root&&entry.proof.matches_kind(kind)=>{
                 let verified=entry.proof.clone();
                 if let Err(error)=verified.recheck(cancel.clone()).await {
-                    if !cancel.load(Ordering::Relaxed) {
-                        if let Err(cleanup)=retire(&mut state).await {return Err(HostAdmissionError(anyhow!("{error:#}; resident cleanup: {cleanup:#}")).into());}
-                    }
+                    if !cancel.load(Ordering::Relaxed)
+                        && let Err(cleanup)=retire(&mut state).await {return Err(HostAdmissionError(anyhow!("{error:#}; resident cleanup: {cleanup:#}")).into());}
                     return Err(error);
                 }
                 verified
@@ -135,7 +134,7 @@ impl ResidentLease {
 }
 impl Drop for ResidentLease {fn drop(&mut self){self.state.last_used=Instant::now();}}
 async fn retire(state:&mut State)->Result<()> {
-    if let Some(entry)=state.entry.take(){if let Err(error)=entry.server.shutdown().await{let reason=format!("Resident cleanup failed: {error:#}");state.failure=Some(reason.clone());return Err(HostAdmissionError(anyhow!(reason)).into());}}
+    if let Some(entry)=state.entry.take()&& let Err(error)=entry.server.shutdown().await{let reason=format!("Resident cleanup failed: {error:#}");state.failure=Some(reason.clone());return Err(HostAdmissionError(anyhow!(reason)).into());}
     if let Some(failure)=&state.failure{return Err(HostAdmissionError(anyhow!(failure.clone())).into());}Ok(())
 }
 async fn wait_cancelled(cancel:&AtomicBool){while !cancel.load(Ordering::Relaxed){tokio::time::sleep(Duration::from_millis(25)).await;}}

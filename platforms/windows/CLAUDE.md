@@ -71,7 +71,7 @@ In progress / not done: butler restructure P2–P4 (VLM group naming, confidence
 
 ## Conventions — Rust engine
 
-- **Edition 2021, MSRV 1.90** (toolchain pinned in `rust-toolchain.toml`, both Windows targets).
+- **Edition 2024, MSRV 1.98** (toolchain pinned in `rust-toolchain.toml`, both Windows targets).
 - **No new dependencies without asking.** Locked set in `Cargo.toml`; new crates need a `DECISIONS.md` justification.
 - **No telemetry.** `engine/src/downloader.rs` permits only user-triggered Hugging Face model downloads. Optional CUDA runtimes must be installed locally by the user; FileID does not fetch vendor runtime archives.
 - **Path redaction.** `redact_path_for_log(path)` before any `tracing::*!()` that includes a user path.

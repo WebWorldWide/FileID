@@ -165,7 +165,7 @@ fn hash(path: &Path) -> Result<String> {
         }
         hash.update(&bytes[..n]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex::encode(hash.finalize()))
 }
 fn persist(conn: &Connection, id: &str, receipts: &[Receipt], state: &str) -> Result<()> {
     conn.execute(

@@ -275,8 +275,8 @@ pub struct DownloadRequest {
 /// a reasonable estimate but always catches a KB-for-GB substitution. (SHA256,
 /// when pinned, is the exact check; this guards the common no-hash case.)
 fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result<()> {
-    if let Some(expected) = expected {
-        if expected > 0 {
+    if let Some(expected) = expected
+        && expected > 0 {
             let floor = (expected / 4).max(1);
             if actual < floor {
                 anyhow::bail!(
@@ -286,7 +286,6 @@ fn check_size_plausible(actual: u64, expected: Option<u64>, url: &str) -> Result
                 );
             }
         }
-    }
     Ok(())
 }
 
@@ -1282,8 +1281,8 @@ pub fn install_model_blocking(
 
     let download_bytes: u64 = model.files.iter().map(|file| file.approx_bytes).sum();
     let required_free = required_install_free_bytes(download_bytes);
-    if let Ok(models_dir) = crate::paths::models_dir() {
-        if let Some(available) = crate::platform::available_disk_bytes(&models_dir) {
+    if let Ok(models_dir) = crate::paths::models_dir()
+        && let Some(available) = crate::platform::available_disk_bytes(&models_dir) {
             anyhow::ensure!(
                 available >= required_free,
                 "{} needs about {:.1} GB free while verified download parts are staged, but only {:.1} GB is available on the models drive",
@@ -1292,7 +1291,6 @@ pub fn install_model_blocking(
                 available as f64 / 1_073_741_824.0,
             );
         }
-    }
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

@@ -105,6 +105,6 @@ pub fn build() -> gtk::DrawingArea {
 }
 
 fn motion_allowed() -> bool {
-    let animations = gtk::Settings::default().map_or(true, |settings| settings.is_gtk_enable_animations());
+    let animations = gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
     animations && !crate::theme::high_contrast()
 }

@@ -125,11 +125,10 @@ pub(crate) fn parse_obj_names(path: &std::path::Path) -> (Vec<String>, Vec<Strin
                 push_unique(&mut objects, rest);
             } else if let Some(rest) = line.strip_prefix("usemtl ") {
                 push_unique(&mut materials, rest);
-            } else if let Some(rest) = line.strip_prefix("mtllib ") {
-                if mtllib.is_none() {
+            } else if let Some(rest) = line.strip_prefix("mtllib ")
+                && mtllib.is_none() {
                     mtllib = Some(rest.trim().to_string());
                 }
-            }
         }
     }
     // Pull `newmtl` names from the referenced .mtl too (often richer than the
@@ -436,11 +435,10 @@ pub(crate) fn grounded_fallback_tags(text: &str) -> Vec<String> {
 
 pub(crate) fn generated_filename_candidate(raw: &str) -> Option<String> {
     let mut line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
-    if let Some((label, value)) = line.split_once(':') {
-        if label.trim().eq_ignore_ascii_case("filename") {
+    if let Some((label, value)) = line.split_once(':')
+        && label.trim().eq_ignore_ascii_case("filename") {
             line = value.trim();
         }
-    }
     let candidate = sanitize_proposed_name(line);
     is_acceptable_proposed_name(&candidate).then_some(candidate)
 }

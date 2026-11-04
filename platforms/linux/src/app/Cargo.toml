@@ -1,8 +1,8 @@
 [package]
 name = "fileid-linux"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.78"
+edition = "2024"
+rust-version = "1.98"
 description = "FileID — Linux GTK4 + libadwaita app. Talks to the shared Rust engine over stdio."
 license = "Apache-2.0"
 publish = false
@@ -33,7 +33,7 @@ serde_json = "1"
 # mirroring macOS/Windows `ReadStore`. rusqlite is already a transitive dep via
 # `fileid-engine`; declaring it directly (with `bundled`) pins the same
 # libsqlite3 + FTS5 build the engine links. Justified in shared/docs/DECISIONS.md.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Structured local-only stderr logging. NEVER transmits.
 tracing            = "0.1"

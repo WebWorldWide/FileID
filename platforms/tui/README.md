@@ -35,7 +35,7 @@ cargo build --release
 ./target/release/fileid-tui --db /path/to/fileid.sqlite
 ```
 
-Rust 1.90 is pinned in `rust-toolchain.toml`.
+Rust 1.98 is pinned in `rust-toolchain.toml`.
 
 ## Choose a library
 

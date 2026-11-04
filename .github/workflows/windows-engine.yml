@@ -92,10 +92,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # MSRV pinned to 1.90 in rust-toolchain.toml. Keep both files
+          # MSRV pinned to 1.98 in rust-toolchain.toml. Keep both files
           # in sync — drift here means CI builds with a different toolchain
           # than contributors use locally.
-          toolchain: 1.90
+          toolchain: 1.98
           targets: ${{ matrix.target }}
           components: rustfmt, clippy
 

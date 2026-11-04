@@ -36,11 +36,10 @@ pub fn root() -> Result<PathBuf> {
 
 #[cfg(not(windows))]
 pub fn root() -> Result<PathBuf> {
-    if let Ok(s) = std::env::var("XDG_DATA_HOME") {
-        if !s.is_empty() {
+    if let Ok(s) = std::env::var("XDG_DATA_HOME")
+        && !s.is_empty() {
             return Ok(PathBuf::from(s).join("FileID"));
         }
-    }
     if let Ok(home) = std::env::var("HOME") {
         return Ok(PathBuf::from(home).join(".local").join("share").join("FileID"));
     }
@@ -70,11 +69,10 @@ pub fn logs_dir()     -> Result<PathBuf> { Ok(root()?.join("logs")) }
 /// it spawns inherits the same path. Unset → the per-OS [`default_models_dir`]
 /// below is byte-identical to before, so the desktop apps are unaffected.
 pub fn models_dir() -> Result<PathBuf> {
-    if let Some(over) = std::env::var_os("FILEID_MODELS_DIR") {
-        if !over.is_empty() {
+    if let Some(over) = std::env::var_os("FILEID_MODELS_DIR")
+        && !over.is_empty() {
             return Ok(PathBuf::from(over));
         }
-    }
     default_models_dir()
 }
 
@@ -180,8 +178,10 @@ mod tests {
 
     fn restore(key: &str, val: Option<std::ffi::OsString>) {
         match val {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            None => unsafe { std::env::remove_var(key) },
         }
     }
 
@@ -227,11 +227,14 @@ mod tests {
         let home = std::env::var_os("HOME")
             .expect("HOME must be set to exercise the fallback");
 
-        std::env::set_var("XDG_DATA_HOME", "");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("XDG_DATA_HOME", "") };
         let empty = root();
-        std::env::set_var("XDG_DATA_HOME", "/data/xdg");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("XDG_DATA_HOME", "/data/xdg") };
         let set = root();
-        std::env::remove_var("XDG_DATA_HOME");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
         let unset = root();
 
         restore("XDG_DATA_HOME", saved);
@@ -249,15 +252,18 @@ mod tests {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("FILEID_DB");
         let default = {
-            std::env::remove_var("FILEID_DB");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("FILEID_DB") };
             db_path().unwrap()
         };
 
         let explicit = std::env::temp_dir().join("fileid-explicit.sqlite");
-        std::env::set_var("FILEID_DB", &explicit);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("FILEID_DB", &explicit) };
         assert_eq!(db_path().unwrap(), explicit);
 
-        std::env::set_var("FILEID_DB", "");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("FILEID_DB", "") };
         assert_eq!(db_path().unwrap(), default);
         restore("FILEID_DB", saved);
     }
@@ -267,7 +273,8 @@ mod tests {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let saved = std::env::var_os("FILEID_MODELS_DIR");
         let custom = std::env::temp_dir().join("fileid-model-root");
-        std::env::set_var("FILEID_MODELS_DIR", &custom);
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", &custom) };
 
         assert_eq!(models_dir().unwrap(), custom);
         assert_eq!(hf_cache_dir().unwrap(), custom.join("HuggingFace"));

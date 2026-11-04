@@ -66,10 +66,10 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust 1.90
+      - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: '1.90'
+          toolchain: '1.98'
           components: rustfmt, clippy
 
       - name: Cache Cargo

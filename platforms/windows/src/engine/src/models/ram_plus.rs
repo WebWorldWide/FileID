@@ -212,8 +212,8 @@ impl RamPlusTagger {
         // FILEID_RAMPLUS_THRESHOLD sweep below the floor (default 0.62) is a
         // silent no-op. Warn once so the operator lowers the floor in lockstep
         // rather than chasing a knob that does nothing (#14).
-        if let Some(t) = env_threshold {
-            if t < precision_floor {
+        if let Some(t) = env_threshold
+            && t < precision_floor {
                 tracing::warn!(
                     model = "RAM++",
                     env_threshold = t,
@@ -223,7 +223,6 @@ impl RamPlusTagger {
                      in lockstep to sweep below it."
                 );
             }
-        }
 
         let suppress_extra = load_suppress_sidecar(tag_list);
 

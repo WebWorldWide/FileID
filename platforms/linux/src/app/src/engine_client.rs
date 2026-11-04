@@ -380,7 +380,7 @@ impl EngineClient {
         if self
             .pending_health
             .as_ref()
-            .is_some_and(|(id, gen)| id == request_id && *gen == generation)
+            .is_some_and(|(id, r#gen)| id == request_id && *r#gen == generation)
         {
             self.pending_health = None;
         }
@@ -711,11 +711,10 @@ fn schedule_respawn(this: &Rc<RefCell<EngineClient>>) {
     };
     let weak = Rc::downgrade(this);
     glib::timeout_add_local_once(delay, move || {
-        if let Some(client) = weak.upgrade() {
-            if !client.borrow().shutting_down.load(Ordering::Relaxed) {
+        if let Some(client) = weak.upgrade()
+            && !client.borrow().shutting_down.load(Ordering::Relaxed) {
                 spawn_process(&client);
             }
-        }
     });
 }
 
@@ -733,7 +732,7 @@ fn drain_engine_stdout(reader: impl BufRead, tx: Sender<RawEvent>) {
                 model_kind: None,
             })),
         };
-        receiver_open = raw.map_or(true, |raw| tx.send_blocking(raw).is_ok());
+        receiver_open = raw.is_none_or(|raw| tx.send_blocking(raw).is_ok());
         receiver_open
     });
     if !receiver_open {

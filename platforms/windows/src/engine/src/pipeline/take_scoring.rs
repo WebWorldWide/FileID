@@ -61,7 +61,7 @@ impl Luma {
     /// BT.601 integer luma, (77 R + 150 G + 29 B) >> 8, from packed RGB8.
     pub fn from_rgb(rgb: &[u8], width: usize, height: usize) -> Self {
         let pixels = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>().0.iter()
             .take(width * height)
             .map(|p| ((77 * p[0] as u32 + 150 * p[1] as u32 + 29 * p[2] as u32) >> 8) as u8)
             .collect();

@@ -1986,11 +1986,10 @@ fn rank_indices(raw: &[RawRow], indices: &mut [usize]) {
 }
 
 fn near_dup_threshold() -> u32 {
-    if let Ok(raw) = std::env::var("FILEID_NEARDUP_HAMMING") {
-        if let Ok(v) = raw.trim().parse::<i64>() {
+    if let Ok(raw) = std::env::var("FILEID_NEARDUP_HAMMING")
+        && let Ok(v) = raw.trim().parse::<i64>() {
             return v.clamp(0, i64::from(MAX_SIMILAR_THRESHOLD)) as u32;
         }
-    }
     DEFAULT_SIMILAR_THRESHOLD
 }
 

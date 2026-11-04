@@ -748,8 +748,8 @@ mod tests {
 
     #[test]
     fn sentinel_path_lives_under_sentinels_dir() {
-        if let LookupResult::Found(m) = lookup_full("ram_plus") {
-            if let Some(p) = sentinel_path(&m) {
+        if let LookupResult::Found(m) = lookup_full("ram_plus")
+            && let Some(p) = sentinel_path(&m) {
                 let s = p.to_string_lossy();
                 assert!(s.contains(".sentinels"), "sentinel not under .sentinels: {s}");
                 let name = p.file_name().unwrap().to_string_lossy();
@@ -757,7 +757,6 @@ mod tests {
                 assert!(name.starts_with("ram_plus-"), "sentinel not id-prefixed: {s}");
                 assert!(name.ends_with(".installed"), "unexpected sentinel: {s}");
             }
-        }
     }
 
     /// A pin bump (revision/sha256 change on any file) must move the sentinel

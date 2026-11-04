@@ -367,7 +367,7 @@ impl MapView {
             };
             let dy = (bezier_y(x, x0, x1, y0, y1) - y).abs();
             let reach = ribbon_thickness(flow.count, layout.total, height) * 0.5 + 6.0;
-            if dy < reach && best.map_or(true, |(closest, _)| dy < closest) {
+            if dy < reach && best.is_none_or(|(closest, _)| dy < closest) {
                 best = Some((dy, flow));
             }
         }

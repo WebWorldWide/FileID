@@ -6,8 +6,8 @@ name = "fileid-engine"
 # (main.rs / hardware.rs). Keep in sync — the MSI build (FileID.Msi.wixproj)
 # cross-checks this literal against VERSION and fails the build on drift.
 version = "0.1.2"
-edition = "2021"
-rust-version = "1.90"
+edition = "2024"
+rust-version = "1.98"
 description = "FileID engine — owns DB, scan pipeline, ML inference. Spawned as a child of the FileID app and talks newline-delimited JSON over stdio."
 license = "Apache-2.0"
 publish = false
@@ -29,13 +29,13 @@ parking_lot = "0.12"
 # Serialization — IPC protocol, settings, structured logs.
 serde      = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-base64     = "0.22"
+base64     = "0.23"
 uuid       = { version = "1", features = ["v4", "serde"] }
 # 0.4.20+ for RUSTSEC-2020-0071 / RUSTSEC-2020-0159 (panic-on-invalid-timestamp + localtime_r soundness).
 chrono     = { version = "0.4.20", features = ["serde"] }
 
 # SQLite. Bundled libsqlite3 + FTS5 for byte-faithful schema parity.
-rusqlite = { version = "0.31", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite"] }
+rusqlite = { version = "0.41", features = ["bundled", "blob", "chrono", "limits", "modern_sqlite", "fallible_uint"] }
 # FTS5 ships in `bundled` since rusqlite 0.31; explicit feature flag isn't needed but documented here.
 
 # Logs — structured local-only tracing. Replaces JSONLog.swift. NEVER goes off-device.
@@ -55,7 +55,7 @@ jwalk     = "0.8"
 
 # CPU/system info for worker count + memory probes.
 num_cpus  = "1"
-sysinfo   = "0.30"
+sysinfo   = "0.40"
 
 # HTTP — only network surface, used by downloader.rs for HuggingFace model fetches.
 # rustls-tls so we don't pull openssl. http2 for parallel range-GETs.
@@ -68,7 +68,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures-util = "0.3"
 
 # Hex / SHA256 for model integrity verification.
-sha2 = "0.10"
+sha2 = "0.11"
 hex  = "0.4"
 # BLAKE3 content hashing for rename/move detection (Phase 3 identity). Faster
 # than SHA-256 on commodity CPUs, pure-Rust + SIMD (no C/C++ build dep). See
@@ -78,7 +78,7 @@ blake3 = "1"
 # Image pipeline. image-rs covers JPEG/PNG/WebP/TIFF; HEIC would need
 # libheif-rs separately.
 image            = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff", "gif"] }
-kamadak-exif     = "0.5"
+kamadak-exif     = "0.6"
 # turbojpeg considered + dropped: requires a system libjpeg-turbo install
 # (no `vendored` feature upstream). The system-dep cost beats the JPEG-decode
 # speedup for the "user just downloads and runs" promise.
@@ -163,7 +163,7 @@ ort = { version = "=2.0.0-rc.10", default-features = false, features = [
 # Windows-rs — IFileOperation, IFileOpenDialog, Windows.Media.Ocr (WinRT), IThumbnailProvider,
 # SetThreadExecutionState, WinVerifyTrust, Media Foundation IMFSourceReader, IPropertyStore,
 # Authenticode, GlobalMemoryStatusEx.
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

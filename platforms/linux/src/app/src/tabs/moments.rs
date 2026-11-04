@@ -179,11 +179,10 @@ impl CatalogUi {
                 let duration = stream.duration() as f64 / 1_000_000.0;
                 ui.timeline
                     .set_duration((duration > 0.0).then_some(duration));
-                if let Some(seconds) = ui.pending_seek.take() {
-                    if stream.is_seekable() {
+                if let Some(seconds) = ui.pending_seek.take()
+                    && stream.is_seekable() {
                         stream.seek((seconds * 1_000_000.0) as i64);
                     }
-                }
             });
             self.video.set_media_stream(Some(&media));
             self.media_stack.set_visible_child_name("video");

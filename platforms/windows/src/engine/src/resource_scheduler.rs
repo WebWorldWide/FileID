@@ -195,8 +195,8 @@ impl ResourceScheduler {
         if demand.cpu > self.cpu || demand.io > self.io {
             bail!("Resource request exceeds local capacity")
         }
-        if demand.memory_mb > 0 {
-            if let Some(reason) =
+        if demand.memory_mb > 0
+            && let Some(reason) =
                 crate::util::model_memory::rejection(total, available, demand.memory_mb)
             {
                 // Free memory comes and goes; only a demand larger than the
@@ -207,7 +207,6 @@ impl ResourceScheduler {
                     bail!("{reason}")
                 }
             }
-        }
         let mut state = self.state.lock();
         state.next += 1;
         let id = state.next;

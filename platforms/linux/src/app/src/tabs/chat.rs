@@ -642,11 +642,10 @@ fn wire(ui: &Rc<ChatUi>, root: &gtk::Box, inspector: Option<Rc<dyn Fn()>>) {
     // reloads it so both show what the other added.
     let weak = Rc::downgrade(ui);
     root.connect_map(move |_| {
-        if let Some(ui) = weak.upgrade() {
-            if ui.engine.borrow().is_ready() && !ui.stop.is_visible() {
+        if let Some(ui) = weak.upgrade()
+            && ui.engine.borrow().is_ready() && !ui.stop.is_visible() {
                 ui.dispatch("history");
             }
-        }
     });
     let weak = Rc::downgrade(ui);
     ui.composer.buffer().connect_changed(move |buffer| {

@@ -1804,11 +1804,10 @@ pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) ->
         .extension()
         .and_then(|s| s.to_str())
         .is_some_and(super::raw_preview::is_raw_extension);
-    if is_raw {
-        if let Some(out) = decode_raw_preview(path, bytes) {
+    if is_raw
+        && let Some(out) = decode_raw_preview(path, bytes) {
             return Ok(out);
         }
-    }
     let primary = decode_image_sync_imagecrate(path, bytes);
     if primary.is_ok() {
         return primary;
@@ -1836,11 +1835,10 @@ pub(crate) fn decode_image_sync(path: &std::path::Path, bytes: Option<&[u8]>) ->
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
-        if ext == "heic" || ext == "heif" {
-            if let Ok(out) = shell::heic::decode(path) {
+        if (ext == "heic" || ext == "heif")
+            && let Ok(out) = shell::heic::decode(path) {
                 return Ok(out);
             }
-        }
     }
     primary
 }
@@ -2069,11 +2067,10 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
         // Read the orientation once, from the same bytes both decode paths use.
         // Neither the image crate nor the DCT-scaled path applies it for us.
         let orientation = exif_orientation(bytes);
-        if reader.format() == Some(image::ImageFormat::Jpeg) {
-            if let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
+        if reader.format() == Some(image::ImageFormat::Jpeg)
+            && let Some((buf, w, h)) = decode_jpeg_scaled(bytes) {
                 return apply_exif_orientation(buf, w, h, orientation);
             }
-        }
         let dyn_img = reader.decode().map_err(|e| anyhow::anyhow!("decode: {e}"))?;
         let rgb = dyn_img.into_rgb8();
         let (w, h) = rgb.dimensions();
@@ -2204,8 +2201,8 @@ async fn process_file_predecoded(
     // doc, an un-renderable .obj).
     tagged.text_stage_done =
         tagged.doc_stage_ran || (matches!(file.kind, FileKind::Model) && !file.online_only);
-    if let Some(text) = doc_text {
-        if !text.trim().is_empty() {
+    if let Some(text) = doc_text
+        && !text.trim().is_empty() {
             for (label, score) in crate::util::keywords::extract(&text) {
                 tagged.tags.push((label, Some(score)));
             }
@@ -2238,7 +2235,6 @@ async fn process_file_predecoded(
             }
             tagged.doc_text = Some(text);
         }
-    }
 
     // Audio metadata: artist/album/title/genre/year, surfaced as
     // tag chips so the user can filter their library by these facts. Each
@@ -2337,8 +2333,8 @@ async fn process_file_predecoded(
                 // device wedges the system when TDR fires.
                 let face_cap = face_max_per_image();
                 let gpu_alive = !coord.is_gpu_dead();
-                if gpu_alive {
-                if let (Some(scrfd_pool), Some(arcface_pool)) = (&models.scrfd, &models.arcface) {
+                if gpu_alive
+                && let (Some(scrfd_pool), Some(arcface_pool)) = (&models.scrfd, &models.arcface) {
                     let vwait = Instant::now();
                     let permit = vision_sem.acquire().await;
                     STATS_VISION_WAIT_US.fetch_add(vwait.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -2455,7 +2451,6 @@ async fn process_file_predecoded(
                     }
                     tagged.vision_ms = vision_started.elapsed().as_secs_f64() * 1000.0;
                     STATS_VISION_US.fetch_add(vision_started.elapsed().as_micros() as u64, Ordering::Relaxed);
-                }
                 }
                 // The face stage truly ran this session iff the GPU was alive at
                 // entry, the face models were loaded, AND the GPU did not die
@@ -2693,12 +2688,11 @@ async fn process_file_predecoded(
                     // Move (not clone) the decoded frame into OCR: this is the
                     // last use of `rgb` in the block, so the clone was a wasted
                     // full-frame allocation + memcpy per OCR'd file.
-                    if let Ok(Some(text)) = run_ocr_blocking(rgb, w, h).await {
-                        if !text.trim().is_empty() {
+                    if let Ok(Some(text)) = run_ocr_blocking(rgb, w, h).await
+                        && !text.trim().is_empty() {
                             tagged.has_text = true;
                             tagged.ocr_text = Some(text);
                         }
-                    }
                     STATS_OCR_RAN.fetch_add(1, Ordering::Relaxed);
                     record_stage(&STATS_OCR_US, ocr_started);
                     perf_trace("ocr_done", &file.path, ocr_started.elapsed().as_secs_f64() * 1000.0);
@@ -2807,11 +2801,10 @@ fn should_run_ocr(path: &std::path::Path, tagged: &TaggedFile, _size_bytes: u64)
         return true;
     }
     // PNG without a camera model is often a screenshot or document — run OCR.
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if ext.eq_ignore_ascii_case("png") {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && ext.eq_ignore_ascii_case("png") {
             return true;
         }
-    }
     // Default: skip. Settings → "Always run OCR" could re-enable later
     // when we wire a per-scan policy flag.
     false
@@ -2864,13 +2857,11 @@ fn push_enriched_extras(tagged: &mut TaggedFile) {
         .created_unix
         .filter(|&c| c > 0.0)
         .unwrap_or(tagged.modified_unix);
-    if year_source > 0.0 {
-        if let Some(year) = local_unix_seconds_to_year(year_source) {
-            if year > 1990 && year < 2100 {
+    if year_source > 0.0
+        && let Some(year) = local_unix_seconds_to_year(year_source)
+            && year > 1990 && year < 2100 {
                 tagged.tags.push((format!("Year_{year}"), None));
             }
-        }
-    }
     if let Some(cm) = tagged.camera_model.as_deref() {
         let lower = cm.to_ascii_lowercase();
         let family = if lower.contains("iphone") { Some("iPhone") }

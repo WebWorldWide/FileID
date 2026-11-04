@@ -242,11 +242,10 @@ pub(crate) fn enqueue(
 
 /// Stops the running job's decoder/model call promptly after pause or cancel.
 pub(crate) fn interrupt(job_id: &str) {
-    if let Some((id, cancel)) = worker().running.lock().as_ref() {
-        if id == job_id {
+    if let Some((id, cancel)) = worker().running.lock().as_ref()
+        && id == job_id {
             cancel.store(true, Ordering::Release);
         }
-    }
 }
 
 pub(crate) fn schedule(job_id: String, sink: Sink, database: Arc<Mutex<Connection>>) {

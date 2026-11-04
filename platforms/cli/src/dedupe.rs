@@ -647,12 +647,11 @@ fn remove_victim_groups(
     let mut removed_ids = Vec::new();
 
     for group in groups {
-        if let Some(guard) = &group.exact_guard {
-            if !exact_group_still_matches(guard, &group.victims) {
+        if let Some(guard) = &group.exact_guard
+            && !exact_group_still_matches(guard, &group.victims) {
                 result.failed += group.victims.len();
                 continue;
             }
-        }
         for (index, victim) in group.victims.iter().enumerate() {
             if group
                 .similar_guard

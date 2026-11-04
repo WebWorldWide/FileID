@@ -68,9 +68,8 @@ pub(super) async fn run_caption_command(
     let cleanup = process.shutdown().await;
     if !drain.done {
         drain.task.abort(); let joined = (&mut drain.task).await; drain.done = true;
-        if let Err(error) = joined {
-            if !error.is_cancelled() { return Err(anyhow!("VLM CLI stderr cleanup failed: {error}; native cleanup: {cleanup:?}")); }
-        }
+        if let Err(error) = joined
+            && !error.is_cancelled() { return Err(anyhow!("VLM CLI stderr cleanup failed: {error}; native cleanup: {cleanup:?}")); }
     }
     match cleanup {
         Ok(()) => result,

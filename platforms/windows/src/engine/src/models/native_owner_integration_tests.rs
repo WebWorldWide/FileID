@@ -20,9 +20,8 @@ fn command(ready: &Path, mode: &str) -> Command {
 async fn ready(path: &Path) -> u32 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                if let Ok(pid) = text.parse() { return pid; }
-            }
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.parse() { return pid; }
             tokio::task::yield_now().await;
         }
     }).await.unwrap()

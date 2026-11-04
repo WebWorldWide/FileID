@@ -76,22 +76,20 @@ fn resolve_target(
             engine_data_home: None,
         });
     }
-    if let Some(s) = fileid_db {
-        if !s.is_empty() {
+    if let Some(s) = fileid_db
+        && !s.is_empty() {
             return Ok(Target {
                 db: PathBuf::from(s),
                 engine_data_home: None,
             });
         }
-    }
-    if let Some(home) = cffixed_home {
-        if !home.is_empty() {
+    if let Some(home) = cffixed_home
+        && !home.is_empty() {
             return Ok(Target {
                 db: PathBuf::from(home).join("fileid.sqlite"),
                 engine_data_home: None,
             });
         }
-    }
     // No explicit library → SCRATCH. The engine appends `FileID/` to whatever
     // we hand it as its data home, so the scratch library is at
     // `<base>/FileID/fileid.sqlite`; pointing the engine at the same `<base>`

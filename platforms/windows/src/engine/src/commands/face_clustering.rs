@@ -37,8 +37,8 @@ fn decode_centroid(blob: Option<Vec<u8>>) -> Option<Vec<f32>> {
         return None;
     }
     let mut centroid = Vec::with_capacity(blob.len() / 4);
-    for chunk in blob.chunks_exact(4) {
-        let value = f32::from_le_bytes(chunk.try_into().ok()?);
+    for chunk in blob.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
         if !value.is_finite() {
             return None;
         }
@@ -646,7 +646,7 @@ pub(crate) async fn handle_run_face_clustering(
                         continue;
                     }
                     let mut embedding = Vec::with_capacity(blob.len() / 4);
-                    for chunk in blob.chunks_exact(4) {
+                    for chunk in blob.as_chunks::<4>().0 {
                         embedding
                             .push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
                     }
@@ -761,10 +761,10 @@ pub(crate) async fn handle_run_face_clustering(
                 let manual_constraints = load_manual_merge_constraints(&tx)?;
                 let existing_person_ids: HashSet<i64> = {
                     let mut statement = tx.prepare("SELECT id FROM persons")?;
-                    let collected = statement
+                    
+                    statement
                         .query_map([], |row| row.get::<_, i64>(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    collected
+                        .collect::<rusqlite::Result<_>>()?
                 };
                 let (manual_owner_by_face, manual_owner_ids) = manual_merge_owner_map(
                     &manual_constraints,

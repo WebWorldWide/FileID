@@ -160,9 +160,8 @@ impl VlmServer {
         }
         // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
         // skipped under forced-CPU so we don't re-engage the evacuated GPU.
-        if !forced_cpu {
-            if let Some(device) = device { cmd.arg("--device").arg(device); }
-        }
+        if !forced_cpu
+            && let Some(device) = device { cmd.arg("--device").arg(device); }
         if cancel.load(Ordering::Relaxed) {
             bail!("VLM server startup cancelled");
         }
@@ -199,15 +198,13 @@ impl VlmServer {
                 .timeout(Duration::from_secs(2))
                 .send()
                 .await
-            {
-                if resp.status().is_success() {
+                && resp.status().is_success() {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     if let Some(status) = child.poll_exit().context("poll VLM server after health")? {
                         bail!("llama-server exited after health check ({status})");
                     }
                     break;
                 }
-            }
             if Instant::now() >= deadline {
                 child.shutdown().await?;
                 bail!("llama-server did not become healthy within 120s");
@@ -269,9 +266,8 @@ impl VlmServer {
         };
         let native_incomplete = work.native_incomplete();
         drop(work);
-        if cancelled && native_incomplete {
-            if let Err(cleanup) = self.process.stop_and_wait().await { return Err(HostAdmissionError(cleanup.context("Cancelled request cleanup failed")).into()); }
-        }
+        if cancelled && native_incomplete
+            && let Err(cleanup) = self.process.stop_and_wait().await { return Err(HostAdmissionError(cleanup.context("Cancelled request cleanup failed")).into()); }
         result
     }
 

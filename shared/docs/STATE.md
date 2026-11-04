@@ -1,5 +1,9 @@
 # FileID — State
 
+## 2026-11-03 (night) — Rust 1.98, edition 2024 and all Dependabot bumps
+
+Owner asked to merge the Dependabot PRs and use the newest language versions. Six green bumps were merged directly (blake3, serde_json in the CLI, libc in the CLI and TUI, tokio, uuid). The rest needed code changes and land together on `deps/dependabot-rollup`: Rust toolchain 1.90 → 1.98 (sysinfo 0.40 requires 1.95) and edition 2021 → 2024 for the engine, CLI, TUI and GTK app; rusqlite 0.31 → 0.41, sysinfo 0.30 → 0.40, sha2 0.11, base64 0.23, kamadak-exif 0.6, windows 0.58 → 0.62, xunit 2.9.3, coverlet 10.1 (NuGet lockfiles regenerated with the .NET 8 SDK). Local results: engine clippy `-D warnings` clean and 1,103 tests pass; CLI 62, TUI 99 and GTK app 122 tests pass; IPC schema tests 60/60 in locked restore. Windows-only code (`cfg(windows)`, including the windows-crate API) cannot compile on the Mac and is verified by Windows CI. 17 egress digests refreshed after checking their diffs add no network code.
+
 ## 2026-11-03 (night) — Deep feature audit: 65 of 65 Swift checks, 89 of 89 Rust checks, 10 bugs fixed
 
 New `shared/scripts/e2e/feature_audit.py` drives the Swift engine through every command the mutate script does not cover, on a scratch copy of Adlon photos, videos and documents (never the drive), and checks the catalog and the files after each step: scan, incremental rescan, add/change/delete, missing root, Locations, exclusions and purge, pause/resume/cancel, catalog tags, events, Best Takes, chapters, People (reassign, merge, undo merge, "different people"), Describe file/folder/cancel, File Tools video and chapters, model controls and Chat actions. First run 50/61; final run 65/65. Two Opus agents ran in parallel: a Rust engine end-to-end run (`rust_e2e.py`, 89/89 incl. 3 by-design macOS refusals) and a SIGKILL crash-safety hunt (`crash_safety.py`, both engines; no original bytes lost in any experiment).

@@ -103,11 +103,10 @@ impl ClipTokenizer {
                 let mut best: Option<(usize, usize)> = None; // (idx, rank)
                 for i in 0..tokens.len().saturating_sub(1) {
                     let pair = (tokens[i].clone(), tokens[i + 1].clone());
-                    if let Some(&rank) = self.merges.get(&pair) {
-                        if best.is_none_or(|(_, r)| rank < r) {
+                    if let Some(&rank) = self.merges.get(&pair)
+                        && best.is_none_or(|(_, r)| rank < r) {
                             best = Some((i, rank));
                         }
-                    }
                 }
                 let Some((i, _)) = best else { break };
                 let merged = format!("{}{}", tokens[i], tokens[i + 1]);
