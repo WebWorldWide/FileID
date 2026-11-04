@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use fileid_engine::ipc::{RestructureApplyResult, RestructureMove};
 use fileid_engine::pipeline::restructure::{
-    classify, FileForClassify, PlannedIdentity, ProposedMove,
+    FileForClassify, PlannedIdentity, ProposedMove, classify,
 };
 use fileid_engine::pipeline::restructure_apply::RestructureApply;
 use parking_lot::Mutex;
@@ -27,10 +27,10 @@ use rusqlite::params;
 use serde::ser::{Error as _, SerializeSeq};
 use serde::{Serialize, Serializer};
 
-use fileid_engine::read::restructure::{library_root, plan_row_to_file, PLAN_FILES_SQL};
+use fileid_engine::read::restructure::{PLAN_FILES_SQL, library_root, plan_row_to_file};
 use fileid_engine::util::path_safety::strip_extended_length;
 
-use crate::context::{display_path, print_json, terminal_text, Ctx};
+use crate::context::{Ctx, display_path, print_json, terminal_text};
 
 const MAX_PRINTED_MOVES: usize = 200;
 const CLASSIFY_CHUNK: usize = 4_096;

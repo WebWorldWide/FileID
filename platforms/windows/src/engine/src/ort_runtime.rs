@@ -65,11 +65,10 @@ pub fn install_path() -> anyhow::Result<std::path::PathBuf> {
 #[cfg(target_os = "macos")]
 pub fn search_locations() -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(4);
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             out.push(dir.join(DYLIB_FILE_NAME));
         }
-    }
     if let Ok(rt) = crate::paths::runtime_dir() {
         out.push(rt.join(DYLIB_FILE_NAME));
     }
@@ -81,10 +80,8 @@ pub fn search_locations() -> Vec<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 pub fn search_locations() -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join(DYLIB_FILE_NAME));
-        }
+    if let Ok(exe) = std::env::current_exe() && let Some(dir) = exe.parent() {
+        out.push(dir.join(DYLIB_FILE_NAME));
     }
     if let Ok(rt) = crate::paths::runtime_dir() {
         out.push(rt.join(DYLIB_FILE_NAME));
@@ -101,24 +98,21 @@ pub fn search_locations() -> Vec<std::path::PathBuf> {
 /// this for a fast, actionable pre-flight, not as a hard proof of absence.
 #[cfg(target_os = "macos")]
 pub fn resolve_dylib() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH") {
-        if !p.is_empty() {
+    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH")
+        && !p.is_empty() {
             let p = PathBuf::from(p);
             if p.is_file() {
                 return Some(p);
             }
         }
-    }
     search_locations().into_iter().find(|p| p.is_file())
 }
 #[cfg(not(target_os = "macos"))]
 pub fn resolve_dylib() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH") {
-        if !p.is_empty() {
-            let p = std::path::PathBuf::from(p);
-            if p.is_file() {
-                return Some(p);
-            }
+    if let Some(p) = std::env::var_os("ORT_DYLIB_PATH") && !p.is_empty() {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
         }
     }
     search_locations().into_iter().find(|p| p.is_file())
@@ -139,7 +133,7 @@ pub fn pin_dylib_path() -> Option<PathBuf> {
     let resolved = search_locations().into_iter().find(|p| p.is_file())?;
     // SAFETY note: single-threaded at this point in startup (set before the
     // tokio workers touch ORT), mirroring the Windows pin in main.rs.
-    std::env::set_var("ORT_DYLIB_PATH", &resolved);
+    unsafe { std::env::set_var("ORT_DYLIB_PATH", &resolved) };
     Some(resolved)
 }
 
@@ -214,7 +208,7 @@ mod tests {
 
         // Saved/restored so the test never leaks process env into siblings.
         let prev = std::env::var_os("ORT_DYLIB_PATH");
-        std::env::set_var("ORT_DYLIB_PATH", &fake);
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", &fake) };
         assert_eq!(resolve_dylib().as_deref(), Some(fake.as_path()));
         assert!(
             pin_dylib_path().is_none(),
@@ -232,7 +226,7 @@ mod tests {
             .unwrap()
             .join(DYLIB_FILE_NAME);
         std::fs::write(&beside_exe, b"not-a-real-dylib").unwrap();
-        std::env::set_var("ORT_DYLIB_PATH", dir.join("typo.dylib"));
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", dir.join("typo.dylib")) };
         assert_eq!(pin_dylib_path().as_deref(), Some(beside_exe.as_path()));
         assert_eq!(
             std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from).as_deref(),
@@ -242,8 +236,8 @@ mod tests {
         std::fs::remove_file(&beside_exe).ok();
 
         match prev {
-            Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
-            None => std::env::remove_var("ORT_DYLIB_PATH"),
+            Some(v) => unsafe { std::env::set_var("ORT_DYLIB_PATH", v) },
+            None => unsafe { std::env::remove_var("ORT_DYLIB_PATH") },
         }
         std::fs::remove_dir_all(&dir).ok();
     }

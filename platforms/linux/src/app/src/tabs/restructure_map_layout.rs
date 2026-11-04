@@ -437,11 +437,10 @@ impl HoverBus {
         });
         let bus: Weak<Self> = Rc::downgrade(self);
         motion.connect_leave(move |_| {
-            if let Some(bus) = bus.upgrade() {
-                if bus.current().as_ref() == Some(&on_enter) {
+            if let Some(bus) = bus.upgrade()
+                && bus.current().as_ref() == Some(&on_enter) {
                     bus.set(None);
                 }
-            }
         });
         widget.add_controller(motion);
     }

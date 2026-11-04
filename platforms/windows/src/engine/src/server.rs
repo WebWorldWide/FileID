@@ -176,12 +176,11 @@ async fn async_main() -> Result<()> {
         // parent — register_dll_dirs_under walks subdirs for DLLs.
         let _ = platform::register_dll_dirs_under(&models_dir.join("cudnn"));
 
-        if let Ok(executable) = std::env::current_exe() {
-            if let Some(application_dir) = executable.parent() {
+        if let Ok(executable) = std::env::current_exe()
+            && let Some(application_dir) = executable.parent() {
                 let bundled_runtimes = application_dir.join("RuntimeBundles");
                 let _ = platform::register_dll_dirs_under(&bundled_runtimes.join("llama.cpp"));
             }
-        }
 
         // Accelerator pack: pyke's `download-binaries` ships only the base
         // onnxruntime.dll + onnxruntime_providers_shared.dll (DirectML/CPU) —
@@ -194,9 +193,9 @@ async fn async_main() -> Result<()> {
         // silent fallback or crash). Guarded on file presence + no pre-existing
         // override + not crash-disabled (ep_guard) → INERT until a matching
         // pack is installed. Must run before the first ORT session.
-        if std::env::var_os("ORT_DYLIB_PATH").is_none() {
-            if let Some((ep, pack_dir)) = models::runtime::active_pack_dir() {
-                if !models::ep_guard::is_disabled(ep) {
+        if std::env::var_os("ORT_DYLIB_PATH").is_none()
+            && let Some((ep, pack_dir)) = models::runtime::active_pack_dir()
+                && !models::ep_guard::is_disabled(ep) {
                     // Locate the pack runtime FIRST: active_pack_dir() is
                     // vendor-keyed and returns the cuda pack path on every
                     // NVIDIA box, installed or not — probing the CUDA stack
@@ -217,12 +216,11 @@ async fn async_main() -> Result<()> {
                             );
                         } else {
                             tracing::info!(ep, path = %platform::redact_path_for_log(&dll), "[EP] accelerator pack present; pinning ORT_DYLIB_PATH to matched runtime");
-                            std::env::set_var("ORT_DYLIB_PATH", &dll);
+                            // SAFETY: engine startup, before any ORT session or worker reads the environment.
+                            unsafe { std::env::set_var("ORT_DYLIB_PATH", &dll) };
                         }
                     }
                 }
-            }
-        }
     }
 
     // If a system-wide NVIDIA CUDA Toolkit + cuDNN is present, register the
@@ -405,11 +403,10 @@ async fn async_main() -> Result<()> {
 
     let command_shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let catalog_index = db_conn.as_ref().map(|writer| catalog_index::CatalogIndex::new(writer.clone(), db_path.clone(), db_path.with_extension("visual-index")));
-    if let Some(writer) = db_conn.as_ref() {
-        if let Err(error) = commands::timeline::recover(&writer.lock()) {
+    if let Some(writer) = db_conn.as_ref()
+        && let Err(error) = commands::timeline::recover(&writer.lock()) {
             tracing::warn!(?error, "timeline job recovery failed");
         }
-    }
 
     // Active scan coordinator. None when no scan is running; populated by
     // StartScan and consulted by PauseScan / ResumeScan / CancelScan.
@@ -740,16 +737,14 @@ async fn watch_parent_pinned(ppid: u32, shutdown: Arc<Notify>) {
     //   * Some(ppid): still our parent — continue with the pinned wait.
     let pinned_creation = process_creation_time(handle);
     let resampled = platform::get_parent_pid();
-    if let Some(current) = resampled {
-        if current != ppid {
-            tracing::warn!(
-                "parent PID changed (was {ppid}, now {current}); treating original parent as gone"
-            );
-            // SAFETY: handle was a live, owned handle from OpenProcess above.
-            unsafe { let _ = CloseHandle(handle); }
-            shutdown.notify_waiters();
-            return;
-        }
+    if let Some(current) = resampled && current != ppid {
+        tracing::warn!(
+            "parent PID changed (was {ppid}, now {current}); treating original parent as gone"
+        );
+        // SAFETY: handle was a live, owned handle from OpenProcess above.
+        unsafe { let _ = CloseHandle(handle); }
+        shutdown.notify_waiters();
+        return;
     }
     if resampled.is_none() || pinned_creation.is_none() {
         tracing::warn!(

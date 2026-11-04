@@ -647,7 +647,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                         if result.failed > 0 {
                             ui.merge_failed.set(true);
                         }
-                        if let Some(pending) = ui.pending_suggestions.borrow_mut().pop_front() {
+                        match ui.pending_suggestions.borrow_mut().pop_front() { Some(pending) => {
                             if result.failed == 0 && result.succeeded > 0 {
                                 if let Some(row) = pending.row.upgrade() {
                                     row.set_visible(false);
@@ -671,7 +671,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                     .unwrap_or("FileID couldn't combine these cards");
                                 set_status(&ui, format!("Couldn't combine: {detail}"));
                             }
-                        } else if result.failed > 0 {
+                        } _ => if result.failed > 0 {
                             let detail = result
                                 .messages
                                 .iter()
@@ -680,7 +680,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                                 })
                                 .unwrap_or("FileID couldn't combine these cards");
                             set_status(&ui, format!("Couldn't combine: {detail}"));
-                        }
+                        }}
                         if ui.merge_results_pending.get() == 0 {
                             if !ui.merge_failed.get() {
                                 set_status(&ui, "Cards combined.".to_string());

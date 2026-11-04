@@ -28,13 +28,13 @@ use anyhow::{Context as _, Result};
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 
 use app::App;
-use context::{terminal_text, Ctx, Invocation};
+use context::{Ctx, Invocation, terminal_text};
 use data::LoadMsg;
 
 /// Point the engine at its OWN writable models dir for this process and any
@@ -52,7 +52,8 @@ fn ensure_engine_models_dir() {
         return;
     }
     if let Ok(dir) = fileid_engine::paths::engine_models_dir() {
-        std::env::set_var("FILEID_MODELS_DIR", dir);
+        // SAFETY: called at the top of main, before any thread is spawned.
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", dir) };
     }
 }
 

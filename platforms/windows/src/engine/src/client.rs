@@ -30,11 +30,10 @@ pub fn engine_exe_name() -> &'static str {
 pub fn locate_engine() -> Option<PathBuf> {
     let exe = engine_exe_name();
     for var in ["FILEID_ENGINE_BIN", "FILEID_ENGINE"] {
-        if let Some(path) = std::env::var_os(var).filter(|value| !value.is_empty()).map(PathBuf::from) {
-            if path.is_file() {
+        if let Some(path) = std::env::var_os(var).filter(|value| !value.is_empty()).map(PathBuf::from)
+            && path.is_file() {
                 return Some(path);
             }
-        }
     }
     let mut candidates = Vec::new();
     if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {

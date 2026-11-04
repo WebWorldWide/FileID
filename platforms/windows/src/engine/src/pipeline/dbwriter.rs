@@ -587,13 +587,12 @@ impl DbWriter {
                     ocr_text_delete
                         .execute(params![file_id])
                         .with_context(|| format!("ocr_text delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                    if let Some(text) = &f.ocr_text {
-                        if !text.trim().is_empty() {
+                    if let Some(text) = &f.ocr_text
+                        && !text.trim().is_empty() {
                             ocr_text_stmt
                                 .execute(params![file_id, text])
                                 .with_context(|| format!("ocr_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
-                    }
                 }
 
                 // Document text — same stage-ran-gated
@@ -602,13 +601,12 @@ impl DbWriter {
                     doc_text_delete
                         .execute(params![file_id])
                         .with_context(|| format!("doc_text delete for {}", crate::platform::redact_path_for_log(&f.path)))?;
-                    if let Some(text) = &f.doc_text {
-                        if !text.trim().is_empty() {
+                    if let Some(text) = &f.doc_text
+                        && !text.trim().is_empty() {
                             doc_text_stmt
                                 .execute(params![file_id, text])
                                 .with_context(|| format!("doc_text insert for {}", crate::platform::redact_path_for_log(&f.path)))?;
                         }
-                    }
                 }
 
                 // Auto-tags (classifier output + enriched extras). Gate the
@@ -915,13 +913,12 @@ pub fn nfc_path_search(path: &str) -> String {
     let mut chars = path.chars().peekable();
     while let Some(base) = chars.next() {
         // Try to fold a following combining mark into `base`.
-        if let Some(&mark) = chars.peek() {
-            if let Some(composed) = compose_canonical(base, mark) {
+        if let Some(&mark) = chars.peek()
+            && let Some(composed) = compose_canonical(base, mark) {
                 out.push(composed);
                 chars.next();
                 continue;
             }
-        }
         out.push(base);
     }
     out
@@ -1481,8 +1478,8 @@ mod tests {
                 )
                 .optional()
                 .unwrap();
-            if let Some((id, old_path, _by_ref)) = healed {
-                if heal_candidate_moved(&old_path) {
+            if let Some((id, old_path, _by_ref)) = healed
+                && heal_candidate_moved(&old_path) {
                     // Mirror the production guard: `UPDATE OR ABORT` raises a
                     // UNIQUE violation when the new path is already occupied by a
                     // live row — skip the heal in that case (don't clobber it).
@@ -1496,7 +1493,6 @@ mod tests {
                         Err(e) => panic!("unexpected heal error: {e}"),
                     }
                 }
-            }
         }
         conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,

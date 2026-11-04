@@ -122,23 +122,23 @@ Require-Command "dotnet" "winget install Microsoft.DotNet.SDK.8"
 Require-Command "python" "Install Python 3 and add it to PATH"
 $SignTool = if ($SkipSign) { $null } else { Resolve-SignTool }
 
-$rustVersion = & rustup run 1.90 rustc --version 2>$null
-if ($LASTEXITCODE -ne 0 -or $rustVersion -notmatch '^rustc 1\.90\.') {
-    Write-Host "ERROR: Rust 1.90 is required, but 'rustup run 1.90 rustc --version' did not return a 1.90 toolchain." -ForegroundColor Red
-    Write-Host "       Install it with: rustup toolchain install 1.90 --profile minimal" -ForegroundColor Yellow
+$rustVersion = & rustup run 1.98 rustc --version 2>$null
+if ($LASTEXITCODE -ne 0 -or $rustVersion -notmatch '^rustc 1\.98\.') {
+    Write-Host "ERROR: Rust 1.98 is required, but 'rustup run 1.98 rustc --version' did not return a 1.98 toolchain." -ForegroundColor Red
+    Write-Host "       Install it with: rustup toolchain install 1.98 --profile minimal" -ForegroundColor Yellow
     exit 1
 }
 Write-Host "  Rust toolchain: $rustVersion" -ForegroundColor Green
 
 $requiredRustTargets = @("x86_64-pc-windows-msvc")
 if (-not $SkipArm64) { $requiredRustTargets += "aarch64-pc-windows-msvc" }
-$installedRustTargets = @(& rustup target list --toolchain 1.90 --installed 2>$null)
+$installedRustTargets = @(& rustup target list --toolchain 1.98 --installed 2>$null)
 foreach ($target in $requiredRustTargets) {
     if ($installedRustTargets -notcontains $target) {
-        Write-Host "Adding Rust 1.90 target $target..." -ForegroundColor Yellow
-        & rustup target add --toolchain 1.90 $target
+        Write-Host "Adding Rust 1.98 target $target..." -ForegroundColor Yellow
+        & rustup target add --toolchain 1.98 $target
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "ERROR: rustup could not install target '$target' for Rust 1.90." -ForegroundColor Red
+            Write-Host "ERROR: rustup could not install target '$target' for Rust 1.98." -ForegroundColor Red
             exit 1
         }
     }
@@ -390,7 +390,7 @@ if (-not $SkipArm64) {
 function Build-Engine($triple) {
     Write-Host "Building engine ($triple, release-debuginfo)..." -ForegroundColor Cyan
     Push-Location $EngineDir
-    try { & rustup run 1.90 cargo build --profile release-debuginfo --locked --target $triple } finally { Pop-Location }
+    try { & rustup run 1.98 cargo build --profile release-debuginfo --locked --target $triple } finally { Pop-Location }
 }
 
 Build-Engine "x86_64-pc-windows-msvc"

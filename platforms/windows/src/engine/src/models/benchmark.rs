@@ -157,7 +157,9 @@ struct PeakSampler {
 }
 
 fn resident_bytes(system: &mut sysinfo::System, pid: sysinfo::Pid) -> Option<u64> {
-    system.refresh_process(pid).then(|| system.process(pid).map(sysinfo::Process::memory)).flatten()
+    (system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true) > 0)
+        .then(|| system.process(pid).map(sysinfo::Process::memory))
+        .flatten()
 }
 
 impl PeakSampler {
@@ -167,7 +169,7 @@ impl PeakSampler {
         if let Some(pid) = pid {
             let (peak, stop) = (peak.clone(), stop.clone());
             std::thread::spawn(move || {
-                let mut system = sysinfo::System::new();
+                let Ok(mut system) = sysinfo::System::new() else { return };
                 let pid = sysinfo::Pid::from_u32(pid);
                 while !stop.load(Ordering::Relaxed) {
                     if let Some(bytes) = resident_bytes(&mut system, pid) {
@@ -184,12 +186,11 @@ impl PeakSampler {
         self.stop.store(true, Ordering::Relaxed);
         // A run shorter than the sampler's first refresh would otherwise
         // report no memory at all.
-        if self.peak.load(Ordering::Relaxed) == 0 {
-            if let Some(pid) = self.pid {
-                let bytes = resident_bytes(&mut sysinfo::System::new(), sysinfo::Pid::from_u32(pid));
+        if self.peak.load(Ordering::Relaxed) == 0
+            && let Some(pid) = self.pid {
+                let bytes = sysinfo::System::new().ok().and_then(|mut system| resident_bytes(&mut system, sysinfo::Pid::from_u32(pid)));
                 self.peak.fetch_max(bytes.unwrap_or(0), Ordering::Relaxed);
             }
-        }
         self.peak.load(Ordering::Relaxed)
     }
 }

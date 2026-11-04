@@ -33,9 +33,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use fileid_engine::client::{self, ScanOutcome};
 use fileid_engine::ipc::EventPayload;
-use fileid_engine::models::required::{missing_required, MissingModel};
+use fileid_engine::models::required::{MissingModel, missing_required};
 
-use crate::context::{display_path, print_json, Ctx};
+use crate::context::{Ctx, display_path, print_json};
 
 pub fn run(ctx: &Ctx, root: &Path, rescan: bool) -> Result<()> {
     let root_abs = std::fs::canonicalize(root)

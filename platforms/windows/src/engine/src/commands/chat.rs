@@ -110,8 +110,8 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
             save_turn(&mut conn, &request.conversation_id, &[("user", &prepared.text), ("assistant", &message)])?;
             return respond(&conn, &request, "completed", message, prepared.hits, prepared.actions);
         }
-        let result = execute_with(&mut database.lock(), &request, &live_semantic);
-        result
+        
+        execute_with(&mut database.lock(), &request, &live_semantic)
     })
     .await;
     let mut response = match result {
@@ -411,11 +411,10 @@ fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Vec<V
             "limit": 100,
             "resultScope": "files",
         }));
-        if let Ok(response) = search.map_err(anyhow::Error::from).and_then(|search| index.search(&search)) {
-            if response.status == "ok" {
+        if let Ok(response) = search.map_err(anyhow::Error::from).and_then(|search| index.search(&search))
+            && response.status == "ok" {
                 lists.push(response.hits);
             }
-        }
     }
     match bge_hits(conn, query) {
         Ok(hits) if !hits.is_empty() => lists.push(hits),
@@ -467,7 +466,7 @@ fn document_hits_scan(conn: &Connection, wanted: &[f32]) -> Result<Vec<CatalogHi
     let mut scored: Vec<(f32, CatalogHit)> = statement
         .query_map(params![wanted.len() as i64 * 4, BGE_MODEL], |row| {
             let blob: Vec<u8> = row.get(1)?;
-            let score = blob.chunks_exact(4).zip(wanted).map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value).sum::<f32>();
+            let score = blob.as_chunks::<4>().0.iter().zip(wanted).map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value).sum::<f32>();
             let id: i64 = row.get(0)?;
             Ok((score, document_hit(id, row.get(2)?, row.get(3)?)))
         })?
@@ -513,7 +512,7 @@ impl DocumentMatrix {
                 }
                 let blob = row.get_ref(1)?.as_blob()?;
                 ids.push(row.get(0)?);
-                values.extend(blob.chunks_exact(4).map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])));
+                values.extend(blob.as_chunks::<4>().0.iter().map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])));
             }
         }
         Ok(Some(Self { path: path.to_path_buf(), watcher, version, dim, ids, values }))

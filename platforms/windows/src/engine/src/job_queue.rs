@@ -113,12 +113,11 @@ impl JobQueue {
         let total_eta_seconds = {
             let mut total = 0.0;
             let mut any = false;
-            if let Some(r) = &inner.running {
-                if let Some(e) = r.eta_seconds {
+            if let Some(r) = &inner.running
+                && let Some(e) = r.eta_seconds {
                     total += e;
                     any = true;
                 }
-            }
             for p in &inner.pending {
                 if let Some(e) = p.eta_seconds {
                     total += e;

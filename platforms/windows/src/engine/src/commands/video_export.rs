@@ -216,11 +216,10 @@ fn parse_probe(data: &[u8]) -> Result<Probe> {
     let mut display_height = height as u32;
     if let Some(side_data) = video["side_data_list"].as_array() {
         for item in side_data {
-            if let Some(rotation) = number(&item["rotation"]) {
-                if (rotation.abs() - 90.0).abs() <= 1.0 || (rotation.abs() - 270.0).abs() <= 1.0 {
+            if let Some(rotation) = number(&item["rotation"])
+                && ((rotation.abs() - 90.0).abs() <= 1.0 || (rotation.abs() - 270.0).abs() <= 1.0) {
                     std::mem::swap(&mut display_width, &mut display_height);
                 }
-            }
         }
     }
     let audio_stream = audio.first().copied();

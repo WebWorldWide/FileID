@@ -76,21 +76,21 @@ fn resolve_target(
             engine_data_home: None,
         });
     }
-    if let Some(s) = fileid_db {
-        if !s.is_empty() {
-            return Ok(Target {
-                db: PathBuf::from(s),
-                engine_data_home: None,
-            });
-        }
+    if let Some(s) = fileid_db
+        && !s.is_empty()
+    {
+        return Ok(Target {
+            db: PathBuf::from(s),
+            engine_data_home: None,
+        });
     }
-    if let Some(home) = cffixed_home {
-        if !home.is_empty() {
-            return Ok(Target {
-                db: PathBuf::from(home).join("fileid.sqlite"),
-                engine_data_home: None,
-            });
-        }
+    if let Some(home) = cffixed_home
+        && !home.is_empty()
+    {
+        return Ok(Target {
+            db: PathBuf::from(home).join("fileid.sqlite"),
+            engine_data_home: None,
+        });
     }
     // No explicit library → SCRATCH. The engine appends `FileID/` to whatever
     // we hand it as its data home, so the scratch library is at
@@ -171,14 +171,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Invocation {
         match arg.as_str() {
             "-h" | "--help" => return Invocation::Print(help_text()),
             "-V" | "--version" => {
-                return Invocation::Print(format!("fileid-tui {}", env!("CARGO_PKG_VERSION")))
+                return Invocation::Print(format!("fileid-tui {}", env!("CARGO_PKG_VERSION")));
             }
             "--db" => match it.next() {
                 Some(v) if v.is_empty() => {
-                    return Invocation::Error("--db requires a non-empty PATH".into())
+                    return Invocation::Error("--db requires a non-empty PATH".into());
                 }
                 Some(_) if db.is_some() => {
-                    return Invocation::Error("--db may only be specified once".into())
+                    return Invocation::Error("--db may only be specified once".into());
                 }
                 Some(v) => db = Some(PathBuf::from(v)),
                 None => return Invocation::Error("--db requires a PATH argument".into()),

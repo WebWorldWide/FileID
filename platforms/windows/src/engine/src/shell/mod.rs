@@ -689,11 +689,10 @@ pub mod thumbnail {
         // SAFETY: read-only map of a file we only read; a concurrent truncation
         // can fault, the same trade-off the scan decoder makes.
         let bytes = unsafe { memmap2::Mmap::map(&file) }.context("mapping thumbnail source")?;
-        if raw_preview::is_raw_extension(&ext) {
-            if let Some((rgb, w, h)) = tagging::decode_raw_preview_at_least(path, Some(&bytes), 1, dim) {
+        if raw_preview::is_raw_extension(&ext)
+            && let Some((rgb, w, h)) = tagging::decode_raw_preview_at_least(path, Some(&bytes), 1, dim) {
                 return rgb_image(rgb, w, h);
             }
-        }
         match decode_with_orientation(&bytes, dim) {
             Ok(image) => Ok(image),
             Err(err) if ext == "heic" || ext == "heif" => {
@@ -2357,11 +2356,9 @@ pub mod heic {
         let mut produced: Option<PathBuf> = None;
         for tool in ["heif-dec", "heif-convert"] {
             clear_output_dir(outputs.path()).context("clear heic output directory")?;
-            if run_converter_bounded(tool, path, &out, outputs.path()) {
-                if let Some(p) = resolve_output(&out) {
-                    produced = Some(p);
-                    break;
-                }
+            if run_converter_bounded(tool, path, &out, outputs.path()) && let Some(p) = resolve_output(&out) {
+                produced = Some(p);
+                break;
             }
         }
         let Some(png) = produced else {

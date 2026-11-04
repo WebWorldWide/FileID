@@ -45,7 +45,7 @@ fn rewrite_breadcrumb(counts: &HashMap<String, usize>) {
     let Some(p) = attempt_path() else { return };
     let live: Vec<&str> = counts
         .iter()
-        .filter(|(_, &c)| c > 0)
+        .filter(|&(_, &c)| c > 0)
         .map(|(ep, _)| ep.as_str())
         .collect();
     if live.is_empty() {
@@ -213,12 +213,11 @@ pub fn reenable_ep(ep: &str) {
     }
     let Some(dir) = packs_dir() else { return };
     let mut cleared = false;
-    if let Some(p) = disabled_marker(ep) {
-        if p.exists() {
+    if let Some(p) = disabled_marker(ep)
+        && p.exists() {
             let _ = std::fs::remove_file(&p);
             cleared = true;
         }
-    }
     // Legacy single-file format — only if it names THIS ep.
     let legacy = dir.join(".ep_disabled");
     if read_trimmed(&legacy).map(|d| d == ep.to_ascii_lowercase()).unwrap_or(false) {

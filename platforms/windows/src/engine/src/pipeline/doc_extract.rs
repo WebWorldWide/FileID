@@ -520,11 +520,10 @@ fn xml_text_runs(xml: &str, target_elems: &[&str]) -> String {
                 // (the old `unescape()` errored on those and we skipped too).
                 if let Ok(Some(ch)) = r.resolve_char_ref() {
                     out.push(ch);
-                } else if let Ok(name) = r.decode() {
-                    if let Some(rep) = quick_xml::escape::resolve_predefined_entity(&name) {
+                } else if let Ok(name) = r.decode()
+                    && let Some(rep) = quick_xml::escape::resolve_predefined_entity(&name) {
                         out.push_str(rep);
                     }
-                }
             }
             Ok(Event::Eof) | Err(_) => break,
             _ => {}

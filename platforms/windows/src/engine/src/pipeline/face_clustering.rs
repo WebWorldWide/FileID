@@ -621,14 +621,13 @@ where
         if let (Some(owner_a), Some(owner_b)) = (
             bucket_owner_by_face.get(&a),
             bucket_owner_by_face.get(&b),
-        ) {
-            if owner_a == owner_b {
+        )
+            && owner_a == owner_b {
                 singleton_endpoints_by_owner
                     .entry(*owner_a)
                     .or_default()
                     .extend([a, b]);
             }
-        }
     }
 
     for members in raw_groups.values_mut() {
@@ -711,13 +710,12 @@ where
         let Some(&cluster_id) = cluster_of.get(&face_id) else {
             continue;
         };
-        if let Some(existing) = owner_by_cluster.insert(cluster_id, owner_id) {
-            if existing != owner_id {
+        if let Some(existing) = owner_by_cluster.insert(cluster_id, owner_id)
+            && existing != owner_id {
                 return Err(format!(
                     "cluster {cluster_id} contains distinct protected identities"
                 ));
             }
-        }
     }
     Ok(owner_by_cluster)
 }
@@ -740,13 +738,12 @@ where
         let Some(&cluster_id) = cluster_of.get(&face_id) else {
             return Err(format!("protected face {face_id} is missing from the final partition"));
         };
-        if let Some(existing) = owner_of_cluster.insert(cluster_id, owner_id) {
-            if existing != owner_id {
+        if let Some(existing) = owner_of_cluster.insert(cluster_id, owner_id)
+            && existing != owner_id {
                 return Err(format!(
                     "cluster {cluster_id} contains distinct protected identities"
                 ));
             }
-        }
     }
     for &(a, b) in different_pairs {
         let (Some(&ca), Some(&cb)) = (cluster_of.get(&a), cluster_of.get(&b)) else {
@@ -3142,7 +3139,7 @@ mod tests {
     fn automerge_threshold_clamps_and_defaults() {
         // Unset → default. (Other env-dependent cases aren't asserted here to
         // avoid process-global env races with parallel tests.)
-        std::env::remove_var("FILEID_FACE_AUTOMERGE_COS");
+        unsafe { std::env::remove_var("FILEID_FACE_AUTOMERGE_COS") };
         assert!((automerge_threshold() - AUTOMERGE_COS_DEFAULT).abs() < 1e-6);
     }
 
@@ -3374,8 +3371,8 @@ mod tests {
 
     #[test]
     fn suppression_env_defaults() {
-        std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE");
-        std::env::remove_var("FILEID_FACE_SOLO_QUALITY");
+        unsafe { std::env::remove_var("FILEID_FACE_MIN_CLUSTER_SIZE") };
+        unsafe { std::env::remove_var("FILEID_FACE_SOLO_QUALITY") };
         assert_eq!(min_cluster_size(), 3);
         assert!((solo_quality_floor() - 0.40).abs() < 1e-6);
     }

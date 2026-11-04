@@ -4,15 +4,15 @@
 
 use std::rc::Rc;
 
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
-use crate::app::{dir_label, App, BrowseRow, Browser, DirCounts, DownloadState, Tab};
+use crate::app::{App, BrowseRow, Browser, DirCounts, DownloadState, Tab, dir_label};
 use crate::context::terminal_text;
-use crate::data::{short, PLAN_CAP};
+use crate::data::{PLAN_CAP, short};
 use fileid_engine::util::display::{self, file_size_i64, fmt_date};
 
 // ── Palette — lifted from the design's terminal panels (NOT the beige page) ──
@@ -983,7 +983,14 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut lines = vec![
         section("Library"),
-        kv("Mode", if app.scratch { "scratch (opens empty)" } else { "explicit --db / env" }),
+        kv(
+            "Mode",
+            if app.scratch {
+                "scratch (opens empty)"
+            } else {
+                "explicit --db / env"
+            },
+        ),
         kv("Saved at", &app.db_label),
         kv("Exists", if app.data.db_exists { "yes" } else { "no" }),
         kv("Files indexed", &app.data.total_files.to_string()),
@@ -1002,7 +1009,10 @@ fn render_settings(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(
                 " D ",
-                Style::default().fg(Color::Black).bg(GOLD).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(GOLD)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  Download scan/search AI models", Style::default().fg(FG)),
         ]),
@@ -1894,7 +1904,7 @@ mod tests {
         assert_eq!(c[2].height, 1); // status line
         assert_eq!(c[3].height, 1); // always-visible key bar
         assert_eq!(c[1].height, 20); // body gets the rest
-                                     // chunks tile the area with no gap
+        // chunks tile the area with no gap
         assert_eq!(c[0].height + c[1].height + c[2].height + c[3].height, 24);
     }
 
@@ -1938,8 +1948,8 @@ mod tests {
     fn renders_library_frame_with_live_data() {
         use crate::app::App;
         use crate::data::{FileRow, LoadMsg, Snapshot};
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new("/tmp/x.sqlite".into());
         let snap = Snapshot {
@@ -1977,8 +1987,8 @@ mod tests {
     fn restructure_partial_preview_is_visibly_labeled() {
         use crate::app::{App, Tab};
         use crate::data::{LoadMsg, PlanRow, Snapshot};
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.tab = Tab::Restructure;
@@ -2010,8 +2020,8 @@ mod tests {
     fn cleanup_partial_preview_is_visibly_labeled() {
         use crate::app::{App, Tab};
         use crate::data::{DupGroup, LoadMsg, Snapshot};
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.tab = Tab::Cleanup;
@@ -2061,8 +2071,8 @@ mod tests {
     fn paints_dark_background_and_gold_accent() {
         use crate::app::App;
         use crate::data::{LoadMsg, Snapshot};
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let (w, h) = (80u16, 24u16);
         let mut app = App::new("/tmp/x.sqlite".into());
@@ -2130,8 +2140,8 @@ mod tests {
     #[test]
     fn active_tab_gets_a_gold_underline() {
         use crate::app::App;
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let app = App::new("/tmp/x.sqlite".into());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -2163,8 +2173,8 @@ mod tests {
 
     /// Sweep a whole `TestBackend` buffer into one string (row-major).
     fn frame_text(w: u16, h: u16, app: &crate::app::App) -> String {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| render(f, app)).unwrap();
         let buf = terminal.backend().buffer();
@@ -2445,8 +2455,8 @@ mod tests {
     fn models_banner_shows_download_gauge() {
         use crate::app::{App, DownloadState};
         use crate::data::{LoadMsg, Snapshot};
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let mut app = App::new("/tmp/x.sqlite".into());
         app.apply_load(LoadMsg::Done(Box::new(Snapshot {

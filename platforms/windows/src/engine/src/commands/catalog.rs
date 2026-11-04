@@ -48,11 +48,10 @@ pub async fn handle(
                     super::timeline::schedule(id, sink.clone(), database);
                 }
             }
-            if ["pauseJob", "cancelJob"].contains(&action.as_str()) {
-                if let Some(id) = job_id.as_deref() {
+            if ["pauseJob", "cancelJob"].contains(&action.as_str())
+                && let Some(id) = job_id.as_deref() {
                     super::timeline::interrupt(id);
                 }
-            }
             response
         }
         Ok(Err(error)) => response(&request_id, "error", Some(error.to_string())),

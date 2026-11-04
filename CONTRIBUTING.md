@@ -46,7 +46,7 @@ python -m unittest discover -s shared/scripts -p 'test_*.py'
   crate or package needs a justification in `shared/docs/DECISIONS.md`.
 - **Comments explain *why*, not *what*.** Add one only when the reason is
   non-obvious — a workaround, an invariant, a performance pitfall.
-- **Rust is pinned to 1.90** (`rust-toolchain.toml`), which is what CI uses. If
+- **Rust is pinned to 1.98** (`rust-toolchain.toml`), which is what CI uses. If
   you have a newer standalone Rust ahead of the rustup shims on `PATH`, your
   local build is not testing what CI tests.
 

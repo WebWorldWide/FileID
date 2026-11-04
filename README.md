@@ -218,7 +218,7 @@ Dev guide: [`platforms/apple/CLAUDE.md`](platforms/apple/CLAUDE.md).
 
 ### Windows
 
-Needs Rust 1.90+ (`rustup`), the .NET 8 SDK and Visual Studio Build Tools 2022 with the UWP MSBuild component.
+Needs Rust 1.98+ (`rustup`), the .NET 8 SDK and Visual Studio Build Tools 2022 with the UWP MSBuild component.
 
 ```powershell
 .\platforms\windows\build\build-all.ps1                    # incremental engine + app

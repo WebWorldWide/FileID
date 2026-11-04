@@ -39,7 +39,7 @@ impl Spring {
 }
 
 pub fn animations_enabled() -> bool {
-    gtk::Settings::default().map_or(true, |settings| settings.is_gtk_enable_animations())
+    gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations())
 }
 
 /// Animate a scalar on the standard spring, handing each value to `setter`.

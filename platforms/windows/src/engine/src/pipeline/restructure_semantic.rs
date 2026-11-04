@@ -268,11 +268,10 @@ fn time_segment_indices(files: &[SemanticFile]) -> Vec<Vec<usize>> {
     let mut segments: Vec<Vec<usize>> = Vec::new();
     let mut cur: Vec<usize> = Vec::new();
     for &i in &timed {
-        if let Some(&last) = cur.last() {
-            if files[i].time_unix - files[last].time_unix > gap {
+        if let Some(&last) = cur.last()
+            && files[i].time_unix - files[last].time_unix > gap {
                 segments.push(std::mem::take(&mut cur));
             }
-        }
         cur.push(i);
     }
     if !cur.is_empty() {
@@ -461,12 +460,11 @@ fn semantic_classify_profiled(
                     // safe_filename_component maps to '_' (e.g. "16:9" and "16/9" →
                     // "16_9") would otherwise collide into one physical directory.
                     // Prefer the next distinctive term first.
-                    if used_group_names.contains(&safe) {
-                        if let Some(extra) = terms.get(2) {
+                    if used_group_names.contains(&safe)
+                        && let Some(extra) = terms.get(2) {
                             pretty = format!("{} {}", base, title_case(extra));
                             safe = crate::util::path_safety::safe_filename_component(&pretty);
                         }
-                    }
                     // Numeric-suffix fallback. Build each candidate so the suffix
                     // ALWAYS survives the 200-scalar filename cap: a base that
                     // already sanitizes to ~200 chars would otherwise truncate every
@@ -528,8 +526,8 @@ fn semantic_classify_profiled(
             // it is reshuffling, not organizing. Only a destination that fits
             // decisively better (clears the routing margin) may pull it out;
             // a freshly minted group never outranks a good existing home.
-            if !file.clip.is_empty() {
-                if let Some(cur) = parent.and_then(|p| proto_by_path.get(p)) {
+            if !file.clip.is_empty()
+                && let Some(cur) = parent.and_then(|p| proto_by_path.get(p)) {
                     let fit = dot(&file.clip, &cur.centroid);
                     let pull = route_sim.unwrap_or(profile.folder_match_cos);
                     if fit >= profile.folder_match_cos && fit + profile.min_margin >= pull {
@@ -537,7 +535,6 @@ fn semantic_classify_profiled(
                         continue;
                     }
                 }
-            }
             let dest = dest_dir.join(name);
             moves.push(ProposedMove {
                 file_id: file.file_id,

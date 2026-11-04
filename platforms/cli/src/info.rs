@@ -2,11 +2,11 @@
 //! text snippet. Read-only.
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use fileid_engine::util::display::fmt_date;
 
-use crate::context::{file_size_i64, print_json, terminal_text, Ctx};
+use crate::context::{Ctx, file_size_i64, print_json, terminal_text};
 
 struct FileRow {
     id: i64,

@@ -751,15 +751,15 @@ fn plan_large_library_in_with_cancel(
                     AND r.source COLLATE NOCASE <> r.destination
                   GROUP BY r.category ORDER BY n DESC, r.category ASC",
             )?;
-            let counts = stmt.query_map([], |row| {
+            
+            stmt.query_map([], |row| {
                 let count: i64 = row.get(1)?;
                 Ok(RestructureCategoryCount {
                     category: row.get(0)?,
                     count: count.clamp(0, u32::MAX as i64) as u32,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-            counts
+            .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let total_moves: i64 = plan_db.query_row(
             "SELECT COUNT(*) FROM raw_moves r
@@ -835,11 +835,10 @@ fn plan_large_library_in_with_cancel(
         };
 
         let truncated = total_moves as usize > RESTRUCTURE_PREVIEW_CAP;
-        if !truncated {
-            if let Ok(path) = plan_path_in(dir, &plan_id) {
+        if !truncated
+            && let Ok(path) = plan_path_in(dir, &plan_id) {
                 let _ = std::fs::remove_file(path);
             }
-        }
         Ok(RestructurePlan {
             library_root: library_root.to_string(),
             plan_id: truncated.then_some(plan_id),
@@ -936,7 +935,7 @@ fn load_text_embeddings(
         let (id, blob) = r?;
         if !blob.is_empty() && blob.len() % 4 == 0 {
             let v = blob
-                .chunks_exact(4)
+                .as_chunks::<4>().0.iter()
                 .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             out.insert(id, v);
@@ -1032,15 +1031,12 @@ pub(crate) async fn handle_plan_restructure(
                 })
                 .await;
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Ok(Ok(plan)) = &planned {
-                        if let Some(plan_id) = plan.plan_id.as_deref() {
-                            if let Ok(dir) = crate::paths::restructure_plans_dir() {
-                                if let Ok(path) = plan_path_in(&dir, plan_id) {
+                    if let Ok(Ok(plan)) = &planned
+                        && let Some(plan_id) = plan.plan_id.as_deref()
+                            && let Ok(dir) = crate::paths::restructure_plans_dir()
+                                && let Ok(path) = plan_path_in(&dir, plan_id) {
                                     let _ = std::fs::remove_file(path);
                                 }
-                            }
-                        }
-                    }
                     let _ = stop_cancelled_plan(&sink, &cancel).await;
                     return;
                 }
@@ -1526,13 +1522,11 @@ pub(crate) async fn handle_plan_restructure(
     };
 
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        if let Some(plan_id) = plan_id.as_deref() {
-            if let Ok(dir) = crate::paths::restructure_plans_dir() {
-                if let Ok(path) = plan_path_in(&dir, plan_id) {
+        if let Some(plan_id) = plan_id.as_deref()
+            && let Ok(dir) = crate::paths::restructure_plans_dir()
+                && let Ok(path) = plan_path_in(&dir, plan_id) {
                     let _ = std::fs::remove_file(path);
                 }
-            }
-        }
         let _ = stop_cancelled_plan(&sink, &cancel).await;
         return;
     }

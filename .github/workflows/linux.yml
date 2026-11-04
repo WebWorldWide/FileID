@@ -61,10 +61,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # MSRV pinned to 1.90 in rust-toolchain.toml (engine + CLI). Keep both
+          # MSRV pinned to 1.98 in rust-toolchain.toml (engine + CLI). Keep both
           # in sync — drift here means CI builds with a different toolchain than
           # contributors use locally.
-          toolchain: 1.90
+          toolchain: 1.98
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
@@ -142,8 +142,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # Matches platforms/cli/rust-toolchain.toml (1.90, same as the engine).
-          toolchain: 1.90
+          # Matches platforms/cli/rust-toolchain.toml (1.98, same as the engine).
+          toolchain: 1.98
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
@@ -188,8 +188,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # Matches platforms/tui/rust-toolchain.toml (1.90, same as the engine).
-          toolchain: 1.90
+          # Matches platforms/tui/rust-toolchain.toml (1.98, same as the engine).
+          toolchain: 1.98
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target
@@ -250,9 +250,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          # 1.90 to match the shared engine path dependency (the app's own
-          # rust-version floor is lower, but the engine pins 1.90).
-          toolchain: 1.90
+          # 1.98 to match the shared engine path dependency (the app's own
+          # rust-version floor is lower, but the engine pins 1.98).
+          toolchain: 1.98
           components: rustfmt, clippy
 
       - name: Cache cargo registry + target

@@ -315,11 +315,10 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
     if ["find", "show", "list", "check", "look", "any", "search", "detect"].contains(&verb) && duplicates {
         return Some(Intent { scope: rest_text(&words, 1), ..Intent::new("findDuplicates") });
     }
-    if ["open", "go", "switch", "take", "view", "show"].contains(&verb) {
-        if let Some(page) = page_for(rest) {
+    if ["open", "go", "switch", "take", "view", "show"].contains(&verb)
+        && let Some(page) = page_for(rest) {
             return Some(Intent { page: Some(page.into()), ..Intent::new("openPage") });
         }
-    }
     let suggestion = ["suggested", "suggestion", "suggestions", "smart", "proposed", "ai", "better", "descriptive", "recommended", "new"];
     if (verb == "rename" && has(rest, &suggestion))
         || (["apply", "use", "accept"].contains(&verb) && has(rest, &["names", "name", "filenames"]) && has(rest, &suggestion))
@@ -349,11 +348,10 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         let targets: [&[&str]; 9] = [
             &["this", "person"], &["that", "person"], &["this", "face"], &["this", "one"], &["him"], &["her"], &["them"], &["this"], &["it"],
         ];
-        if let Some(target) = targets.iter().find(|target| starts(rest, target)) {
-            if let Some(name) = person_name(&cased[1 + target.len()..], false) {
+        if let Some(target) = targets.iter().find(|target| starts(rest, target))
+            && let Some(name) = person_name(&cased[1 + target.len()..], false) {
                 return Some(Intent { name: Some(name), ..Intent::new("namePerson") });
             }
-        }
         return None;
     }
     for lead in [&["this", "person", "is"][..], &["this", "is"], &["that", "is"], &["that's"], &["this's"], &["he", "is"], &["she", "is"], &["he's"], &["she's"]] {
@@ -382,8 +380,8 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         return (people.is_empty() && has(rest, &["these", "those", "them"]) || people.len() >= 2)
             .then(|| Intent { people, ..Intent::new("mergePeople") });
     }
-    if let Some(same) = words.windows(3).position(|window| window == ["the", "same", "person"]) {
-        if same >= 2 && ["are", "is"].contains(&words[same - 1].as_str()) {
+    if let Some(same) = words.windows(3).position(|window| window == ["the", "same", "person"])
+        && same >= 2 && ["are", "is"].contains(&words[same - 1].as_str()) {
             let names = &cased[..same - 1];
             let lower = &words[..same - 1];
             if let Some(split) = lower.iter().position(|word| word == "and") {
@@ -393,17 +391,15 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
                 }
             }
         }
-    }
     let library_words = ["the", "my", "library", "files", "scan", "index", "catalog", "everything", "again", "all"];
     if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(&verb) {
         if rest.iter().all(|word| library_words.contains(&word.as_str())) {
             return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
         }
-        if ["rescan", "re-scan", "reindex", "re-index"].contains(&verb) {
-            if let Some(folder) = folder_reference(rest, &cased[1..], text).filter(|folder| folder != "library") {
+        if ["rescan", "re-scan", "reindex", "re-index"].contains(&verb)
+            && let Some(folder) = folder_reference(rest, &cased[1..], text).filter(|folder| folder != "library") {
                 return Some(Intent { folder: Some(folder), ..Intent::new("rescan") });
             }
-        }
     }
     if starts(&words, &["check", "for", "new", "files"]) {
         return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
@@ -634,17 +630,15 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     }
     // "tell me about my Adlon library": one name before "library", never after it ("library of dogs" is a search).
     let unknown: Vec<(usize, &String)> = words.iter().enumerate().filter(|(_, word)| !OVERVIEW_WORDS.contains(&word.as_str())).collect();
-    if let [(at, word)] = unknown.as_slice() {
-        if let Some(library) = words.iter().position(|word| word == "library" || word == "collection") {
-            if *at < library
+    if let [(at, word)] = unknown.as_slice()
+        && let Some(library) = words.iter().position(|word| word == "library" || word == "collection")
+            && *at < library
                 && ["tell", "describe", "summarize", "summarise", "give", "show", "what", "whats"].contains(&words[0].as_str())
                 && !KIND_WORDS.contains(&word.as_str())
                 && format_extensions(word).is_none()
             {
                 return Some(("overview", "newest"));
             }
-        }
-    }
     // "what file formats do I have", "which extensions are in my library"
     if has(&words, &["format", "formats", "extension", "extensions"])
         && has(&words, &["what", "which", "each", "every", "per", "by", "breakdown", "different", "list"])
@@ -690,11 +684,10 @@ fn question_folder(words: &[String], raw: &[&str]) -> Option<(String, std::ops::
             let label = chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default();
             return Some((format!("named:{label}"), index..end));
         }
-        if target == "folder" || target == "directory" {
-            if let Some(name) = raw.get(at + 1) {
+        if (target == "folder" || target == "directory")
+            && let Some(name) = raw.get(at + 1) {
                 return Some((format!("named:{}", original(name)), index..at + 2));
             }
-        }
     }
     None
 }
@@ -772,21 +765,17 @@ fn date_at(words: &[String], index: usize) -> Option<Span> {
         _ => {}
     }
     let digits: Vec<&str> = word.split('-').collect();
-    if digits.len() == 3 && digits[0].len() == 4 {
-        if let (Some(y), Ok(m), Ok(d)) = (year(digits[0]), digits[1].parse::<u32>(), digits[2].parse::<u32>()) {
-            if digits[1].len() == 2 && digits[2].len() == 2 && (1..=12).contains(&m) {
+    if digits.len() == 3 && digits[0].len() == 4
+        && let (Some(y), Ok(m), Ok(d)) = (year(digits[0]), digits[1].parse::<u32>(), digits[2].parse::<u32>())
+            && digits[1].len() == 2 && digits[2].len() == 2 && (1..=12).contains(&m) {
                 let date = calendar(y, m, d)?;
                 return Some(Span { filter: exact(vec![date.clone()], vec![date, "+1 day".into()], format!("{} {d}, {y}", MONTH_NAMES[m as usize - 1])), length: 1 });
             }
-        }
-    }
-    if digits.len() == 2 && digits[0].len() == 4 && digits[1].len() == 2 {
-        if let (Some(y), Ok(m)) = (year(digits[0]), digits[1].parse::<u32>()) {
-            if (1..=12).contains(&m) {
+    if digits.len() == 2 && digits[0].len() == 4 && digits[1].len() == 2
+        && let (Some(y), Ok(m)) = (year(digits[0]), digits[1].parse::<u32>())
+            && (1..=12).contains(&m) {
                 return Some(month_year(y, m, 1));
             }
-        }
-    }
     let slashes: Vec<&str> = word.split('/').collect();
     if (2..=3).contains(&slashes.len()) && slashes.iter().all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())) {
         let m: u32 = slashes[0].parse().ok()?;
@@ -868,8 +857,8 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
                 filter = DateFilter { to: span.filter.from.clone(), phrase: format!("before {}", span.filter.phrase), ..DateFilter::default() };
             }
             "between" if absolute && words.get(end).is_some_and(|word| word == "and") => {
-                if let Some(second) = (end + 1 < words.len()).then(|| date_at(words, end + 1)).flatten() {
-                    if second.filter.month_day.is_none() && second.filter.month.is_none() {
+                if let Some(second) = (end + 1 < words.len()).then(|| date_at(words, end + 1)).flatten()
+                    && second.filter.month_day.is_none() && second.filter.month.is_none() {
                         let filter = DateFilter {
                             from: span.filter.from.clone(),
                             to: second.filter.to.clone(),
@@ -878,7 +867,6 @@ fn date_filter(words: &[String]) -> Option<(DateFilter, std::ops::Range<usize>)>
                         };
                         return Some((filter, start..end + 1 + second.length));
                     }
-                }
                 filter.phrase = format!("from {}", span.filter.phrase);
             }
             _ => filter.phrase = format!("from {}", span.filter.phrase),

@@ -29,10 +29,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result};
 use fileid_engine::client::{self, ScanOutcome};
 use fileid_engine::ipc::{EventPayload, ScanPhase};
-use fileid_engine::models::required::{missing_required, MissingModel};
+use fileid_engine::models::required::{MissingModel, missing_required};
 use fileid_engine::util::display::file_size;
 
-use crate::data::{self, short, LoadMsg};
+use crate::data::{self, LoadMsg, short};
 
 /// Spawn the scan on a worker thread. Non-blocking; the UI keeps drawing and
 /// `q` keeps quitting. On success the thread reloads the DB and sends `Done`;
@@ -191,12 +191,12 @@ fn run_scan(
             Ok(ScanSummary {
                 message: if failed > 0 {
                     format!(
-                    "Scan partial: {processed}/{total} files, {failed} failed in {seconds:.1}s · {people} people from {faces} faces"
-                )
+                        "Scan partial: {processed}/{total} files, {failed} failed in {seconds:.1}s · {people} people from {faces} faces"
+                    )
                 } else {
                     format!(
-                    "Scan complete: {processed}/{total} files in {seconds:.1}s · {people} people from {faces} faces"
-                )
+                        "Scan complete: {processed}/{total} files in {seconds:.1}s · {people} people from {faces} faces"
+                    )
                 },
                 failed,
             })
@@ -397,12 +397,12 @@ fn prepare_scratch_dir(data_home: &Path) {
     #[cfg(not(target_os = "macos"))]
     {
         let link = root.join("Models");
-        if !link.exists() {
-            if let Ok(real) = fileid_engine::paths::models_dir() {
-                if real.is_dir() && real != link {
-                    let _ = symlink_dir(&real, &link);
-                }
-            }
+        if !link.exists()
+            && let Ok(real) = fileid_engine::paths::models_dir()
+            && real.is_dir()
+            && real != link
+        {
+            let _ = symlink_dir(&real, &link);
         }
     }
 }

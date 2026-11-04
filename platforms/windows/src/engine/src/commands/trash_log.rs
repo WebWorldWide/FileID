@@ -151,11 +151,10 @@ fn find_batch_in(raw: &[u8], key: &[u8], batch_id: &str) -> Option<TrashLogEntry
             tracing::warn!("trash_log entry HMAC mismatch -- rejecting forged entry");
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload) {
-            if entry.batch_id == batch_id {
+        if let Ok(entry) = serde_json::from_str::<TrashLogEntry>(payload)
+            && entry.batch_id == batch_id {
                 return Some(entry);
             }
-        }
     }
     None
 }

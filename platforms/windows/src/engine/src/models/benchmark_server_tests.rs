@@ -46,13 +46,12 @@ fn serve(listener: std::net::TcpListener, requests: usize) -> std::thread::JoinH
                 let n = stream.read(&mut buffer).unwrap();
                 assert!(n > 0);
                 bytes.extend_from_slice(&buffer[..n]);
-                if length.is_none() {
-                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                if length.is_none()
+                    && let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
                         let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
                         let content = headers.lines().find_map(|l| l.strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap();
                         length = Some(end + 4 + content);
                     }
-                }
                 if length.is_some_and(|total| bytes.len() >= total) { break; }
             }
             let body = String::from_utf8_lossy(&bytes);

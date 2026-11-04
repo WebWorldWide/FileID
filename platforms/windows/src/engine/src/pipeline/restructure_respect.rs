@@ -46,11 +46,10 @@ pub fn is_generic_folder_name(raw: &str) -> bool {
             if rest.is_empty() {
                 return true;
             }
-            if let Some(number) = rest.strip_prefix(' ') {
-                if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+            if let Some(number) = rest.strip_prefix(' ')
+                && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
                     return true;
                 }
-            }
         }
     }
     let bytes = name.as_bytes();
@@ -183,11 +182,10 @@ pub fn keep(m: &ProposedMove, kind: FileKind, root: &Path) -> bool {
     }
     let destination = components(&m.destination, root);
     let role = file_role(&m.source, kind);
-    if let Some(last) = destination.last() {
-        if !fits(role, folder_role(last)) {
+    if let Some(last) = destination.last()
+        && !fits(role, folder_role(last)) {
             return false;
         }
-    }
     let existing: HashSet<String> = components(&m.source, root).into_iter().collect();
     destination.iter().all(|folder| {
         existing.contains(folder)
@@ -350,11 +348,10 @@ pub fn event_spans(files: &[FileForClassify], root: &Path) -> Vec<EventSpan> {
         if t > 0.0 {
             times.entry(top.clone()).or_default().push(t);
         }
-        if folders.last().and_then(|n| folder_role(n)).is_some() {
-            if let Some(parent) = f.source.parent() {
+        if folders.last().and_then(|n| folder_role(n)).is_some()
+            && let Some(parent) = f.source.parent() {
                 formats.entry(top.clone()).or_default().insert(parent.to_path_buf());
             }
-        }
     }
     let mut spans: Vec<EventSpan> = times
         .into_iter()

@@ -18,9 +18,9 @@ use anyhow::Result;
 use rusqlite::params;
 
 use fileid_engine::pipeline::restructure;
-use fileid_engine::read::people::active_people;
 pub use fileid_engine::read::people::Person;
-use fileid_engine::read::restructure::{library_root, plan_row_to_file, PLAN_FILES_SQL};
+use fileid_engine::read::people::active_people;
+use fileid_engine::read::restructure::{PLAN_FILES_SQL, library_root, plan_row_to_file};
 use fileid_engine::read::text::{escape_like, fts_phrase_query};
 use fileid_engine::read::{dupes, dupes::ExactCaps};
 

@@ -289,9 +289,9 @@ pub(crate) async fn handle_prewarm_model(
 
     let total_bytes_estimate: u64 = model.files.iter().map(|f| f.approx_bytes).sum();
     let required_free = required_install_free_bytes(total_bytes_estimate);
-    if let Ok(models_dir) = crate::paths::models_dir() {
-        if let Some(available) = platform::available_disk_bytes(&models_dir) {
-            if available < required_free {
+    if let Ok(models_dir) = crate::paths::models_dir()
+        && let Some(available) = platform::available_disk_bytes(&models_dir)
+            && available < required_free {
                 sink.send(EngineError::new(
                     "model_download_disk_full",
                     format!(
@@ -307,8 +307,6 @@ pub(crate) async fn handle_prewarm_model(
                 tracing::warn!(model_kind = %model_kind, required_free, available, outcome = "insufficient_disk", "[PREWARM] exiting");
                 return;
             }
-        }
-    }
     let total_estimate = total_bytes_estimate.max(1);
     let file_count = model.files.len();
 
@@ -568,8 +566,8 @@ pub(crate) async fn handle_prewarm_model(
     // Atomic write so a kill mid-write can never leave a half-written
     // sentinel that subsequent runs treat as "installed."
     if let Some(sentinel) = registry::sentinel_path(&model) {
-        if let Some(parent) = sentinel.parent() {
-            if let Err(err) = tokio::fs::create_dir_all(parent).await {
+        if let Some(parent) = sentinel.parent()
+            && let Err(err) = tokio::fs::create_dir_all(parent).await {
                 tracing::error!(?err, dir = %crate::platform::redact_path_for_log(parent), "could not create .sentinels dir");
                 sink.send(EngineError::new(
                     "sentinel_dir_create_failed",
@@ -585,7 +583,6 @@ pub(crate) async fn handle_prewarm_model(
                 .await;
                 return;
             }
-        }
         let Some(attestation) = registry::installation_attestation(&model) else {
             sink.send(EngineError::new(
                 "sentinel_attestation_failed",

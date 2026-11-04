@@ -28,7 +28,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
-use context::{terminal_text, Ctx};
+use context::{Ctx, terminal_text};
 
 /// Shown at the foot of `fileid --help`: a few copy-pasteable starting points.
 const HELP_FOOTER: &str = "\
@@ -333,7 +333,8 @@ pub(crate) fn ensure_engine_models_dir() {
         return;
     }
     if let Ok(dir) = fileid_engine::paths::engine_models_dir() {
-        std::env::set_var("FILEID_MODELS_DIR", dir);
+        // SAFETY: runs on the CLI command thread before any engine work spawns threads.
+        unsafe { std::env::set_var("FILEID_MODELS_DIR", dir) };
     }
 }
 

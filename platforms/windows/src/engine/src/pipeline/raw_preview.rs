@@ -258,11 +258,10 @@ impl<'a> Tiff<'a> {
             if let (Some(o), Some(l)) = (jpeg_offset, jpeg_length) {
                 out.push((o as usize, l as usize));
             }
-            if matches!(compression, 6 | 7 | 99) {
-                if let (Some(o), Some(l)) = (strip_offset, strip_length) {
+            if matches!(compression, 6 | 7 | 99)
+                && let (Some(o), Some(l)) = (strip_offset, strip_length) {
                     out.push((o as usize, l as usize));
                 }
-            }
             if let Some(next) = self.u32(ifd + 2 + count as usize * 12) {
                 push(&mut queue, next as usize);
             }

@@ -358,14 +358,13 @@ impl Shell {
         if self.split.is_collapsed() {
             self.split.set_show_sidebar(false);
         }
-        if changed {
-            if let Some(child) = self.stack.visible_child() {
+        if changed
+            && let Some(child) = self.stack.visible_child() {
                 let target = child.clone();
                 let _ = crate::spring::animate(&child, 0.0, 1.0, move |v| {
                     target.set_opacity(v.clamp(0.0, 1.0))
                 });
             }
-        }
     }
 
     fn hand_off(&self, page: &str, placeholder: &str, text: &str) {
@@ -712,16 +711,14 @@ fn clear_running(status: &mut Status) {
 }
 
 fn find_editable(root: &gtk::Widget, placeholder: &str) -> Option<gtk::Editable> {
-    if let Some(entry) = root.downcast_ref::<gtk::Entry>() {
-        if entry.placeholder_text().as_deref() == Some(placeholder) {
+    if let Some(entry) = root.downcast_ref::<gtk::Entry>()
+        && entry.placeholder_text().as_deref() == Some(placeholder) {
             return Some(entry.clone().upcast());
         }
-    }
-    if let Some(entry) = root.downcast_ref::<gtk::SearchEntry>() {
-        if entry.placeholder_text().as_deref() == Some(placeholder) {
+    if let Some(entry) = root.downcast_ref::<gtk::SearchEntry>()
+        && entry.placeholder_text().as_deref() == Some(placeholder) {
             return Some(entry.clone().upcast());
         }
-    }
     let mut child = root.first_child();
     while let Some(widget) = child {
         if let Some(found) = find_editable(&widget, placeholder) {

@@ -195,11 +195,10 @@ fn load_mtl(
             }
             Some("Kd") => {
                 let c: Vec<f32> = it.take(3).filter_map(|s| s.parse().ok()).collect();
-                if c.len() == 3 {
-                    if let Some(name) = &cur {
+                if c.len() == 3
+                    && let Some(name) = &cur {
                         out.insert(name.clone(), [c[0], c[1], c[2]]);
                     }
-                }
             }
             _ => {}
         }

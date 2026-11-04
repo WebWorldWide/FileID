@@ -28,7 +28,7 @@ fn no_clobber_rename_bound(
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
         FILE_ATTRIBUTE_NORMAL, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FILE_SHARE_DELETE,
@@ -85,7 +85,7 @@ fn no_clobber_rename_bound(
     let mut storage = vec![0u64; byte_len.div_ceil(std::mem::size_of::<u64>())];
     let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
-        (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: BOOLEAN(0) };
+        (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: false };
         (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
         (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
         std::ptr::copy_nonoverlapping(
@@ -904,14 +904,12 @@ fn bind_windows_trash_receipts_with(
         entry.items[index].recycle_physical_path = Some(path.to_string_lossy().into_owned());
         verified.push(index);
     }
-    if !verified.is_empty() {
-        if let Err(error) = append(entry) {
-            for index in verified {
-                outcomes[index] = CheckedTrashOutcome::Failed(format!(
-                    "file moved to the Recycle Bin, but its identity receipt could not be journaled ({error}); the catalog row was retained"
-                ));
-                entry.items[index].recycle_physical_path = None;
-            }
+    if !verified.is_empty() && let Err(error) = append(entry) {
+        for index in verified {
+            outcomes[index] = CheckedTrashOutcome::Failed(format!(
+                "file moved to the Recycle Bin, but its identity receipt could not be journaled ({error}); the catalog row was retained"
+            ));
+            entry.items[index].recycle_physical_path = None;
         }
     }
 }
@@ -1278,7 +1276,8 @@ fn persist_manual_merge_constraint(
                     OR (file_a IS NOT NULL AND bbox_a IS NOT NULL \
                         AND file_b IS NOT NULL AND bbox_b IS NOT NULL))",
         )?;
-        let collected = statement
+        
+        statement
             .query_map([], |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -1291,8 +1290,7 @@ fn persist_manual_merge_constraint(
                     row.get::<_, Option<String>>(7)?,
                 ))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        collected
+            .collect::<rusqlite::Result<Vec<_>>>()?
     };
     let expected_pair = if source_person_id < destination_person_id {
         (source_person_id, destination_person_id)
@@ -1994,8 +1992,8 @@ fn decode_unit_embedding(blob: &[u8]) -> Option<Vec<f32>> {
         return None;
     }
     let mut embedding = Vec::with_capacity(blob.len() / 4);
-    for chunk in blob.chunks_exact(4) {
-        let value = f32::from_le_bytes(chunk.try_into().ok()?);
+    for chunk in blob.as_chunks::<4>().0 {
+        let value = f32::from_le_bytes(*chunk);
         if !value.is_finite() {
             return None;
         }
@@ -2210,15 +2208,14 @@ pub(crate) async fn handle_find_merge_suggestions(
             // so a verdict still suppresses the re-prompt after a faces_evaluated
             // re-scan churns face_print ids — mirroring the clustering-apply path.
             let resolve = |legacy: Option<i64>, file: Option<i64>, bbox: Option<String>| -> Option<i64> {
-                if let (Some(f), Some(b)) = (file, bbox) {
-                    if let Ok(id) = conn.query_row(
+                if let (Some(f), Some(b)) = (file, bbox)
+                    && let Ok(id) = conn.query_row(
                         "SELECT id FROM face_prints WHERE file_id = ?1 AND bbox = ?2 LIMIT 1",
                         rusqlite::params![f, b],
                         |r| r.get::<_, i64>(0),
                     ) {
                         return Some(id);
                     }
-                }
                 match legacy {
                     Some(l)
                         if conn
@@ -2258,24 +2255,21 @@ pub(crate) async fn handle_find_merge_suggestions(
                     for fid in [fa, fb] {
                         if let std::collections::hash_map::Entry::Vacant(slot) =
                             face_person.entry(fid)
-                        {
-                            if let Ok(Some(pid)) = fpstmt.query_row(
+                            && let Ok(Some(pid)) = fpstmt.query_row(
                                 rusqlite::params![fid],
                                 |r| r.get::<_, Option<i64>>(0),
                             ) {
                                 slot.insert(pid);
                             }
-                        }
                     }
                 }
             }
             for (fa, fb) in verified_face_pairs {
-                if let (Some(&pa), Some(&pb)) = (face_person.get(&fa), face_person.get(&fb)) {
-                    if pa != pb {
+                if let (Some(&pa), Some(&pb)) = (face_person.get(&fa), face_person.get(&fb))
+                    && pa != pb {
                         let pk = if pa < pb { (pa, pb) } else { (pb, pa) };
                         verified_membership_persons.insert(pk);
                     }
-                }
             }
         }
 

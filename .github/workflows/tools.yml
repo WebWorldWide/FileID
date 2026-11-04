@@ -61,15 +61,16 @@ jobs:
             artifact: linux-arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # The hosted Intel Mac passes tests and clippy in ~40 min, then the LTO release builds overrun 60.
+    timeout-minutes: ${{ matrix.runner == 'macos-15-intel' && 100 || 60 }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust 1.90
+      - name: Install Rust 1.98
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
-          toolchain: '1.90'
+          toolchain: '1.98'
           components: rustfmt, clippy
 
       - name: Cache Cargo

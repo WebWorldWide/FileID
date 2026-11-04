@@ -43,7 +43,7 @@ pub(crate) fn discover_at(root: &Path, application_dir: Option<&Path>, name: &st
     let mut result = Vec::new();
     for dir in dirs {
         for path in [dir.join(format!("{name}{suffix}")), dir.join("bin").join(format!("{name}{suffix}"))] {
-            if let Ok(path) = validate_binary(&path) { if !result.contains(&path) { result.push(path); } }
+            if let Ok(path) = validate_binary(&path) && !result.contains(&path) { result.push(path); }
         }
     }
     Ok(result)

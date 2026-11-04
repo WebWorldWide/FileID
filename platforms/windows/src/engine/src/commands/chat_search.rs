@@ -105,13 +105,12 @@ impl SearchPlan {
         let mut time_indices = std::collections::BTreeSet::new();
         if !negative {
             for (index, word) in normalized.iter().enumerate() {
-                if ["at", "around", "near"].contains(&word.as_str()) {
-                    if let Some(seconds) = normalized.get(index + 1).and_then(|value| timestamp(value)) {
+                if ["at", "around", "near"].contains(&word.as_str())
+                    && let Some(seconds) = normalized.get(index + 1).and_then(|value| timestamp(value)) {
                         time_seconds = Some(seconds);
                         time_indices.extend([index, index + 1]);
                         break;
                     }
-                }
             }
         }
         let aliases = |word: &str| -> &[&str] {
@@ -156,8 +155,8 @@ impl SearchPlan {
             .map(|(_, (word, _))| *word)
             .collect::<Vec<_>>()
             .join(" ");
-        if refinement && !normalized.iter().any(|word| word == "all") {
-            if let Some(previous) = previous {
+        if refinement && !normalized.iter().any(|word| word == "all")
+            && let Some(previous) = previous {
                 if query.is_empty() {
                     query.clone_from(&previous.query);
                 } else if (normalized.iter().any(|word| word == "also")
@@ -167,14 +166,12 @@ impl SearchPlan {
                     query = format!("{} {}", previous.query, query);
                 }
             }
-        }
-        if kinds.is_empty() && !negative && refinement && !normalized.iter().any(|word| word == "all") {
-            if let Some(previous) = previous {
+        if kinds.is_empty() && !negative && refinement && !normalized.iter().any(|word| word == "all")
+            && let Some(previous) = previous {
                 kinds.clone_from(&previous.kinds);
             }
-        }
-        if refinement {
-            if let Some(previous) = previous {
+        if refinement
+            && let Some(previous) = previous {
                 if person_ids.is_empty() {
                     person_ids.clone_from(&previous.person_ids);
                     person_names.clone_from(&previous.person_names);
@@ -193,7 +190,6 @@ impl SearchPlan {
                     time_seconds = previous.time_seconds;
                 }
             }
-        }
         person_ids.sort();
         person_ids.dedup();
         person_names.sort();

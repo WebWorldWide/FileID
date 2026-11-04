@@ -85,7 +85,7 @@ pub fn open_writer(db_path: &Path) -> Result<Connection> {
         .with_context(|| format!("opening db at {}", db_path.display()))?;
     conn.busy_timeout(BUSY_TIMEOUT).context("setting busy timeout")?;
     // SQLite silently falls back to read-only when the file isn't writable.
-    if conn.is_readonly(rusqlite::DatabaseName::Main).unwrap_or(false) {
+    if conn.is_readonly(rusqlite::MAIN_DB).unwrap_or(false) {
         return Err(ReadOnlyDatabase.into());
     }
     for pragma in SETUP_PRAGMAS {

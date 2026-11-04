@@ -13,17 +13,17 @@
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Write as _};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result};
-use fileid_engine::downloader::{install_model_blocking, InstallFileProgress};
+use fileid_engine::downloader::{InstallFileProgress, install_model_blocking};
 use fileid_engine::models::license;
 use fileid_engine::models::registry::{self, LookupResult, Model};
 use fileid_engine::models::required::REQUIRED_SCAN_MODELS;
 use fileid_engine::util::display::{rate, size_pair};
 
-use crate::context::{display_path, file_size_i64, print_json, truncate, Ctx};
+use crate::context::{Ctx, display_path, file_size_i64, print_json, truncate};
 
 /// One curated, cross-platform, commercial-clean model the engine uses. `kind`
 /// is the registry key passed to `lookup_full`; `license` + `category` are the

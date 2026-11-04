@@ -431,10 +431,9 @@ pub fn default_worker_cap() -> u32 {
 
 /// Physical memory in GiB.
 pub fn physical_memory_gb() -> f64 {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else { return 0.0 };
     sys.refresh_memory();
-    let bytes = sys.total_memory(); // bytes since sysinfo 0.30
-    (bytes as f64) / (1024.0 * 1024.0 * 1024.0)
+    (sys.total_memory() as f64) / (1024.0 * 1024.0 * 1024.0)
 }
 
 /// Available (not-in-use) physical memory in MiB. Polls
@@ -460,7 +459,7 @@ pub fn available_memory_mb() -> u64 {
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn available_memory_mb() -> u64 {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else { return 0 };
     sys.refresh_memory();
     sys.available_memory() / (1024 * 1024)
 }
@@ -471,7 +470,7 @@ pub fn available_memory_mb() -> u64 {
 /// reclaim.
 #[cfg(target_os = "macos")]
 pub fn available_memory_mb() -> u64 {
-    let mut sys = sysinfo::System::new();
+    let Ok(mut sys) = sysinfo::System::new() else { return 0 };
     sys.refresh_memory();
     let mut level: libc::c_int = 0;
     let mut size = std::mem::size_of::<libc::c_int>();
@@ -693,7 +692,7 @@ pub fn storage_type_for_path(path: &Path) -> StorageType {
             // For now: treat all no-seek-penalty fixed drives as NVMe-class
             // (16-thread budget). The downside on SATA SSDs is moderate
             // over-parallelism, which still beats single-threaded walkdir.
-            if desc.IncursSeekPenalty.as_bool() { StorageType::Hdd } else { StorageType::Nvme }
+            if desc.IncursSeekPenalty { StorageType::Hdd } else { StorageType::Nvme }
         } else {
             StorageType::Unknown
         }

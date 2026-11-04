@@ -293,11 +293,10 @@ impl CatalogIndex {
                     ))
                 })
                 .optional()?;
-            if let Some((hit, blob)) = found {
-                if clip_space::digest(&blob) == entry.fingerprint && clip_space::decode(&blob).is_some() {
+            if let Some((hit, blob)) = found
+                && clip_space::digest(&blob) == entry.fingerprint && clip_space::decode(&blob).is_some() {
                     visual.push(hit);
                 }
-            }
         }
         response.hits = if mode == "semantic" {
             crate::commands::catalog_search::select(visual, limit, files_only)
@@ -467,8 +466,8 @@ impl CatalogIndex {
                 }
                 points.remove(id);
                 let blob: Option<Vec<u8>> = tx.query_row("SELECT e.embedding FROM clip_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id=?1 AND e.model=?2 AND f.failed=0",params![id,clip_space::model_id()], |row| row.get(0)).optional()?;
-                if let Some(blob) = blob {
-                    if let Some(mut vector) = clip_space::decode(&blob) {
+                if let Some(blob) = blob
+                    && let Some(mut vector) = clip_space::decode(&blob) {
                         normalize(&mut vector);
                         points.insert(
                             *id,
@@ -481,7 +480,6 @@ impl CatalogIndex {
                             ),
                         );
                     }
-                }
             }
             ensure!(points.len() <= MAX_FILES, "Visual index capacity exceeded");
             Cache {

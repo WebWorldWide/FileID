@@ -48,10 +48,8 @@ fn trash_path_checked(
         }
         return Ok(());
     }
-    if let Some(expected) = expected {
-        if crate::platform::file_identity(path) != Some(expected) {
-            anyhow::bail!("claimed Trash source identity changed before the Recycle Bin operation");
-        }
+    if let Some(expected) = expected && crate::platform::file_identity(path) != Some(expected) {
+        anyhow::bail!("claimed Trash source identity changed before the Recycle Bin operation");
     }
 
     let wide: Vec<u16> = path
@@ -76,16 +74,12 @@ fn trash_path_checked(
             let item: IShellItem =
                 SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)
                     .context("SHCreateItemFromParsingName")?;
-            if let Some(expected) = expected {
-                if crate::platform::file_identity(path) != Some(expected) {
-                    anyhow::bail!("claimed Trash source identity changed while binding the Recycle Bin item");
-                }
+            if let Some(expected) = expected && crate::platform::file_identity(path) != Some(expected) {
+                anyhow::bail!("claimed Trash source identity changed while binding the Recycle Bin item");
             }
             op.DeleteItem(&item, None).context("DeleteItem queue")?;
-            if let Some(expected) = expected {
-                if crate::platform::file_identity(path) != Some(expected) {
-                    anyhow::bail!("claimed Trash source identity changed before Recycle Bin execution");
-                }
+            if let Some(expected) = expected && crate::platform::file_identity(path) != Some(expected) {
+                anyhow::bail!("claimed Trash source identity changed before Recycle Bin execution");
             }
             op.PerformOperations().context("PerformOperations")?;
             if op

@@ -23,7 +23,7 @@ exists for users who want one download with no runtime, no sandbox, and no store
 # -> packaging/appimage/build/FileID-x86_64.AppImage.sha256
 ```
 
-Requirements on the build host: `cargo` (Rust 1.90), `curl`, `libgtk-4-dev`,
+Requirements on the build host: `cargo` (Rust 1.98), `curl`, `libgtk-4-dev`,
 `libadwaita-1-dev`, `pkg-config`, `build-essential`, and FUSE (for AppImages to
 self-mount at runtime). The linuxdeploy binary and GTK plugin are pinned to a
 release/commit and SHA256-verified on every run, including cached copies.

@@ -385,8 +385,7 @@ impl ShortcutUndoManifest {
             ..
         } = self;
         let staging_has_work = std::fs::read_dir(&staging_dir)
-            .ok()
-            .is_some_and(|mut entries| entries.next().is_some());
+            .is_ok_and(|mut entries| entries.next().is_some());
         if !staging_has_work {
             let staging_base = staging_dir.parent().map(Path::to_path_buf);
             let _ = std::fs::remove_dir(&staging_dir);
@@ -527,14 +526,13 @@ impl UndoJournal {
         } = self;
         drop(file);
         let _ = std::fs::remove_file(&path);
-        if let Some(backup) = prior_backup {
-            if let Err(error) = std::fs::rename(&backup, &path) {
+        if let Some(backup) = prior_backup
+            && let Err(error) = std::fs::rename(&backup, &path) {
                 tracing::error!(
                     ?error,
                     "[RESTRUCTURE] could not restore preserved prior undo journal"
                 );
             }
-        }
     }
 
     /// Durably append one inverse entry; returns the pre-append offset so a
@@ -765,8 +763,8 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
         }
         let had_newline = buf.last() == Some(&b'\n');
         let body_len = if had_newline { n - 1 } else { n };
-        if offset == 0 {
-            if let Ok(header) = serde_json::from_slice::<UndoJournalHeader>(&buf[..body_len]) {
+        if offset == 0
+            && let Ok(header) = serde_json::from_slice::<UndoJournalHeader>(&buf[..body_len]) {
                 if !matches!(header.version, 2 | UNDO_JOURNAL_VERSION) {
                     anyhow::bail!("unsupported undo journal version {}", header.version);
                 }
@@ -781,7 +779,6 @@ fn scan_undo_journal_spans(path: &Path) -> Result<Option<UndoJournalScan>> {
                 }
                 continue;
             }
-        }
         let parses = serde_json::from_slice::<UndoEntry>(&buf[..body_len]).is_ok();
         if parses {
             if !had_newline {
@@ -1886,8 +1883,8 @@ impl RestructureApply {
             // planning) is skipped so we never move the wrong bytes or stamp
             // the row with a path that never held this file.
             let current_identity = current_identity_in_db(&self.db_conn, m.file_id);
-            if !record_undo {
-                if let Ok(Some((db_path, db_ref))) = &current_identity {
+            if !record_undo
+                && let Ok(Some((db_path, db_ref))) = &current_identity {
                     let source = Path::new(&m.source);
                     let destination = Path::new(&m.destination);
                     if paths_equal(db_path, &m.source)
@@ -1921,7 +1918,6 @@ impl RestructureApply {
                         continue;
                     }
                 }
-            }
             let db_file_ref = match current_identity {
                 Ok(Some((db_path, db_ref))) if paths_equal(&db_path, &m.source) => {
                     if record_undo && !planned_identity_matches(&self.db_conn, &m).unwrap_or(false) {
@@ -2017,13 +2013,12 @@ impl RestructureApply {
             // move starts, so repeating the path walk here only widens the
             // per-file TOCTOU surface. Forward, plan-generated destinations
             // still require the check immediately before mutation.
-            if record_undo {
-                if let Err(err) = ensure_inside_root(&dest, &canonical_root) {
+            if record_undo
+                && let Err(err) = ensure_inside_root(&dest, &canonical_root) {
                     tracing::warn!(?err, dest=%crate::platform::redact_path_for_log(&dest), "rejecting move outside library root");
                     failed += 1;
                     continue;
                 }
-            }
 
             if let Some(parent) = dest.parent() {
                 // SEC-5: TOCTOU defense, pass 1. Check the EXISTING ancestor
@@ -2237,14 +2232,13 @@ impl RestructureApply {
             match result {
                 Ok(SymlinkOutcome::AlreadyPresent) => {}
                 Ok(SymlinkOutcome::Created) => {
-                    if let Some(journal) = journal.as_mut() {
-                        if let Err(error) = journal.commit_replacement() {
+                    if let Some(journal) = journal.as_mut()
+                        && let Err(error) = journal.commit_replacement() {
                             tracing::warn!(
                                 ?error,
                                 "[RESTRUCTURE] preserved prior undo journal cleanup will retry before returning"
                             );
                         }
-                    }
                     if !self.use_symlinks {
                         // Only update DB on real moves. Symlinks leave
                         // `path_text` pointing at the original.
@@ -2803,7 +2797,7 @@ fn remove_recorded_shortcut(
 ) -> Result<bool> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileAttributeTagInfo, FileDispositionInfo,
         GetFileInformationByHandleEx, SetFileInformationByHandle, FILE_ATTRIBUTE_TAG_INFO,
@@ -2891,7 +2885,7 @@ fn remove_recorded_shortcut(
     );
 
     let disposition = FILE_DISPOSITION_INFO {
-        DeleteFile: BOOLEAN(1),
+        DeleteFile: true,
     };
     unsafe {
         SetFileInformationByHandle(
@@ -3108,7 +3102,7 @@ fn rename_staged_shortcut(
 ) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx,
         FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -3189,7 +3183,7 @@ fn rename_staged_shortcut(
     let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
     unsafe {
         (*rename).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: BOOLEAN(0),
+            ReplaceIfExists: false,
         };
         (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
         (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
@@ -3253,7 +3247,7 @@ fn move_file(
 ) -> std::result::Result<(), ApplyError> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, DELETE, OPEN_EXISTING,
@@ -3305,7 +3299,7 @@ fn move_file(
         let mut storage = vec![0u64; byte_len.div_ceil(std::mem::size_of::<u64>())];
         let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
-            (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: BOOLEAN(0) };
+            (*rename).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: false };
             (*rename).RootDirectory = HANDLE(parent_handle.as_raw_handle());
             (*rename).FileNameLength = u32::try_from(destination_wide.len() * 2)?;
             std::ptr::copy_nonoverlapping(
@@ -3419,7 +3413,7 @@ fn make_symlink(
                 SYMBOLIC_LINK_FLAGS(flags.0),
             )
         };
-        if !created.as_bool() {
+        if !created {
             let error = std::io::Error::last_os_error();
             if std::fs::symlink_metadata(&dst_ext)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -4024,10 +4018,8 @@ fn has_reparse_point_in_chain(parent: &Path, root: &Path) -> bool {
     let root_norm = strip_extended_length(root);
     let mut cur = parent.to_path_buf();
     loop {
-        if let Ok(meta) = std::fs::symlink_metadata(&cur) {
-            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-                return true;
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(&cur) && (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return true;
         }
         // Stop once we reach (or pass) the root. Compared CASE-INSENSITIVELY and
         // component-wise: NTFS is case-insensitive, so a raw IPC parent that
@@ -5817,7 +5809,6 @@ mod tests {
         let ShortcutUndoManifest {
             mut file,
             path,
-            token: _,
             ..
         } = manifest;
         let entry = serde_json::to_vec(&ShortcutUndoEntry {

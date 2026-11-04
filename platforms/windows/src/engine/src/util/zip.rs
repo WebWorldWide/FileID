@@ -122,12 +122,11 @@ fn extract_archive(
         }
         total_written = total_written.saturating_add(written);
 
-        if let Ok(real) = std::fs::canonicalize(&dest) {
-            if !real.starts_with(&stage_canon) {
+        if let Ok(real) = std::fs::canonicalize(&dest)
+            && !real.starts_with(&stage_canon) {
                 let _ = std::fs::remove_file(&dest);
                 anyhow::bail!("zip entry escaped extraction root: {}", dest.display());
             }
-        }
     }
     Ok(())
 }
@@ -219,8 +218,8 @@ where
         match std::fs::symlink_metadata(&destination) {
             Ok(_) => {
                 let backup_path = backup.join(relative);
-                if let Some(backup_parent) = backup_path.parent() {
-                    if let Err(error) = create_backup_dir(backup_parent) {
+                if let Some(backup_parent) = backup_path.parent()
+                    && let Err(error) = create_backup_dir(backup_parent) {
                         return fail_with_rollback(
                             error,
                             "creating zip backup directory",
@@ -231,7 +230,6 @@ where
                             &backed_up,
                         );
                     }
-                }
                 if let Err(error) = std::fs::rename(&destination, &backup_path) {
                     return fail_with_rollback(
                         error,

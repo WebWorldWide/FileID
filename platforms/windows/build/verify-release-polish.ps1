@@ -21,10 +21,10 @@ try {
 
     Push-Location "$platformDir\src\engine"
     try {
-        Invoke-Checked { rustup run 1.90 cargo clippy --all-targets -- -D warnings } "engine clippy"
-        Invoke-Checked { rustup run 1.90 cargo test --all-targets } "engine tests"
+        Invoke-Checked { rustup run 1.98 cargo clippy --all-targets -- -D warnings } "engine clippy"
+        Invoke-Checked { rustup run 1.98 cargo test --all-targets } "engine tests"
         Invoke-Checked {
-            rustup run 1.90 cargo test --release --lib `
+            rustup run 1.98 cargo test --release --lib `
                 million_row_reconciliation_uses_set_based_update -- --ignored
         } "million-row reconciliation gate"
     } finally {

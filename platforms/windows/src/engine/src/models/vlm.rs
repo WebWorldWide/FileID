@@ -122,11 +122,10 @@ pub fn find_weights(model_kind: &str) -> Option<(PathBuf, PathBuf)> {
                 .map(|f| f.dest.clone())
                 .find(|d| d.file_name().is_some_and(|n| n == name))
         };
-        if let (Some(gguf), Some(mmproj)) = (dest("model.gguf"), dest("mmproj.gguf")) {
-            if gguf.exists() && mmproj.exists() {
+        if let (Some(gguf), Some(mmproj)) = (dest("model.gguf"), dest("mmproj.gguf"))
+            && gguf.exists() && mmproj.exists() {
                 return Some((gguf, mmproj));
             }
-        }
     }
     // Unregistered kinds (or callers passing a literal dir name) keep the
     // direct-layout fallback.
@@ -183,11 +182,10 @@ pub async fn caption(
     cmd.arg("-ngl").arg(if forced_cpu { "0" } else { "99" });
     // Pin to the discrete GPU on hybrid iGPU+dGPU systems (no-op otherwise);
     // skipped under forced-CPU so we don't re-engage the evacuated GPU.
-    if !forced_cpu {
-        if let Some(dev) = discrete_gpu_device(&runner.binary, &cancel).await? {
+    if !forced_cpu
+        && let Some(dev) = discrete_gpu_device(&runner.binary, &cancel).await? {
             cmd.arg("--device").arg(dev);
         }
-    }
     verified.recheck(cancel.clone()).await?;
     let memory_mb = model_mb.checked_add(512)
         .ok_or_else(|| super::native_admission::HostAdmissionError(anyhow!("VLM CLI host estimate overflow")))?;

@@ -18,17 +18,17 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use fileid_engine::db::zero_byte::{
-    apply_validated_zero_byte_files, finish_zero_byte_mutation, validate_zero_byte_files,
-    ZeroByteObservation,
+    ZeroByteObservation, apply_validated_zero_byte_files, finish_zero_byte_mutation,
+    validate_zero_byte_files,
 };
 use fileid_engine::pipeline::discovery::FileKind;
-use rusqlite::{params, OptionalExtension as _};
+use rusqlite::{OptionalExtension as _, params};
 use walkdir::WalkDir;
 
 use fileid_engine::pipeline::dbwriter::nfc_path_search;
 use fileid_engine::util::path_safety::{stable_path_hash, strip_extended_length};
 
-use crate::context::{display_path, print_json, terminal_text, Ctx};
+use crate::context::{Ctx, display_path, print_json, terminal_text};
 
 const TEXT_CAP_BYTES: u64 = 4 * 1024 * 1024;
 const DB_BATCH_SIZE: usize = 500;

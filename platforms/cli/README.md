@@ -36,7 +36,7 @@ cargo build --release
 ./target/release/fileid --help
 ```
 
-Rust 1.90 is pinned in `rust-toolchain.toml`. The engine is a path dependency,
+Rust 1.98 is pinned in `rust-toolchain.toml`. The engine is a path dependency,
 so there is no separate library build step.
 
 ## Quick start

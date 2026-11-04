@@ -313,14 +313,13 @@ impl FrameModel for ScriptedModel {
         }
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let readable = image::image_dimensions(image).is_ok();
-        if let Some((after, database, id)) = &self.pause_after {
-            if call + 1 == *after {
+        if let Some((after, database, id)) = &self.pause_after
+            && call + 1 == *after {
                 database
                     .lock()
                     .execute("UPDATE catalog_jobs SET state='paused' WHERE id=?1", [id])
                     .unwrap();
             }
-        }
         let text = self.captions[call % self.captions.len()].to_owned();
         std::future::ready(if readable {
             Ok(text)
