@@ -13,7 +13,7 @@
 torch==2.13.0
 torchvision==0.28.0
 numpy==1.26.4
-pillow==13.0.0
+pillow==13.0.0          # needs Python >= 3.11 (setup-dev builds .venv-ramplus with python3.11)
 
 # RAM++ model deps (the ones `recognize-anything` forgets to pull):
 timm==0.9.16            # keeps the `timm.models.layers` shim ram imports (gone in 1.0)
