@@ -87,7 +87,7 @@ fn folder_path(conn: &Connection, reference: &str, context: &Context<'_>) -> Res
             } else {
                 let pattern = format!("%/{}/%", chat_facts::like_escape(name));
                 conn.query_row(
-                    "SELECT substr(path_text,1,instr(lower(path_text),lower(?2))+length(?2)-2) FROM files WHERE path_text LIKE ?1 ESCAPE '\\' ORDER BY length(path_text),id LIMIT 1",
+                    "SELECT substr(path_text,1,instr(lower(replace(path_text,char(92),'/')),lower(?2))+length(?2)-2) FROM files WHERE replace(path_text,char(92),'/') LIKE ?1 ESCAPE '\\' ORDER BY length(path_text),id LIMIT 1",
                     params![pattern, format!("/{name}/")],
                     |row| row.get(0),
                 )
@@ -99,7 +99,15 @@ fn folder_path(conn: &Connection, reference: &str, context: &Context<'_>) -> Res
                 Some(rest) => home().map(|home| format!("{home}{rest}")),
                 None => Some(path.to_owned()),
             };
-            expanded.map(|path| if path.len() > 1 { path.trim_end_matches(['/', '\\']).to_owned() } else { path })
+            expanded.map(|path| {
+                let trimmed = path.trim_end_matches(['/', '\\']);
+                // A root ("/", "D:\") keeps its separator: "D:" alone is drive-relative.
+                if trimmed.is_empty() || trimmed.ends_with(':') {
+                    path[..(trimmed.len() + 1).min(path.len())].to_owned()
+                } else {
+                    trimmed.to_owned()
+                }
+            })
         }
     })
 }
@@ -220,6 +228,14 @@ pub(crate) fn resolve(conn: &Connection, intent: &Intent, context: &Context<'_>)
                 return Ok(Resolution::say("I couldn't find that folder. Choose it in Library to scan it."));
             };
             let mut proposed = action(context, "scanFolder", format!("Scan {}", display(&path)), format!("Adds the files in {path} to the library. Nothing is moved or changed."));
+            proposed.path = Some(path);
+            finish(proposed, vec![])
+        }
+        "rescan" if intent.folder.as_deref().is_some_and(|folder| folder != "library") => {
+            let Some(path) = folder(intent.folder.as_ref())?.filter(|path| Path::new(path).is_absolute() && Path::new(path).is_dir()) else {
+                return Ok(Resolution::say("I couldn't find that folder. Choose it in Library to rescan it."));
+            };
+            let mut proposed = action(context, "rescan", format!("Rescan {}", display(&path)), format!("Checks {path} for new and changed files. Nothing is moved or changed."));
             proposed.path = Some(path);
             finish(proposed, vec![])
         }
@@ -717,6 +733,19 @@ mod tests {
 
     fn context<'a>(chat: Option<&'a ChatContext>, people: &'a KnownPeople, events: &'a KnownEvents, text: &'a str) -> Context<'a> {
         Context { request_id: "r", text, chat, people, events, source: "parser" }
+    }
+
+    #[test]
+    fn named_folders_resolve_in_windows_catalogs() {
+        let conn = crate::db::test_support::memory_db();
+        crate::db::test_support::insert_file(&conn, 1, "C:\\Users\\a\\Pictures\\Trip\\x.jpg", "image");
+        let (people, events) = (KnownPeople::new(), KnownEvents::new());
+        let chat = ChatContext { library_root: Some("C:\\Users\\a".into()), ..ChatContext::default() };
+        let context = context(Some(&chat), &people, &events, "organize my Trip folder");
+        assert_eq!(folder_path(&conn, "named:Trip", &context).unwrap().as_deref(), Some("C:\\Users\\a\\Pictures\\Trip"));
+        for (typed, resolved) in [("D:\\", "D:\\"), ("D:\\Photos\\", "D:\\Photos"), ("/", "/"), ("/lib/Photos/", "/lib/Photos")] {
+            assert_eq!(folder_path(&conn, typed, &context).unwrap().as_deref(), Some(resolved), "{typed}");
+        }
     }
 
     #[test]

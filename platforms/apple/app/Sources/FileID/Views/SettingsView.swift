@@ -20,6 +20,8 @@ struct SettingsTab: View {
             VStack(alignment: .leading, spacing: 20) {
                 AppearanceCard()
 
+                LocationsCard(engine: engine)
+
                 // ─── User-facing settings (always visible) ───────────────
 
                 Panel(padding: 16) {

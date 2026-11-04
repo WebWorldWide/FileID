@@ -85,6 +85,7 @@ public final class EngineClient {
     public private(set) var deepAnalyzeComplete: DeepAnalyzeComplete?
     public private(set) var modelDownloadProgress: ModelDownloadProgress?
     public private(set) var benchmarkProgress: BenchmarkProgress?
+    public private(set) var libraryRoots: [LibraryRoot] = []
     public private(set) var benchmarkResults: [String: ModelBenchmark] = [:]
     public private(set) var benchmarkMessage: (modelKind: String, text: String)?
     public private(set) var benchmarkModelKind: String?
@@ -789,6 +790,9 @@ public final class EngineClient {
         //    equivalent flows are synchronous (per-tab actions), so these
         //    aren't consumed here yet; they're decoded so a shared/
         //    cross-platform engine doesn't wedge the wire. ──
+        case .rootsList(let list):
+            guard list.requestID.hasPrefix("roots-") else { break }
+            libraryRoots = list.roots
         case .modelCatalog(let catalog):
             for model in catalog.models { if let result = model.benchmark { benchmarkResults[model.id] = result } }
         case .benchmarkProgress(let progress):
@@ -847,6 +851,10 @@ public final class EngineClient {
         autoPilotActive = false
         isPaused = false
         queueState = QueueState(running: nil, pending: [], totalEtaSeconds: nil)
+        // Keep the counters as context, but a scan the dead engine was running
+        // can never report its terminal phase: left live, the sidebar offers
+        // only Pause/Stop against a jobless engine and hides Scan again.
+        lastProgress = lastProgress?.settledAfterEngineExit()
         // Signal views that own their in-flight UI (e.g. Deep Analyze's
         // StreamCard + inert Cancel) to reset — the engine can no longer
         // emit the terminal event that would clear them.
@@ -1341,6 +1349,11 @@ public final class EngineClient {
         send(.cancelBenchmark)
     }
 
+    /// Asks the engine for the scanned locations; the answer lands in `libraryRoots`.
+    public func refreshLibraryRoots() {
+        send(.listRoots(requestID: "roots-" + UUID().uuidString.prefix(8).lowercased()))
+    }
+
     /// Pulls stored benchmark results for this Mac.
     public func refreshModelCatalog() {
         send(.listModels(requestID: "catalog-" + UUID().uuidString.prefix(8).lowercased(), role: nil))
@@ -1367,6 +1380,16 @@ public final class EngineClient {
 }
 
 extension ScanProgress {
+    func settledAfterEngineExit() -> ScanProgress {
+        switch phase {
+        case .completed, .cancelled, .failed, .idle: return self
+        case .discovering, .tagging, .postScan:
+            return ScanProgress(sessionID: sessionID, phase: .failed, total: total, discovered: discovered,
+                                processed: processed, failed: failed, filesPerSecond: 0, etaSeconds: nil,
+                                residentMB: residentMB, availableMB: availableMB)
+        }
+    }
+
     /// True when `self` is a fresher scan-progress snapshot than `prior`
     /// and should replace it. Snapshots reach the main actor as
     /// independent unstructured Tasks the runtime may reorder; a stale

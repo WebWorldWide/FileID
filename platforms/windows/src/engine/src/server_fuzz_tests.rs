@@ -454,7 +454,11 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
                 continue;
             }
             *stats.entry("lines").or_default() += 1;
+            // Parsing a multi-megabyte random frame in a debug build on a starved CI runner can take
+            // seconds by itself; that is input size, not a hang, so the budgets below grow by it.
+            let parse_started = std::time::Instant::now();
             let mut decoded: Option<IpcCommand> = serde_json::from_str(trimmed).ok();
+            let parse_cost = parse_started.elapsed() * 3;
             let tag = decoded.as_ref().and_then(|c| serde_json::to_value(&c.payload).ok()).and_then(|v| v.as_object()?.keys().next().cloned());
             let valid = decoded.as_mut().map(|c| ipc::normalize_and_validate_command(&mut c.payload).is_ok());
             match (&tag, valid) {
@@ -476,7 +480,7 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             }
             let started = std::time::Instant::now();
             let handled = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
+                std::time::Duration::from_secs(15) + parse_cost,
                 futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(handle_line(&d, &line))),
             )
             .await;
@@ -494,7 +498,7 @@ fn ipc_fuzzer_never_panics_hangs_or_drops_an_error() {
             if let Some(tag) = &tag {
                 dispatched_tags.insert(tag.clone());
             }
-            if started.elapsed() > std::time::Duration::from_secs(5) {
+            if started.elapsed() > std::time::Duration::from_secs(5) + parse_cost {
                 failures
                     .entry(format!("slow dispatch of {}", tag.as_deref().unwrap_or("?")))
                     .or_insert(format!("{:?} after {recent:?}: {sample}", started.elapsed()));

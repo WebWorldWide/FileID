@@ -102,6 +102,7 @@ impl Sidebar {
             .valign(gtk::Align::Start)
             .tooltip_text("Dismiss")
             .build();
+        dismiss.update_property(&[gtk::accessible::Property::Label("Dismiss")]);
         let act_dismiss = act.clone();
         dismiss.connect_clicked(move |_| act_dismiss(Action::DismissNote));
         note.append(&dismiss);
@@ -369,6 +370,7 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
         .tooltip_text("Show scan details")
         .visible(false)
         .build();
+    details_toggle.update_property(&[gtk::accessible::Property::Label("Scan details")]);
     step_row.append(&details_toggle);
     pipeline.append(&step_row);
     let sub = label("", &["scan-sub"]);

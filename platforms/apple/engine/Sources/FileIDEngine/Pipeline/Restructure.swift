@@ -1465,6 +1465,20 @@ public enum Restructure {
                     continue
                 }
             }
+            // An undo killed between its move and its row update already put these bytes
+            // home; only the row still names the group folder.
+            if !recordUndo && !FileManager.default.fileExists(atPath: p.oldPath)
+                && Self.fileRefMatches(dbRef: live.fileRef, currentRef: Discovery.inode(of: plannedURL)) {
+                let homePath = plannedURL.path
+                try? await database.pool.write { db in
+                    try db.execute(
+                        sql: "UPDATE OR ABORT files SET path_text = ?, path_hash = ?, path_search = ? WHERE id = ? AND path_text = ?",
+                        arguments: [homePath, StablePathHash.hash(homePath),
+                                    homePath.precomposedStringWithCanonicalMapping, p.fileID, live.path])
+                }
+                skipped += 1
+                continue
+            }
             // R-#14 same-path SWAP guard: the path check above only proves the DB row
             // still NAMES this source — not that the file currently AT that path is the
             // one we planned to move. If a different file was dropped at the same path in

@@ -35,10 +35,8 @@ public actor DeepAnalyze {
     private var loadedKind: AIModelKind?
     private var cancelRequested: Bool = false
     private var currentAnalysisTask: Task<AnalysisResult, Never>?
-    private var prewarmTask: Task<Void, Never>?
-    /// Honored by setPrewarmTask if a Cancel arrives before the
-    /// JobQueue dispatches the work.
-    private var prewarmCancelPending: Bool = false
+    /// Keyed so a finishing prewarm only drops its own handle, never a concurrent one's.
+    private var prewarmTasks: [UUID: Task<Void, Never>] = [:]
 
     /// Single-flight handle for an in-progress model load. A
     /// prewarm and a Deep Analyze run that race share THIS one task instead
@@ -103,8 +101,13 @@ public actor DeepAnalyze {
         case compact
     }
 
-    nonisolated static func replyFormat(environment: [String: String] = ProcessInfo.processInfo.environment) -> ReplyFormat {
-        environment["FILEID_VLM_FORMAT"].flatMap(ReplyFormat.init(rawValue:)) ?? .sections
+    /// Qwen3-VL 2B ignores the one-sentence rule in sections form (46% more tokens,
+    /// 6 of 20 photos looped, 6 lost TAGS and needed a second image pass) but keeps
+    /// the one-line form. 4B already writes one sentence in sections form and breaks
+    /// the compact line into labelled lines, so every other model keeps sections.
+    nonisolated static func replyFormat(model: AIModelKind?, environment: [String: String] = ProcessInfo.processInfo.environment) -> ReplyFormat {
+        if let forced = environment["FILEID_VLM_FORMAT"].flatMap(ReplyFormat.init(rawValue:)) { return forced }
+        return model == .qwen3VL2B ? .compact : .sections
     }
 
     /// Our greedy loop (early stop, optional prompt lookup) instead of the library's stream.
@@ -154,6 +157,8 @@ public actor DeepAnalyze {
         if gate.bail() { task.cancel() }
     }
     public func clearCancel()   { cancelRequested = false }
+    /// Stops only the generation in flight; a batch around it keeps going.
+    func cancelCurrentAnalysis() { currentAnalysisTask?.cancel() }
     public func isCancelled() -> Bool { cancelRequested }
 
     func answerCatalog(prompt: String, onToken: @escaping @Sendable (String) async -> Void) async throws -> String {
@@ -224,21 +229,25 @@ public actor DeepAnalyze {
         // the shared load only when no other caller (a concurrent run) is still
         // joined to it. Cancelling loadTask directly here would abort a joined
         // run's load too.
-        if let task = prewarmTask {
-            task.cancel()
-        } else {
-            prewarmCancelPending = true
-        }
+        for task in prewarmTasks.values { task.cancel() }
     }
 
-    public func setPrewarmTask(_ task: Task<Void, Never>?) {
-        self.prewarmTask = task
-        if let task, prewarmCancelPending {
-            prewarmCancelPending = false
-            task.cancel()
+    /// Registers the task before its body can reach the actor, so its own
+    /// completion can never run ahead of the registration.
+    @discardableResult
+    public func startPrewarm(_ work: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        let id = UUID()
+        let task = Task.detached(priority: .userInitiated) { [weak self] in
+            await work()
+            await self?.finishPrewarm(id)
         }
-        if task == nil { prewarmCancelPending = false }
+        prewarmTasks[id] = task
+        return task
     }
+
+    private func finishPrewarm(_ id: UUID) { prewarmTasks[id] = nil }
+
+    var activePrewarmCount: Int { prewarmTasks.count }
 
     /// Idefics3 and SmolVLM tile images at a fixed size and crash on any other.
     nonisolated static func acceptsResize(_ context: ModelContext) -> Bool {
@@ -814,7 +823,7 @@ public actor DeepAnalyze {
 
         let sceneCaption = sceneCaption && boxCI != nil
         let mergedTags = !sceneCaption && Self.mergedTagsEnabled() && boxCI != nil
-        let format: ReplyFormat = mergedTags ? Self.replyFormat() : .sections
+        let format: ReplyFormat = mergedTags ? Self.replyFormat(model: loadedKind) : .sections
         let systemPrompt = sceneCaption ? Self.sceneSystemPrompt : Self.analysisSystemPrompt(
             mediaKind: mediaKind,
             fileExtension: imageURL.pathExtension,

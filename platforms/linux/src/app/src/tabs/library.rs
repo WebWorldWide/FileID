@@ -777,11 +777,13 @@ fn open_preview(
         .css_classes(["flat"])
         .tooltip_text("Previous (←)")
         .build();
+    prev_btn.update_property(&[gtk::accessible::Property::Label("Previous")]);
     let next_btn = gtk::Button::builder()
         .icon_name("go-next-symbolic")
         .css_classes(["flat"])
         .tooltip_text("Next (→)")
         .build();
+    next_btn.update_property(&[gtk::accessible::Property::Label("Next")]);
     let counter = gtk::Label::builder().css_classes(["dim-label", "numeric"]).build();
     header.pack_start(&prev_btn);
     header.pack_start(&counter);
@@ -791,11 +793,13 @@ fn open_preview(
         .css_classes(["flat"])
         .tooltip_text("Open in the default app")
         .build();
+    open_btn.update_property(&[gtk::accessible::Property::Label("Open in the default app")]);
     let reveal_btn = gtk::Button::builder()
         .icon_name("folder-open-symbolic")
         .css_classes(["flat"])
         .tooltip_text("Show in Files")
         .build();
+    reveal_btn.update_property(&[gtk::accessible::Property::Label("Show in Files")]);
     header.pack_end(&open_btn);
     header.pack_end(&reveal_btn);
 

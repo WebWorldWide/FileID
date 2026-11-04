@@ -79,6 +79,8 @@ pub enum CommandPayload {
     HealthCheck(HealthCheckPayload),
     #[serde(rename = "requestStatus")]
     RequestStatus(Empty),
+    #[serde(rename = "listRoots")]
+    ListRoots(ListRootsPayload),
     #[serde(rename = "listModels")]
     ListModels(ListModelsPayload),
     #[serde(rename = "benchmarkModel")]
@@ -515,6 +517,42 @@ mod health_tests {
             assert!(!HealthCheckPayload { request_id }.is_valid());
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListRootsPayload {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+}
+
+impl ListRootsPayload {
+    pub fn is_valid(&self) -> bool {
+        HealthCheckPayload { request_id: self.request_id.clone() }.is_valid()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryRoot {
+    pub id: i64,
+    pub path: String,
+    pub display: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub online: bool,
+    pub file_count: i64,
+    pub total_bytes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scan_at: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RootsList {
+    #[serde(rename = "requestID")]
+    pub request_id: String,
+    pub roots: Vec<LibraryRoot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1021,6 +1059,8 @@ pub enum EventPayload {
     Ready(Wrap<EngineInfo>),
     #[serde(rename = "healthCheckResult")]
     HealthCheckResult(Wrap<HealthCheckResult>),
+    #[serde(rename = "rootsList")]
+    RootsList(Wrap<RootsList>),
     #[serde(rename = "modelCatalog")]
     ModelCatalog(Wrap<ModelCatalog>),
     #[serde(rename = "benchmarkProgress")]

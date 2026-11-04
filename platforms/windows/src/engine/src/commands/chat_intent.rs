@@ -395,8 +395,15 @@ pub fn parse_intent(text: &str) -> Option<Intent> {
         }
     }
     let library_words = ["the", "my", "library", "files", "scan", "index", "catalog", "everything", "again", "all"];
-    if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(&verb) && rest.iter().all(|word| library_words.contains(&word.as_str())) {
-        return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
+    if ["rescan", "re-scan", "reindex", "re-index", "refresh", "update"].contains(&verb) {
+        if rest.iter().all(|word| library_words.contains(&word.as_str())) {
+            return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
+        }
+        if ["rescan", "re-scan", "reindex", "re-index"].contains(&verb) {
+            if let Some(folder) = folder_reference(rest, &cased[1..], text).filter(|folder| folder != "library") {
+                return Some(Intent { folder: Some(folder), ..Intent::new("rescan") });
+            }
+        }
     }
     if starts(&words, &["check", "for", "new", "files"]) {
         return Some(Intent { folder: Some("library".into()), ..Intent::new("rescan") });
@@ -548,6 +555,7 @@ pub fn parse_question(text: &str) -> Question {
             "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
             "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
             "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
+            "my", "library", "collection", "whole", "entire", "altogether", "overall", "everything", "all",
         ];
         for (index, word) in words.iter().enumerate() {
             if filler.contains(&word.as_str()) {
@@ -602,6 +610,11 @@ fn format_extensions(word: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+const KIND_WORDS: [&str; 22] = [
+    "photo", "photos", "picture", "pictures", "image", "images", "video", "videos", "clip", "clips", "document", "documents", "pdf", "pdfs", "audio",
+    "music", "song", "songs", "people", "person", "face", "faces",
+];
+
 const OVERVIEW_WORDS: [&str; 26] = [
     "what", "whats", "is", "in", "my", "the", "library", "files", "collection", "tell", "me", "about", "give", "an", "overview", "summary", "of",
     "summarize", "summarise", "describe", "everything", "all", "do", "i", "have", "got",
@@ -616,6 +629,34 @@ fn library_measure(words: &[String]) -> Option<(&'static str, &'static str)> {
     }
     if words.iter().all(|word| OVERVIEW_WORDS.contains(&word.as_str()))
         && has(&words, &["library", "collection", "overview", "summary", "summarize", "summarise"])
+    {
+        return Some(("overview", "newest"));
+    }
+    // "tell me about my Adlon library": one name before "library", never after it ("library of dogs" is a search).
+    let unknown: Vec<(usize, &String)> = words.iter().enumerate().filter(|(_, word)| !OVERVIEW_WORDS.contains(&word.as_str())).collect();
+    if let [(at, word)] = unknown.as_slice() {
+        if let Some(library) = words.iter().position(|word| word == "library" || word == "collection") {
+            if *at < library
+                && ["tell", "describe", "summarize", "summarise", "give", "show", "what", "whats"].contains(&words[0].as_str())
+                && !KIND_WORDS.contains(&word.as_str())
+                && format_extensions(word).is_none()
+            {
+                return Some(("overview", "newest"));
+            }
+        }
+    }
+    // "what file formats do I have", "which extensions are in my library"
+    if has(&words, &["format", "formats", "extension", "extensions"])
+        && has(&words, &["what", "which", "each", "every", "per", "by", "breakdown", "different", "list"])
+        && !has(&words, &["folder", "folders", "directory"])
+        && (!has(&words, &["in", "inside", "under", "from"]) || has(&words, &["library", "collection"]))
+    {
+        return Some(("formats", "newest"));
+    }
+    // "how many of each file type", "break down my files by type", "what file types do I have"
+    if (has(&words, &["type", "types", "kind", "kinds"]) && has(&words, &["each", "every", "per", "by", "breakdown", "different"])
+        || has(&words, &["type", "types", "kinds"]) && has(&words, &["what", "which"]) && has(&words, &["files", "file"]))
+        && !has(&words, &["folder", "folders", "in", "inside", "under", "from"])
     {
         return Some(("overview", "newest"));
     }

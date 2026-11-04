@@ -96,25 +96,39 @@ enum TrashJournal {
         try save(load(at: url) + [batch], at: url)
     }
 
-    static func take(_ id: String, at url: URL = defaultURL) -> Batch? {
+    /// Replaces the batch with the same id, or appends it. A trash batch is rewritten after
+    /// every file so a killed engine leaves each moved file restorable.
+    static func upsert(_ batch: Batch, at url: URL = defaultURL) throws {
         lock.lock(); defer { lock.unlock() }
-        var batches = load(at: url)
-        guard let index = batches.firstIndex(where: { $0.id == id }) else { return nil }
-        let batch = batches.remove(at: index)
-        try? save(batches, at: url)
-        return batch
+        try save(load(at: url).filter { $0.id != batch.id } + [batch], at: url)
     }
 
-    static func putBack(_ batch: Batch, at url: URL = defaultURL) {
+    static func find(_ id: String, at url: URL = defaultURL) -> Batch? {
         lock.lock(); defer { lock.unlock() }
-        try? save(load(at: url) + [batch], at: url)
+        return load(at: url).first { $0.id == id }
+    }
+
+    /// Drops the batch once a restore pass is over, keeping only the items still to retry.
+    static func finish(_ batch: Batch, leftover: [Item], at url: URL = defaultURL) {
+        lock.lock(); defer { lock.unlock() }
+        let rest = load(at: url).filter { $0.id != batch.id }
+        try? save(leftover.isEmpty ? rest : rest + [Batch(id: batch.id, createdAt: batch.createdAt, items: leftover)], at: url)
+    }
+
+    /// A killed restore can leave a file home with its rows not yet re-inserted; the
+    /// snapshot's inode proves the file at the original path is that same file.
+    static func alreadyRestored(_ item: Item, original: URL, trashed: URL) -> Bool {
+        guard !FileManager.default.fileExists(atPath: trashed.path),
+              let ref = item.rows.first(where: { $0.table == "files" })?.columns["file_ref"]?.int else { return false }
+        return Restructure.fileRefMatches(dbRef: ref, currentRef: Discovery.inode(of: original))
     }
 
     /// Moves each file back from the Trash and re-inserts its catalog rows.
-    /// Items that cannot be restored stay in the journal for a later retry.
+    /// The batch stays journaled until the pass ends, so a killed restore can be retried;
+    /// items that cannot be restored stay in the journal for a later retry.
     static func restore(batchID: String, database: Database, journal: URL = defaultURL,
                         move: (URL, URL) throws -> Void = { try FileManager.default.moveItem(at: $0, to: $1) }) async -> BulkActionResult {
-        guard let batch = take(batchID, at: journal) else {
+        guard let batch = find(batchID, at: journal) else {
             return BulkActionResult(action: "restoreFromTrash", succeeded: 0, failed: 1,
                                     messages: [BulkActionItem(ok: false, message: "Nothing to put back: this Trash batch is unknown or already restored.")])
         }
@@ -122,21 +136,24 @@ enum TrashJournal {
         var leftover: [Item] = []
         for item in batch.items {
             let original = URL(fileURLWithPath: item.originalPath), trashed = URL(fileURLWithPath: item.trashedPath)
-            guard !FileManager.default.fileExists(atPath: original.path) else {
-                messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Cannot restore: another file is already at \(original.lastPathComponent)."))
-                continue
-            }
-            guard FileManager.default.fileExists(atPath: trashed.path) else {
-                messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "\(original.lastPathComponent) is no longer in the Trash."))
-                continue
-            }
-            do {
-                try FileManager.default.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try move(trashed, original)
-            } catch {
-                leftover.append(item)
-                messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Could not put \(original.lastPathComponent) back."))
-                continue
+            if FileManager.default.fileExists(atPath: original.path) {
+                guard alreadyRestored(item, original: original, trashed: trashed) else {
+                    messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Cannot restore: another file is already at \(original.lastPathComponent)."))
+                    continue
+                }
+            } else {
+                guard FileManager.default.fileExists(atPath: trashed.path) else {
+                    messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "\(original.lastPathComponent) is no longer in the Trash."))
+                    continue
+                }
+                do {
+                    try FileManager.default.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try move(trashed, original)
+                } catch {
+                    leftover.append(item)
+                    messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Could not put \(original.lastPathComponent) back."))
+                    continue
+                }
             }
             do {
                 try await database.pool.write { db in
@@ -149,7 +166,7 @@ enum TrashJournal {
                 messages.append(BulkActionItem(fileID: item.fileID, ok: false, message: "Restored the file, but the catalog update failed; rescan the folder."))
             }
         }
-        if !leftover.isEmpty { putBack(Batch(id: batch.id, createdAt: batch.createdAt, items: leftover), at: journal) }
+        finish(batch, leftover: leftover, at: journal)
         return BulkActionResult(action: "restoreFromTrash", succeeded: messages.filter(\.ok).count,
                                 failed: messages.filter { !$0.ok }.count, messages: messages)
     }

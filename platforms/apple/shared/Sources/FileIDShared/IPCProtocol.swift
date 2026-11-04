@@ -35,6 +35,9 @@ public struct IPCCommand: Codable, Sendable {
         case chatRequest(request: ChatRequest)
         case toolRequest(request: ToolRequest)
         case healthCheck(requestID: String)
+        /// Library locations the catalog has scanned, with online state and
+        /// file counts. Read-only. Replies with `rootsList` (schema 1.18.0+).
+        case listRoots(requestID: String)
         /// Read-only model catalog with install state, hardware fit and any
         /// local benchmark. Replies with `modelCatalog` (schema 1.14.0+).
         case listModels(requestID: String, role: String?)
@@ -234,6 +237,7 @@ public struct IPCEvent: Codable, Sendable {
         case toolResponse(ToolResponse)
         case ready(EngineInfo)
         case healthCheckResult(HealthCheckResult)
+        case rootsList(RootsList)
         case modelCatalog(ModelCatalog)
         case benchmarkProgress(BenchmarkProgress)
         case benchmarkResult(BenchmarkResult)
@@ -268,6 +272,36 @@ public struct IPCEvent: Codable, Sendable {
 }
 
 // MARK: - DTOs
+
+public struct LibraryRoot: Codable, Sendable, Equatable {
+    public let id: Int64
+    public let path: String
+    public let display: String
+    public let kind: String
+    public let enabled: Bool
+    public let online: Bool
+    public let fileCount: Int64
+    public let totalBytes: Int64
+    public let lastScanAt: Double?
+    public let lastStatus: String?
+
+    public init(id: Int64, path: String, display: String, kind: String, enabled: Bool, online: Bool,
+                fileCount: Int64, totalBytes: Int64, lastScanAt: Double?, lastStatus: String?) {
+        self.id = id; self.path = path; self.display = display; self.kind = kind; self.enabled = enabled
+        self.online = online; self.fileCount = fileCount; self.totalBytes = totalBytes
+        self.lastScanAt = lastScanAt; self.lastStatus = lastStatus
+    }
+}
+
+public struct RootsList: Codable, Sendable, Equatable {
+    public let requestID: String
+    public let roots: [LibraryRoot]
+
+    public init(requestID: String, roots: [LibraryRoot]) {
+        self.requestID = requestID
+        self.roots = roots
+    }
+}
 
 public struct ModelCatalog: Codable, Sendable {
     public let requestID: String

@@ -249,6 +249,7 @@ impl ScanSession {
             // it is installed so a rescan backfills their embeddings (and faces,
             // which run in the same pass) — lockstep with macOS Discovery.
             let image_clip_gate = if clip_installed() { SKIP_SET_IMAGE_CLIP_GATE } else { "" };
+            let video_clip_gate = video_clip_gate();
             // R4-01: drop the tautological `scanned_at >= modified_at` predicate
             // (both are stored at scan time, so it's true for every scanned file
             // and STAYS true after an edit). Fetch size+mtime instead and let
@@ -258,13 +259,13 @@ impl ScanSession {
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE path_text >= ?1 AND path_text < ?2 \
                      AND failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{video_clip_gate}{text_embed_gate}"
                 )
             } else {
                 format!(
                     "SELECT path_text, size_bytes, modified_at FROM files \
                      WHERE failed = 0 \
-                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{text_embed_gate}"
+                     {content_hash_gate}{model_clip_gate}{image_clip_gate}{video_clip_gate}{text_embed_gate}"
                 )
             };
             if let Ok(mut stmt) = conn.prepare(&select_sql) {
@@ -1042,6 +1043,24 @@ pub(crate) const SKIP_SET_IMAGE_CLIP_GATE: &str =
     " AND NOT (kind = 'image' AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
                                             WHERE clip_embeddings.file_id = files.id))";
 
+/// A macOS video catalogued while FileID's FFmpeg runtime was absent has no
+/// frame and no CLIP vector; keep it out of the skip set once frames are
+/// available so a rescan backfills it. Appended only on macOS (see `video_clip_gate`).
+pub(crate) const SKIP_SET_VIDEO_CLIP_GATE: &str =
+    " AND NOT (kind = 'video' AND NOT EXISTS (SELECT 1 FROM clip_embeddings \
+                                            WHERE clip_embeddings.file_id = files.id))";
+
+fn video_clip_gate() -> &'static str {
+    if cfg!(all(not(windows), not(target_os = "linux")))
+        && clip_installed()
+        && crate::pipeline::tagging::video_frames_available()
+    {
+        SKIP_SET_VIDEO_CLIP_GATE
+    } else {
+        ""
+    }
+}
+
 fn clip_installed() -> bool {
     crate::models::mobileclip::default_weights_path().is_ok_and(|p| p.exists())
 }
@@ -1799,6 +1818,27 @@ mod tests {
             skip.contains("C:\\M\\corrupt.obj"),
             "an un-renderable .obj whose render already ran (text_stage_done=1) must NOT re-walk forever"
         );
+    }
+
+    #[test]
+    fn video_clip_gate_reprocesses_frameless_videos_only() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (id INTEGER PRIMARY KEY, path_text TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+                 failed INTEGER NOT NULL DEFAULT 0, content_hash BLOB);
+             CREATE TABLE clip_embeddings (file_id INTEGER PRIMARY KEY, embedding BLOB, model TEXT);
+             INSERT INTO files (id, path_text, kind, content_hash) VALUES
+                 (1, '/v/frameless.mov', 'video', X'00'), (2, '/v/embedded.mov', 'video', X'00'),
+                 (3, '/a/song.m4a', 'audio', X'00');
+             INSERT INTO clip_embeddings (file_id, embedding, model) VALUES (2, X'00', 'clip');",
+        )
+        .unwrap();
+        let sql = format!("SELECT path_text FROM files WHERE failed = 0 {SKIP_SET_CONTENT_HASH_GATE}{SKIP_SET_VIDEO_CLIP_GATE}");
+        let skip: std::collections::HashSet<String> =
+            conn.prepare(&sql).unwrap().query_map([], |r| r.get(0)).unwrap().flatten().collect();
+        assert!(!skip.contains("/v/frameless.mov"));
+        assert!(skip.contains("/v/embedded.mov"));
+        assert!(skip.contains("/a/song.m4a"));
     }
 }
 

@@ -15,6 +15,25 @@ public sealed record HealthCheckResult(
     [property: JsonPropertyName("requestID")] string RequestId,
     int Pid);
 
+/// <summary>One scanned location (schema 1.18.0). <c>Online</c> means the folder exists and is
+/// not empty right now; an unplugged drive reads offline and its catalog rows are kept.</summary>
+public sealed record LibraryRoot(
+    long Id,
+    string Path,
+    string Display,
+    string Kind,
+    bool Enabled,
+    bool Online,
+    long FileCount,
+    long TotalBytes,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? LastScanAt = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LastStatus = null);
+
+/// <summary>Reply to <c>listRoots</c>.</summary>
+public sealed record RootsList(
+    [property: JsonPropertyName("requestID")] string RequestId,
+    IReadOnlyList<LibraryRoot> Roots);
+
 /// <summary>Reply to <c>listModels</c>: curated and catalog models for this
 /// platform with install state, hardware fit and any local benchmark.</summary>
 public sealed record ModelCatalog(

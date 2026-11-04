@@ -473,6 +473,7 @@ impl DbWriter {
                             // CASE WHEN in the upsert.
                             f.faces_evaluated,
                             f.ocr_stage_ran || f.doc_stage_ran,
+                            f.captured_from_exif,
                         ],
                         |row| row.get(0),
                     )
@@ -788,7 +789,10 @@ const INSERT_FILE_RETURNING_ID_SQL: &str = r#"
         failed       = excluded.failed,
         error_message= excluded.error_message,
         content_hash = COALESCE(excluded.content_hash, content_hash),
-        file_ref     = COALESCE(excluded.file_ref, file_ref)
+        file_ref     = COALESCE(excluded.file_ref, file_ref),
+        -- ?23: created_at came from the photo's EXIF capture time; a file's
+        -- birth time never replaces the recorded one.
+        created_at   = CASE WHEN ?23 THEN excluded.created_at ELSE created_at END
     RETURNING id
 "#;
 
@@ -1084,6 +1088,7 @@ mod tests {
                 nfc_path_search(&path_text),
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
+                f.captured_from_exif,
             ],
             |row| row.get::<_, i64>(0),
         )?;
@@ -1097,6 +1102,7 @@ mod tests {
             size_bytes: 1234,
             modified_unix: 1_700_000_000.0,
             created_unix: None,
+            captured_from_exif: false,
             scanned_unix: 1_700_000_100.0,
             has_faces: false,
             faces: vec![],
@@ -1219,19 +1225,38 @@ mod tests {
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0, false, false],
+                    row.17, row.18, row.0, false, false, false],
             |r| r.get(0),
         ).expect("first insert returns id");
         let id2: i64 = conn.query_row(
             INSERT_FILE_RETURNING_ID_SQL,
             params![row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
                     row.8, row.9, row.10, row.11, row.12, row.13, row.14, row.15, row.16,
-                    row.17, row.18, row.0, false, false],
+                    row.17, row.18, row.0, false, false, false],
             |r| r.get(0),
         ).expect("ON CONFLICT branch must also return id");
         assert_eq!(id1, id2, "RETURNING must yield stable id across insert + update");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn exif_capture_time_replaces_created_at_but_birth_time_never_does() {
+        let conn = crate::db::test_support::memory_db();
+        let path = "/lib/IMG_DATE.jpg";
+        let upsert = |created: f64, from_exif: bool| {
+            conn.query_row(
+                INSERT_FILE_RETURNING_ID_SQL,
+                params![path, 7_i64, 1_i64, created, 1.0, 1.0, "image", "jpg", None::<i64>, None::<f64>,
+                        0_i64, 0_i64, None::<String>, None::<f64>, None::<f64>, 0_i64, None::<String>,
+                        None::<Vec<u8>>, None::<i64>, path, false, false, from_exif],
+                |r| r.get::<_, i64>(0),
+            ).unwrap();
+            conn.query_row("SELECT CAST(created_at AS INTEGER) FROM files", [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(upsert(1_800_000_000.0, false), 1_800_000_000);
+        assert_eq!(upsert(1_900_000_000.0, false), 1_800_000_000, "a copy's birth time must not replace the recorded date");
+        assert_eq!(upsert(1_200_000_000.0, true), 1_200_000_000, "EXIF capture time corrects a copy date");
     }
 
     /// A re-scan whose vision/EXIF stage produced no values (decode
@@ -1498,6 +1523,7 @@ mod tests {
                 path_search,
                 f.faces_evaluated,
                 f.ocr_stage_ran || f.doc_stage_ran,
+                f.captured_from_exif,
             ],
             |r| r.get(0),
         )

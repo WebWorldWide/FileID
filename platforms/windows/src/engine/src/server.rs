@@ -300,6 +300,10 @@ async fn async_main() -> Result<()> {
     if let Some(db) = db_conn.as_ref() {
         pipeline::restructure_apply::reconcile_pending_path_updates(db);
     }
+    let reclaimed = commands::trash_log::recover_stranded_claims();
+    if reclaimed > 0 {
+        tracing::warn!(reclaimed, "put back files a killed trashFiles left under a claim name");
+    }
 
     let (sink, sink_writer) = Sink::spawn();
 
@@ -1350,6 +1354,10 @@ async fn handle_line(d: &Dispatcher, line: &str) {
             let database = db.cloned();
             let index = catalog_index.cloned();
             spawn_guarded(&sink.clone(), commands::catalog::handle(sink, database, index, payload.request));
+        }
+        CommandPayload::ListRoots(payload) => {
+            let database = db.cloned();
+            spawn_guarded(sink, commands::roots::handle(sink.clone(), database, payload));
         }
         CommandPayload::ListModels(payload) => {
             spawn_guarded(sink, commands::models::handle(sink.clone(), payload));

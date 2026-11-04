@@ -260,8 +260,13 @@ public actor MediaTools {
         guard let id = request.operationID else { throw Failure(text: "Select an export operation.") }
         let (_, stored, state) = try await load(id, database: database)
         guard ["completed", "failed"].contains(state) else { throw Failure(text: "This operation cannot be undone.") }
+        // A kill between linking an output and recording it leaves a pending receipt whose output is already published.
+        func published(_ receipt: Receipt) -> Bool {
+            receipt.output.state == "completed" || (receipt.output.state == "pending" && (receipt.recoveryPath != nil
+                || (try? Self.hash(URL(fileURLWithPath: receipt.output.outputPath))) == receipt.hash))
+        }
         var receipts = stored
-        for receipt in receipts where receipt.output.state == "completed" {
+        for receipt in receipts where published(receipt) {
             let output = URL(fileURLWithPath: receipt.output.outputPath)
             try ReadOnlyLocations.requireSourceMutation(output)
             if let recoveryPath = receipt.recoveryPath, !FileManager.default.fileExists(atPath: output.path), FileManager.default.fileExists(atPath: recoveryPath) { continue }
@@ -271,7 +276,7 @@ public actor MediaTools {
         let directory = recovery.appendingPathComponent("ExportRecovery").appendingPathComponent(id)
         try ReadOnlyLocations.requireWritable(directory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        for index in receipts.indices where receipts[index].output.state == "completed" {
+        for index in receipts.indices where published(receipts[index]) {
             let output = URL(fileURLWithPath: receipts[index].output.outputPath)
             try ReadOnlyLocations.requireSourceMutation(output)
             if let path = receipts[index].recoveryPath, !FileManager.default.fileExists(atPath: output.path), FileManager.default.fileExists(atPath: path), try Self.hash(URL(fileURLWithPath: path)) == receipts[index].hash {

@@ -171,13 +171,11 @@ public actor Discovery {
     }
 
     private static func normalizedExclusionPath(_ url: URL) -> String {
-        stripTrailingSlashes(
-            url.resolvingSymlinksInPath()
-                .standardizedFileURL
-                .path
-                .precomposedStringWithCanonicalMapping
-                .lowercased()
-        )
+        foldedPath(ScanRootGuard.canonicalPath(url.path))
+    }
+
+    private static func foldedPath(_ path: String) -> String {
+        stripTrailingSlashes(path.precomposedStringWithCanonicalMapping.lowercased())
     }
 
     private static func stripTrailingSlashes(_ path: String) -> String {
@@ -191,7 +189,9 @@ public actor Discovery {
 
     private static func isExcluded(_ path: String, by exclusions: [Exclusion]) -> Bool {
         guard !exclusions.isEmpty else { return false }
-        let normalized = normalizedExclusionPath(URL(fileURLWithPath: path))
+        // The enumerator already reports children in realpath form, so only case
+        // and Unicode folding are needed per file — no per-file symlink resolution.
+        let normalized = foldedPath(path)
         return exclusions.contains { exclusion in
             normalized == exclusion.path || normalized.hasPrefix(exclusion.prefix)
         }

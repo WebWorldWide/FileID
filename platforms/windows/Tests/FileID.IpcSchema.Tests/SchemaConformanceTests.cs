@@ -216,6 +216,7 @@ public class SchemaConformanceTests
         new ReassignFaceCommand(10, DestinationPersonId: 2),
         new RequestStatusCommand(),
         new HealthCheckCommand("probe-1"),
+        new ListRootsCommand("roots-1"),
         new ListModelsCommand("models-1", "vision"),
         new BenchmarkModelCommand("bench-1", "qwen3_vl_4b", true),
         new CancelBenchmarkCommand(),
@@ -259,6 +260,10 @@ public class SchemaConformanceTests
         new HealthCheckResultEvent(new HealthCheckResult("probe-1", 1234)),
         new BenchmarkProgressEvent(new BenchmarkProgress("bench-1", "qwen3_vl_4b", "measuring", 3, 12)),
         new BenchmarkResultEvent(new BenchmarkResult("bench-1", "qwen3_vl_4b", "error", "The model is not installed or failed verification")),
+        new RootsListEvent(new RootsList("roots-1", new[]
+        {
+            new LibraryRoot(1, "/Volumes/Photos", "Photos", "external", true, true, 1200, 3_400_000_000, 1_700_000_000.0, "completed"),
+        })),
         new ModelCatalogEvent(new ModelCatalog("models-1", 16, 6144, new[]
         {
             new ModelCatalogItem("qwen3_vl_2b_instruct_gguf_q4_k_m", "Qwen3-VL-2B-Instruct", "Qwen3", "Qwen/Qwen3-VL-2B-Instruct", "vision", "gguf",

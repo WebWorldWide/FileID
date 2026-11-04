@@ -180,6 +180,7 @@ final class ChatActionRunner {
                         finished: { ![.discovering, .tagging, .postScan].contains(engine.lastProgress?.phase) }) {
                 guard let progress = engine.lastProgress else { return "Scan finished." }
                 if progress.phase == .cancelled { return "Scan stopped. Files found so far stay in the library." }
+                if progress.phase == .failed { return "The scan didn't finish. Scan again to pick up where it left off." }
                 return "Scan finished · \(progress.processed.formatted()) files\(progress.failed > 0 ? " · \(progress.failed.formatted()) couldn't be read" : "")."
             }
         case "describeFiles":
@@ -234,10 +235,11 @@ final class ChatActionRunner {
         case "suggestFolderLayout":
             guard let path = action.path else { return }
             let signal = engine.restructurePlanSignal
+            let interrupted = Self.folderJobInterrupted(engine)
             guard engine.planRestructure(libraryRoot: path) else { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
             handoff.navigate(.restructure)
             phases[action.id] = .running("Planning a tidier layout")
-            await watch(action, started: { true }, finished: { engine.restructurePlanSignal != signal }) { [weak self] in
+            await watch(action, started: { true }, finished: { engine.restructurePlanSignal != signal }, interrupted: interrupted) { [weak self] in
                 guard let summary = self?.planSummary(action, engine: engine) else { return "Nothing needs to move." }
                 return "Layout ready: \(summary.count.formatted()) files would move. Nothing has moved yet; review it in Organize Folders or ask Chat to apply it."
             }
@@ -247,11 +249,12 @@ final class ChatActionRunner {
                 return
             }
             let signal = engine.restructureApplyResultSignal
+            let interrupted = Self.folderJobInterrupted(engine)
             guard engine.applyRestructure(libraryRoot: summary.root, moves: summary.moves, planID: summary.planID) else {
                 phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return
             }
             phases[action.id] = .running("Moving files")
-            await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }) {
+            await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }, interrupted: interrupted) {
                 guard let result = engine.restructureApplyResult else { return "Done." }
                 if result.cancelled { return "Stopped after moving \(result.applied.formatted()) files." }
                 return "Moved \(result.applied.formatted()) files\(result.failed > 0 ? " · \(result.failed.formatted()) couldn't move" : "")."
@@ -259,8 +262,12 @@ final class ChatActionRunner {
             if engine.canUndoRestructure {
                 offerUndo(action, label: "Undo moves") {
                     let signal = engine.restructureApplyResultSignal
+                    let interrupted = Self.folderJobInterrupted(engine)
                     guard engine.undoRestructure(libraryRoot: summary.root) else { return "Undo didn't start. Try Organize Folders." }
-                    while engine.restructureApplyResultSignal == signal { try? await Task.sleep(for: .milliseconds(300)) }
+                    while engine.restructureApplyResultSignal == signal {
+                        if let reason = interrupted() { return reason }
+                        try? await Task.sleep(for: .milliseconds(300))
+                    }
                     return "Moved \(engine.restructureApplyResult?.applied.formatted() ?? "the") files back."
                 }
             }
@@ -269,9 +276,10 @@ final class ChatActionRunner {
                 phases[action.id] = .failed("There's no applied layout to undo."); return
             }
             let signal = engine.restructureApplyResultSignal
+            let interrupted = Self.folderJobInterrupted(engine)
             guard engine.undoRestructure(libraryRoot: path) else { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
             phases[action.id] = .running("Moving files back")
-            await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }) {
+            await watch(action, started: { true }, finished: { engine.restructureApplyResultSignal != signal }, interrupted: interrupted) {
                 "Moved \(engine.restructureApplyResult?.applied.formatted() ?? "the") files back."
             }
         case "moveDuplicatesToTrash":
@@ -359,12 +367,43 @@ final class ChatActionRunner {
     }
 
     /// Updates progress until `finished`, then records the result. Gives a
-    /// job up to 5 s to report that it started.
-    private func watch(_ action: ChatAction, started: @escaping () -> Bool, finished: @escaping () -> Bool, result: @escaping () -> String) async {
+    /// job up to 5 s to report that it started. `interrupted` ends the wait
+    /// when the job can no longer report back (engine restart or a rejection).
+    func watch(_ action: ChatAction, started: @escaping () -> Bool, finished: @escaping () -> Bool,
+               interrupted: @escaping () -> String? = { nil }, result: @escaping () -> String) async {
         let deadline = Date().addingTimeInterval(5)
         while !started(), Date() < deadline { try? await Task.sleep(for: .milliseconds(200)) }
-        while !finished() { try? await Task.sleep(for: .milliseconds(300)) }
+        while !finished() {
+            if let reason = interrupted() {
+                if case .running = phase(action) { phases[action.id] = .failed(reason) }
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
         if case .running = phase(action) { phases[action.id] = .done(result()) }
+    }
+
+    func markRunning(_ action: ChatAction, _ text: String) { phases[action.id] = .running(text) }
+
+    nonisolated static let folderJobFailureKinds: Set<String> = [
+        "restructure_busy", "plan_restructure_failed", "apply_restructure", "undo_restructure", "db_unavailable",
+    ]
+
+    /// Why a folder job a card is waiting on will never send its reply.
+    nonisolated static func folderJobInterruption(engineRestarted: Bool, newError: EngineError?) -> String? {
+        if engineRestarted { return "FileID's engine restarted before this finished. Check Organize Folders, then try again." }
+        guard let newError, folderJobFailureKinds.contains(newError.kind) else { return nil }
+        return newError.kind == "restructure_busy"
+            ? "Another folder job is already running. Wait for it to finish, then try again."
+            : "This didn't finish. Check Organize Folders to see what changed, then try again."
+    }
+
+    private static func folderJobInterrupted(_ engine: EngineClient) -> () -> String? {
+        let reset = engine.engineResetSignal, errors = engine.lastErrorSignal
+        return {
+            folderJobInterruption(engineRestarted: engine.engineResetSignal != reset,
+                                  newError: engine.lastErrorSignal != errors ? engine.lastError : nil)
+        }
     }
 
     // MARK: - Settings Chat may change

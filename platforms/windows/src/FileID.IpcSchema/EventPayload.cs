@@ -21,6 +21,7 @@ public sealed record CatalogResponseEvent(CatalogResponse Response) : EventPaylo
 
 public sealed record ReadyEvent(EngineInfo Info) : EventPayload;
 public sealed record HealthCheckResultEvent(HealthCheckResult Result) : EventPayload;
+public sealed record RootsListEvent(RootsList Roots) : EventPayload;
 public sealed record ModelCatalogEvent(ModelCatalog Catalog) : EventPayload;
 public sealed record BenchmarkProgressEvent(BenchmarkProgress Progress) : EventPayload;
 public sealed record BenchmarkResultEvent(BenchmarkResult Result) : EventPayload;
@@ -86,6 +87,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             "catalogResponse" => new CatalogResponseEvent(ReadWrapped<CatalogResponse>(ref reader, options)),
             "ready" => new ReadyEvent(ReadWrapped<EngineInfo>(ref reader, options)),
             "healthCheckResult" => new HealthCheckResultEvent(ReadWrapped<HealthCheckResult>(ref reader, options)),
+            "rootsList" => new RootsListEvent(ReadWrapped<RootsList>(ref reader, options)),
             "modelCatalog" => new ModelCatalogEvent(ReadWrapped<ModelCatalog>(ref reader, options)),
             "benchmarkProgress" => new BenchmarkProgressEvent(ReadWrapped<BenchmarkProgress>(ref reader, options)),
             "benchmarkResult" => new BenchmarkResultEvent(ReadWrapped<BenchmarkResult>(ref reader, options)),
@@ -132,6 +134,7 @@ public sealed class EventPayloadJsonConverter : JsonConverter<EventPayload>
             case CatalogResponseEvent v: WriteWrapped(writer, "catalogResponse", v.Response, options); break;
             case ReadyEvent v: WriteWrapped(writer, "ready", v.Info, options); break;
             case HealthCheckResultEvent v: WriteWrapped(writer, "healthCheckResult", v.Result, options); break;
+            case RootsListEvent v: WriteWrapped(writer, "rootsList", v.Roots, options); break;
             case ModelCatalogEvent v: WriteWrapped(writer, "modelCatalog", v.Catalog, options); break;
             case BenchmarkProgressEvent v: WriteWrapped(writer, "benchmarkProgress", v.Progress, options); break;
             case BenchmarkResultEvent v: WriteWrapped(writer, "benchmarkResult", v.Result, options); break;

@@ -157,6 +157,7 @@ impl SelectedPane {
             .css_classes(["tb-plain"])
             .tooltip_text("Close (Esc)")
             .build();
+        close.update_property(&[gtk::accessible::Property::Label("Close")]);
         close.connect_clicked(move |_| on_close());
         head.append(&close);
         body.append(&head);
@@ -198,11 +199,13 @@ impl SelectedPane {
             .css_classes(["secondary"])
             .tooltip_text("Show in Files")
             .build();
+        reveal.update_property(&[gtk::accessible::Property::Label("Show in Files")]);
         let open = gtk::Button::builder()
             .icon_name("document-open-symbolic")
             .css_classes(["secondary"])
             .tooltip_text("Open in the default app")
             .build();
+        open.update_property(&[gtk::accessible::Property::Label("Open in the default app")]);
         actions.append(&reveal);
         actions.append(&open);
         body.append(&actions);

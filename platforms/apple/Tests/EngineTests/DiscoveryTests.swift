@@ -303,4 +303,35 @@ struct FileTypeTableTests {
         #expect(FileTypes.kind(forExtension: "vob") == .video)
         #expect(!FileTypes.isTaggable("iso"))
     }
+
+    @Test("A symlinked scan root walks its target in the same form the walk reports children")
+    func symlinkedRootCanonicalizes() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDSymlinkRoot-\(UUID().uuidString)")
+        let real = tmp.appendingPathComponent("real")
+        let link = tmp.appendingPathComponent("link")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try Data("x".utf8).write(to: real.appendingPathComponent("a.jpg"))
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let canonical = ScanRootGuard.canonicalPath(link.path)
+        #expect(canonical.hasPrefix("/private/"))
+        #expect(canonical.hasSuffix("/real"))
+        #expect(ScanRootGuard.canonicalPath(canonical) == canonical)
+
+        let result = await Discovery().walk(root: URL(fileURLWithPath: canonical))
+        #expect(result.map(\.url.path) == [canonical + "/a.jpg"],
+                "children must share the root's form so prefix keys match stored rows")
+
+        let skip = real.appendingPathComponent("Skip")
+        try FileManager.default.createDirectory(at: skip, withIntermediateDirectories: true)
+        try Data("y".utf8).write(to: skip.appendingPathComponent("b.jpg"))
+        let pruned = await Discovery().walk(root: URL(fileURLWithPath: canonical),
+                                            excludedPaths: [link.path + "/Skip"])
+        #expect(pruned.map(\.url.path) == [canonical + "/a.jpg"])
+        #expect(Discovery.resolvedExclusionPaths(root: URL(fileURLWithPath: canonical), rawPaths: [link.path + "/Skip"])
+                == [(canonical + "/skip").lowercased()],
+                "purge needles must use the stored-row form, /private included")
+    }
 }

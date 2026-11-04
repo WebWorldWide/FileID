@@ -44,6 +44,10 @@ public sealed record PurgeExcludedCommand(
 public sealed record RequestStatusCommand : CommandPayload;
 public sealed record HealthCheckCommand(
     [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
+/// <summary>Read-only list of the scanned library locations (schema 1.18.0). Replies with
+/// <c>rootsList</c>; never scans and never touches the files.</summary>
+public sealed record ListRootsCommand(
+    [property: JsonPropertyName("requestID")] string RequestId) : CommandPayload;
 /// <summary>Read-only local model catalog (schema 1.14.0). Replies with
 /// <c>modelCatalog</c>; never downloads, loads or benchmarks a model.</summary>
 public sealed record ListModelsCommand(
@@ -268,6 +272,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             "reassignFace" => JsonSerializer.Deserialize<ReassignFaceCommand>(ref reader, options) ?? throw new JsonException("reassignFace: null body"),
             "requestStatus" => Empty<RequestStatusCommand>(ref reader),
             "healthCheck" => JsonSerializer.Deserialize<HealthCheckCommand>(ref reader, options) ?? throw new JsonException("healthCheck: null body"),
+            "listRoots" => JsonSerializer.Deserialize<ListRootsCommand>(ref reader, options) ?? throw new JsonException("listRoots: null body"),
             "listModels" => JsonSerializer.Deserialize<ListModelsCommand>(ref reader, options) ?? throw new JsonException("listModels: null body"),
             "benchmarkModel" => JsonSerializer.Deserialize<BenchmarkModelCommand>(ref reader, options) ?? throw new JsonException("benchmarkModel: null body"),
             "cancelBenchmark" => Empty<CancelBenchmarkCommand>(ref reader),
@@ -307,6 +312,7 @@ public sealed class CommandPayloadJsonConverter : JsonConverter<CommandPayload>
             case ReassignFaceCommand c: WriteVariant(writer, "reassignFace", c, options); break;
             case RequestStatusCommand: WriteEmpty(writer, "requestStatus"); break;
             case HealthCheckCommand c: WriteVariant(writer, "healthCheck", c, options); break;
+            case ListRootsCommand c: WriteVariant(writer, "listRoots", c, options); break;
             case ListModelsCommand c: WriteVariant(writer, "listModels", c, options); break;
             case BenchmarkModelCommand c: WriteVariant(writer, "benchmarkModel", c, options); break;
             case CancelBenchmarkCommand: WriteEmpty(writer, "cancelBenchmark"); break;

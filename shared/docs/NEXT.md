@@ -12,6 +12,12 @@ Adlon-run follow-ups (2026-11-03): 3,408 `.fileid-tags.json` sidecar files and ~
 Needs the owner's session (cannot be done headlessly): grant Accessibility to the terminal/agent app and Screen Recording so the Mac app can be driven and screenshotted, then walk all pages against `DESIGN_V3_PORT.md`; take matching screenshots on a Windows 11 host and a GTK host and diff them against the Mac set (palette and springs already match in code; layout, font metrics and blur cannot be proven from source). The Prototype v3 import still needs `/design-login`. Rust engine on macOS/Linux: accept the Swift app's flat model layout (or add the sentinel-free sha check) so models installed once work for both engines; install YuNet to get faces from the Rust engine.
 Open UI wiring: date pickers in Search & Moments for the capture window; Locations panel, "All locations" scope and OFFLINE badge on top of `library_roots`.
 
+Crash-safety follow-ups (2026-11-03 night, from the SIGKILL hunt):
+- [ ] After a crash the app cannot restore a trash batch: the batch id reaches the app only in the reply. Persist or list journaled batches (schema first) so Undo survives a restart.
+- [ ] Restructure undo after wipe + rescan fails because wiping resets file ids; files stay moved and the journal stays stuck. Needs a design call (key the journal by path + inode instead of file id).
+- [ ] Rust `renameFiles` updates the catalog only after all renames; a kill leaves stale rows and rename-back is refused until a rescan.
+- [ ] Existing catalogs keep copy dates until a rescan re-reads EXIF; consider a one-off EXIF date backfill job for photos whose `created_at` is a filesystem time.
+
 Safety and quick wins:
 - [ ] Chat gets its own job category so a queued summary no longer blocks Describe (`deep_analyze_already_running`); schema first (`JobCategory`, ipc.schema.json:1174), then Swift, Rust, C# DTOs.
 - [ ] Status text while a parked model reloads or waits behind a job; filename-only hits for `failed=1` rows labelled "unreadable".

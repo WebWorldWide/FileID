@@ -324,7 +324,7 @@ public enum Tagging {
                     enrichedTags.append(contentsOf: extraTags(
                         cgImage: cgImage,
                         cameraModel: exif.cameraModel,
-                        creationDate: discovered.creationDate,
+                        creationDate: exif.capturedAt ?? discovered.creationDate,
                         hasFaces: pass.faceCount > 0,
                         hasOCR: ocr?.isEmpty == false,
                         hasLocation: exif.lat != nil && exif.lon != nil
@@ -348,7 +348,7 @@ public enum Tagging {
                     var tagged = TaggedFile(
                         url: url, kind: "image", extension: ext,
                         sizeBytes: discovered.sizeBytes,
-                        createdAt: discovered.creationDate,
+                        createdAt: exif.capturedAt ?? discovered.creationDate,
                         modifiedAt: discovered.modificationDate,
                         visionTags: dedupedTags,
                         tagScores: tagScores,
@@ -379,6 +379,7 @@ public enum Tagging {
                     tagged.ocrMs = ocrMs
                     tagged.ocrCarefulMs = ocrCarefulMs
                     tagged.ocrHandwritten = ocrHandwritten
+                    tagged.capturedFromEXIF = exif.capturedAt != nil
                     return tagged
                 }
                 cont.resume(returning: result)
@@ -684,7 +685,7 @@ public enum Tagging {
     static func loadImageAndEXIF(
         url: URL,
         sizeBytes: Int64
-    ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?))? {
+    ) -> (CGImage, (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?))? {
         // Skip files smaller than 256 B — corrupt or zero-byte. Avoids the
         // ImageIO crash mode v1's Session-B-hardening fixed. Reuse the size
         // Discovery (Stage A) already stat'd instead of a second
@@ -795,12 +796,18 @@ public enum Tagging {
         return out
     }
 
-    /// Read EXIF camera model + GPS coords from an already-open source.
-    private static func readEXIF(from src: CGImageSource) -> (cameraModel: String?, lat: Double?, lon: Double?) {
+    /// Read EXIF camera model, GPS coords and capture time from an already-open source.
+    private static func readEXIF(from src: CGImageSource) -> (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?) {
         guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         else {
-            return (nil, nil, nil)
+            return (nil, nil, nil, nil)
         }
+        let exifDict = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let capturedAt = [(kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifOffsetTimeOriginal),
+                          (kCGImagePropertyExifDateTimeDigitized, kCGImagePropertyExifOffsetTimeDigitized)]
+            .lazy.compactMap { key, offsetKey in
+                (exifDict?[key] as? String).flatMap { exifCaptureDate($0, offset: exifDict?[offsetKey] as? String) }
+            }.first
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
         let cameraModel = tiff?[kCGImagePropertyTIFFModel] as? String
         let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any]
@@ -810,7 +817,26 @@ public enum Tagging {
            let l = lat { lat = -l }
         if let lonRef = gps?[kCGImagePropertyGPSLongitudeRef] as? String, lonRef == "W",
            let l = lon { lon = -l }
-        return (cameraModel, lat, lon)
+        return (cameraModel, lat, lon, capturedAt)
+    }
+
+    /// Mirrors the Rust `exif_datetime_to_unix`: the OffsetTime* companion when
+    /// present, else the machine's zone; pre-1990 (reset clocks), future and
+    /// placeholder values are rejected.
+    static func exifCaptureDate(_ text: String, offset: String?, now: Date = Date()) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        formatter.timeZone = .current
+        if let offset = offset?.trimmingCharacters(in: .whitespaces), offset.count == 6,
+           let sign = offset.first, sign == "+" || sign == "-",
+           let hours = Int(offset.dropFirst().prefix(2)), let minutes = Int(offset.suffix(2)),
+           let zone = TimeZone(secondsFromGMT: (sign == "-" ? -1 : 1) * (hours * 3600 + minutes * 60)) {
+            formatter.timeZone = zone
+        }
+        guard let date = formatter.date(from: text.trimmingCharacters(in: CharacterSet(charactersIn: "\0 "))) else { return nil }
+        let unix = date.timeIntervalSince1970
+        return unix >= 631_152_000 && unix <= now.timeIntervalSince1970 + 86_400 ? date : nil
     }
 }
 

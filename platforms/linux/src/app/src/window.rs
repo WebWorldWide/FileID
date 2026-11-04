@@ -653,7 +653,9 @@ impl Shell {
                     message,
                     model_kind,
                 } => {
-                    if kind.starts_with("deep_analyze") {
+                    if kind.starts_with("deep_analyze")
+                        && crate::tabs::deep_analyze::error_ends_deep_run(&kind)
+                    {
                         status.deep_running = false;
                     }
                     if kind == "scan_already_running" || kind == "scan_failed" {

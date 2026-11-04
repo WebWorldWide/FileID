@@ -108,11 +108,14 @@ impl Filter {
             }
         }
         if let Some(folder) = &self.folder {
-            parts.push("f.path_text LIKE ? ESCAPE '\\'".into());
-            args.push(Value::Text(match folder.strip_prefix("named:") {
-                Some(name) => format!("%/{}/%", like_escape(name)),
-                None => format!("{}/%", like_escape(folder.trim_end_matches(['/', '\\']))),
-            }));
+            // Windows catalogs store `\` separators; accept either.
+            parts.push("(f.path_text LIKE ? ESCAPE '\\' OR f.path_text LIKE ? ESCAPE '\\')".into());
+            for separator in ["/", "\\\\"] {
+                args.push(Value::Text(match folder.strip_prefix("named:") {
+                    Some(name) => format!("%{separator}{}{separator}%", like_escape(name)),
+                    None => format!("{}{separator}%", like_escape(folder.trim_end_matches(['/', '\\']))),
+                }));
+            }
         }
         if self.undescribed {
             parts.push("(f.vlm_description IS NULL OR trim(f.vlm_description)='')".into());
@@ -324,6 +327,30 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
         let list = top.iter().map(folder_phrase).collect::<Vec<_>>().join(", ");
         return Ok((format!("{}: {list}.", if by_size { "Biggest folders" } else { "Folders with the most files" }), hits));
     }
+    if question.measure == "formats" {
+        let mut statement = conn.prepare(
+            "SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0 \
+             GROUP BY lower(COALESCE(NULLIF(f.extension,''),'none')) ORDER BY c DESC,e ASC",
+        )?;
+        let formats = statement
+            .query_map([], |row| {
+                let (ext, n): (String, i64) = (row.get(0)?, row.get(1)?);
+                Ok(format!("{} {ext}", count_label(n)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let more = if formats.len() > 10 { format!(" and {} more", formats.len() - 10) } else { String::new() };
+        return Ok((
+            format!(
+                "Your {} {} {} {}: {}{more}.",
+                count_label(count),
+                if count == 1 { "file uses" } else { "files use" },
+                formats.len(),
+                if formats.len() == 1 { "format" } else { "formats" },
+                formats.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+            ),
+            hits,
+        ));
+    }
     let mut statement = conn.prepare("SELECT f.kind,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,f.kind ASC")?;
     let kinds = statement
         .query_map([], |row| {
@@ -361,7 +388,7 @@ fn library_answer(conn: &Connection, question: &Question) -> Result<(String, Vec
 
 /// Answers a question that is fully structured: no subject words remain.
 pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) -> Result<(String, Vec<CatalogHit>)> {
-    if question.measure == "overview" || question.measure == "folders" {
+    if matches!(question.measure.as_str(), "overview" | "folders" | "formats") {
         return library_answer(conn, question);
     }
     let qualifiers = filter.qualifiers();
@@ -463,6 +490,28 @@ mod tests {
     }
 
     #[test]
+    fn a_named_library_gets_the_overview_but_a_library_of_things_is_a_search() {
+        let measure = |text: &str| super::super::chat_intent::parse_question(text).measure;
+        for text in ["tell me about my Adlon library", "what is in my vacation library", "summarize my Adlon library"] {
+            assert_eq!(measure(text), "overview", "{text}");
+        }
+        for text in ["describe my photo collection", "show me my library of dogs", "tell me about my dog photos", "what is in my library of recipes", "give me my library photos"] {
+            assert_ne!(measure(text), "overview", "{text}");
+        }
+    }
+
+    #[test]
+    fn per_type_questions_get_the_library_breakdown() {
+        let measure = |text: &str| super::super::chat_intent::parse_question(text).measure;
+        for text in ["how many files are there and how many of each file type", "break down my files by type", "what file types do I have", "how many of every kind of file"] {
+            assert_eq!(measure(text), "overview", "{text}");
+        }
+        for text in ["photos by Kyle", "what kind of camera took this", "how many photos from the type of event", "how many files in my Downloads folder by type"] {
+            assert_ne!(measure(text), "overview", "{text}");
+        }
+    }
+
+    #[test]
     fn format_words_filter_by_extension() {
         let conn = crate::db::test_support::memory_db();
         for (id, path, kind, size, ext) in [
@@ -515,6 +564,20 @@ mod tests {
 
     use super::*;
     use crate::commands::chat_intent::parse_question;
+
+    #[test]
+    fn folder_filters_match_windows_separators() {
+        let conn = crate::db::test_support::memory_db();
+        for (id, path) in [(1, "C:\\Users\\a\\Downloads\\x.jpg"), (2, "C:\\Users\\a\\Downloads\\sub\\y.jpg"), (3, "C:\\Users\\a\\Pictures\\z.jpg"), (4, "/lib/Downloads/w.jpg")] {
+            conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,1000,0,'image','jpg')", rusqlite::params![id, path]).unwrap();
+        }
+        let count = |folder: &str| totals(&conn, &Filter { folder: Some(folder.into()), ..Filter::default() }).unwrap().0;
+        assert_eq!(count("named:Downloads"), 3);
+        assert_eq!(count("C:\\Users\\a\\Downloads"), 2);
+        assert_eq!(count("C:\\Users\\a\\Downloads\\"), 2);
+        assert_eq!(count("/lib/Downloads"), 1);
+        assert_eq!(count("C:\\Users\\a\\Down"), 0);
+    }
 
     fn library() -> Connection {
         let conn = crate::db::test_support::memory_db();

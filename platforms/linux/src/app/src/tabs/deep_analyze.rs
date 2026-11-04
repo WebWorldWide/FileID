@@ -1011,9 +1011,16 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.download_card.set_visible(true);
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
-        EngineEvent::Error { .. } | EngineEvent::Exited => end_run(ui),
+        EngineEvent::Error { kind, .. } if error_ends_deep_run(&kind) => end_run(ui),
+        EngineEvent::Exited => end_run(ui),
         _ => {}
     }
+}
+
+/// A busy bounce means a run IS going, and a server-format fallback keeps the
+/// run alive on the slower path; neither may tear down the live run.
+pub(crate) fn error_ends_deep_run(kind: &str) -> bool {
+    !matches!(kind, "deep_analyze_already_running" | "vlm_server_payload_rejected")
 }
 
 // ─── DB-backed refresh (mirror of macOS ReadStore counts) ────────────────────
@@ -1126,6 +1133,9 @@ fn build_proposed_row(ui: &Rc<DeepUi>, row: &ProposedRow) -> gtk::Box {
         #[strong]
         ui,
         move |button| {
+            if ui.in_flight.get() {
+                return;
+            }
             let kind = ui.active_kind.get();
             if !crate::model_license::ensure_or_prompt(button, kind) {
                 return;
@@ -1521,6 +1531,7 @@ fn build_explainer() -> gtk::Box {
         .valign(gtk::Align::Start)
         .tooltip_text("Hide this explanation")
         .build();
+    dismiss.update_property(&[gtk::accessible::Property::Label("Hide this explanation")]);
     dismiss.connect_clicked(clone!(
         #[weak]
         card,
@@ -1650,6 +1661,7 @@ fn build_naming_banner() -> (gtk::Box, gtk::Button) {
         .valign(gtk::Align::Start)
         .tooltip_text("Hide this tip")
         .build();
+    dismiss.update_property(&[gtk::accessible::Property::Label("Hide this tip")]);
     banner.append(&icon);
     banner.append(&text);
     banner.append(&dismiss);
@@ -1881,6 +1893,14 @@ mod recommendation_tests {
         );
         assert_eq!(person_tag_name(&[], "  old name  "), "old name");
         assert_eq!(person_tag_name(&[], "   "), "");
+    }
+
+    #[test]
+    fn non_terminal_engine_errors_keep_a_live_run() {
+        assert!(!error_ends_deep_run("deep_analyze_already_running"));
+        assert!(!error_ends_deep_run("vlm_server_payload_rejected"));
+        assert!(error_ends_deep_run("deep_analyze_failed"));
+        assert!(error_ends_deep_run("llama_cpp_missing"));
     }
 
     #[test]

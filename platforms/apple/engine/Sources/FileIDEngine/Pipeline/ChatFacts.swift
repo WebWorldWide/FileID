@@ -222,6 +222,18 @@ enum ChatFacts {
             let top = try folders(db, bySize: bySize, limit: 5)
             return ("\(bySize ? "Biggest folders" : "Folders with the most files"): \(top.map(folderPhrase).joined(separator: ", ")).", hits)
         }
+        if question.measure == "formats" {
+            let formats = try Row.fetchAll(db, sql: """
+                SELECT upper(COALESCE(NULLIF(f.extension,''),'none')) AS e,COUNT(*) AS c FROM files f WHERE f.failed=0
+                GROUP BY lower(COALESCE(NULLIF(f.extension,''),'none')) ORDER BY c DESC,e ASC
+                """).map { row -> String in
+                    let n: Int64 = row["c"]
+                    let ext: String = row["e"]
+                    return "\(ChatIntent.countLabel(n)) \(ext)"
+                }
+            let more = formats.count > 10 ? " and \(formats.count - 10) more" : ""
+            return ("Your \(ChatIntent.countLabel(count)) \(count == 1 ? "file uses" : "files use") \(formats.count) \(formats.count == 1 ? "format" : "formats"): \(formats.prefix(10).joined(separator: ", "))\(more).", hits)
+        }
         let kinds = try Row.fetchAll(db, sql: "SELECT f.kind AS k,COUNT(*) AS c FROM files f WHERE f.failed=0 GROUP BY f.kind ORDER BY c DESC,k ASC")
             .map { row -> String in
                 let n: Int64 = row["c"]
@@ -240,7 +252,7 @@ enum ChatFacts {
 
     /// Answers a question that is fully structured: no subject words remain.
     static func answer(_ db: GRDB.Database, _ question: ChatIntent.Question, _ filter: Filter) throws -> (String, [CatalogHit]) {
-        if question.measure == "overview" || question.measure == "folders" { return try libraryAnswer(db, question) }
+        if ["overview", "folders", "formats"].contains(question.measure) { return try libraryAnswer(db, question) }
         let qualifiers = filter.qualifiers
         if question.duplicates {
             let found = try extras(db, filter, limit: shown)

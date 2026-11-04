@@ -687,6 +687,14 @@ fn validate_image(path: &Path) -> Result<()> {
             offset = next;
         }
     }
+    let mut decoder = ImageReader::open(path)?.with_guessed_format()?.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > 32_000_000 {
+        bail!("This adapter currently limits input images to 32 megapixels")
+    }
+    if decoder.icc_profile()?.is_some() {
+        bail!("This adapter requires untagged sRGB input; use color-managed conversion for embedded ICC profiles")
+    }
     Ok(())
 }
 fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<()> {
@@ -701,13 +709,6 @@ fn export_photo(source: &Path, file: &mut File, recipe: &ToolRecipe) -> Result<(
     limits.max_image_height = Some(65536);
     reader.limits(limits);
     let mut decoder = reader.into_decoder()?;
-    let (width, height) = decoder.dimensions();
-    if u64::from(width) * u64::from(height) > 32_000_000 {
-        bail!("This adapter currently limits input images to 32 megapixels")
-    }
-    if decoder.icc_profile()?.is_some() {
-        bail!("This adapter requires untagged sRGB input; use color-managed conversion for embedded ICC profiles")
-    }
     let orientation = decoder.orientation()?;
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
@@ -872,6 +873,24 @@ mod tests {
         })
         .unwrap();
         assert_eq!(undone.outputs[0].state, "undone");
+    }
+
+    #[test]
+    fn preview_refuses_a_photo_that_execute_would_refuse() {
+        use image::ImageEncoder;
+        let mut fixture = Fixture::new();
+        let mut png = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut png);
+        encoder.set_icc_profile(vec![0u8; 128]).unwrap();
+        encoder.write_image(&[200u8; 32 * 16 * 3], 32, 16, image::ExtendedColorType::Rgb8).unwrap();
+        fs::write(&fixture.source, png).unwrap();
+        let request = fixture.request("jpeg");
+        let refused = execute(&mut fixture.conn, &request);
+        let message = refused.as_ref().map(|r| r.message.clone()).unwrap_or_else(|e| e.to_string());
+        assert!(refused.is_err(), "preview accepted a source execute refuses: {message}");
+        assert!(message.contains("ICC"), "{message}");
+        let exports = fs::read_dir(&fixture.root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains("Export")).count();
+        assert_eq!(exports, 0, "nothing was written");
     }
 
     #[test]

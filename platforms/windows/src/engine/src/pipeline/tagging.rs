@@ -170,6 +170,9 @@ pub struct TaggedFile {
     /// rescan never clobbers the original (it's excluded from the INSERT's
     /// ON CONFLICT DO UPDATE set). `None` when the platform has no birth time.
     pub created_unix: Option<f64>,
+    /// `created_unix` holds the photo's EXIF capture time, so a rescan should
+    /// replace the stored value (a filesystem birth time never does).
+    pub captured_from_exif: bool,
     pub scanned_unix: f64,
 
     pub has_faces: bool,
@@ -1237,6 +1240,7 @@ impl Tagger {
                                 size_bytes: timeout_size,
                                 modified_unix: timeout_modified,
                                 created_unix: timeout_created,
+                                captured_from_exif: false,
                                 scanned_unix: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -1305,7 +1309,7 @@ pub struct PreDecoded {
     pub audio_tags: Vec<(String, Option<f32>)>,
     pub content_hash: Option<[u8; 32]>,
     pub legacy_hashes: Option<LegacyHashes>,
-    pub exif: Option<(Option<String>, Option<f64>, Option<f64>)>,
+    pub exif: Option<ExifFields>,
     /// Reservation of this frame's decoded bytes in the predecode budget;
     /// released when the worker drops the frame.
     budget: Option<PredecodeBudgetGuard>,
@@ -1534,7 +1538,7 @@ fn predecode_one(
                             // an explicit no-EXIF result instead of looking
                             // unparsed downstream.
                             exif_data =
-                                Some(parse_exif_fields(&bytes).unwrap_or((None, None, None)));
+                                Some(parse_exif_fields(&bytes).unwrap_or((None, None, None, None)));
                             // ≤16 MB → full SHA-256 (cross-platform with Swift).
                             content_hash = Some(sha256_bytes(&bytes));
                             legacy_hashes = legacy.then(|| LegacyHashes::of_full_bytes(&bytes));
@@ -1624,8 +1628,14 @@ fn predecode_one(
                         coord,
                         || decode_video_keyframe_sync(&file.path),
                     )?;
-                    budget_guard = Some(guard);
-                    Some(result)
+                    // Without a frame decoder the video is still catalogued, like a
+                    // missing model; the skip-set video gate backfills it later.
+                    if result.is_err() && !video_frames_available() {
+                        None
+                    } else {
+                        budget_guard = Some(guard);
+                        Some(result)
+                    }
                 }
                 // 3D `.obj` → rendered-shape RGB for CLIP (lockstep with macOS processModel).
                 // A render failure is NOT a file failure (the model still groups under 3D
@@ -2084,6 +2094,17 @@ fn decode_image_sync_imagecrate(path: &std::path::Path, bytes: Option<&[u8]>) ->
     }
 }
 
+/// macOS takes video frames only from FileID's optional FFmpeg runtime; Windows
+/// (Media Foundation) and Linux (system ffmpeg fallback) always have a decoder.
+#[cfg(all(not(windows), not(target_os = "linux")))]
+pub(crate) fn video_frames_available() -> bool {
+    crate::commands::ffmpeg_runtime_available()
+}
+#[cfg(any(windows, target_os = "linux"))]
+pub(crate) fn video_frames_available() -> bool {
+    true
+}
+
 /// Sync video-keyframe decode. Used by the decoder pool.
 fn decode_video_keyframe_sync(path: &std::path::Path) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     let frame = shell::video::keyframe_25pct(path)?;
@@ -2122,6 +2143,7 @@ async fn process_file_predecoded(
         size_bytes: file.size_bytes,
         modified_unix: file.modified_unix,
         created_unix: file.created_unix,
+        captured_from_exif: false,
         scanned_unix,
         has_faces: false,
         faces: Vec::new(),
@@ -2292,10 +2314,14 @@ async fn process_file_predecoded(
         }
             if matches!(file.kind, FileKind::Image) {
                 let exif_started = Instant::now();
-                if let Some((cam, lat, lon)) = exif {
+                if let Some((cam, lat, lon, captured)) = exif {
                     tagged.camera_model = cam;
                     tagged.location_lat = lat;
                     tagged.location_lon = lon;
+                    if let Some(captured) = captured {
+                        tagged.created_unix = Some(captured);
+                        tagged.captured_from_exif = true;
+                    }
                 }
                 record_stage(&STATS_EXIF_US, exif_started);
                 perf_trace("exif_done", &file.path, exif_started.elapsed().as_secs_f64() * 1000.0);
@@ -2958,7 +2984,10 @@ fn apply_exif_orientation(
     Ok((rgb.into_raw(), ow, oh))
 }
 
-pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+/// Camera model, latitude, longitude and capture time (Unix seconds).
+pub(crate) type ExifFields = (Option<String>, Option<f64>, Option<f64>, Option<f64>);
+
+pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
         .ok()?;
@@ -2971,7 +3000,37 @@ pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<
         .filter(|v| v.is_finite() && v.abs() <= 90.0);
     let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef)
         .filter(|v| v.is_finite() && v.abs() <= 180.0);
-    Some((camera_model, lat, lon))
+    let captured = [exif::Tag::DateTimeOriginal, exif::Tag::DateTimeDigitized]
+        .into_iter()
+        .find_map(|tag| exif_capture_unix(&exif, tag));
+    Some((camera_model, lat, lon, captured))
+}
+
+/// EXIF wall-clock time with its OffsetTime* companion when present, else read
+/// in the machine's zone (what the camera clock meant). Out-of-range or
+/// placeholder ("0000:00:00 …") values yield None.
+fn exif_capture_unix(exif: &exif::Exif, tag: exif::Tag) -> Option<f64> {
+    let text = match &exif.get_field(tag, exif::In::PRIMARY)?.value {
+        exif::Value::Ascii(parts) => String::from_utf8_lossy(parts.first()?).into_owned(),
+        _ => return None,
+    };
+    let offset_tag = if tag == exif::Tag::DateTimeOriginal { exif::Tag::OffsetTimeOriginal } else { exif::Tag::OffsetTimeDigitized };
+    let offset = exif.get_field(offset_tag, exif::In::PRIMARY).and_then(|field| match &field.value {
+        exif::Value::Ascii(parts) => parts.first().map(|p| String::from_utf8_lossy(p).into_owned()),
+        _ => None,
+    });
+    exif_datetime_to_unix(&text, offset.as_deref(), chrono::Utc::now().timestamp() as f64)
+}
+
+pub(crate) fn exif_datetime_to_unix(text: &str, offset: Option<&str>, now_unix: f64) -> Option<f64> {
+    use chrono::TimeZone;
+    let naive = chrono::NaiveDateTime::parse_from_str(text.trim().trim_end_matches('\0'), "%Y:%m:%d %H:%M:%S").ok()?;
+    let unix = match offset.and_then(|o| o.trim().parse::<chrono::FixedOffset>().ok()) {
+        Some(zone) => zone.from_local_datetime(&naive).single()?.timestamp(),
+        None => chrono::Local.from_local_datetime(&naive).earliest()?.timestamp(),
+    } as f64;
+    // Before 1990 is almost always a reset camera clock; the future is a wrong one.
+    (unix >= 631_152_000.0 && unix <= now_unix + 86_400.0).then_some(unix)
 }
 
 /// EXIF for an image too large to read fully into memory: the APP1 segment
@@ -2979,12 +3038,12 @@ pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<(Option<String>, Option<
 /// bounded 4 MB head read recovers camera/GPS without the full-file read the
 /// in-memory branch does. Returns `Some((None, None, None))` on a readable
 /// file with no parseable EXIF — same contract as that branch.
-fn exif_from_head(path: &std::path::Path) -> Option<(Option<String>, Option<f64>, Option<f64>)> {
+fn exif_from_head(path: &std::path::Path) -> Option<ExifFields> {
     const EXIF_HEAD_BYTES: u64 = 4 * 1024 * 1024;
     let f = open_image_file(path).ok()?;
     let mut head = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(f, EXIF_HEAD_BYTES), &mut head).ok()?;
-    Some(parse_exif_fields(&head).unwrap_or((None, None, None)))
+    Some(parse_exif_fields(&head).unwrap_or((None, None, None, None)))
 }
 
 fn read_gps_coord(exif: &exif::Exif, value_tag: exif::Tag, ref_tag: exif::Tag) -> Option<f64> {
@@ -3508,6 +3567,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    #[test]
+    fn video_is_catalogued_without_a_frame_when_the_ffmpeg_runtime_is_absent() {
+        if std::env::var_os("FILEID_FFMPEG_DIR").is_some() || video_frames_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("fileid-decoder-video-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clip.mov");
+        std::fs::write(&path, vec![7u8; 4096]).unwrap();
+        let item = predecode_one(
+            DiscoveredFile {
+                path: path.clone(),
+                kind: FileKind::Video,
+                size_bytes: 4096,
+                modified_unix: 0.0,
+                created_unix: None,
+                online_only: false,
+                file_ref: None,
+            },
+            &ScanCoordinator::new(),
+            &PredecodeBudget::new(256 << 20),
+            false,
+        )
+        .expect("not cancelled");
+        assert!(item.decoded.is_none(), "a missing frame runtime must not mark the video failed");
+        assert!(item.content_hash.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn decoder_computes_legacy_digests_from_its_single_read_only_when_asked() {
         let dir = std::env::temp_dir().join(format!("fileid-decoder-legacy-{}", std::process::id()));
@@ -3680,6 +3769,18 @@ mod tests {
     }
 
     #[test]
+    fn exif_datetime_reads_offsets_and_rejects_placeholders() {
+        let now = 1_900_000_000.0;
+        assert_eq!(exif_datetime_to_unix("2019:07:04 12:00:00", Some("+00:00"), now), Some(1_562_241_600.0));
+        assert_eq!(exif_datetime_to_unix("2019:07:04 14:00:00", Some("+02:00"), now), Some(1_562_241_600.0));
+        assert!(exif_datetime_to_unix("2019:07:04 12:00:00", None, now).is_some());
+        assert_eq!(exif_datetime_to_unix("0000:00:00 00:00:00", None, now), None);
+        assert_eq!(exif_datetime_to_unix("1980:01:01 00:00:00", Some("+00:00"), now), None);
+        assert_eq!(exif_datetime_to_unix("2099:01:01 00:00:00", Some("+00:00"), now), None);
+        assert_eq!(exif_datetime_to_unix("    :  :     :  :  ", None, now), None);
+    }
+
+    #[test]
     fn exif_from_head_extracts_camera_model() {
         let mut jpeg: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x28];
         jpeg.extend_from_slice(b"Exif\0\0");
@@ -3698,7 +3799,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&p, &jpeg).unwrap();
-        let (model, lat, lon) = exif_from_head(&p).expect("readable file must yield Some");
+        let (model, lat, lon, _) = exif_from_head(&p).expect("readable file must yield Some");
         assert_eq!(model.as_deref(), Some("Pixel"));
         assert_eq!((lat, lon), (None, None));
         let _ = std::fs::remove_file(&p);
@@ -3817,6 +3918,7 @@ mod tests {
             size_bytes,
             modified_unix: 1_710_504_000.0,
             created_unix: None,
+            captured_from_exif: false,
             scanned_unix: 1_710_504_001.0,
             has_faces: false,
             faces: Vec::new(),
