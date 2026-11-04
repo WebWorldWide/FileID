@@ -59,9 +59,11 @@ fn models_download_without_a_selection_is_a_failure() {
     );
     let error: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
     assert_eq!(error["level"], "error");
-    assert!(error["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("no models selected")));
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no models selected"))
+    );
 }
 
 #[test]
@@ -126,11 +128,13 @@ fn restricted_model_json_mode_is_single_result_and_noninteractive() {
     let value = json(&out);
     assert_eq!(value["error"], "license_acceptance_required");
     assert_eq!(value["policy"], "Gemma");
-    assert!(!models
-        .parent()
-        .unwrap()
-        .join("model-licenses.json")
-        .exists());
+    assert!(
+        !models
+            .parent()
+            .unwrap()
+            .join("model-licenses.json")
+            .exists()
+    );
     let _ = std::fs::remove_dir_all(models.parent().unwrap());
 }
 

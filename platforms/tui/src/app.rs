@@ -344,13 +344,15 @@ impl App {
         // AltGr reports as CONTROL|ALT on Windows, and it types real characters
         // on European layouts (@, €, ł). So this only claims CONTROL *without*
         // ALT — otherwise AltGr text would be silently swallowed.
-        if mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT)
-            && let KeyCode::Char(c) = code {
-                if c.eq_ignore_ascii_case(&'c') {
-                    self.should_quit = true;
-                }
-                return;
+        if mods.contains(KeyModifiers::CONTROL)
+            && !mods.contains(KeyModifiers::ALT)
+            && let KeyCode::Char(c) = code
+        {
+            if c.eq_ignore_ascii_case(&'c') {
+                self.should_quit = true;
             }
+            return;
+        }
         if self.input_active {
             self.on_key_input(code);
             return;
@@ -1030,9 +1032,10 @@ fn expand_tilde_with(input: &str, home: Option<&Path>) -> PathBuf {
     } else if let Some(rest) = input
         .strip_prefix("~/")
         .or_else(|| input.strip_prefix("~\\"))
-        && let Some(h) = home {
-            return h.join(rest);
-        }
+        && let Some(h) = home
+    {
+        return h.join(rest);
+    }
     PathBuf::from(input)
 }
 
@@ -1712,10 +1715,12 @@ mod tests {
 
         let browser = Browser::open(base.clone());
         assert!(browser.here.capped);
-        assert!(browser
-            .rows
-            .iter()
-            .any(|row| matches!(row, BrowseRow::Dir(path) if path == &wanted)));
+        assert!(
+            browser
+                .rows
+                .iter()
+                .any(|row| matches!(row, BrowseRow::Dir(path) if path == &wanted))
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1893,11 +1898,12 @@ mod tests {
             "no fake Drives path is scanned"
         );
         assert!(!app.scanning);
-        assert!(app
-            .browser
-            .as_ref()
-            .and_then(|browser| browser.notice.as_deref())
-            .is_some_and(|notice| notice.contains("Open a drive")));
+        assert!(
+            app.browser
+                .as_ref()
+                .and_then(|browser| browser.notice.as_deref())
+                .is_some_and(|notice| notice.contains("Open a drive"))
+        );
     }
 
     #[test]

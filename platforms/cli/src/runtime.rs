@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 
-use crate::context::{print_json, Ctx};
+use crate::context::{Ctx, print_json};
 
 #[cfg(any(target_os = "macos", test))]
 fn install_aborted_payload() -> serde_json::Value {
@@ -163,7 +163,10 @@ pub fn status(ctx: &Ctx) -> Result<()> {
             );
             println!("  {}", ctx.bold("To install (any one):"));
             println!("    brew install onnxruntime");
-            println!("    set FILEID_ORT_DYLIB_URL to a HuggingFace-hosted ONNX Runtime dylib/archive, then run {}", ctx.bold(rt::INSTALL_COMMAND));
+            println!(
+                "    set FILEID_ORT_DYLIB_URL to a HuggingFace-hosted ONNX Runtime dylib/archive, then run {}",
+                ctx.bold(rt::INSTALL_COMMAND)
+            );
         }
     }
     if let Some(s) = &source {
@@ -444,19 +447,20 @@ fn download_artifact(url: &str, sha256: Option<&str>, dest: &std::path::Path) ->
             "runtime download is not hash-pinned; set FILEID_ORT_DYLIB_SHA256 to the expected SHA256"
         )
     })?;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
-    use fileid_engine::downloader::{download_file_blocking, DownloadProgress};
+    use fileid_engine::downloader::{DownloadProgress, download_file_blocking};
 
     let cancel = Arc::new(AtomicBool::new(false));
     let progress: Arc<dyn Fn(DownloadProgress) + Send + Sync> = Arc::new(|p: DownloadProgress| {
         if let Some(total) = p.bytes_total
-            && total > 0 {
-                let pct = (p.bytes_done as f64 / total as f64 * 100.0).min(100.0);
-                eprint!("\r  {pct:.0}% \x1b[K");
-                let _ = std::io::Write::flush(&mut std::io::stderr());
-            }
+            && total > 0
+        {
+            let pct = (p.bytes_done as f64 / total as f64 * 100.0).min(100.0);
+            eprint!("\r  {pct:.0}% \x1b[K");
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
     });
     let r = download_file_blocking(url, dest, Some(sha256), cancel, progress);
     eprintln!();

@@ -189,7 +189,7 @@ fn macos_app_db() -> Option<PathBuf> {
 /// order `info` uses (numeric id → exact canonical/raw path → basename suffix)
 /// so the same argument resolves identically across subcommands.
 pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64> {
-    use rusqlite::{params, OptionalExtension};
+    use rusqlite::{OptionalExtension, params};
     if let Ok(id) = target.parse::<i64>()
         && let Ok(Some(id)) = conn
             .query_row(
@@ -198,9 +198,9 @@ pub fn resolve_file_id(conn: &rusqlite::Connection, target: &str) -> Option<i64>
                 |r| r.get::<_, i64>(0),
             )
             .optional()
-        {
-            return Some(id);
-        }
+    {
+        return Some(id);
+    }
     let canon = std::fs::canonicalize(target)
         .map(|p| strip_extended_length(&p).to_string_lossy().into_owned())
         .unwrap_or_else(|_| target.to_string());

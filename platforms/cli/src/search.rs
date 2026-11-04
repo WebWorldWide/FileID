@@ -17,7 +17,7 @@ use anyhow::Result;
 use rusqlite::params;
 
 use crate::context::{
-    display_path, escape_like, file_size_i64, print_json, resolve_file_id, terminal_text, Ctx,
+    Ctx, display_path, escape_like, file_size_i64, print_json, resolve_file_id, terminal_text,
 };
 
 struct Hit {
@@ -268,7 +268,9 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
         } else {
             (
                 "seed_not_embedded",
-                format!("file #{seed_id} has no CLIP embedding (it may be a non-image, or predate the model scan)"),
+                format!(
+                    "file #{seed_id} has no CLIP embedding (it may be a non-image, or predate the model scan)"
+                ),
             )
         };
         return absent(ctx, kind, &msg, Some(seed_id));
@@ -381,7 +383,9 @@ fn run_similar(ctx: &Ctx, seed: &str, limit: usize) -> Result<()> {
 /// engine's `floats_to_le_bytes`).
 fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .as_chunks::<4>().0.iter()
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

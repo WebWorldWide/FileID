@@ -11,13 +11,13 @@
 //! sends [`LoadMsg::Done`]; any failure becomes a single [`LoadMsg::Error`].
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender as Sender;
-use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use fileid_engine::downloader::{install_model_blocking, InstallFileProgress};
-use fileid_engine::models::registry::{lookup_full, LookupResult, Model};
+use fileid_engine::downloader::{InstallFileProgress, install_model_blocking};
+use fileid_engine::models::registry::{LookupResult, Model, lookup_full};
 use fileid_engine::util::display::{rate, size_pair};
 
 use crate::data::{self, LoadMsg};

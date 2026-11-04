@@ -28,7 +28,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
-use context::{terminal_text, Ctx};
+use context::{Ctx, terminal_text};
 
 /// Shown at the foot of `fileid --help`: a few copy-pasteable starting points.
 const HELP_FOOTER: &str = "\

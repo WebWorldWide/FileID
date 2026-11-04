@@ -5,7 +5,7 @@
 use anyhow::Result;
 use fileid_engine::read::people::active_people;
 
-use crate::context::{print_json, terminal_text, truncate, Ctx};
+use crate::context::{Ctx, print_json, terminal_text, truncate};
 
 pub fn run(ctx: &Ctx) -> Result<()> {
     ctx.require_db_exists()?;

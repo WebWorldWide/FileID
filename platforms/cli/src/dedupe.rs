@@ -22,10 +22,10 @@ use anyhow::Result;
 use rusqlite::params;
 
 use fileid_engine::util::content_hash::{
-    exact_file_sha256, group_exact_duplicates, ExactDuplicateGroup,
+    ExactDuplicateGroup, exact_file_sha256, group_exact_duplicates,
 };
 
-use crate::context::{display_path, file_size_i64, print_json, Ctx};
+use crate::context::{Ctx, display_path, file_size_i64, print_json};
 
 use fileid_engine::read::dupes::{self, ExactCaps, MAX_SIMILAR_THRESHOLD};
 
@@ -253,8 +253,9 @@ fn load_file_metadata(
         let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(",");
-        let sql =
-            format!("SELECT id, path_text, size_bytes FROM files WHERE failed = 0 AND id IN ({placeholders})");
+        let sql = format!(
+            "SELECT id, path_text, size_bytes FROM files WHERE failed = 0 AND id IN ({placeholders})"
+        );
         let mut stmt = conn.prepare(&sql)?;
         for (id, path, size) in stmt
             .query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
@@ -648,10 +649,11 @@ fn remove_victim_groups(
 
     for group in groups {
         if let Some(guard) = &group.exact_guard
-            && !exact_group_still_matches(guard, &group.victims) {
-                result.failed += group.victims.len();
-                continue;
-            }
+            && !exact_group_still_matches(guard, &group.victims)
+        {
+            result.failed += group.victims.len();
+            continue;
+        }
         for (index, victim) in group.victims.iter().enumerate() {
             if group
                 .similar_guard
