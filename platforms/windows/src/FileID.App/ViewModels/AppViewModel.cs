@@ -114,6 +114,43 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         return candidates;
     }
 
+    private string? _pendingMomentsQuery;
+    private IReadOnlyList<CatalogHit>? _pendingToolFiles;
+
+    /// <summary>Raised after Chat hands a search to Search &amp; Moments.</summary>
+    public event EventHandler? MomentsQueryRequested;
+
+    /// <summary>Raised after Chat hands chosen files to File Tools.</summary>
+    public event EventHandler? ToolFilesRequested;
+
+    public void RequestMomentsQuery(string query)
+    {
+        _pendingMomentsQuery = query;
+        ActiveTab = SidebarTab.Moments;
+        MomentsQueryRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    public string? TakeMomentsQuery()
+    {
+        var query = _pendingMomentsQuery;
+        _pendingMomentsQuery = null;
+        return query;
+    }
+
+    public void RequestToolFiles(IReadOnlyList<CatalogHit> files)
+    {
+        _pendingToolFiles = files;
+        ActiveTab = SidebarTab.Tools;
+        ToolFilesRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    public IReadOnlyList<CatalogHit>? TakeToolFiles()
+    {
+        var files = _pendingToolFiles;
+        _pendingToolFiles = null;
+        return files;
+    }
+
     public string? TakeChatDraft()
     {
         var draft = _pendingChatDraft;

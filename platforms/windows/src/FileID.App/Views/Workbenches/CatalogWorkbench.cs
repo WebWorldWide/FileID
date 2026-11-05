@@ -15,6 +15,9 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private const int EagerThumbnails = 30;
     private readonly TextBox _query = new() { PlaceholderText = "Search files and videos", MaxLength = 2000, MinWidth = 360 };
     private readonly ComboBox _mode = new() { ItemsSource = new[] { "keyword", "hybrid", "semantic" }, SelectedIndex = 0 };
+    private readonly CalendarDatePicker _from = new() { PlaceholderText = "From", HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0 };
+    private readonly CalendarDatePicker _to = new() { PlaceholderText = "To", HorizontalAlignment = HorizontalAlignment.Stretch, MinWidth = 0 };
+    private readonly Button _anyDate;
     private readonly ListView _hits = new() { Height = 220, SelectionMode = ListViewSelectionMode.Multiple };
     private readonly ListView _chapters = new() { Height = 140 };
     private readonly ListView _jobs = new() { Height = 150 };
@@ -93,6 +96,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         searchControls.Children.Add(search);
         searchControls.Children.Add(keyword);
         searchTop.Children.Add(searchControls);
+        searchTop.Children.Add(BuildDateFilter(out _anyDate));
 
         _bestTakes = Secondary(new Button { Content = "Best takes", Height = 28, MinHeight = 28, IsEnabled = false });
         ToolTipService.SetToolTip(_bestTakes, TakeGroupsPolicy.SearchTooltip(_lastHits));
@@ -216,8 +220,53 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         UpdateControls();
     }
 
+    private Grid BuildDateFilter(out Button anyDate)
+    {
+        const string help = "Keeps matches taken in these days, or last changed when the taking date is unknown. FileID checks the best 100 matches.";
+        AutomationProperties.SetName(_from, "Taken on or after");
+        AutomationProperties.SetName(_to, "Taken on or before");
+        AutomationProperties.SetHelpText(_from, help);
+        AutomationProperties.SetHelpText(_to, help);
+        ToolTipService.SetToolTip(_from, help);
+        ToolTipService.SetToolTip(_to, help);
+        anyDate = Ghost(new Button { Content = "Any date", Visibility = Visibility.Collapsed });
+        AutomationProperties.SetName(anyDate, "Clear the dates");
+        anyDate.Click += (_, _) => DebugLog.SafeRun("CatalogWorkbench.AnyDate", () =>
+        {
+            _from.Date = null;
+            _to.Date = null;
+        });
+        _from.DateChanged += (_, _) => DebugLog.SafeRun("CatalogWorkbench.FromChanged", SyncDateFilter);
+        _to.DateChanged += (_, _) => DebugLog.SafeRun("CatalogWorkbench.ToChanged", SyncDateFilter);
+        var row = new Grid { ColumnSpacing = 6 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(_to, 1);
+        Grid.SetColumn(anyDate, 2);
+        row.Children.Add(_from);
+        row.Children.Add(_to);
+        row.Children.Add(anyDate);
+        return row;
+    }
+
+    private void SyncDateFilter() =>
+        _anyDate.Visibility = _from.Date is null && _to.Date is null ? Visibility.Collapsed : Visibility.Visible;
+
+    private void OnMomentsQueryRequested(object? sender, EventArgs e)
+        => DebugLog.SafeRun("CatalogWorkbench.OnMomentsQueryRequested", () => DispatcherQueue.TryEnqueue(UseMomentsQuery));
+
+    private void UseMomentsQuery()
+    {
+        if (AppViewModel.Instance.TakeMomentsQuery() is not { } query) return;
+        _query.Text = query;
+        if (!string.IsNullOrWhiteSpace(query)) Run(ct => SearchAsync("keyword", ct));
+    }
+
     protected override void OnOpened()
     {
+        AppViewModel.Instance.MomentsQueryRequested += OnMomentsQueryRequested;
+        UseMomentsQuery();
         _thumbs ??= new ThumbnailService();
         _poll.Start();
         _ = PollAsync();
@@ -226,6 +275,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
 
     protected override void OnClosed()
     {
+        AppViewModel.Instance.MomentsQueryRequested -= OnMomentsQueryRequested;
         _poll.Stop();
         _playhead.Stop();
         _thumbs?.Dispose();
@@ -434,6 +484,13 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private async Task SearchAsync(string mode, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(_query.Text)) throw new InvalidOperationException("Type a word to search for first.");
+        (double? From, double? To) dates = default;
+        var dateNote = "";
+        await UI(() =>
+        {
+            dates = SearchDateRange.Unix(_from.Date, _to.Date);
+            dateNote = SearchDateRange.Describe(_from.Date, _to.Date);
+        }, ct);
         await UI(() =>
         {
             _resultsCount.Visibility = Visibility.Collapsed;
@@ -442,7 +499,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         CatalogResponse result;
         try
         {
-            result = await Engine.CatalogSearchAsync(_query.Text, mode, ct);
+            result = await Engine.CatalogSearchAsync(_query.Text, mode, dates.From, dates.To, ct);
         }
         finally
         {
@@ -460,6 +517,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
                     ? "No matches. Try another word, or describe more files so there is more to search."
                     : $"{result.Hits.Count:N0} match{(result.Hits.Count == 1 ? "" : "es")}.");
             if (result.Status != "ok" && mode != "keyword") Status.Text += " Try Keyword instead.";
+            if (dateNote.Length > 0) Status.Text += $" {dateNote}.";
             IReadOnlyList<CatalogHit> hits = result.Status == "ok" ? result.Hits : Array.Empty<CatalogHit>();
             RenderHits(hits, searched: true);
             _fileID = null;

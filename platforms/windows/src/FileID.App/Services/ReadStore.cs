@@ -717,6 +717,57 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
+    /// <summary>Path, size and pending suggested name for each file still in the catalog,
+    /// for Chat actions that re-check files before changing them.</summary>
+    public async Task<IReadOnlyDictionary<long, ChatFileRow>> FilesByIdAsync(IReadOnlyCollection<long> ids, CancellationToken ct)
+    {
+        var rows = new Dictionary<long, ChatFileRow>();
+        if (_connection == null || ids.Count == 0) return rows;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return rows;
+            foreach (var chunk in ids.Distinct().Chunk(500))
+            {
+                using var cmd = _connection.CreateCommand();
+                var names = new string[chunk.Length];
+                for (var i = 0; i < chunk.Length; i++)
+                {
+                    names[i] = "$id" + i;
+                    cmd.Parameters.AddWithValue(names[i], chunk[i]);
+                }
+                cmd.CommandText = $"SELECT id, path_text, kind, size_bytes, vlm_proposed_name FROM files WHERE failed = 0 AND id IN ({string.Join(',', names)})";
+                using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+                while (await reader.ReadAsync(ct).ConfigureAwait(false))
+                {
+                    var id = reader.GetInt64(0);
+                    rows[id] = new ChatFileRow(id, reader.GetString(1), reader.GetString(2), reader.IsDBNull(3) ? 0 : reader.GetInt64(3), reader.IsDBNull(4) ? null : reader.GetString(4));
+                }
+            }
+            return rows;
+        }
+        finally { _gate.Release(); }
+    }
+
+    /// <summary>A person's stored name parts, so Chat can put a name back after renaming.</summary>
+    public async Task<PersonNameRow?> PersonNameAsync(long personId, CancellationToken ct)
+    {
+        if (_connection == null) return null;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return null;
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT title, first_name, middle_name, last_name, suffix, name, IFNULL(is_unknown, 0) FROM persons WHERE id = $id";
+            cmd.Parameters.AddWithValue("$id", personId);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+            string? Col(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+            return new PersonNameRow(Col(0), Col(1), Col(2), Col(3), Col(4), Col(5), reader.GetInt64(6) != 0);
+        }
+        finally { _gate.Release(); }
+    }
+
     /// <summary>Most spans read per lane; the timeline merges them to its pixel width anyway.</summary>
     internal const int TimelineSpanLimit = 5000;
 
@@ -952,6 +1003,10 @@ internal sealed record FileRow(
     string? ProposedName = null);
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
+
+internal sealed record ChatFileRow(long Id, string Path, string Kind, long SizeBytes, string? ProposedName);
+
+internal sealed record PersonNameRow(string? Title, string? First, string? Middle, string? Last, string? Suffix, string? Name, bool IsUnknown);
 
 /// <summary>Examined and Speech spans (seconds) for one video's timeline.</summary>
 internal sealed record TimelineTracks(
