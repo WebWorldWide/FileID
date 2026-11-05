@@ -16,7 +16,7 @@ Crash-safety follow-ups (2026-11-03 night, from the SIGKILL hunt):
 - [ ] After a crash the app cannot restore a trash batch: the batch id reaches the app only in the reply. Persist or list journaled batches (schema first) so Undo survives a restart.
 - [x] (2026-11-04) One-file window between a Trash move and its journal entry closed on the Mac: entries are written ahead of the move, restore finds an unrecorded one by inode, and startup drops catalog rows of files provably in the Trash (crash harness trash experiments 20/20).
 - [ ] Restructure undo after wipe + rescan fails because wiping resets file ids; files stay moved and the journal stays stuck. Needs a design call (key the journal by path + inode instead of file id).
-- [x] Rust `renameFiles` writes each file's row right after its move (2026-11-05); a kill now leaves at most the in-flight file out of step, which the recovery sidecar and rename-heal cover.
+- [ ] Rust `renameFiles` updates the catalog only after all renames; a kill leaves stale rows and rename-back is refused until a rescan. Fix written and tested 2026-11-05 (each row written right after its move; new mixed-batch test; clippy + 1,105 tests pass) but not merged: `commands/bulk.rs` carries a reviewed egress digest that needs the owner to refresh. Patch: `~/Library/Developer/FileIDBuild/pending-patches/rust-rename-per-file.patch` (`git apply`, then refresh the digest in `check_runtime_egress.py`).
 - [ ] Existing catalogs keep copy dates until a rescan re-reads EXIF; consider a one-off EXIF date backfill job for photos whose `created_at` is a filesystem time.
 
 Safety and quick wins:
