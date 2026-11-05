@@ -116,6 +116,17 @@ public actor DeepAnalyze {
         environment["FILEID_VLM_DECODER"] != "library"
     }
 
+    /// Captions use the library's stream, measured 6% faster per photo on Qwen3-VL 4B
+    /// (2.94 vs 3.13 s, 60 photos, identical descriptions, names and tags), except
+    /// models that write the compact line (Qwen3-VL 2B), which need the loop guard.
+    nonisolated static func captionUsesGreedy(model: AIModelKind?, environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        switch environment["FILEID_VLM_DECODER"] {
+        case "greedy": return true
+        case "library": return false
+        default: return replyFormat(model: model, environment: environment) == .compact
+        }
+    }
+
     // Tag pass: short greedy decode — mirrors the Windows tag call (max_tokens 40,
     // greedy). parseVLMTags caps at 2 tags regardless, so a 320-token sample is
     // wasted work; greedy (temperature 0) also makes the tags deterministic across
@@ -857,6 +868,7 @@ public actor DeepAnalyze {
 
         let collector = TokenCollector()
         let params = sceneCaption ? sceneGenerateParams : analysisGenerateParams
+        let captionModel = loadedKind
         do {
             try await container.perform { (context: ModelContext) -> Void in
                 try Task.checkCancellation()
@@ -872,7 +884,7 @@ public actor DeepAnalyze {
                 if Self.acceptsResize(context) { userInput.processing.resize = .init(width: side, height: side) }
                 let lmInput = try await context.processor.prepare(input: userInput)
                 let warm = try prefixCache.split(lmInput, context: context, parameters: params, stats: stats)
-                if Self.greedyDecoderEnabled() {
+                if Self.captionUsesGreedy(model: captionModel) {
                     let lookup = VLMGreedyDecoder.promptLookupEnabled()
                     let sources = lookup ? Self.lookupSources(input: lmInput, context: context, format: format) : []
                     let earlyStop = VLMGreedyDecoder.earlyStopEnabled()

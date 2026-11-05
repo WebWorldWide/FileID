@@ -74,6 +74,15 @@ struct VLMReplyFormatTests {
         #expect(DeepAnalyze.replyFormat(model: .qwen3VL4B, environment: ["FILEID_VLM_FORMAT": "bogus"]) == .sections)
     }
 
+    @Test("captions use the library stream except for the compact-line model, and the switch overrides both")
+    func captionDecoder() {
+        #expect(DeepAnalyze.captionUsesGreedy(model: .qwen3VL2B, environment: [:]))
+        #expect(!DeepAnalyze.captionUsesGreedy(model: .qwen3VL4B, environment: [:]))
+        #expect(!DeepAnalyze.captionUsesGreedy(model: nil, environment: [:]))
+        #expect(DeepAnalyze.captionUsesGreedy(model: .qwen3VL4B, environment: ["FILEID_VLM_DECODER": "greedy"]))
+        #expect(!DeepAnalyze.captionUsesGreedy(model: .qwen3VL2B, environment: ["FILEID_VLM_DECODER": "library"]))
+    }
+
     @Test("the compact prompt asks for one line of three fields")
     func compactPrompt() {
         let prompt = DeepAnalyze.analysisSystemPrompt(
