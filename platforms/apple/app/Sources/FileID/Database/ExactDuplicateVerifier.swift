@@ -214,6 +214,7 @@ extension ExactDuplicateVerifier {
             return outcome
         }
         outcome.trashed = result.messages.filter(\.ok).compactMap(\.fileID).map { ($0, sizes[$0] ?? 0) }
+        SpotlightIndexer.deindex(ids: outcome.trashed.map(\.id))
         let refused = result.messages.filter { !$0.ok }
         outcome.verificationFailed += refused.filter { ($0.message ?? "").contains("changed") || ($0.message ?? "").contains("match") }.count
         outcome.failed = refused.count - refused.filter { ($0.message ?? "").contains("changed") || ($0.message ?? "").contains("match") }.count
