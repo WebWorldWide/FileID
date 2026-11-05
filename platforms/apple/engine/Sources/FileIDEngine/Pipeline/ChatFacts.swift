@@ -296,10 +296,26 @@ enum ChatFacts {
             let ordered = question.explicitOrder ? "\(question.order) " : ""
             return ("The \(top == 1 ? "" : "\(ChatIntent.countLabel(top)) ")\(ordered)\(ChatIntent.noun(kinds, top))\(qualifiers): \(names).", hits)
         }
+        if let unit = question.breakdown {
+            var args: [DatabaseValueConvertible?] = []
+            let clause = filter.clause(&args)
+            let format = unit == "year" ? "%Y" : "%Y-%m"
+            let groups = try Row.fetchAll(db, sql: "SELECT strftime('\(format)',\(taken),'unixepoch','localtime') AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE \(clause) GROUP BY g ORDER BY g IS NULL,g DESC", arguments: StatementArguments(args))
+            let parts = groups.prefix(24).map { row -> String in
+                let n: Int64 = row["c"]
+                let label: String = row["g"] ?? "no date"
+                return question.measure == "size" ? "\(label): \(ChatIntent.bytesLabel(row["b"]))" : "\(label): \(ChatIntent.countLabel(n))"
+            }
+            let more = groups.count > 24 ? " and \(groups.count - 24) more" : ""
+            return ("\(capitalized(ChatIntent.noun(kinds, 2)))\(qualifiers) by \(unit): \(parts.joined(separator: ", "))\(more).", hits)
+        }
         let message: String
         switch question.measure {
         case "size":
-            message = "\(capitalized(ChatIntent.noun(kinds, 2)))\(qualifiers) use \(ChatIntent.bytesLabel(bytes)) (\(ChatIntent.countLabel(count)) \(ChatIntent.noun(kinds, count)))."
+            let largest = question.explicitOrder && question.order == "largest" && !hits.isEmpty
+                ? " Largest: \(hits.prefix(3).map { "\(fileName($0.path)) (\($0.text.components(separatedBy: " · ").first ?? ""))" }.joined(separator: ", "))."
+                : ""
+            message = "\(capitalized(ChatIntent.noun(kinds, 2)))\(qualifiers) use \(ChatIntent.bytesLabel(bytes)) (\(ChatIntent.countLabel(count)) \(ChatIntent.noun(kinds, count))).\(largest)"
         case "count":
             message = "Found \(ChatIntent.countLabel(count)) \(ChatIntent.noun(kinds, count))\(qualifiers), using \(ChatIntent.bytesLabel(bytes))."
         default:
@@ -313,7 +329,8 @@ enum ChatFacts {
     static let subjectFillers: Set<String> = [
         "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show",
         "containing", "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where",
-        "who", "me", "my", "i", "do", "does", "have", "has", "s"
+        "who", "me", "my", "i", "do", "does", "have", "has", "s", "mentioning", "mention", "mentions", "named", "called",
+        "titled", "labeled", "labelled", "regarding", "related"
     ]
     static let subjectLimit = 200_000
 
