@@ -1,13 +1,18 @@
 import CoreGraphics
 import ImageIO
+import UniformTypeIdentifiers
 
-/// Bounded working image for the scan. Uses an embedded preview when it is at
-/// least two-thirds of the requested size (RAW files carry full-size JPEG
-/// previews; decoding those is 10–17× cheaper than demosaicing the sensor
-/// data), otherwise decodes the full image. Small EXIF thumbnails never pass.
-/// A preview up to a third larger than the target is used at its native size:
-/// resampling a 1616 px Sony preview down to 1536 px cost more than decoding it.
-/// Larger previews are scaled to the target; everything else decodes at it.
+/// Bounded working image for the scan. For RAW files, uses an embedded preview
+/// when it is at least two-thirds of the requested size (RAW files carry
+/// full-size JPEG previews; decoding those is 10–17× cheaper than demosaicing
+/// the sensor data), otherwise decodes the full image. Small EXIF thumbnails
+/// never pass. A preview up to a third larger than the target is used at its
+/// native size: resampling a 1616 px Sony preview down to 1536 px cost more
+/// than decoding it. Larger previews are scaled to the target.
+///
+/// Other formats decode straight to the target. The preview probe made ImageIO
+/// scale a camera JPEG's full image to the probe size first, so every photo was
+/// decoded twice (73 vs 26 ms CPU per 24 MP JPEG, measured).
 func decodeBoundedImage(_ source: CGImageSource, maxPixelSize: Int) -> CGImage? {
     let cap = maxPixelSize * 4 / 3
     var options: [CFString: Any] = [
@@ -16,11 +21,17 @@ func decodeBoundedImage(_ source: CGImageSource, maxPixelSize: Int) -> CGImage? 
         kCGImageSourceThumbnailMaxPixelSize: cap,
         kCGImageSourceCreateThumbnailFromImageIfAbsent: false
     ]
+    guard isCameraRaw(source) else {
+        options[kCGImageSourceCreateThumbnailFromImageIfAbsent] = nil
+        options[kCGImageSourceCreateThumbnailFromImageAlways] = true
+        options[kCGImageSourceThumbnailMaxPixelSize] = maxPixelSize
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
     var largePreview = false
     if let preview = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
         let side = max(preview.width, preview.height)
         if side * 3 >= maxPixelSize * 2 && side < cap { return preview }
-        if !hasLargerImage(source, than: preview) { return preview }
+        if longSide(source).map({ $0 > side }) == false { return preview }
         largePreview = side >= cap
     }
     options[kCGImageSourceThumbnailMaxPixelSize] = maxPixelSize
@@ -33,9 +44,15 @@ func decodeBoundedImage(_ source: CGImageSource, maxPixelSize: Int) -> CGImage? 
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
 }
 
-private func hasLargerImage(_ source: CGImageSource, than image: CGImage) -> Bool {
+private func isCameraRaw(_ source: CGImageSource) -> Bool {
+    guard let identifier = CGImageSourceGetType(source) as String?,
+          let type = UTType(identifier) else { return false }
+    return type.conforms(to: .rawImage)
+}
+
+private func longSide(_ source: CGImageSource) -> Int? {
     guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
           let width = properties[kCGImagePropertyPixelWidth] as? Int,
-          let height = properties[kCGImagePropertyPixelHeight] as? Int else { return true }
-    return max(width, height) > max(image.width, image.height)
+          let height = properties[kCGImagePropertyPixelHeight] as? Int else { return nil }
+    return max(width, height)
 }

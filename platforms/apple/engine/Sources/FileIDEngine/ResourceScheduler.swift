@@ -7,14 +7,26 @@ actor ResourceScheduler {
 
     struct Demand: Sendable, Equatable {
         let memoryMB: UInt64
-        let cpuUnits: Int
+        /// CPU in half-core units, so work that spends about half its time waiting on the
+        /// Neural Engine, GPU or hardware image decoder can reserve half a core.
+        let cpuHalves: Int
         let ioUnits: Int
 
+        var cpuUnits: Int { cpuHalves / 2 + cpuHalves % 2 }
+
         init(memoryMB: UInt64 = 0, cpuUnits: Int = 0, ioUnits: Int = 0) {
+            let (halves, overflow) = cpuUnits.multipliedReportingOverflow(by: 2)
+            self.init(memoryMB: memoryMB, cpuHalves: overflow ? .max : halves, ioUnits: ioUnits)
+        }
+
+        init(memoryMB: UInt64 = 0, cpuHalves: Int, ioUnits: Int = 0) {
             self.memoryMB = memoryMB
-            self.cpuUnits = cpuUnits
+            self.cpuHalves = cpuHalves
             self.ioUnits = ioUnits
         }
+
+        /// One scan file: decode, Vision and CLIP keep a core busy about half the time.
+        static let acceleratedHalfCore = Demand(cpuHalves: 1)
     }
 
     enum Priority: Int, Sendable {
@@ -175,7 +187,7 @@ actor ResourceScheduler {
 
     func snapshot() -> Snapshot {
         Snapshot(reservedMemoryMB: reservations.values.map { $0.demand.memoryMB }.reduce(0, saturatingAdd),
-                 reservedCPUUnits: reservations.values.map { $0.demand.cpuUnits }.reduce(0, saturatingAdd),
+                 reservedCPUUnits: Demand(cpuHalves: reservedCPUHalves).cpuUnits,
                  reservedIOUnits: reservations.values.map { $0.demand.ioUnits }.reduce(0, saturatingAdd),
                  activeReservations: reservations.count,
                  waitingCount: waiters.count)
@@ -190,11 +202,11 @@ actor ResourceScheduler {
 
     private func validate(_ demand: Demand) throws {
         let (totalMB, availableMB) = memory()
-        guard demand.memoryMB > 0 || demand.cpuUnits > 0 || demand.ioUnits > 0,
-              demand.cpuUnits >= 0, demand.ioUnits >= 0 else {
+        guard demand.memoryMB > 0 || demand.cpuHalves > 0 || demand.ioUnits > 0,
+              demand.cpuHalves >= 0, demand.ioUnits >= 0 else {
             throw AdmissionError.invalidMemoryEstimate
         }
-        guard demand.cpuUnits <= cpuCapacity, demand.ioUnits <= ioCapacity else {
+        guard demand.cpuHalves <= cpuCapacityHalves, demand.ioUnits <= ioCapacity else {
             throw AdmissionError.exceedsResourceCapacity
         }
         if demand.memoryMB > 0 {
@@ -206,9 +218,9 @@ actor ResourceScheduler {
     }
 
     private func canGrant(_ demand: Demand) -> Bool {
-        let reservedCPU = reservations.values.map { $0.demand.cpuUnits }.reduce(0, saturatingAdd)
+        let reservedCPU = reservedCPUHalves
         let reservedIO = reservations.values.map { $0.demand.ioUnits }.reduce(0, saturatingAdd)
-        guard demand.cpuUnits <= cpuCapacity - min(cpuCapacity, reservedCPU),
+        guard demand.cpuHalves <= cpuCapacityHalves - min(cpuCapacityHalves, reservedCPU),
               demand.ioUnits <= ioCapacity - min(ioCapacity, reservedIO) else { return false }
         guard demand.memoryMB > 0 else { return true }
 
@@ -224,9 +236,9 @@ actor ResourceScheduler {
     }
 
     private func admissionError(_ demand: Demand) -> AdmissionError {
-        let reservedCPU = reservations.values.map { $0.demand.cpuUnits }.reduce(0, saturatingAdd)
+        let reservedCPU = reservedCPUHalves
         let reservedIO = reservations.values.map { $0.demand.ioUnits }.reduce(0, saturatingAdd)
-        if demand.cpuUnits > cpuCapacity - min(cpuCapacity, reservedCPU)
+        if demand.cpuHalves > cpuCapacityHalves - min(cpuCapacityHalves, reservedCPU)
             || demand.ioUnits > ioCapacity - min(ioCapacity, reservedIO) {
             return .insufficientResources
         }
@@ -266,6 +278,12 @@ actor ResourceScheduler {
         let waiter = waiters.remove(at: index)
         waiter.continuation.resume(throwing: CancellationError())
         drainWaiters()
+    }
+
+    private var cpuCapacityHalves: Int { cpuCapacity * 2 }
+
+    private var reservedCPUHalves: Int {
+        reservations.values.map { $0.demand.cpuHalves }.reduce(0, saturatingAdd)
     }
 
     private var hasInteractiveReservation: Bool {

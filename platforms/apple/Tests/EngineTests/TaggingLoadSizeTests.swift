@@ -140,6 +140,28 @@ struct TaggingLoadSizeTests {
         #expect(taggingResult.0.height == 480)
     }
 
+    @Test("JPEGs decode to the target size whether or not they carry a thumbnail")
+    func jpegDecodeSizes() throws {
+        func jpeg(width: Int, height: Int, thumbnail: Bool = true) throws -> CGImageSource {
+            let ctx = try #require(CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+            ctx.setFillColor(CGColor(red: 0.7, green: 0.3, blue: 0.1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            let data = NSMutableData()
+            let dest = try #require(CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
+            CGImageDestinationAddImage(dest, try #require(ctx.makeImage()), [kCGImageDestinationEmbedThumbnail: thumbnail] as CFDictionary)
+            #expect(CGImageDestinationFinalize(dest))
+            return try #require(CGImageSourceCreateWithData(data, nil))
+        }
+        let near = try #require(decodeBoundedImage(try jpeg(width: 600, height: 400, thumbnail: false), maxPixelSize: 512))
+        #expect(near.width == 512 && near.height == 341)
+        let large = try #require(decodeBoundedImage(try jpeg(width: 2000, height: 1000), maxPixelSize: 512))
+        #expect(large.width == 512 && large.height == 256)
+        let small = try #require(decodeBoundedImage(try jpeg(width: 300, height: 200), maxPixelSize: 512))
+        #expect(small.width == 300 && small.height == 200)
+    }
+
     @Test("PDFs over 20 MiB bypass extraction during scan tagging")
     func largePDFBypassesExtraction() async throws {
         let dir = FileManager.default.temporaryDirectory
