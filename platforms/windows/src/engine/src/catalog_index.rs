@@ -175,9 +175,6 @@ impl CatalogIndex {
         let mut wide = request.clone();
         wide.limit = Some(100);
         let mut response = self.search_unfiltered(&wide)?;
-        if response.hits.is_empty() {
-            return Ok(response);
-        }
         let conn = db::open_read(&self.database)?;
         let mut statement = conn.prepare("SELECT 1 FROM files WHERE id=?1 AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3")?;
         let mut inside = std::collections::HashSet::new();
@@ -191,6 +188,37 @@ impl CatalogIndex {
         }
         response.hits.retain(|hit| inside.contains(&hit.file_id));
         response.hits.truncate(limit);
+        // Ranking keeps the best hundred overall; files in the window beyond them
+        // come from every file the words describe, newest first (Swift `CatalogSearch.handle`).
+        let query = request.query.as_deref().map(str::trim).unwrap_or_default();
+        if response.hits.len() < limit
+            && !query.is_empty()
+            && request.search_mode.as_deref().unwrap_or("keyword") != "semantic"
+            && let Some(subject) = crate::commands::chat_facts::subject_ids(&conn, query)?
+        {
+            {
+                let seen: std::collections::HashSet<i64> = response.hits.iter().map(|hit| hit.file_id).collect();
+                let wanted = serde_json::to_string(&subject)?;
+                let mut more = conn.prepare(
+                    "SELECT id,path_text,kind,COALESCE(vlm_description,'') FROM files
+                     WHERE failed=0 AND id IN (SELECT value FROM json_each(?1)) AND COALESCE(created_at,modified_at) BETWEEN ?2 AND ?3
+                     ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?4",
+                )?;
+                let rows = more.query_map(rusqlite::params![wanted, from, to, (limit + seen.len()) as i64], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+                })?;
+                for row in rows {
+                    let (file_id, path, kind, text) = row?;
+                    if response.hits.len() >= limit {
+                        break;
+                    }
+                    if seen.contains(&file_id) {
+                        continue;
+                    }
+                    response.hits.push(CatalogHit { file_id, path, kind, text, evidence_id: None, start_seconds: None, page: None });
+                }
+            }
+        }
         Ok(response)
     }
 

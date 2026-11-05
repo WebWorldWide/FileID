@@ -614,3 +614,21 @@ fn capture_window_keeps_files_inside_it_and_rejects_backwards_ranges() {
     let backwards = request(serde_json::json!({"requestID":"bad","action":"search","query":"fixture","capturedFrom":5000,"capturedTo":1000}));
     assert!(index.search(&backwards).is_err());
 }
+#[test]
+fn capture_window_reaches_files_beyond_the_ranked_hundred() {
+    let (_directory, index) = fixture();
+    {
+        let conn = index.writer.lock();
+        for id in 100..400 {
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at,vlm_description) VALUES(?1,?2,?1,1,0,'image','jpg',?3,'harbor boats')",
+                rusqlite::params![id, format!("/lib/harbor_{id}.jpg"), if id < 380 { 5_000.0 } else { 100.0 }],
+            )
+            .unwrap();
+        }
+    }
+    let body = serde_json::json!({"requestID":"old","action":"search","query":"harbor","capturedTo":200});
+    let hits = index.search(&request(body)).unwrap().hits;
+    assert_eq!(hits.len(), 20, "all 20 old harbor photos, not only those in the ranked hundred");
+    assert!(hits.iter().all(|hit| hit.file_id >= 380));
+}

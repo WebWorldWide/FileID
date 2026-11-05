@@ -24,12 +24,30 @@ enum CatalogSearch {
         var wide = request
         wide.limit = 100
         var response = try await run(wide, database: database)
-        guard !response.hits.isEmpty else { return response }
         let ids = String(decoding: try JSONEncoder().encode(Set(response.hits.map(\.fileID)).sorted()), as: UTF8.self)
-        let inside = try await database.pool.read { db in
+        let inside = response.hits.isEmpty ? [] : try await database.pool.read { db in
             Set(try Int64.fetchAll(db, sql: "SELECT id FROM files WHERE id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?", arguments: [ids, from, to]))
         }
         response.hits = Array(response.hits.filter { inside.contains($0.fileID) }.prefix(limit))
+        // Ranking keeps the best hundred overall; files in the window beyond them
+        // come from every file the words describe, newest first.
+        let query = request.query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if response.hits.count < limit, !query.isEmpty, (request.searchMode ?? "keyword") != "semantic" {
+            let seen = Set(response.hits.map(\.fileID))
+            let more = try await database.pool.read { db -> [CatalogHit] in
+                guard let subject = try ChatFacts.subjectIDs(db, query) else { return [] }
+                let wanted = String(decoding: try JSONEncoder().encode(subject), as: UTF8.self)
+                return try Row.fetchAll(db, sql: """
+                    SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files
+                    WHERE failed=0 AND id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?
+                    ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?
+                    """, arguments: [wanted, from, to, limit + seen.count]).compactMap { row in
+                    let id: Int64 = row["id"]
+                    return seen.contains(id) ? nil : CatalogHit(fileID: id, path: row["path_text"], kind: row["kind"], text: row["description"])
+                }
+            }
+            response.hits += more.prefix(limit - response.hits.count)
+        }
         return response
     }
 
