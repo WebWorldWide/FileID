@@ -272,6 +272,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     glib::MainContext::default().spawn_local(clone!(
         #[strong]
         reload,
+        #[strong]
+        pane,
         async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
@@ -282,7 +284,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                             reload();
                         }
                     }
-                    EngineEvent::ScanComplete(_) => reload(),
+                    EngineEvent::ScanComplete(_) => {
+                        reload();
+                        refresh_pane_details(&pane);
+                    }
                     _ => {}
                 }
             }
@@ -430,8 +435,9 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         ctx.selection
             .set_selected(position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32));
         ctx.restoring.set(false);
-        if position.is_none() {
-            ctx.pane.hide();
+        match position {
+            Some(position) => ctx.pane.refresh(rows[position].clone(), false),
+            None => ctx.pane.hide(),
         }
         ctx.total.set(total);
         ctx.has_more.set(total > rows.len() as i64);
@@ -745,6 +751,19 @@ fn clear_tile(tile: &gtk::Widget) {
         pic.set_paintable(None::<&gtk::gdk::Texture>);
         play.set_visible(false);
     }
+}
+
+/// People and tags change at the end of a scan without touching the file
+/// row, so the Selected pane re-reads its file then.
+fn refresh_pane_details(pane: &Rc<SelectedPane>) {
+    let Some(id) = pane.current_id() else { return };
+    let rx = crate::engine_client::read_file_row(id);
+    let pane = Rc::downgrade(pane);
+    glib::MainContext::default().spawn_local(async move {
+        if let (Ok(Some(row)), Some(pane)) = (rx.recv().await, pane.upgrade()) {
+            pane.refresh(row, true);
+        }
+    });
 }
 
 // ── Preview dialog ───────────────────────────────────────────────────────────
