@@ -407,7 +407,10 @@ struct ToolsWorkbench: View {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
-        panel.canCreateDirectories = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose where to save the new copies. Your originals stay where they are."
+        panel.prompt = "Save Here"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         session.destination = url.path
         session.destinationBookmark = nil
