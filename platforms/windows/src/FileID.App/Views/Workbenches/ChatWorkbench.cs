@@ -54,13 +54,14 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         Inputs.Children.Add(_messages);
         _input.AcceptsReturn = false;
         _input.MinHeight = 30;
+        _send = Primary(ActionButton("Send", SendAsync));
+        var send = _send;
         _input.KeyDown += (_, e) => DebugLog.SafeRun("ChatWorkbench.ReturnSends", () =>
         {
-            if (e.Key != Windows.System.VirtualKey.Enter || !_send.IsEnabled) return;
+            if (e.Key != Windows.System.VirtualKey.Enter || !send.IsEnabled) return;
             e.Handled = true;
             Run(SendAsync);
         });
-        _send = Primary(ActionButton("Send", SendAsync));
         _input.TextChanged += (_, _) => SyncSend();
         SyncSend();
         Inputs.Children.Add(Row(_input, _send));
