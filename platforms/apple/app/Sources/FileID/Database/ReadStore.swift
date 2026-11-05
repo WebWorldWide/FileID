@@ -33,6 +33,8 @@ public final class ReadStore: @unchecked Sendable {
     /// Files the scan could not decode or read; the Library hides them unless
     /// the Unreadable filter is chosen.
     public private(set) var unreadableFiles: Int = 0
+    /// Files cataloged by name, size and dates only (archives, installers, unknown types).
+    public private(set) var otherFiles: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
     public private(set) var totalReclaimableMB: Double = 0
     public private(set) var hasFacePrints = false
@@ -80,6 +82,7 @@ public final class ReadStore: @unchecked Sendable {
             self.totalFiles = 0
             self.totalImages = 0
             self.unreadableFiles = 0
+            self.otherFiles = 0
             self.totalDuplicateGroups = 0
             self.totalReclaimableMB = 0
             self.hasFacePrints = false
@@ -174,6 +177,7 @@ public final class ReadStore: @unchecked Sendable {
         let totalFiles: Int
         let totalImages: Int
         let unreadableFiles: Int
+        let otherFiles: Int
         let totalDuplicateGroups: Int
         let totalReclaimableMB: Double
         let hasFacePrints: Bool
@@ -244,7 +248,8 @@ public final class ReadStore: @unchecked Sendable {
             return try q.read { db -> CounterResult in
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
-                let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1") ?? 0
+                let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1 AND \(Self.unreadableSQL)") ?? 0
+                let otherFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'other' AND failed = 0") ?? 0
 
                 // Fast stored-hash candidate metrics for Settings only. Cleanup itself
                 // performs bounded live full-file verification before display and Trash.
@@ -274,6 +279,7 @@ public final class ReadStore: @unchecked Sendable {
                     totalFiles: totalFiles,
                     totalImages: totalImages,
                     unreadableFiles: unreadableFiles,
+                    otherFiles: otherFiles,
                     totalDuplicateGroups: groups,
                     totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
                     hasFacePrints: hasFacePrints,
@@ -291,6 +297,7 @@ public final class ReadStore: @unchecked Sendable {
         self.totalFiles = snapshot.totalFiles
         self.totalImages = snapshot.totalImages
         self.unreadableFiles = snapshot.unreadableFiles
+        self.otherFiles = snapshot.otherFiles
         self.totalDuplicateGroups = snapshot.totalDuplicateGroups
         self.totalReclaimableMB = snapshot.totalReclaimableMB
         self.hasFacePrints = snapshot.hasFacePrints
@@ -302,6 +309,8 @@ public final class ReadStore: @unchecked Sendable {
 
     /// `kindFilter` value that lists the files the scan could not read.
     public static let unreadableFilter = "unreadable"
+    /// Failed rows that are really unreadable, not just waiting for the next scan to retry them.
+    static let unreadableSQL = "COALESCE(error_message, '') NOT LIKE '%will retry%'"
 
     public func files(offset: Int = 0, limit: Int = 200,
                       search: String = "",
@@ -310,7 +319,7 @@ public final class ReadStore: @unchecked Sendable {
         do {
             return try q.read { db in
                 let unreadable = kindFilter == Self.unreadableFilter
-                var sql = unreadable ? "SELECT * FROM files WHERE failed = 1" : "SELECT * FROM files WHERE failed = 0"
+                var sql = unreadable ? "SELECT * FROM files WHERE failed = 1 AND \(Self.unreadableSQL)" : "SELECT * FROM files WHERE failed = 0"
                 var args: StatementArguments = []
                 let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
                 if !trimmedSearch.isEmpty {

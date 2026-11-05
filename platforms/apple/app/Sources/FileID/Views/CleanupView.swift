@@ -19,8 +19,10 @@ struct CleanupView: View {
     @State private var lastSeenBatchIndex: Int = -1
     @State private var status: String?
     @State private var statusWarning = false
-    /// The last Trash batch, while it can still be put back from the status banner.
-    @State private var undoBatch: String?
+    /// The last Trash batch. Kept across launches: the engine's journal keeps it until
+    /// it is put back, so "Put back last move" still works after a restart or crash.
+    @AppStorage("cleanup.lastTrashBatch") private var undoBatchStored = ""
+    private var undoBatch: String? { undoBatchStored.isEmpty ? nil : undoBatchStored }
     @State private var exactPreviewPartial = false
     @State private var exactCandidateCount = 0
     @State private var exactSkipped = 0
@@ -130,6 +132,13 @@ struct CleanupView: View {
             SegmentedBar(selection: $mode, options: [("exact", "Exact copies"), ("similar", "Look-alikes")])
             .help("Exact copies are the same file twice. Look-alikes are photos that look nearly the same (resized, cropped or lightly edited) but are not identical, so check each one.")
             Spacer()
+            if let batch = undoBatch, status == nil {
+                Button { Task { await undoTrash(batch) } } label: { Label("Put back last move", systemImage: "arrow.uturn.backward") }
+                    .buttonStyle(.dsSecondary)
+                    .fixedSize()
+                    .disabled(deleting)
+                    .help("Puts the copies FileID last moved to Trash back where they were")
+            }
             if !visibleGroups.isEmpty {
                 HStack(spacing: 6) {
                     // Bulk "select every non-keeper" is hidden in Similar mode: those
@@ -168,7 +177,7 @@ struct CleanupView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(totalSelected == 0)
-                .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back from Trash.")
+                .help(totalSelected == 0 ? "Choose the copies to remove first: click their pictures, or use Select all extra copies." : "Move the chosen copies to Trash. You can put them back afterwards.")
                 .confirmationDialog(
                     "Move \(totalSelected) file\(totalSelected == 1 ? "" : "s") to Trash?",
                     isPresented: $confirmDelete,
@@ -321,7 +330,6 @@ struct CleanupView: View {
                         Button("Dismiss") {
                             status = nil
                             statusWarning = false
-                            undoBatch = nil
                         }
                             .buttonStyle(.borderless)
                     }
@@ -467,7 +475,7 @@ struct CleanupView: View {
         status = summary
         store.notifyChanged()
         reload()
-        undoBatch = trashedIDs.isEmpty ? nil : outcome.batchID
+        if !trashedIDs.isEmpty, let batch = outcome.batchID { undoBatchStored = batch }
     }
 
     private func undoTrash(_ batch: String) async {
@@ -475,7 +483,7 @@ struct CleanupView: View {
         deleting = true
         defer { deleting = false }
         let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
-        undoBatch = nil
+        if undone.restored > 0 || undone.message?.contains("unknown or already restored") == true { undoBatchStored = "" }
         statusWarning = undone.restored == 0
         status = undone.restored > 0
             ? "Put back \(undone.restored) file\(undone.restored == 1 ? "" : "s") where \(undone.restored == 1 ? "it was" : "they were")."

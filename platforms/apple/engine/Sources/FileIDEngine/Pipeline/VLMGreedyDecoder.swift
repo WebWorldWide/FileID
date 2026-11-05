@@ -134,7 +134,7 @@ enum VLMGreedyDecoder {
         promptLookup: Bool,
         stopOnLoop: Bool = false,
         isComplete: (String) -> Bool,
-        onText: ((String) async -> Void)?
+        onText: (@Sendable (String) async -> Void)?
     ) async throws -> Outcome {
         let model = context.model
         let cache = try providedCache ?? model.newCache(parameters: parameters)
@@ -158,6 +158,18 @@ enum VLMGreedyDecoder {
         var fedDraft: [Int] = []
         asyncEval([pending] + cache.flatMap { $0.state })
         var emittedText = ""
+        // Decoding the whole reply after every token cost ~6 ms per token on a 2B
+        // model (the library's loop was 20% faster); the streaming detokenizer
+        // decodes only the current line. The final text is one full decode.
+        var detokenizer = NaiveStreamingDetokenizer(tokenizer: context.tokenizer)
+        // Text callbacks (progress events to the app) run on their own task, in
+        // order: awaiting them inline held up queueing the next step, which made
+        // this loop ~15% slower per token than the library's stream.
+        let (chunks, chunkSink) = AsyncStream.makeStream(of: String.self)
+        let delivery: Task<Void, Never>? = onText.map { onText in
+            Task { for await chunk in chunks { await onText(chunk) } }
+        }
+        defer { chunkSink.finish() }
         var generateStart = Date()
         var history: [Int] = []
         var sources = lookupSources
@@ -167,21 +179,26 @@ enum VLMGreedyDecoder {
             if stops.contains(token) { return false }
             outcome.tokens.append(token)
             history.append(token)
+            detokenizer.append(token: token)
             return true
         }
 
         decoding: while true {
             var lookahead: MLXArray?
-            if draftLength == 0 {
-                // Queue the next step on the unevaluated token so the GPU never waits
-                // for the CPU to build the graph, as TokenIterator does.
-                let output = model(LMInput.Text(tokens: pending.reshaped([1, 1])), cache: cache, state: state)
-                state = output.state ?? state
-                let next = argMax(output.logits[0..., -1, 0...], axis: -1)
-                asyncEval([next] + cache.flatMap { $0.state })
-                lookahead = next
+            // Each forward pass leaves hundreds of autoreleased MLX wrappers; drain
+            // them every step as TokenIterator does, or they pile up for the reply.
+            let predictions: [Int] = autoreleasepool {
+                if draftLength == 0 {
+                    // Queue the next step on the unevaluated token so the GPU never waits
+                    // for the CPU to build the graph, as TokenIterator does.
+                    let output = model(LMInput.Text(tokens: pending.reshaped([1, 1])), cache: cache, state: state)
+                    state = output.state ?? state
+                    let next = argMax(output.logits[0..., -1, 0...], axis: -1)
+                    asyncEval([next] + cache.flatMap { $0.state })
+                    lookahead = next
+                }
+                return pending.asArray(Int.self)
             }
-            let predictions = pending.asArray(Int.self)
             if outcome.modelCalls == 0 {
                 outcome.promptSeconds = Date().timeIntervalSince(promptStart)
                 generateStart = Date()
@@ -196,11 +213,11 @@ enum VLMGreedyDecoder {
             for token in fedDraft.prefix(accepted) + [predictions[accepted]] {
                 if !emit(token) || outcome.tokens.count >= maxTokens { finished = true; break }
             }
-            let text = context.tokenizer.decode(tokenIds: outcome.tokens)
-            if let onText, text.count > emittedText.count, text.hasPrefix(emittedText) {
-                await onText(String(text.dropFirst(emittedText.count)))
+            if let chunk = detokenizer.next(), !chunk.isEmpty {
+                emittedText += chunk
+                if delivery != nil { chunkSink.yield(chunk) }
             }
-            emittedText = text
+            let text = emittedText
             if finished { break decoding }
             if stopOnLoop, let length = repeatedTailLength(outcome.tokens) {
                 outcome.tokens.removeLast(length)
@@ -231,7 +248,9 @@ enum VLMGreedyDecoder {
             asyncEval([pending] + cache.flatMap { $0.state })
         }
         Stream.defaultStream.synchronize()
-        outcome.text = emittedText
+        chunkSink.finish()
+        await delivery?.value
+        outcome.text = outcome.brokeLoop ? emittedText : context.tokenizer.decode(tokenIds: outcome.tokens)
         outcome.generateSeconds = Date().timeIntervalSince(generateStart)
         return outcome
     }

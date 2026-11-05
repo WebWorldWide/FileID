@@ -1696,6 +1696,8 @@ struct FileIDEngineMain {
         let discovery = Discovery()
         let scanStart = Date()
         let changeMark = FileSystemChanges.currentEventID()
+        let catalogHadRows = await CaptureDateBackfill.catalogHasRows(database: database, root: url)
+        let datesCurrent = rescan || !catalogHadRows
 
         // Pre-warm both ANE-bound models on the main task before workers
         // start so all workers don't race the cold-start slow path
@@ -1821,9 +1823,13 @@ struct FileIDEngineMain {
         // them. One incremental follow-up walk picks up the new and changed files
         // (a rename heals by inode) and stamps every file still present, so the
         // sweep below, keyed to the follow-up's start, drops the deleted ones.
+        // Also retried here: photos whose Vision pass timed out, which happens while
+        // a newly installed engine compiles Vision's Neural Engine models (first
+        // scan after an update). The follow-up walk re-picks failed rows.
         var sweepStart = scanStart
+        let timedOut = await Self.visionTimeouts(database: database, root: url, since: scanStart)
         if await !coordinator.isCancelled,
-           FileSystemChanges.changed(under: url, since: changeMark) == true {
+           timedOut > 0 || FileSystemChanges.changed(under: url, since: changeMark, ignoring: [Discovery.engineStatePrefix]) == true {
             sweepStart = Date()
             var changedFiles: [DiscoveredFile] = []
             _ = await discovery.walkStreaming(
@@ -1831,7 +1837,7 @@ struct FileIDEngineMain {
                 excludedPaths: effectiveExcludedPaths,
                 cancelCheck: { ScanCoordinator.isCancelledSync() }
             ) { changedFiles.append($0) }
-            await coordinator.addFiles(changedFiles.count)
+            await coordinator.addFiles(changedFiles.count, retried: timedOut)
             let followUpChan = AsyncChannel<TaggedFile>()
             let followUpWriter = Task.detached(priority: .userInitiated) {
                 await dbWriter.drain(followUpChan)
@@ -1852,7 +1858,7 @@ struct FileIDEngineMain {
             followUpChan.finish()
             await followUpWriter.value
             JSONLog.shared.info(ev: "scan_followup", sess: session.id,
-                                extra: ["files": AnyCodable(changedFiles.count)])
+                                extra: ["files": AnyCodable(changedFiles.count), "visionRetries": AnyCodable(timedOut)])
         }
 
         // Stage D — post-scan orphan sweep + auto-enqueue face clustering.
@@ -1875,6 +1881,10 @@ struct FileIDEngineMain {
             await sink.emit(.phaseChanged(.postScan))
             await sweepOrphans(database: database, scanRootPath: url.path,
                                 scanStart: sweepStart, sink: sink, sessionID: session.id)
+            if datesCurrent { CaptureDateBackfill.markDone(root: url) } else {
+                await CaptureDateBackfill.runIfNeeded(database: database, root: url,
+                                                       isCancelled: { ScanCoordinator.isCancelledSync() })
+            }
             await autoEnqueueFaceClusteringIfNeeded(database: database, sink: sink)
         }
 
@@ -1882,6 +1892,19 @@ struct FileIDEngineMain {
         await markSessionFinal(database: database, session: session,
                                 coordinator: coordinator, sink: sink,
                                 totalSeconds: totalDur)
+    }
+
+    static let visionTimeoutMessage = "Vision pass timed out (will retry next scan)"
+
+    /// Photos under `root` whose Vision pass timed out during this scan.
+    private static func visionTimeouts(database: Database, root: URL, since: Date) async -> Int {
+        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        return (try? await database.pool.read { db in
+            try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM files WHERE failed = 1 AND error_message = ? AND scanned_at >= ?
+                  AND substr(path_text, 1, ?) = ?
+                """, arguments: [visionTimeoutMessage, since.timeIntervalSince1970, prefix.utf8.count, prefix])
+        }) ?? 0
     }
 
     private static func processScanFile(

@@ -83,7 +83,10 @@ struct ScanPipelinePerfTests {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
         for n in names { try Data("payload".utf8).write(to: tmp.appendingPathComponent(n)) }
 
-        let db = try Database(at: tmp.appendingPathComponent("test.sqlite"))
+        let dbDir = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDSkipDB-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dbDir) }
+        let db = try Database(at: dbDir.appendingPathComponent("test.sqlite"))
         let discovery = Discovery()
 
         // Discover once with no DB to learn the exact enumerator paths + sizes

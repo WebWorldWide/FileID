@@ -30,7 +30,12 @@ let visionConcurrencyGate = DispatchSemaphore(value: Hardware.workerCap)
 /// the call and free the worker. The orphaned background thread keeps
 /// running until Vision's internal queue eventually unblocks (or the
 /// engine exits). Bounded leak, unbounded responsiveness.
-let visionPerformTimeoutSeconds: Double = 10.0
+let visionPerformTimeoutSeconds: Double = {
+    #if DEBUG
+    if let raw = ProcessInfo.processInfo.environment["FILEID_TEST_VISION_TIMEOUT"], let value = Double(raw), value > 0 { return value }
+    #endif
+    return 10.0
+}()
 
 /// At most four accurate text reads in flight. Fourteen cold concurrent reads
 /// each loaded the model and took 70 s wall (M1 Pro, every one past the 10 s

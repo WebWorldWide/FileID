@@ -68,6 +68,23 @@ public enum FileTypes {
             || audio.contains(e) || models.contains(e)
     }
 
+    /// Other files are cataloged with name, size, dates and a content hash so they
+    /// count, search and appear in Duplicates. Never these: half-finished downloads,
+    /// editor scratch files and per-folder system files (mirrors the shared engine).
+    public static let neverCataloged: Set<String> = [
+        "part", "partial", "crdownload", "download", "opdownload", "tmp", "temp", "swp", "swo", "lock",
+        "sqlite-wal", "sqlite-shm", "sqlite-journal", "db-wal", "db-shm", "db-journal"
+    ]
+    public static let neverCatalogedNames: Set<String> = ["desktop.ini", "thumbs.db", "icon\r", "ehthumbs.db"]
+
+    /// True for a file the scan catalogs: a known kind, or any other file that is not junk.
+    public static func isCataloged(name: String) -> Bool {
+        let lower = name.lowercased()
+        guard !neverCatalogedNames.contains(lower) else { return false }
+        let ext = (lower as NSString).pathExtension
+        return isTaggable(ext) || !neverCataloged.contains(ext)
+    }
+
     public static let archives: Set<String> = ["zip", "tar", "gz", "rar", "7z"]
     public static let structuredData: Set<String> = ["json", "yaml", "yml", "toml", "xml"]
 

@@ -6,6 +6,7 @@
 // ScanCoordinator's AtomicBool sync mirrors checked between batches for
 // cancellation that lands within milliseconds without an actor hop per file.
 
+pub mod archive_names;
 pub mod discovery;
 pub mod tagging;
 pub mod batch_clip;

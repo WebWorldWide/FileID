@@ -674,10 +674,11 @@ fn classify_entry(
         .and_then(|e| e.to_str())
         .map(FileKind::from_extension)
         .unwrap_or(FileKind::Other);
-    if kind == FileKind::Other {
-        // Present but not pipeline-eligible: keep it in `seen` so a catalog row
-        // whose kind mapping changed across versions is never soft-hidden as
-        // "no longer present" while the file still exists on disk.
+    if kind == FileKind::Other && !is_cataloged_other(path_extension_lower(entry_path).as_deref()) {
+        // Present but never cataloged (unfinished downloads, scratch and SQLite
+        // temporary files): keep it in `seen` so a catalog row whose kind mapping
+        // changed across versions is never soft-hidden as "no longer present"
+        // while the file still exists on disk.
         return ClassifiedEntry {
             discovered: None,
             zero_byte: None,
@@ -703,6 +704,23 @@ fn classify_entry(
         zero_byte: None,
         seen_path_hash: Some(seen_path_hash),
     }
+}
+
+/// Other files (archives, installers, unknown types) are cataloged with name, size,
+/// dates and a content hash so they count, search and appear in Duplicates, except
+/// these, which are transient. Mirrors the Swift `FileTypes.neverCataloged`.
+fn is_cataloged_other(extension: Option<&str>) -> bool {
+    !matches!(
+        extension,
+        Some(
+            "part" | "partial" | "crdownload" | "download" | "opdownload" | "tmp" | "temp" | "swp" | "swo"
+                | "lock" | "sqlite-wal" | "sqlite-shm" | "sqlite-journal" | "db-wal" | "db-shm" | "db-journal"
+        )
+    )
+}
+
+fn path_extension_lower(path: &std::path::Path) -> Option<String> {
+    path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase())
 }
 
 /// True when `to_string_lossy` would mangle this path: the lossy text is the
@@ -817,8 +835,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let zero = dir.join("truncated.jpg");
         std::fs::write(&zero, b"").unwrap();
-        let other = dir.join("notes.xyz");
+        let other = dir.join("movie.mp4.part");
         std::fs::write(&other, b"payload").unwrap();
+        let archive = dir.join("notes.xyz");
+        std::fs::write(&archive, b"payload").unwrap();
 
         let skips: HashMap<SkipFingerprint, (i64, Option<f64>)> = HashMap::new();
         let errs = AtomicU64::new(0);
@@ -829,9 +849,11 @@ mod tests {
         assert!(z.seen_path_hash.is_some(), "zero-byte file is present and must be seen");
 
         let o = classify_entry(&other, &skips, &errs);
-        assert!(o.discovered.is_none(), "unsupported kind must not be catalogued");
+        assert!(o.discovered.is_none(), "an unfinished download must not be catalogued");
         assert!(o.zero_byte.is_none());
-        assert!(o.seen_path_hash.is_some(), "unsupported-kind file is present and must be seen");
+        assert!(o.seen_path_hash.is_some(), "a skipped file is present and must be seen");
+        let a = classify_entry(&archive, &skips, &errs);
+        assert_eq!(a.discovered.map(|f| f.kind), Some(FileKind::Other), "unknown types are catalogued as other");
 
         assert_eq!(errs.load(std::sync::atomic::Ordering::Relaxed), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1016,6 +1038,8 @@ mod tests {
     fn noise_file_recognized() {
         assert!(is_noise_file("Thumbs.db"));
         assert!(is_noise_file("desktop.ini"));
+        assert!(is_cataloged_other(Some("zip")) && is_cataloged_other(None) && is_cataloged_other(Some("rpt")));
+        assert!(!is_cataloged_other(Some("part")) && !is_cataloged_other(Some("crdownload")) && !is_cataloged_other(Some("sqlite-wal")));
         assert!(is_noise_file(".DS_Store"));
         assert!(is_noise_file(".hidden"));
         assert!(!is_noise_file("vacation.jpg"));
@@ -1235,7 +1259,7 @@ mod tests {
         assert!(df.modified_unix > 0.0, "modified timestamp populated by the parallel stage");
         assert_eq!(errors.load(Ordering::Relaxed), 0);
 
-        // Zero-byte and unsupported-kind files resolve to None (skipped) here,
+        // Zero-byte files and transient downloads resolve to None (skipped) here,
         // so the consumer never has to re-stat to decide — but they are still
         // present on disk, so they stay in the reconciliation seen-set.
         let empty = root.join("empty.jpg");
@@ -1244,7 +1268,7 @@ mod tests {
         assert!(empty_result.discovered.is_none());
         assert!(empty_result.zero_byte.is_some());
         assert!(empty_result.seen_path_hash.is_some());
-        let other = root.join("notes.xyz");
+        let other = root.join("download.crdownload");
         fs::write(&other, b"data").unwrap();
         let other_result = classify_entry(&other, &skip, &errors);
         assert!(other_result.discovered.is_none());

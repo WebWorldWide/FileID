@@ -70,6 +70,13 @@ public enum Tagging {
                 perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000,
                 tagsEvaluated: true
             )
+            if ext.lowercased() == "zip" {
+                // The names inside a zip go into doc_text, so searching for a file finds its archive.
+                tagged.docText = await withCheckedContinuation { continuation in
+                    visionQueue.async { continuation.resume(returning: ArchiveNames.list(url: url)) }
+                }
+                tagged.textStageDone = true
+            }
         }
         if tagged.contentHash == nil && !Task.isCancelled {
             let contentSize = UInt64(max(0, discovered.sizeBytes))
@@ -242,7 +249,7 @@ public enum Tagging {
                             createdAt: discovered.creationDate,
                             modifiedAt: discovered.modificationDate,
                             failed: true,
-                            errorMessage: "Vision pass timed out (will retry next scan)",
+                            errorMessage: FileIDEngineMain.visionTimeoutMessage,
                             perFileTotalMs: (CFAbsoluteTimeGetCurrent() - started) * 1000
                         )
                     }
@@ -795,6 +802,12 @@ public enum Tagging {
     }
 
     /// Read EXIF camera model, GPS coords and capture time from an already-open source.
+    /// The EXIF capture time of an image without decoding it; nil when it has none.
+    static func exifCaptureTime(url: URL) -> Date? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return readEXIF(from: src).capturedAt
+    }
+
     private static func readEXIF(from src: CGImageSource) -> (cameraModel: String?, lat: Double?, lon: Double?, capturedAt: Date?) {
         guard let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         else {
