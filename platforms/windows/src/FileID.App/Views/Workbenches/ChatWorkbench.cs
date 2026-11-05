@@ -19,6 +19,8 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     private readonly TextBox _input = new() { PlaceholderText = "Ask about your files (up to 2,000 characters)", MaxLength = 2000, MinWidth = 400 };
     private readonly CheckBox _useModel = new() { Content = "Written answers from local AI (not available on Windows yet)", IsChecked = false, IsEnabled = ChatFrontendPolicy.SupportsModelGeneration };
     private readonly StackPanel _messageList = new() { Spacing = 20, Padding = new Thickness(0, 4, 12, 4) };
+    private readonly StackPanel _actionsHost = new() { Spacing = 10, Margin = new Thickness(12, 20, 12, 4), Visibility = Visibility.Collapsed };
+    private IReadOnlyList<ChatAction> _actions = Array.Empty<ChatAction>();
     private readonly ScrollViewer _messageScroll;
     private readonly List<MessageView> _messageViews = new();
     private readonly StackPanel _busy = new() { Orientation = Orientation.Horizontal, Spacing = 10, Visibility = Visibility.Collapsed };
@@ -48,7 +50,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     private string? _conversationID;
     private readonly TextBlock _sourcesCount = Meta("");
     private readonly StackPanel _empty = new() { Spacing = 12, Padding = new Thickness(0, 8, 0, 8) };
-    private static readonly string[] Suggestions = { "Find birthday gift opening", "How many videos are from last month?", "How much space do duplicates use?" };
+    private static readonly string[] Suggestions = { "Find birthday gift opening", "How many videos are from last month?", "How much space do duplicates use?", "Organize my Downloads" };
 
     public ChatWorkbench() : base("FileID Chat")
     {
@@ -69,9 +71,12 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         header.Children.Add(_clear);
         SyncClear(hasContent: false);
         Inputs.Children.Add(header);
+        var conversation = new StackPanel();
+        conversation.Children.Add(_messageList);
+        conversation.Children.Add(_actionsHost);
         _messageScroll = new ScrollViewer
         {
-            Content = _messageList,
+            Content = conversation,
             Height = 420,
             MaxWidth = 760,
             HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -191,7 +196,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         var title = new TextBlock { Text = "Find the moment.", FontSize = 34, Foreground = ThemeHelper.GetBrushSafe("Text1Brush") };
         var body = new TextBlock
         {
-            Text = "Ask about files, people and moments in this library. Answers list the files they come from.",
+            Text = "Ask about files, people and moments in this library, or ask FileID to do something. Answers list the files they come from, and anything that moves, renames or deletes files waits for your OK.",
             FontSize = 13.5,
             TextWrapping = TextWrapping.Wrap,
             MaxWidth = 560,
@@ -251,6 +256,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     {
         _stop.IsEnabled = ChatFrontendPolicy.SupportsCancellation && _request.CanStop && _request.Generation == Engine.SpawnGeneration;
         _busy.Visibility = _request.HasActiveSend ? Visibility.Visible : Visibility.Collapsed;
+        _actionsHost.Visibility = !_request.HasActiveSend && _actions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -324,7 +330,8 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         await UI(SynchronizeSend, ct);
         await Engine.WaitForReadyAsync(TimeSpan.FromSeconds(30), ct);
         var generation = Engine.SpawnGeneration;
-        var request = new ChatRequest(Guid.NewGuid().ToString(), id, action, text, UseModel: action == "send" && ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true));
+        var context = action == "send" ? ChatActionPolicy.Context(SelectionRegistry.Instance.LibrarySelection, AppViewModel.Instance.FolderPath) : null;
+        var request = new ChatRequest(Guid.NewGuid().ToString(), id, action, text, UseModel: action == "send" && ChatFrontendPolicy.UseModelForSend(_useModel.IsChecked == true), Context: context);
         if (action == "history" && _request.HasActiveSend)
         {
             ChatPresentationRevision.HistoryStamp? stamp = null;
@@ -339,6 +346,7 @@ internal sealed class ChatWorkbench : WorkbenchPanel
             return;
         }
         _request.Begin(request, generation);
+        if (action is "send" or "clear") RenderActions(Array.Empty<ChatAction>());
         UpdateControls();
         using var observation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (action == "send") _sendObservation = observation;
@@ -409,6 +417,24 @@ internal sealed class ChatWorkbench : WorkbenchPanel
             _evidence.Select(null);
         }
         RenderChips(response.Messages);
+        if (action is "send" or "clear" || response.Actions is not null) RenderActions(ChatActionPolicy.Runnable(response.Actions));
+    }
+
+    /// <summary>One card per proposed action under the latest answer (CHAT.md port note). Cards are
+    /// rebuilt only when the set of actions changes, so a running card keeps its state.</summary>
+    private void RenderActions(IReadOnlyList<ChatAction> actions)
+    {
+        var shown = _actionsHost.Children.OfType<ChatActionCard>().Select(card => card.ActionID);
+        if (!shown.SequenceEqual(actions.Select(action => action.Id), StringComparer.Ordinal))
+        {
+            _actionsHost.Children.Clear();
+            foreach (var action in actions) _actionsHost.Children.Add(new ChatActionCard(action));
+        }
+        _actions = actions;
+        UpdateControls();
+        if (actions.Count == 0) return;
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => DebugLog.SafeRun("ChatWorkbench.ScrollToActions", () =>
+            _messageScroll.ChangeView(null, _messageScroll.ScrollableHeight, null, ReducedMotion.Instance.IsReduced)));
     }
 
     /// <summary>Updates the shown messages in place while a reply only adds to

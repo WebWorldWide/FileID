@@ -17,6 +17,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:settings="using:FileID.Views.Settings"
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto"
@@ -595,6 +596,10 @@
                     </Grid>
                 </StackPanel>
             </Border>
+
+            <!-- Locations. Mirrors macOS Settings' Locations card: scanned
+                 folders and drives from listRoots, OFFLINE when unplugged. -->
+            <settings:LocationsCard />
 
             <!-- Storage. Shows where every on-disk artifact lives — DB,
                  thumbnail cache, model cache — so users know exactly what

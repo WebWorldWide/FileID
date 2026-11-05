@@ -34,13 +34,14 @@ internal static class CatalogEmbeddingSpace
         return Math.Abs(squaredNorm - 1) <= 0.02;
     }
 
-    public static CatalogRequest SearchRequest(string query, string mode, IReadOnlyList<float>? vector = null)
+    public static CatalogRequest SearchRequest(string query, string mode, IReadOnlyList<float>? vector = null, double? capturedFrom = null, double? capturedTo = null)
     {
         if (mode is not ("keyword" or "hybrid" or "semantic")) throw new ArgumentException("Unknown catalog search mode.", nameof(mode));
         if (mode != "keyword" && (vector is null || !IsValidVector(vector)))
             throw new InvalidOperationException("The installed CLIP text model did not return a finite, normalized 512-dimensional vector. Use keyword search; no semantic query was sent.");
         return new CatalogRequest(Guid.NewGuid().ToString(), "search", query, null, null, null, null, null,
             SearchMode: mode, QueryVector: mode == "keyword" ? null : vector!.ToArray(),
-            EmbeddingModel: mode == "keyword" ? null : ModelID, Limit: 100, ResultScope: "all");
+            EmbeddingModel: mode == "keyword" ? null : ModelID, Limit: 100, ResultScope: "all",
+            CapturedFrom: capturedFrom, CapturedTo: capturedTo);
     }
 }
