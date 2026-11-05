@@ -430,6 +430,7 @@ struct TakeReview: View {
                                                                 takeDecision: CatalogTakeDecision(groupKey: group.groupKey, decision: "keepAll", fileIDs: keptIDs)), timeout: 30)
         }
         let moved = Set(result.messages.filter(\.ok).compactMap(\.fileID))
+        SpotlightIndexer.deindex(ids: Array(moved))
         let movedShots = doomed.filter { !moved.isDisjoint(with: $0.fileIDs) }.count
         let batch = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
         var text = "Moved \(movedShots) \(movedShots == 1 ? noun.one : noun.many) to Trash"
