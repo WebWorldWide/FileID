@@ -61,6 +61,22 @@ struct RestructureCascadeTests {
         #expect(aud.bucket == "audio")
     }
 
+    @Test("A named person or place with no reliable date gets no 1970 folder; bad coordinates fall through")
+    func undatedPeopleAndBadCoordinates() {
+        let moves = Restructure.ruleClassify([
+            f(1, "image", person: "Alice", modified: 0),
+            f(2, "image", lat: 41.9, lon: -87.6, modified: 0),
+            f(3, "image", lat: 999, lon: .nan),
+            f(4, "image", person: "Bob")
+        ], libraryRoot: root)
+        let byID = Dictionary(uniqueKeysWithValues: moves.map { ($0.fileID, $0) })
+        #expect(byID[1]!.newPath.contains("/People/Alice/") && !byID[1]!.newPath.contains("1970"))
+        #expect(byID[1]!.confidence == "review")
+        #expect(byID[2]!.newPath.contains("/Places/") && !byID[2]!.newPath.contains("1970"))
+        #expect(byID[3]!.bucket == "photo" && !byID[3]!.newPath.contains("Places"))
+        #expect(byID[4]!.newPath.contains("/People/Bob/2024/") && byID[4]!.confidence == "auto")
+    }
+
     @Test("A dated image routes to Photos/<Year>/<MonthName>")
     func imageYearMonth() {
         let moves = Restructure.ruleClassify([f(1, "image")], libraryRoot: root)

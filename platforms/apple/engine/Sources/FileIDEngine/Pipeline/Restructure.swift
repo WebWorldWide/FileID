@@ -779,22 +779,23 @@ public enum Restructure {
             let dir: URL
             if let name = f.personName, !name.isEmpty {
                 let safe = FilesystemNameSafe.componentSafe(name)
-                dir = libraryRoot.appendingPathComponent("People", isDirectory: true)
+                let person = libraryRoot.appendingPathComponent("People", isDirectory: true)
                     .appendingPathComponent(safe, isDirectory: true)
-                    .appendingPathComponent("\(y)", isDirectory: true)
+                dir = tsValid ? person.appendingPathComponent("\(y)", isDirectory: true) : person
                 category = "People/\(safe)"
-                confidence = "auto"
-                reason = "Named person: \(safe)"
-            } else if let lat = f.lat, let lon = f.lon {
+                confidence = tsValid ? "auto" : "review"
+                reason = tsValid ? "Named person: \(safe)" : "Named person: \(safe); no reliable date"
+            } else if let lat = f.lat, let lon = f.lon, lat.isFinite, lon.isFinite,
+                      (-90...90).contains(lat), (-180...180).contains(lon) {
                 let latB = (lat * 2).rounded() / 2
                 let lonB = (lon * 2).rounded() / 2
                 let b = String(format: "%.1f_%.1f", latB, lonB)
-                dir = libraryRoot.appendingPathComponent("Places", isDirectory: true)
+                let place = libraryRoot.appendingPathComponent("Places", isDirectory: true)
                     .appendingPathComponent(b, isDirectory: true)
-                    .appendingPathComponent("\(y)", isDirectory: true)
+                dir = tsValid ? place.appendingPathComponent("\(y)", isDirectory: true) : place
                 category = "Places/\(b)"
                 confidence = "review"
-                reason = "Taken at a shared location"
+                reason = tsValid ? "Taken at a shared location" : "Taken at a shared location; no reliable date"
             } else if f.hasText || f.kind == "pdf" || f.kind == "doc" {
                 let docs = libraryRoot.appendingPathComponent("Documents", isDirectory: true)
                 dir = tsValid ? docs.appendingPathComponent("\(y)", isDirectory: true) : docs
