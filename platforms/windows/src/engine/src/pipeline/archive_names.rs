@@ -72,7 +72,8 @@ pub(crate) fn list(path: &Path) -> Option<String> {
     (!names.is_empty()).then(|| names.join("\n"))
 }
 
-#[cfg(test)]
+// The test builds its fixture with the `zip` command-line tool, which Unix runners have.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -89,7 +90,6 @@ mod tests {
         zip
     }
 
-    #[cfg(unix)]
     #[test]
     fn lists_names_and_survives_corruption() {
         let dir = std::env::temp_dir().join(format!("fileid-zip-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
