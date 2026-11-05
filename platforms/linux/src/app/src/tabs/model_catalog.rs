@@ -214,7 +214,19 @@ impl Catalog {
     }
 }
 
+/// Settings composes this section; Locations follows the catalog because
+/// settings.rs is digest-locked by the runtime egress review.
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
+    let page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(18)
+        .build();
+    page.append(&catalog(engine.clone()));
+    page.append(&super::locations::build(engine));
+    page.upcast()
+}
+
+fn catalog(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)

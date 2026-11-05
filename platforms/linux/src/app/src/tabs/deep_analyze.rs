@@ -132,7 +132,7 @@ pub fn recommended_vlm_display() -> &'static str {
     vlm_by_key(host_recommended_vlm_kind()).display
 }
 
-fn host_recommended_vlm_kind() -> &'static str {
+pub(super) fn host_recommended_vlm_kind() -> &'static str {
     let total = fileid_engine::platform::physical_memory_gb();
     let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
     let free = fileid_engine::paths::models_dir()

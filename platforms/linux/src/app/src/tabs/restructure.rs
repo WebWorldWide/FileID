@@ -1030,6 +1030,10 @@ impl Ui {
     }
 
     fn show_plan(self: &Rc<Self>, plan: RestructurePlan) {
+        if self.root.borrow().as_deref() != Some(plan.library_root.as_str()) {
+            self.root.replace(Some(plan.library_root.clone()));
+            self.set_folder_label(&plan.library_root);
+        }
         self.operation.set(None);
         self.moved.set(false);
         let anchors = plan
