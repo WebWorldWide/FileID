@@ -155,4 +155,24 @@ struct HEIFDecoderTests {
         #expect(loaded.0.width == 1024 && loaded.0.height == 1536)
         #expect(loaded.0.dataProvider?.data == direct.dataProvider?.data)
     }
+
+    @Test("face clustering and Takes load HEICs through the HEIF decoder, other formats through ImageIO")
+    func analysisUsesDecoder() throws {
+        let directory = try Self.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        guard let url = Self.writeHEIC(try Self.quadrants(width: 2100, height: 1400),
+                                       orientation: 6, in: directory, name: "photo.heic") else { return }
+        let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let clustering = try #require(decodeBoundedImage(source, path: url.path, maxPixelSize: 2048))
+        let clusteringDirect = try #require(HEIFDecoder.decode(path: url.path, maxPixelSize: 2048))
+        #expect(clustering.height == 2048 && clustering.width < clustering.height)
+        #expect(clustering.dataProvider?.data == clusteringDirect.dataProvider?.data)
+        let jpeg = directory.appendingPathComponent("photo.jpg")
+        let destination = try #require(CGImageDestinationCreateWithURL(jpeg as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try Self.quadrants(width: 300, height: 200), nil)
+        #expect(CGImageDestinationFinalize(destination))
+        let jpegSource = try #require(CGImageSourceCreateWithURL(jpeg as CFURL, nil))
+        #expect(!isHEIF(jpegSource) && isHEIF(source))
+        #expect(decodeBoundedImage(jpegSource, path: jpeg.path, maxPixelSize: 2048)?.width == 300)
+    }
 }

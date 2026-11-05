@@ -79,7 +79,7 @@ enum TakeMediaAnalysis {
         let url = URL(fileURLWithPath: path)
         if isVideo { return await videoSignals(url).map { ($0, true) } }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let decoded = decodeBoundedImage(source, maxPixelSize: TakeScoring.analysisLongSide),
+              let decoded = decodeBoundedImage(source, path: path, maxPixelSize: TakeScoring.analysisLongSide),
               let fitted = fit(decoded, longSide: TakeScoring.analysisLongSide) else { return nil }
         let found = analyzer.analyze(fitted.image)
         return (TakeScoring.signals(fitted.luma, faces: found?.faces ?? [], people: found?.people), found != nil)
@@ -134,7 +134,7 @@ enum TakeMediaAnalysis {
             let column = index % columns, row = index / columns
             let cell = CGRect(x: column * cellW, y: (rows - 1 - row) * cellH, width: cellW, height: cellH).insetBy(dx: 2, dy: 2)
             if let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
-               let image = decodeBoundedImage(source, maxPixelSize: tile) {
+               let image = decodeBoundedImage(source, path: path, maxPixelSize: tile) {
                 let scale = min(cell.width / CGFloat(image.width), cell.height / CGFloat(image.height))
                 let size = CGSize(width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
                 context.draw(image, in: CGRect(x: cell.midX - size.width / 2, y: cell.midY - size.height / 2, width: size.width, height: size.height))

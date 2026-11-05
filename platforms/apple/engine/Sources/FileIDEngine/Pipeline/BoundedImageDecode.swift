@@ -44,6 +44,21 @@ func decodeBoundedImage(_ source: CGImageSource, maxPixelSize: Int) -> CGImage? 
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
 }
 
+/// The same bounded decode, sending HEIC/HEIF through `HEIFDecoder` first
+/// (hardware HEVC, about 4x ImageIO's throughput). Falls back to ImageIO for
+/// layouts the decoder declines.
+func decodeBoundedImage(_ source: CGImageSource, path: String, maxPixelSize: Int) -> CGImage? {
+    if isHEIF(source), let image = HEIFDecoder.decode(path: path, maxPixelSize: maxPixelSize) { return image }
+    return decodeBoundedImage(source, maxPixelSize: maxPixelSize)
+}
+
+// public.heic and public.heif are siblings, not parent and child.
+func isHEIF(_ source: CGImageSource) -> Bool {
+    guard let identifier = CGImageSourceGetType(source) as String?,
+          let type = UTType(identifier) else { return false }
+    return type.conforms(to: .heic) || type.conforms(to: .heif)
+}
+
 private func isCameraRaw(_ source: CGImageSource) -> Bool {
     guard let identifier = CGImageSourceGetType(source) as String?,
           let type = UTType(identifier) else { return false }
