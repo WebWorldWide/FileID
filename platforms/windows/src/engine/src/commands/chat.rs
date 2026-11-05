@@ -204,18 +204,18 @@ async fn send_with_model(sink: &Sink, database: Arc<Mutex<Connection>>, request:
     }
     let hits = queued.hits.clone();
     emit(sink, queued).await;
-    let prompt = format!(
-        "{EVIDENCE_SYSTEM}\n\n{history}{}\n{}",
-        evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE),
-        chat_actions::ACTION_TOOL_FORMAT
-    );
-    let answer = summarize(model, &prompt, cancel.clone()).await;
+    let plain = format!("{EVIDENCE_SYSTEM}\n\n{history}{}", evidence_prompt(&prepared.text, &hits, SUMMARY_EVIDENCE));
+    let answer = summarize(model, &plain, cancel.clone()).await;
     let cancelled = cancel.load(Ordering::Acquire);
     let (status, message) = match answer {
         _ if cancelled => ("cancelled", prepared.message.clone()),
         Ok(answer) if !answer.trim().is_empty() => ("completed", answer.trim().to_owned()),
         Ok(_) => ("completed", prepared.message.clone()),
-        Err(error) => {
+        Err(Summary::NotStarted(error)) => {
+            tracing::warn!(?error, "chat summary model could not start; answering with catalog evidence");
+            ("completed", format!("{}{NOT_STARTED_NOTE}", prepared.message))
+        }
+        Err(Summary::Failed(error)) => {
             tracing::warn!(?error, "chat evidence summary failed; answering with catalog evidence");
             ("completed", prepared.message.clone())
         }
@@ -248,15 +248,46 @@ fn model_actions(conn: &Connection, request: &ChatRequest, proposals: &[super::c
     Ok(actions)
 }
 
-async fn summarize(model: &str, prompt: &str, cancel: Arc<AtomicBool>) -> Result<String> {
+const NOT_STARTED_NOTE: &str = " The local AI model couldn't be started, so these are the matching files. Nothing was downloaded.";
+
+enum Summary {
+    NotStarted(anyhow::Error),
+    Failed(anyhow::Error),
+}
+
+async fn summarize(model: &str, plain: &str, cancel: Arc<AtomicBool>) -> Result<String, Summary> {
     let lease = crate::models::resident_service::ResidentService::shared()
         .acquire(model, cancel.clone())
-        .await?;
-    let result = lease.complete_text_with_cancel(prompt, SUMMARY_TOKENS, cancel).await;
+        .await
+        .map_err(Summary::NotStarted)?;
+    let server = &*lease;
+    let complete = |prompt: String| {
+        let cancel = cancel.clone();
+        async move { server.complete_text_with_cancel(&prompt, SUMMARY_TOKENS, cancel).await }
+    };
+    let result = answer_or_retry_plainly(plain, &cancel, complete).await;
     if let Err(error) = lease.finish(result.is_ok()).await {
         tracing::warn!(?error, "releasing the chat summary model failed");
     }
-    result
+    result.map_err(Summary::Failed)
+}
+
+/// Asks with the action format; a model that answers with only an `<actions>`
+/// line is asked again without it so the user gets words. Mirrors macOS
+/// `ChatService.summarize`.
+async fn answer_or_retry_plainly<F, Fut>(plain: &str, cancel: &AtomicBool, complete: F) -> Result<String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let first = complete(format!("{plain}\n{}", chat_actions::ACTION_TOOL_FORMAT)).await?;
+    if first.trim().is_empty() || cancel.load(Ordering::Acquire) || !chat_actions::model_proposals(&first).0.is_empty() {
+        return Ok(first);
+    }
+    match complete(plain.to_owned()).await {
+        Ok(retry) if !retry.trim().is_empty() => Ok(retry),
+        _ => Ok(first),
+    }
 }
 
 fn recent_turns(conn: &Connection, conversation_id: &str) -> Result<Vec<(String, String)>> {
@@ -801,6 +832,46 @@ fn respond(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scripted(replies: &[&str]) -> (Arc<Mutex<Vec<String>>>, impl Fn(String) -> std::future::Ready<Result<String>>) {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let replies: Vec<String> = replies.iter().map(|reply| (*reply).to_owned()).collect();
+        let log = prompts.clone();
+        let complete = move |prompt: String| {
+            let mut log = log.lock();
+            log.push(prompt);
+            std::future::ready(replies.get(log.len() - 1).cloned().ok_or_else(|| anyhow!("no more replies")))
+        };
+        (prompts, complete)
+    }
+
+    #[tokio::test]
+    async fn an_actions_only_answer_is_asked_again_without_the_action_format() {
+        let cancel = AtomicBool::new(false);
+        let (prompts, complete) = scripted(&["<actions>[{\"kind\":\"findDuplicates\"}]</actions>", "Five files mention a schedule [1]."]);
+        let answer = answer_or_retry_plainly("evidence", &cancel, complete).await.unwrap();
+        assert_eq!(answer, "Five files mention a schedule [1].");
+        let prompts = prompts.lock().clone();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[0].ends_with(chat_actions::ACTION_TOOL_FORMAT));
+        assert_eq!(prompts[1], "evidence");
+
+        let (prompts, complete) = scripted(&["The roof contract [1].\n<actions>[]</actions>"]);
+        let answer = answer_or_retry_plainly("evidence", &cancel, complete).await.unwrap();
+        assert_eq!(answer, "The roof contract [1].\n<actions>[]</actions>");
+        assert_eq!(prompts.lock().len(), 1, "an answer with prose is not asked again");
+
+        let (prompts, complete) = scripted(&["<actions>[]</actions>"]);
+        let answer = answer_or_retry_plainly("evidence", &cancel, complete).await.unwrap();
+        assert_eq!(answer, "<actions>[]</actions>", "a failed retry keeps the first answer");
+        assert_eq!(prompts.lock().len(), 2);
+
+        cancel.store(true, Ordering::Release);
+        let (prompts, complete) = scripted(&["<actions>[]</actions>", "unused"]);
+        answer_or_retry_plainly("evidence", &cancel, complete).await.unwrap();
+        assert_eq!(prompts.lock().len(), 1, "a cancelled summary is not asked again");
+    }
+
     #[test]
     fn history_search_and_clear_preserve_catalog_files() {
         let mut conn = crate::db::test_support::memory_db();

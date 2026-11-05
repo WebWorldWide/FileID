@@ -9,8 +9,8 @@
 //! embedded preview when it is large enough.
 
 const RAW_EXTENSIONS: &[&str] = &[
-    "arw", "srf", "sr2", "nef", "nrw", "cr2", "cr3", "orf", "pef", "dng", "raf", "rw2", "rwl", "3fr", "erf", "mef",
-    "mos", "iiq", "srw",
+    "arw", "srf", "sr2", "nef", "nrw", "cr2", "cr3", "orf", "pef", "dng", "raf", "rw2", "rwl", "raw", "3fr", "erf",
+    "mef", "mos", "iiq", "srw", "kdc",
 ];
 
 pub fn is_raw_extension(ext: &str) -> bool {
@@ -19,18 +19,7 @@ pub fn is_raw_extension(ext: &str) -> bool {
 
 /// Byte range of the largest JPEG the file embeds, or None.
 pub fn largest_embedded_jpeg(bytes: &[u8]) -> Option<&[u8]> {
-    let mut candidates: Vec<(usize, usize)> = Vec::new();
-    if bytes.starts_with(b"FUJIFILMCCD-RAW") && bytes.len() >= 92 {
-        let offset = u32::from_be_bytes(bytes[84..88].try_into().ok()?) as usize;
-        let length = u32::from_be_bytes(bytes[88..92].try_into().ok()?) as usize;
-        candidates.push((offset, length));
-    } else if is_bmff(bytes) {
-        Bmff { bytes }.walk(0, bytes.len(), 0, &mut candidates, &mut None);
-    } else {
-        let tiff = Tiff::new(bytes)?;
-        tiff.collect(&mut candidates);
-    }
-    candidates
+    candidates(bytes)
         .into_iter()
         .filter(|&(offset, length)| {
             length > 2 && offset.checked_add(length).is_some_and(|end| end <= bytes.len())
@@ -40,19 +29,81 @@ pub fn largest_embedded_jpeg(bytes: &[u8]) -> Option<&[u8]> {
         .map(|(offset, length)| &bytes[offset..offset + length])
 }
 
+/// The largest embedded preview, cut off where `bytes` ends. A head read of a
+/// large RAW still reaches the preview's EXIF segment, the only EXIF a
+/// Fujifilm RAF keeps.
+pub fn embedded_jpeg_head(bytes: &[u8]) -> Option<&[u8]> {
+    candidates(bytes)
+        .into_iter()
+        .filter_map(|(offset, length)| {
+            let jpeg = bytes.get(offset..offset.saturating_add(length).min(bytes.len()))?;
+            (length > 2 && is_viewable_jpeg(jpeg)).then_some((length, jpeg))
+        })
+        .max_by_key(|&(length, _)| length)
+        .map(|(_, jpeg)| jpeg)
+}
+
+fn candidates(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    if bytes.starts_with(b"FUJIFILMCCD-RAW") && bytes.len() >= 92 {
+        let be32 = |at: usize| u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
+        candidates.push((be32(84), be32(88)));
+    } else if is_bmff(bytes) {
+        Bmff { bytes }.walk(0, bytes.len(), 0, &mut candidates, &mut [None; 4]);
+    } else if let Some(tiff) = Tiff::new(bytes) {
+        tiff.collect(&mut candidates);
+    }
+    candidates
+}
+
 /// EXIF orientation (1-8) the RAW container records in IFD0, or None. Reads
 /// ORF and RW2 headers, which the generic EXIF reader rejects, and the CR3
 /// `CMT1` TIFF block.
 pub fn orientation(bytes: &[u8]) -> Option<u16> {
     let value = if is_bmff(bytes) {
-        let mut cmt1 = None;
-        Bmff { bytes }.walk(0, bytes.len(), 0, &mut Vec::new(), &mut cmt1);
-        let (start, end) = cmt1?;
+        let mut cmt = [None; 4];
+        Bmff { bytes }.walk(0, bytes.len(), 0, &mut Vec::new(), &mut cmt);
+        let (start, end) = cmt[0]?;
         Tiff::new(&bytes[start..end])?.ifd0_value(0x0112)?
     } else {
         Tiff::new(bytes)?.ifd0_value(0x0112)?
     };
     u16::try_from(value).ok().filter(|v| (1..=8).contains(v))
+}
+
+/// EXIF the generic reader cannot see, as standard TIFF blocks.
+pub enum RawExif<'a> {
+    /// ORF / RW2: the file's IFD0, with its Exif and GPS children, re-headed
+    /// as standard TIFF.
+    Tiff(Vec<u8>),
+    /// CR3: IFD0 (`CMT1`), the Exif IFD (`CMT2`) and the GPS IFD (`CMT4`),
+    /// each stored as its own TIFF whose first IFD holds the tags.
+    Cr3 { ifd0: Option<&'a [u8]>, exif: Option<&'a [u8]>, gps: Option<&'a [u8]> },
+}
+
+const EXIF_WINDOW: usize = 4 * 1024 * 1024;
+
+pub fn exif_blocks(bytes: &[u8]) -> Option<RawExif<'_>> {
+    if is_bmff(bytes) {
+        let mut cmt = [None; 4];
+        Bmff { bytes }.walk(0, bytes.len(), 0, &mut Vec::new(), &mut cmt);
+        let block = |i: usize| cmt[i].and_then(|(start, end): (usize, usize)| bytes.get(start..end));
+        return cmt.iter().any(Option::is_some).then(|| RawExif::Cr3 { ifd0: block(0), exif: block(1), gps: block(3) });
+    }
+    let tiff = Tiff::new(bytes)?;
+    if tiff.u16(2)? == 42 {
+        return None;
+    }
+    let ifd0 = tiff.u32(4)? as usize;
+    let next = ifd0.checked_add(2 + usize::from(tiff.u16(ifd0)?) * 12)?;
+    let mut copy = bytes[..bytes.len().min(EXIF_WINDOW)].to_vec();
+    copy[2..4].copy_from_slice(&if tiff.little { 42u16.to_le_bytes() } else { 42u16.to_be_bytes() });
+    // The EXIF reader gives up on the whole chain at the first IFD it cannot
+    // read, and the later IFDs (sensor data) often lie past the window.
+    if let Some(link) = copy.get_mut(next..next.saturating_add(4)) {
+        link.fill(0);
+    }
+    Some(RawExif::Tiff(copy))
 }
 
 fn is_bmff(bytes: &[u8]) -> bool {
@@ -91,13 +142,13 @@ impl Bmff<'_> {
         out
     }
 
-    fn walk(&self, start: usize, end: usize, depth: usize, out: &mut Vec<(usize, usize)>, cmt1: &mut Option<(usize, usize)>) {
+    fn walk(&self, start: usize, end: usize, depth: usize, out: &mut Vec<(usize, usize)>, cmt: &mut [Option<(usize, usize)>; 4]) {
         if depth > 4 {
             return;
         }
         for (payload, box_end, name) in self.boxes(start, end) {
             match &name {
-                b"moov" => self.walk(payload, box_end, depth + 1, out, cmt1),
+                b"moov" => self.walk(payload, box_end, depth + 1, out, cmt),
                 // Canon's metadata uuid lists its children right after the
                 // 16-byte uuid; the preview uuid has 8 more header bytes.
                 b"uuid" => {
@@ -106,7 +157,7 @@ impl Bmff<'_> {
                             .first()
                             .is_some_and(|(_, _, child)| child.iter().all(u8::is_ascii_alphanumeric))
                     }) {
-                        self.walk(payload + skip, box_end, depth + 1, out, cmt1);
+                        self.walk(payload + skip, box_end, depth + 1, out, cmt);
                     }
                 }
                 b"PRVW" | b"THMB" => {
@@ -115,7 +166,7 @@ impl Bmff<'_> {
                         out.push((payload + soi, box_end - payload - soi));
                     }
                 }
-                b"CMT1" => *cmt1 = Some((payload, box_end)),
+                b"CMT1" | b"CMT2" | b"CMT3" | b"CMT4" => cmt[usize::from(name[3] - b'1')] = Some((payload, box_end)),
                 _ => {}
             }
         }
@@ -412,6 +463,129 @@ mod tests {
         assert_eq!((img.width(), img.height()), (1620, 1080));
         assert_eq!(orientation(&cr3), Some(6));
         assert!(is_raw_extension("CR3"));
+    }
+
+    fn ascii(text: &str) -> (u16, u32, Vec<u8>) {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(0);
+        (2, bytes.len() as u32, bytes)
+    }
+
+    fn rationals(values: &[(u32, u32)]) -> (u16, u32, Vec<u8>) {
+        (5, values.len() as u32, values.iter().flat_map(|(n, d)| [n.to_le_bytes(), d.to_le_bytes()]).flatten().collect())
+    }
+
+    type Entry = (u16, (u16, u32, Vec<u8>));
+
+    /// Little-endian TIFF with `magic`: IFD0 holds `ifd0` and links to `next`,
+    /// plus an Exif child IFD (0x8769) holding `exif` when given.
+    fn tiff_block(magic: u16, ifd0: &[Entry], exif: &[Entry], next: u32) -> Vec<u8> {
+        fn ifd(out: &mut Vec<u8>, entries: &[Entry], next: u32) {
+            let data_start = out.len() + 2 + entries.len() * 12 + 4;
+            let mut data = Vec::new();
+            out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+            for (tag, (kind, count, value)) in entries {
+                out.extend_from_slice(&tag.to_le_bytes());
+                out.extend_from_slice(&kind.to_le_bytes());
+                out.extend_from_slice(&count.to_le_bytes());
+                if value.len() <= 4 {
+                    let mut inline = value.clone();
+                    inline.resize(4, 0);
+                    out.extend_from_slice(&inline);
+                } else {
+                    out.extend_from_slice(&((data_start + data.len()) as u32).to_le_bytes());
+                    data.extend_from_slice(value);
+                    if data.len() % 2 == 1 {
+                        data.push(0);
+                    }
+                }
+            }
+            out.extend_from_slice(&next.to_le_bytes());
+            out.extend_from_slice(&data);
+        }
+        let mut out = b"II".to_vec();
+        out.extend_from_slice(&magic.to_le_bytes());
+        out.extend_from_slice(&8u32.to_le_bytes());
+        let mut first = ifd0.to_vec();
+        if !exif.is_empty() {
+            let mut probe = out.clone();
+            first.push((0x8769, (4, 1, vec![0; 4])));
+            ifd(&mut probe, &first, 0);
+            first.last_mut().unwrap().1 .2 = (probe.len() as u32).to_le_bytes().to_vec();
+        }
+        ifd(&mut out, &first, next);
+        if !exif.is_empty() {
+            ifd(&mut out, exif, 0);
+        }
+        out
+    }
+
+    #[test]
+    fn olympus_panasonic_and_canon_raws_report_camera_date_and_place() {
+        use crate::pipeline::tagging::{exif_datetime_to_unix, parse_exif_fields};
+        let now = chrono::Utc::now().timestamp() as f64;
+        let taken = exif_datetime_to_unix("2026:09:19 18:30:00", Some("-05:00"), now);
+        assert!(taken.is_some());
+        let date = || [(0x9003, ascii("2026:09:19 18:30:00")), (0x9011, ascii("-05:00"))];
+        for magic in [0x4F52, 0x55] {
+            // IFD0 links to a sensor IFD past the end, as in a head read.
+            let raw = tiff_block(magic, &[(0x0110, ascii("E-M1MarkIII")), (0x0112, (3, 1, vec![6, 0]))], &date(), 0x00FF_FFF0);
+            assert!(
+                exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&raw)).is_err(),
+                "the generic reader rejects {magic:#x}"
+            );
+            let (model, _, _, captured) = parse_exif_fields(&raw).expect("RAW EXIF");
+            assert_eq!(model.as_deref(), Some("E-M1MarkIII"));
+            assert_eq!(captured, taken);
+            assert_eq!(orientation(&raw), Some(6));
+        }
+
+        let cmt1 = tiff_block(42, &[(0x0110, ascii("Canon EOS R5"))], &[], 0);
+        let cmt2 = tiff_block(42, &date(), &[], 0);
+        let cmt4 = tiff_block(
+            42,
+            &[
+                (0x0001, ascii("N")),
+                (0x0002, rationals(&[(38, 1), (30, 1), (0, 1)])),
+                (0x0003, ascii("W")),
+                (0x0004, rationals(&[(90, 1), (15, 1), (0, 1)])),
+            ],
+            &[],
+            0,
+        );
+        let mut canon = vec![0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b, 0x6a, 0x48];
+        for (name, block) in [(b"CMT1", &cmt1), (b"CMT2", &cmt2), (b"CMT4", &cmt4)] {
+            canon.extend(bmff_box(name, block));
+        }
+        let mut cr3 = bmff_box(b"ftyp", b"crx \0\0\0\x01crx isom");
+        cr3.extend(bmff_box(b"moov", &bmff_box(b"uuid", &canon)));
+        assert!(exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&cr3)).is_err());
+        let (model, lat, lon, captured) = parse_exif_fields(&cr3).expect("CR3 EXIF");
+        assert_eq!(model.as_deref(), Some("Canon EOS R5"));
+        assert!((lat.unwrap() - 38.5).abs() < 1e-9 && (lon.unwrap() + 90.25).abs() < 1e-9, "{lat:?} {lon:?}");
+        assert_eq!(captured, taken);
+    }
+
+    #[test]
+    fn fujifilm_raf_reports_the_previews_exif_even_from_a_head_read() {
+        let mut preview = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        let tiff = tiff_block(42, &[(0x0110, ascii("X-T5"))], &[(0x9003, ascii("2026:09:19 18:30:00"))], 0);
+        preview.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+        preview.extend_from_slice(b"Exif\0\0");
+        preview.extend_from_slice(&tiff);
+        preview.extend_from_slice(&jpeg(1600, 1200)[2..]);
+        let mut raf = b"FUJIFILMCCD-RAW 0201FF383501".to_vec();
+        raf.resize(100, 0);
+        raf[84..88].copy_from_slice(&100u32.to_be_bytes());
+        raf[88..92].copy_from_slice(&(preview.len() as u32).to_be_bytes());
+        raf.extend_from_slice(&preview);
+        let head = &raf[..raf.len() - preview.len() / 2];
+        for bytes in [&raf[..], head] {
+            let (model, _, _, captured) = crate::pipeline::tagging::parse_exif_fields(bytes).expect("RAF EXIF");
+            assert_eq!(model.as_deref(), Some("X-T5"));
+            assert!(captured.is_some());
+        }
+        assert!(largest_embedded_jpeg(head).is_none(), "a cut-off preview is not decoded");
     }
 
     #[test]
