@@ -2103,7 +2103,7 @@ public enum FaceClustering {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         let properties = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
         let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
-        guard (1...8).contains(orientation), let image = decodeBoundedImage(src, maxPixelSize: 2048) else { return nil }
+        guard (1...8).contains(orientation), let image = decodeBoundedImage(src, path: url.path, maxPixelSize: 2048) else { return nil }
         return (image, orientation)
     }
 
