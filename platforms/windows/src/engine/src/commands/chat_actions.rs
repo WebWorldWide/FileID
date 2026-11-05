@@ -166,7 +166,7 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
     let words: Vec<String> = text.split_whitespace().map(clean).collect();
     let explicit = words.iter().any(|word| ["these", "this", "selected", "selection", "them", "those"].contains(&word.as_str()));
     let question = parse_question(text);
-    let plan = SearchPlan::resolve_known(&question.reduced, None, context.people, context.events);
+    let plan = SearchPlan::resolve_known(&question.reduced, None, context.people, context.events, false);
     let mut filter = Filter {
         kinds: plan.kinds.clone(),
         person_ids: plan.person_ids.clone(),
@@ -174,8 +174,8 @@ fn scope(conn: &Connection, text: Option<&str>, context: &Context<'_>) -> Result
         date: question.date.clone(),
         folder: question.folder.clone(),
         undescribed: question.undescribed,
-        ids: None,
         extensions: question.formats.clone().unwrap_or_default(),
+        ..Filter::default()
     };
     if explicit {
         match context.chat.and_then(|chat| chat.file_ids.clone()).filter(|ids| !ids.is_empty()) {

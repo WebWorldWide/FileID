@@ -55,7 +55,7 @@ struct ChatSearchPlan: Sendable, Equatable {
             "find", "show", "me", "please", "search", "for", "from", "the", "a", "an", "where", "of",
             "my", "files", "file", "with", "in", "at", "around", "near", "all", "only", "just", "now",
             "these", "those", "instead", "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were",
-            "do", "does", "did", "have", "has", "there", "any", "about", "that", "i"
+            "do", "does", "did", "have", "has", "there", "any", "about", "that", "i", "ones"
         ]
         let refinement = followUp || normalized.contains {
             ["only", "just", "now", "these", "those", "instead", "also", "and"].contains($0)

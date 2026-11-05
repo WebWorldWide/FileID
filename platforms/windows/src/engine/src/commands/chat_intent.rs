@@ -72,6 +72,14 @@ pub struct Question {
     /// File extensions named in the question ("RAW", "PNGs"), lowercase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formats: Option<Vec<String>>,
+    /// "the 3 largest", "top 10": how many files to list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// "bigger than 1 GB" / "under 500 KB", in bytes (exclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<i64>,
 }
 
 impl Default for Question {
@@ -86,6 +94,9 @@ impl Default for Question {
             undescribed: false,
             reduced: String::new(),
             formats: None,
+            limit: None,
+            min_bytes: None,
+            max_bytes: None,
         }
     }
 }
@@ -93,6 +104,7 @@ impl Default for Question {
 impl Question {
     pub fn structured(&self) -> bool {
         self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
+            || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some()
     }
 }
 
@@ -537,6 +549,32 @@ pub fn parse_question(text: &str) -> Question {
     if !formats.is_empty() {
         question.formats = Some(formats);
     }
+    let order_words = ["largest", "biggest", "heaviest", "smallest", "tiniest", "newest", "latest", "recent", "oldest", "earliest"];
+    for (index, word) in words.iter().enumerate() {
+        let Ok(n) = word.parse::<i64>() else { continue };
+        if !(1..=500).contains(&n) || n.to_string() != *word {
+            continue;
+        }
+        let before = index.checked_sub(1).map(|at| words[at].as_str()).unwrap_or_default();
+        let after = words.get(index + 1).map(String::as_str).unwrap_or_default();
+        if before == "top" || before == "first" || order_words.contains(&after) {
+            question.limit = Some(n);
+            used.insert(index);
+            if before == "top" || before == "first" {
+                used.insert(index - 1);
+            }
+            if before == "top" && !question.explicit_order {
+                question.order = "largest".into();
+                question.explicit_order = true;
+            }
+            break;
+        }
+    }
+    if let Some((minimum, maximum, range)) = size_bounds(&words) {
+        question.min_bytes = minimum;
+        question.max_bytes = maximum;
+        used.extend(range);
+    }
     if let Some((filter, range)) = date_filter(&words) {
         question.date = Some(filter);
         mark(&mut used, range);
@@ -547,7 +585,7 @@ pub fn parse_question(text: &str) -> Question {
     }
     if question.structured() {
         let filler = [
-            "how", "many", "much", "what", "which", "is", "are", "there", "do", "does", "did", "i", "we", "you", "have", "has", "got",
+            "how", "many", "much", "what", "whats", "which", "is", "are", "there", "do", "does", "did", "i", "we", "you", "have", "has", "got",
             "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
             "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
             "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
@@ -563,6 +601,79 @@ pub fn parse_question(text: &str) -> Question {
         text.clone_into(&mut question.reduced);
     }
     question
+}
+
+/// "bigger than 1 GB", "over 500MB", "under 2.5 gb", "at least 10 MB": byte
+/// bounds and the words they used. Decimal units, as sizes are shown.
+/// Mirrors macOS `ChatIntent.sizeBounds`.
+pub fn size_bounds(words: &[String]) -> Option<(Option<i64>, Option<i64>, BTreeSet<usize>)> {
+    let unit = |word: &str| -> Option<f64> {
+        Some(match word {
+            "b" | "byte" | "bytes" => 1.0,
+            "kb" => 1e3,
+            "mb" => 1e6,
+            "gb" => 1e9,
+            "tb" => 1e12,
+            _ => return None,
+        })
+    };
+    let above = ["bigger", "larger", "over", "above", "more", "exceeding", "heavier"];
+    let below = ["smaller", "under", "below", "less", "lighter"];
+    let amount = |index: usize| -> Option<(f64, usize)> {
+        let word = words.get(index)?;
+        if let Ok(number) = word.parse::<f64>()
+            && number >= 0.0
+            && let Some(unit) = words.get(index + 1).and_then(|next| unit(next))
+        {
+            return Some((number * unit, 2));
+        }
+        let digits = word.len() - word.trim_start_matches(|c: char| c.is_numeric() || c == '.').len();
+        if digits > 0
+            && let Ok(number) = word[..digits].parse::<f64>()
+            && let Some(unit) = unit(&word[digits..])
+        {
+            return Some((number * unit, 1));
+        }
+        None
+    };
+    let (mut minimum, mut maximum) = (None, None);
+    let mut used = BTreeSet::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index].as_str();
+        let mut start = index + 1;
+        let mut direction = if above.contains(&word) {
+            Some(true)
+        } else if below.contains(&word) {
+            Some(false)
+        } else {
+            None
+        };
+        if word == "at" && let Some(next) = words.get(index + 1).filter(|next| *next == "least" || *next == "most") {
+            direction = Some(next == "least");
+            start = index + 2;
+        }
+        let Some(direction) = direction else {
+            index += 1;
+            continue;
+        };
+        if words.get(start).is_some_and(|word| word == "than") {
+            start += 1;
+        }
+        let Some((bytes, length)) = amount(start).filter(|(bytes, _)| bytes.is_finite() && *bytes < 9e18) else {
+            index += 1;
+            continue;
+        };
+        let value = bytes.round() as i64;
+        if direction {
+            minimum = Some(value);
+        } else {
+            maximum = Some(value);
+        }
+        used.extend(index..start + length);
+        index = start + length;
+    }
+    (!used.is_empty()).then_some((minimum, maximum, used))
 }
 
 const RAW_EXTENSIONS: [&str; 20] = [

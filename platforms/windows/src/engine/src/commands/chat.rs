@@ -670,7 +670,20 @@ fn plan_for(
     events: &super::catalog_retrieval::KnownEvents,
 ) -> (super::chat_intent::Question, SearchPlan) {
     let question = parse_question(text);
-    let plan = SearchPlan::resolve_known(&question.reduced, previous, people, events);
+    let plan = SearchPlan::resolve_known(&question.reduced, previous, people, events, false);
+    // "how many are from 2018?" names nothing of its own: it narrows the last search.
+    let bare = plan.query.is_empty() && plan.kinds.is_empty() && plan.person_ids.is_empty() && plan.event_ids.is_empty() && plan.excluded_person_ids.is_empty();
+    let library_wide = ["files", "file", "library", "everything", "all", "total", "overall", "collection"];
+    let lower = text.to_lowercase();
+    let mut words = lower.split(|c: char| !c.is_alphabetic());
+    if previous.is_some()
+        && bare
+        && question.structured()
+        && !["overview", "folders", "formats"].contains(&question.measure.as_str())
+        && !words.any(|word| library_wide.contains(&word))
+    {
+        return (question.clone(), SearchPlan::resolve_known(&question.reduced, previous, people, events, true));
+    }
     (question, plan)
 }
 
@@ -698,28 +711,41 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
             .fold(None, |previous, text| Some(plan_for(text, previous.as_ref(), &people, &events).1))
     };
     let (question, plan) = plan_for(&text, previous.as_ref(), &people, &events);
-    let structured = Filter {
+    let mut structured = Filter {
         kinds: plan.kinds.clone(),
         person_ids: plan.person_ids.clone(),
         person_names: plan.person_names.clone(),
         date: question.date.clone(),
         folder: question.folder.clone(),
         undescribed: question.undescribed,
-        ids: None,
         extensions: question.formats.clone().unwrap_or_default(),
+        all_people: plan.all_people,
+        excluded_person_ids: plan.excluded_person_ids.clone(),
+        excluded_person_names: plan.excluded_person_names.clone(),
+        min_bytes: question.min_bytes,
+        max_bytes: question.max_bytes,
+        ..Filter::default()
     };
-    if question.structured() && plan.query.is_empty() && plan.event_ids.is_empty() && plan.time_seconds.is_none() {
+    // Counts, sizes, orders and duplicates must see every match, so a subject
+    // becomes the full set of files it describes.
+    let wants_all = question.measure != "list" || question.explicit_order || question.duplicates;
+    if question.structured() && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (plan.query.is_empty() || wants_all) {
+        if !plan.query.is_empty()
+            && let Some(ids) = chat_facts::subject_ids(conn, &plan.query)?
+        {
+            structured.ids = Some(ids);
+            structured.subject = Some(plan.query.clone());
+        }
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
-    let mut hits = super::catalog_retrieval::search(
-        conn,
-        &plan.query,
-        &plan.kinds,
-        &plan.person_ids,
-        &plan.event_ids,
-        plan.time_seconds,
-    )?;
+    let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds);
+    let groups = chat_facts::subject_groups(&plan.query);
+    let mut hits = if groups.len() > 1 {
+        fuse(groups.iter().map(|group| search(&group.join(" "))).collect::<Result<Vec<_>>>()?)
+    } else {
+        search(&plan.query)?
+    };
     if !plan.query.is_empty() {
         let extra = semantic(conn, request, &plan.query);
         if !extra.is_empty() {
@@ -731,9 +757,39 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
             hits = fuse(lists);
         }
     }
-    let extra_filter = question.structured().then(|| Filter { kinds: vec![], person_ids: vec![], person_names: vec![], ..structured.clone() });
+    let extra_filter = (question.structured() || plan.all_people || !plan.excluded_person_ids.is_empty()).then(|| Filter {
+        person_ids: if plan.all_people { plan.person_ids.clone() } else { vec![] },
+        date: question.date.clone(),
+        folder: question.folder.clone(),
+        undescribed: question.undescribed,
+        extensions: question.formats.clone().unwrap_or_default(),
+        all_people: plan.all_people,
+        excluded_person_ids: plan.excluded_person_ids.clone(),
+        excluded_person_names: plan.excluded_person_names.clone(),
+        min_bytes: question.min_bytes,
+        max_bytes: question.max_bytes,
+        ..Filter::default()
+    });
     if let Some(filter) = &extra_filter {
         hits = chat_facts::restrict(conn, hits, filter)?;
+    }
+    // Search keeps its best hundred and matches words as written; fill a short
+    // list from every file the subject describes (singulars too) that passes
+    // the same filters.
+    if hits.len() < chat_facts::SHOWN && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (!plan.query.is_empty() || extra_filter.is_some()) {
+        let mut fill = extra_filter.clone().unwrap_or_default();
+        fill.kinds.clone_from(&plan.kinds);
+        fill.person_ids.clone_from(&plan.person_ids);
+        fill.all_people = plan.all_people;
+        let subject = if plan.query.is_empty() { Some(None) } else { chat_facts::subject_ids(conn, &plan.query)?.map(Some) };
+        if let Some(ids) = subject {
+            fill.ids = ids;
+            let seen: std::collections::HashSet<i64> = hits.iter().map(|hit| hit.file_id).collect();
+            let count = chat_facts::totals(conn, &fill)?.0;
+            let more = chat_facts::listed(conn, &fill, &question.order, chat_facts::SHOWN + seen.len(), count)?;
+            let room = chat_facts::SHOWN - hits.len();
+            hits.extend(more.into_iter().filter(|hit| !seen.contains(&hit.file_id)).take(room));
+        }
     }
     let scope = if plan.query.is_empty() {
         "in the library".to_owned()
@@ -749,7 +805,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let people = if plan.person_names.is_empty() {
         String::new()
     } else {
-        format!(" (people: {})", plan.person_names.join(", "))
+        format!(" (people: {})", plan.person_names.join(if plan.all_people { " and " } else { ", " }))
     };
     let events = if plan.event_names.is_empty() {
         String::new()
@@ -757,7 +813,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         format!(" (event: {})", plan.event_names.join(", "))
     };
     let time = plan.time_seconds.map(|seconds| format!(" (near {})", time_label(seconds))).unwrap_or_default();
-    let structure = extra_filter.map(|filter| filter.qualifiers()).filter(|text| !text.is_empty()).map(|text| format!(" ({})", text.trim())).unwrap_or_default();
+    let structure = extra_filter.map(|filter| Filter { person_names: vec![], ..filter }.qualifiers()).filter(|text| !text.is_empty()).map(|text| format!(" ({})", text.trim())).unwrap_or_default();
     let qualifiers = format!("{filter}{people}{events}{time}{structure}");
     let explanation = if plan.query.is_empty()
         && plan.kinds.is_empty()
@@ -1213,6 +1269,41 @@ mod tests {
                 assert!(result.message.contains("birthday"));
             }
         }
+    }
+
+    #[test]
+    fn complex_questions_see_every_matching_file() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,'Kyle','Kyle',0,0),(2,'Maya','Maya',0,0);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<250)
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description)
+             SELECT i,'/lib/Pets/pet_'||i||'.jpg',i,1000,1552219200-i*86400,0,'image','jpg','A dog in the yard' FROM n;
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description) VALUES
+             (301,'/lib/Trips/a.jpg',301,4000,1688472000,0,'image','jpg','Kyle at the beach'),
+             (302,'/lib/Trips/b.jpg',302,5000,1688472000,0,'image','jpg','Kyle at the beach'),
+             (303,'/lib/Trips/c.arw',303,9000,1688472000,0,'image','arw','Sunset over the beach'),
+             (304,'/lib/Trips/surf.mov',304,2500000000,1688472000,0,'video','mov','Surfing at the beach');
+             INSERT INTO tags(file_id,tag,source,score) VALUES(303,'sunset','auto',0.9);
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox) VALUES(301,1,X'00','[0,0,1,1]'),(301,2,X'00','[0,0,1,1]'),(302,1,X'00','[0,0,1,1]'),(303,2,X'00','[0,0,1,1]');",
+        )
+        .unwrap();
+        let mut ask = |conversation: &str, text: &str| {
+            let request = ChatRequest { request_id: uuid::Uuid::new_v4().to_string(), conversation_id: conversation.into(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            let response = execute(&mut conn, &request).unwrap();
+            (response.message, response.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>())
+        };
+        assert_eq!(ask("a", "how many dogs are there?").0, "Found 250 files matching “dogs”, using 250.0 KB.");
+        assert_eq!(ask("b", "photos of Kyle and Maya at the beach"), ("Found 1 match for “beach” (photos) (people: Kyle and Maya).".into(), vec![301]));
+        let (message, mut hits) = ask("c", "beach photos without Maya");
+        hits.sort_unstable();
+        assert_eq!((message.as_str(), hits), ("Found 1 match for “beach” (photos) (without Maya).", vec![302]));
+        assert_eq!(ask("d", "show me the 2 largest photos").0, "The 2 largest photos: c.arw (9.0 KB · 2023-07-04), b.jpg (5.0 KB · 2023-07-04).");
+        assert_eq!(ask("e", "files bigger than 1 GB"), ("Found 1 file over 1.0 GB.".into(), vec![304]));
+        let (message, hits) = ask("f", "beach or sunset photos");
+        assert_eq!((message.as_str(), hits.len()), ("Found 3 matches for “beach or sunset” (photos).", 3));
+        ask("g", "dog photos");
+        assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
     }
 
     #[test]

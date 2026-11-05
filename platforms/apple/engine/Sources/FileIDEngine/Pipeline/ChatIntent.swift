@@ -399,7 +399,8 @@ struct ChatIntent: Codable, Equatable, Sendable {
             }
             guard let direction = isMin else { index += 1; continue }
             if start < words.count, words[start] == "than" { start += 1 }
-            guard let (bytes, length) = amount(at: start) else { index += 1; continue }
+            // Int64(_:) traps on infinity or overflow ("over inf gb", "over 1e30 tb").
+            guard let (bytes, length) = amount(at: start), bytes.isFinite, bytes < 9e18 else { index += 1; continue }
             let value = Int64(bytes.rounded())
             if direction { minimum = value } else { maximum = value }
             used.formUnion(index..<(start + length))

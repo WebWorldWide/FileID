@@ -169,7 +169,7 @@ fn tag_hits(
 
 /// The word plus its singular stems, so "dogs" and "beaches" reach the singular
 /// scan tags. Mirrors macOS `CatalogStore.wordForms`.
-fn word_forms(word: &str) -> Vec<String> {
+pub(super) fn word_forms(word: &str) -> Vec<String> {
     if word.chars().count() < 4 {
         return vec![word.to_owned()];
     }

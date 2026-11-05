@@ -6,6 +6,7 @@ use super::chat_intent::{bytes_label, count_label, noun, DateFilter, Question};
 use crate::ipc::CatalogHit;
 use anyhow::Result;
 use rusqlite::{types::Value, Connection};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub(crate) const ANALYZABLE: [&str; 6] = ["image", "video", "pdf", "doc", "audio", "model"];
@@ -37,6 +38,16 @@ pub(crate) struct Filter {
     pub ids: Option<Vec<i64>>,
     /// Lowercase file extensions ("raw" covers every RAW type).
     pub extensions: Vec<String>,
+    /// Every named person must appear ("Kyle and Maya"), not any of them.
+    pub all_people: bool,
+    /// The subject words behind `ids`, for the reply.
+    pub subject: Option<String>,
+    /// People the question leaves out ("without Maya").
+    pub excluded_person_ids: Vec<i64>,
+    pub excluded_person_names: Vec<String>,
+    /// Exclusive byte bounds.
+    pub min_bytes: Option<i64>,
+    pub max_bytes: Option<i64>,
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Value {
@@ -80,10 +91,32 @@ impl Filter {
             parts.push("lower(f.extension) IN (SELECT value FROM json_each(?))".into());
             args.push(json(&self.extensions));
         }
-        if !self.person_ids.is_empty() {
+        if self.all_people && self.person_ids.len() > 1 {
+            let mut people = self.person_ids.clone();
+            people.sort_unstable();
+            people.dedup();
+            for person in people {
+                parts.push("f.id IN (SELECT file_id FROM face_prints WHERE person_id=? UNION SELECT file_id FROM catalog_observations WHERE person_id=? AND stale=0)".into());
+                args.push(Value::Integer(person));
+                args.push(Value::Integer(person));
+            }
+        } else if !self.person_ids.is_empty() {
             parts.push("f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)".into());
             args.push(json(&self.person_ids));
             args.push(json(&self.person_ids));
+        }
+        if !self.excluded_person_ids.is_empty() {
+            parts.push("f.id NOT IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)".into());
+            args.push(json(&self.excluded_person_ids));
+            args.push(json(&self.excluded_person_ids));
+        }
+        if let Some(min) = self.min_bytes {
+            parts.push("f.size_bytes>?".into());
+            args.push(Value::Integer(min));
+        }
+        if let Some(max) = self.max_bytes {
+            parts.push("f.size_bytes<?".into());
+            args.push(Value::Integer(max));
         }
         if let Some(ids) = &self.ids {
             parts.push("f.id IN (SELECT value FROM json_each(?))".into());
@@ -127,11 +160,24 @@ impl Filter {
     pub fn qualifiers(&self) -> String {
         use std::fmt::Write;
         let mut text = String::new();
+        if let Some(subject) = self.subject.as_deref().filter(|subject| !subject.is_empty()) {
+            let _ = write!(text, " matching “{subject}”");
+        }
         if !self.extensions.is_empty() {
             let _ = write!(text, " in {} format", format_label(&self.extensions));
         }
         if !self.person_names.is_empty() {
-            let _ = write!(text, " of {}", self.person_names.join(" and "));
+            let separator = if self.all_people || self.person_names.len() == 1 { " and " } else { " or " };
+            let _ = write!(text, " of {}", self.person_names.join(separator));
+        }
+        if !self.excluded_person_names.is_empty() {
+            let _ = write!(text, " without {}", self.excluded_person_names.join(" or "));
+        }
+        if let Some(min) = self.min_bytes {
+            let _ = write!(text, " over {}", bytes_label(min));
+        }
+        if let Some(max) = self.max_bytes {
+            let _ = write!(text, " under {}", bytes_label(max));
         }
         if let Some(folder) = &self.folder {
             let _ = write!(text, " in {}", folder.strip_prefix("named:").unwrap_or(folder));
@@ -410,9 +456,19 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
     }
     let kinds = filter.kinds.clone();
     let (count, bytes) = totals(conn, filter)?;
-    let hits = listed(conn, filter, &question.order, SHOWN, count)?;
+    let shown = question.limit.map_or(SHOWN, |limit| usize::try_from(limit).unwrap_or(SHOWN).min(SHOWN));
+    let hits = listed(conn, filter, &question.order, shown, count)?;
     if count == 0 {
         return Ok((format!("No {}{qualifiers}.", noun(&kinds, 2)), hits));
+    }
+    if let Some(limit) = question.limit
+        && question.measure == "list"
+    {
+        let names = hits.iter().map(|hit| format!("{} ({})", file_name(&hit.path), hit.text)).collect::<Vec<_>>().join(", ");
+        let top = limit.min(count);
+        let number = if top == 1 { String::new() } else { format!("{} ", count_label(top)) };
+        let ordered = if question.explicit_order { format!("{} ", question.order) } else { String::new() };
+        return Ok((format!("The {number}{ordered}{}{qualifiers}: {names}.", noun(&kinds, top)), hits));
     }
     let message = match question.measure.as_str() {
         "size" => format!(
@@ -429,6 +485,105 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
         }
     };
     Ok((message, hits))
+}
+
+/// Words that only join a subject to the question ("about taxes", "photos showing a dog").
+const SUBJECT_FILLERS: [&str; 39] = [
+    "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show", "containing",
+    "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where", "who", "me", "my", "i", "do",
+    "does", "have", "has", "s", "",
+];
+pub(crate) const SUBJECT_LIMIT: usize = 200_000;
+
+/// Subject words split into alternatives on "or": "beach or sunset" → [[beach], [sunset]].
+pub(crate) fn subject_groups(query: &str) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = vec![vec![]];
+    for word in query.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        if word == "or" {
+            if groups.last().is_some_and(|group| !group.is_empty()) {
+                groups.push(vec![]);
+            }
+        } else if !SUBJECT_FILLERS.contains(&word)
+            && let Some(group) = groups.last_mut()
+        {
+            group.push(word.to_owned());
+        }
+    }
+    groups.retain(|group| !group.is_empty());
+    groups
+}
+
+/// Every file the subject describes, so counts, sizes and orders see all
+/// matches rather than the best hundred search keeps. A word matches a file's
+/// name, description, scan tags, document or photo text, or current video
+/// evidence, in its written or singular form; every word must match, and "or"
+/// joins alternatives. `None` when no subject word remains. Mirrors macOS
+/// `ChatFacts.subjectIDs`.
+pub(crate) fn subject_ids(conn: &Connection, query: &str) -> Result<Option<Vec<i64>>> {
+    let groups = subject_groups(query);
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let mut cache: HashMap<String, HashSet<i64>> = HashMap::new();
+    let mut result: HashSet<i64> = HashSet::new();
+    for group in groups {
+        let mut matched: Option<HashSet<i64>> = None;
+        for word in group {
+            if !cache.contains_key(&word) {
+                let found = files_matching(conn, &word)?;
+                cache.insert(word.clone(), found);
+            }
+            let found = &cache[&word];
+            let next: HashSet<i64> = match matched {
+                Some(previous) => previous.intersection(found).copied().collect(),
+                None => found.clone(),
+            };
+            let empty = next.is_empty();
+            matched = Some(next);
+            if empty {
+                break;
+            }
+        }
+        result.extend(matched.unwrap_or_default());
+        if result.len() >= SUBJECT_LIMIT {
+            break;
+        }
+    }
+    let mut ids: Vec<i64> = result.into_iter().collect();
+    ids.sort_unstable();
+    ids.truncate(SUBJECT_LIMIT);
+    Ok(Some(ids))
+}
+
+fn files_matching(conn: &Connection, word: &str) -> Result<HashSet<i64>> {
+    let forms = super::catalog_retrieval::word_forms(word);
+    let matching = forms.iter().map(|form| format!("\"{}\"", form.replace('"', "\"\""))).collect::<Vec<_>>().join(" OR ");
+    let limit = SUBJECT_LIMIT as i64;
+    let mut ids = HashSet::new();
+    let mut collect = |sql: &str, args: Vec<Value>| -> Result<()> {
+        let mut statement = conn.prepare(sql)?;
+        for id in statement.query_map(rusqlite::params_from_iter(args), |row| row.get::<_, i64>(0))? {
+            ids.insert(id?);
+        }
+        Ok(())
+    };
+    for table in ["catalog_file_fts", "doc_fts", "ocr_fts"] {
+        collect(&format!("SELECT rowid FROM {table} WHERE {table} MATCH ? LIMIT ?"), vec![Value::Text(matching.clone()), Value::Integer(limit)])?;
+    }
+    collect(
+        "SELECT DISTINCT CAST(e.file_id AS INTEGER) FROM catalog_evidence_fts e \
+         LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter' \
+         LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage' \
+         WHERE catalog_evidence_fts MATCH ? AND (c.stale=0 OR p.stale=0) LIMIT ?",
+        vec![Value::Text(matching.clone()), Value::Integer(limit)],
+    )?;
+    if word.chars().count() >= 3 {
+        let likes = vec!["(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?"; forms.len()].join(" OR ");
+        let mut args: Vec<Value> = forms.iter().map(|form| Value::Text(format!("% {form}%"))).collect();
+        args.push(Value::Integer(limit));
+        collect(&format!("SELECT DISTINCT file_id FROM tags WHERE source IN ('auto','user','vlm') AND tag IN (SELECT tag FROM catalog_tag_vocab WHERE {likes}) LIMIT ?"), args)?;
+    }
+    Ok(ids)
 }
 
 /// Keeps only hits whose files pass the structured filter, preserving order.
