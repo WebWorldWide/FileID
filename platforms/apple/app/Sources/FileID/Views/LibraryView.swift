@@ -484,8 +484,8 @@ struct LibraryView: View {
                 kindPicker
 
                 ViewThatFits(in: .horizontal) {
-                    MetaText("\(rows.count.formatted()) of \(store.totalFiles.formatted()) shown", size: 11).fixedSize()
-                    MetaText("\(rows.count.formatted())/\(store.totalFiles.formatted())", size: 11).fixedSize()
+                    MetaText("\(rows.count.formatted()) of \(shownTotal.formatted()) shown", size: 11).fixedSize()
+                    MetaText("\(rows.count.formatted())/\(shownTotal.formatted())", size: 11).fixedSize()
                     Color.clear.frame(width: 0, height: 0)
                 }
                 .fixedSize(horizontal: false, vertical: true)
@@ -570,9 +570,9 @@ struct LibraryView: View {
                 if result.failed == 0 && result.skipped == 0 {
                     BulkRenameSheet.clearLastBatch()
                 }
-                undoStatus = "Reverted \(result.undone) rename\(result.undone == 1 ? "" : "s")"
-                    + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
-                    + (result.failed > 0 ? " · failed \(result.failed)" : "")
+                undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
+                    + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
+                    + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
                 editEpoch += 1   // refresh tiles (renamed files) even mid-scan
                 refreshBulkState()
                 reload()
@@ -590,8 +590,8 @@ struct LibraryView: View {
                     BulkTagSheet.clearLastBatch()
                 }
                 undoStatus = "Removed tags from \(result.undone) file\(result.undone == 1 ? "" : "s")"
-                    + (result.skipped > 0 ? " · skipped \(result.skipped)" : "")
-                    + (result.failed > 0 ? " · failed \(result.failed)" : "")
+                    + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
+                    + (result.failed > 0 ? " · \(result.failed) couldn't be changed" : "")
                     + (result.firstError.map { " — \($0)" } ?? "")
                 editEpoch += 1   // refresh tile dots even mid-scan
                 refreshBulkState()
@@ -599,6 +599,16 @@ struct LibraryView: View {
                 reload()
             }
         }
+    }
+
+    /// Files the current listing draws from: unreadable files appear only under their own filter.
+    private var shownTotal: Int {
+        kindFilter == ReadStore.unreadableFilter ? store.unreadableFiles : max(0, store.totalFiles - store.unreadableFiles)
+    }
+
+    private var unreadableKind: [(label: String, value: String?)] {
+        guard store.unreadableFiles > 0 || kindFilter == ReadStore.unreadableFilter else { return [] }
+        return [(label: "Unreadable \(store.unreadableFiles.formatted())", value: ReadStore.unreadableFilter)]
     }
 
     @ViewBuilder
@@ -610,7 +620,7 @@ struct LibraryView: View {
             ("Docs",     "doc"),
             ("PDFs",     "pdf"),
             ("Audio",    "audio")
-        ]
+        ] + unreadableKind
         HStack(spacing: 0) {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value
@@ -757,7 +767,7 @@ struct LibraryView: View {
                 newRows = await store.filesAsync(limit: want, search: query, kindFilter: kind)
                 pageable = newRows.count == want
                 let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.count >= 3, encoderReady, let vector = await store.semanticVectorAsync(query: trimmed) {
+                if trimmed.count >= 3, encoderReady, kind != ReadStore.unreadableFilter, let vector = await store.semanticVectorAsync(query: trimmed) {
                     guard !Task.isCancelled else { return }
                     rows = newRows
                     visualSearchPending = true
@@ -1105,6 +1115,7 @@ private struct FileDetailRows: View {
     let people: [String]
     var body: some View {
         DetailRow("Kind", FileKindLabel.title(file.kind) + " · " + file.extension.uppercased())
+        if file.failed { DetailRow("Status", "Couldn't be read, so it has no tags, faces or text. It may be damaged.") }
         if let date = file.displayDate { DetailRow("Captured", date.formatted(date: .abbreviated, time: .shortened)) }
         DetailRow("Size", ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
         if let camera = file.cameraModel, !camera.isEmpty { DetailRow("Camera", camera) }

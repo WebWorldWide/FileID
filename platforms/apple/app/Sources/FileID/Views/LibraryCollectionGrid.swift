@@ -325,6 +325,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let date = TextLayer(size: 11, weight: .regular, color: Theme.nsText3, align: .right)
     private let check = NSImageView()
     private let textGlyph = NSImageView()
+    private let unreadableGlyph = NSImageView()
     private var hasSmartName = false
     private var rowID: Int64?
     private var thumbTask: Task<Void, Never>?
@@ -360,9 +361,14 @@ final class LibraryTileItem: NSCollectionViewItem {
         textGlyph.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
         textGlyph.layer?.cornerRadius = 4
         textGlyph.setAccessibilityElement(false)
+        unreadableGlyph.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 26, weight: .regular))
+        unreadableGlyph.contentTintColor = Theme.nsText3
+        unreadableGlyph.setAccessibilityElement(false)
         for layer in [badge, name, size, date] + chips { root.layer?.addSublayer(layer) }
         root.addSubview(check)
         root.addSubview(textGlyph)
+        root.addSubview(unreadableGlyph)
         view = root
     }
 
@@ -379,6 +385,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         badge.frame = CGRect(x: 6, y: b.height - 6 - 17, width: badge.textWidth + 12, height: 17)
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
         textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
+        unreadableGlyph.frame = CGRect(x: thumbFrame.midX - 18, y: thumbFrame.midY - 18, width: 36, height: 36)
         var y = b.height - thumbHeight - 6 - 17
         name.frame = CGRect(x: 0, y: y, width: b.width, height: 17)
         y -= 4 + 18
@@ -399,11 +406,12 @@ final class LibraryTileItem: NSCollectionViewItem {
         rowID = row.id
         self.isChosen = selected
         self.checked = checked
-        badge.text = FileKindLabel.title(row.kind)
+        badge.text = row.failed ? "Unreadable" : FileKindLabel.title(row.kind)
         let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         hasSmartName = !proposed.isEmpty
         name.text = hasSmartName ? (row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)") : row.url.lastPathComponent
         textGlyph.isHidden = !row.hasText
+        unreadableGlyph.isHidden = !row.failed
         for (index, chip) in chips.enumerated() {
             chip.isHidden = index >= tags.count
             if index < tags.count { chip.text = tags[index] }
@@ -417,14 +425,15 @@ final class LibraryTileItem: NSCollectionViewItem {
         view.needsLayout = true
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
-        view.setAccessibilityLabel([row.url.lastPathComponent, hasSmartName ? "smart name \(name.text)" : nil, row.kind.capitalized,
+        view.setAccessibilityLabel([row.url.lastPathComponent, hasSmartName ? "smart name \(name.text)" : nil, row.failed ? "couldn't be read" : FileKindLabel.title(row.kind),
                                     row.displayDate?.formatted(date: .abbreviated, time: .omitted),
                                     row.hasFaces ? "contains faces" : nil, row.hasText ? "contains text" : nil]
             .compactMap { $0 }.joined(separator: ", "))
         applyColors()
         view.setAccessibilitySelected(selected || checked)
         (view as? TileView)?.customActions = [NSAccessibilityCustomAction(name: "Open preview") { [weak self] in self?.onOpenPreview?(); return true }]
-        if changedFile || reloadImage { loadThumbnail(for: row, keepCurrent: !changedFile) }
+        if row.failed { thumbTask?.cancel(); thumbLayer.contents = nil }
+        else if changedFile || reloadImage { loadThumbnail(for: row, keepCurrent: !changedFile) }
     }
 
     private func loadThumbnail(for row: FileRow, keepCurrent: Bool) {

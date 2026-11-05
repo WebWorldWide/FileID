@@ -551,6 +551,46 @@ struct RestructureApplyTests {
         #expect(again.moved == 0)
     }
 
+    @Test("Undo still restores files after the catalog was wiped and rescanned (new file ids)")
+    func undoAfterWipeAndRescan() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDUndoWipe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let root = tmp.appendingPathComponent("Library")
+        let downloads = root.appendingPathComponent("downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        let srcA = downloads.appendingPathComponent("a.pdf"), srcB = downloads.appendingPathComponent("b.pdf")
+        try Data("A".utf8).write(to: srcA)
+        try Data("B".utf8).write(to: srcB)
+        let db = try makeDB(tmp)
+        try await insertRow(db, id: 1, path: srcA.path)
+        try await insertRow(db, id: 2, path: srcB.path)
+        let journal = tmp.appendingPathComponent("undo.ndjson")
+        let destA = root.appendingPathComponent("Documents/a.pdf"), destB = root.appendingPathComponent("Documents/b.pdf")
+        let applied = try await Restructure.apply(
+            proposals: [RestructureProposal(fileID: 1, oldPath: srcA.path, newPath: destA.path, bucket: "document"),
+                        RestructureProposal(fileID: 2, oldPath: srcB.path, newPath: destB.path, bucket: "document")],
+            database: db, libraryRoot: root, undoJournal: journal)
+        #expect(applied.moved == 2)
+
+        // Wipe + rescan: rows come back under new ids, and old id 1 now names a different file.
+        try await db.pool.write { d in try d.execute(sql: "DELETE FROM files") }
+        try await insertRow(db, id: 1, path: destB.path)
+        try await insertRow(db, id: 7, path: destA.path)
+
+        let undone = await Restructure.undoLast(database: db, libraryRoot: root, undoJournal: journal)
+        #expect(undone.moved == 2)
+        #expect(undone.failed == 0)
+        #expect(FileManager.default.fileExists(atPath: srcA.path) && FileManager.default.fileExists(atPath: srcB.path))
+        #expect(try String(contentsOf: srcA, encoding: .utf8) == "A")
+        #expect(try String(contentsOf: srcB, encoding: .utf8) == "B")
+        let paths: [Int64: String] = try await db.pool.read { d in
+            Dictionary(uniqueKeysWithValues: try Row.fetchAll(d, sql: "SELECT id, path_text FROM files").map { ($0["id"], $0["path_text"]) })
+        }
+        #expect(paths == [7: srcA.path, 1: srcB.path])
+        #expect(!Restructure.hasUndoableRun(undoJournal: journal))
+    }
+
     @Test("Undo recovers a crash after move but before DB update")
     func undoRecoversPostMoveCrash() async throws {
         let tmp = FileManager.default.temporaryDirectory

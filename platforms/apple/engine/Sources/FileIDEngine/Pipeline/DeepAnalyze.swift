@@ -1660,7 +1660,7 @@ public actor DeepAnalyze {
                     return nil
                 }
             }
-            if let cg = decodeBoundedImage(src, maxPixelSize: maxPixelSize) {
+            if let cg = decodeBoundedImage(src, path: url.path, maxPixelSize: maxPixelSize) {
                 return cg
             }
         }
