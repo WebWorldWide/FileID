@@ -90,6 +90,83 @@ public sealed class TakeReviewPolicyTests
         Assert.Equal(WholeGroup, decision.FileIDs.ToArray());
         Assert.Equal("ALL 3 PHOTOS · 1 TO KEEP", TakeReviewPolicy.FilmstripHeader(Group("photos", "open", 1, 2, 3), new HashSet<long> { 2 }, 3));
     }
+
+    [Fact]
+    public void ConfirmationMentionsRawCopiesOnlyWhenThereAreExtraFiles()
+    {
+        var plain = new[] { Quality(1, 1, true, 1), Quality(2, 2, false, 2) };
+        var keep = TakeReviewPolicy.DefaultKeep(plain);
+        Assert.Equal("Keeps IMG_1.jpg. The others go to the Trash. You can undo right after, or put them back from the Trash.",
+            TakeReviewPolicy.ConfirmBody(plain, keep));
+    }
+
+    [Fact]
+    public void ToastsCountMovedTriesAndRestoredFiles()
+    {
+        var group = Group("photos", "open", 1, 2, 3);
+        var qualities = Three();
+        var doomed = qualities.Where(q => q.PrimaryFileID != 2).ToArray();
+        Assert.Equal(1, TakeReviewPolicy.MovedShots(doomed, MovedOnlyTwin));
+        Assert.Equal("Moved 1 photo to Trash", TakeReviewPolicy.MovedText(group, 1, 0));
+        Assert.Equal("Moved 2 photos to Trash · 1 couldn't be moved", TakeReviewPolicy.MovedText(group, 2, 1));
+        Assert.Equal("Put back 3 files", TakeReviewPolicy.PutBackText(3, null));
+        Assert.Equal("Put back 1 file", TakeReviewPolicy.PutBackText(1, null));
+        Assert.Equal("Nothing was put back. Check the Trash.", TakeReviewPolicy.PutBackText(0, null));
+        Assert.Equal("Kept all 3. This group won't be suggested again.", TakeReviewPolicy.KeptAllText(group));
+    }
+
+    [Fact]
+    public void TwoOrMoreKeptTriesAreKeptTogetherAfterTheTrash()
+    {
+        var group = Group("photos", "open", 1, 2, 3);
+        var qualities = Three();
+        Assert.Null(TakeReviewPolicy.KeptTogether(group, qualities, TakeReviewPolicy.DefaultKeep(qualities), "keepAll"));
+        var decision = TakeReviewPolicy.KeptTogether(group, qualities, new HashSet<long> { 1, 2 }, "keepAll");
+        Assert.NotNull(decision);
+        Assert.Equal(KeptPairFiles, decision!.FileIDs.OrderBy(id => id).ToArray());
+    }
+
+    [Fact]
+    public void ScoresReasonsAndSpokenLabelsFollowTheMac()
+    {
+        var group = Group("photos", "open", 1, 2, 3);
+        var best = Three()[1];
+        Assert.Equal(100, TakeReviewPolicy.Score(best));
+        Assert.True(TakeReviewPolicy.HasRawTwin(best));
+        Assert.Equal(TakeReviewPolicy.ReasonTone.Positive, TakeReviewPolicy.Tone("Eyes open"));
+        Assert.Equal(TakeReviewPolicy.ReasonTone.Goal, TakeReviewPolicy.Tone("Shows the goal"));
+        Assert.Equal(TakeReviewPolicy.ReasonTone.Neutral, TakeReviewPolicy.Tone("Blurry"));
+        Assert.Equal("Photo 2 of 3, IMG_2.jpg, recommended, keep, score 100", TakeReviewPolicy.TileSpoken(group, best, 2, 3, best: true, kept: true));
+        Assert.Equal("Best, photo 2 of 3, IMG_2.jpg", TakeReviewPolicy.PaneSpoken("Best", group, 2, 3, "IMG_2.jpg"));
+        Assert.Equal("Keeping IMG_2.jpg", TakeReviewPolicy.KeepAnnouncement(best, kept: true));
+        Assert.Equal("Zoom to face", TakeReviewPolicy.ZoomLabel(group, zoomed: false));
+        Assert.Equal("Show whole clip", TakeReviewPolicy.ZoomLabel(Group("videos", "open", 1, 2), zoomed: true));
+        Assert.Contains("Return keeps the marked photos", TakeReviewPolicy.HintLine(group));
+    }
+
+    [Fact]
+    public void ZoomUsesTheLargestFaceOrTheSubjectAndCentresIt()
+    {
+        var faces = new[] { new CatalogTakeBox(0.1, 0.1, 0.05, 0.05), new CatalogTakeBox(0.4, 0.4, 0.1, 0.1) };
+        var quality = new CatalogTakeQuality(1, OneFile, "C:\\IMG_1.jpg", 0.5, 1, true, Array.Empty<string>(), faces);
+        var box = TakeReviewPolicy.ZoomBox(quality)!;
+        Assert.Equal(0.32, box.X, 6);
+        Assert.Equal(0.26, box.Width, 6);
+        var subjectOnly = quality with { Faces = Array.Empty<CatalogTakeBox>(), Subject = new CatalogTakeBox(0.9, 0, 0.2, 0.2) };
+        var clamped = TakeReviewPolicy.ZoomBox(subjectOnly)!;
+        Assert.Equal(1 - 0.24, clamped.X, 6);
+        Assert.Null(TakeReviewPolicy.ZoomBox(quality with { Faces = Array.Empty<CatalogTakeBox>() }));
+
+        var (scale, x, y) = TakeReviewPolicy.ZoomTransform(400, 340, 400, 300, new CatalogTakeBox(0.25, 0.25, 0.5, 0.5));
+        Assert.Equal(2, scale, 6);
+        Assert.Equal(200, scale * 200 + x, 6);
+        Assert.Equal(170, 20 + scale * 150 + y, 6);
+        Assert.Equal((1d, 0d, 0d), TakeReviewPolicy.ZoomTransform(400, 340, 400, 300, null));
+    }
+
+    private static readonly long[] MovedOnlyTwin = { 11 };
+    private static readonly long[] KeptPairFiles = { 1, 2, 11, 12 };
+    private static readonly long[] OneFile = { 1 };
 }
 
 public sealed class SidebarTabShortcutTests

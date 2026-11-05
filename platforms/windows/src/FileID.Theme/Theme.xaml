@@ -39,6 +39,12 @@
             <SolidColorBrush x:Key="HairlineStrongBrush" Color="#24FFFFFF" />
             <SolidColorBrush x:Key="ControlBorderBrush" Color="#2EFFFFFF" />
             <SolidColorBrush x:Key="ShellControlBorderBrush" Color="#29FFFFFF" />
+            <!-- Focus (DESIGN_V3_PORT Focus): one 2 px gold ring at 0.9, no inner ring. -->
+            <SolidColorBrush x:Key="FocusRingBrush" Color="#E6FFCC00" />
+            <SolidColorBrush x:Key="FocusStrokeColorOuterBrush" Color="#E6FFCC00" />
+            <SolidColorBrush x:Key="FocusStrokeColorInnerBrush" Color="#00000000" />
+            <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="#E6FFCC00" />
+            <SolidColorBrush x:Key="SystemControlFocusVisualSecondaryBrush" Color="#00000000" />
         </ResourceDictionary>
         <ResourceDictionary x:Key="HighContrast">
             <SolidColorBrush x:Key="Text1Brush" Color="{ThemeResource SystemColorWindowTextColor}" />
@@ -51,6 +57,7 @@
             <SolidColorBrush x:Key="HairlineStrongBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="ControlBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
             <SolidColorBrush x:Key="ShellControlBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
+            <SolidColorBrush x:Key="FocusRingBrush" Color="{ThemeResource SystemColorHighlightColor}" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 
@@ -393,6 +400,11 @@
         <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusS}" />
         <Setter Property="HorizontalContentAlignment" Value="Center" />
         <Setter Property="VerticalContentAlignment" Value="Center" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualMargin" Value="-3" />
+        <Setter Property="FocusVisualPrimaryThickness" Value="2" />
+        <Setter Property="FocusVisualSecondaryThickness" Value="0" />
+        <Setter Property="FocusVisualPrimaryBrush" Value="{ThemeResource FocusRingBrush}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
@@ -443,11 +455,63 @@
         </Setter>
     </Style>
 
+    <!-- Primary (DESIGN_V3_PORT Controls): gold fill, hover #FFD84D, pressed
+         #CCA300 at 0.98 scale, disabled 0.4. Named parts precede the
+         VisualStateGroups block (XamlCompiler Pass 1 forward-reference trap). -->
     <Style x:Key="ShellPrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
         <Setter Property="Background" Value="{StaticResource GoldBrush}" />
         <Setter Property="Foreground" Value="{StaticResource OnGoldBrush}" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Padding" Value="14,0,14,0" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Grid x:Name="RootGrid"
+                          Background="{TemplateBinding Background}"
+                          BorderBrush="{TemplateBinding BorderBrush}"
+                          BorderThickness="{TemplateBinding BorderThickness}"
+                          CornerRadius="{TemplateBinding CornerRadius}"
+                          RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <ScaleTransform x:Name="RootScale" ScaleX="1" ScaleY="1" />
+                        </Grid.RenderTransform>
+                        <ContentPresenter x:Name="ContentPresenter"
+                                          Foreground="{TemplateBinding Foreground}"
+                                          FontFamily="{TemplateBinding FontFamily}"
+                                          FontSize="{TemplateBinding FontSize}"
+                                          FontWeight="{TemplateBinding FontWeight}"
+                                          Content="{TemplateBinding Content}"
+                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                          Padding="{TemplateBinding Padding}"
+                                          AutomationProperties.AccessibilityView="Raw" />
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver">
+                                    <VisualState.Setters>
+                                        <Setter Target="RootGrid.Background" Value="{StaticResource GoldHoverBrush}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Pressed">
+                                    <VisualState.Setters>
+                                        <Setter Target="RootGrid.Background" Value="{StaticResource GoldDimBrush}" />
+                                        <Setter Target="RootScale.ScaleX" Value="0.98" />
+                                        <Setter Target="RootScale.ScaleY" Value="0.98" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="RootGrid.Opacity" Value="0.4" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="ShellSecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ShellButtonStyle}">
@@ -460,7 +524,7 @@
         <Setter Property="Foreground" Value="{ThemeResource Text3Brush}" />
         <Setter Property="FontSize" Value="12.5" />
         <Setter Property="Padding" Value="6,0,6,0" />
-        <Setter Property="MinHeight" Value="24" />
+        <Setter Property="MinHeight" Value="28" />
         <Setter Property="CornerRadius" Value="{StaticResource CornerRadiusXs}" />
     </Style>
 
