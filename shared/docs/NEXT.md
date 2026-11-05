@@ -134,7 +134,7 @@ UI loop (Prototype v3 simplicity plus the old feature set, pixel-checked against
 
 ## Best Takes follow-ups (from agent/best-takes, 2026-10-21)
 
-- [ ] WinUI and GTK Best Takes pages per the port spec: GTK done (auto and manual groups); WinUI auto groups done (thumbnails, states, compare panes with score/RAW/reason chips, zoom to face, inline clips, keyboard filmstrip, timed Undo); WinUI manual groups done 2026-11-05 (not yet run on Windows).
+- [x] WinUI and GTK Best Takes pages per the port spec (on-screen checks on a GTK host and Windows hardware are still open): GTK done (auto and manual groups); WinUI auto groups done (thumbnails, states, compare panes with score/RAW/reason chips, zoom to face, inline clips, keyboard filmstrip, timed Undo); WinUI manual groups done 2026-11-05 (not yet run on Windows).
 - [ ] On-screen check of the macOS page: keyboard (← → Space Z Return), VoiceOver labels, Undo after Trash, a populated video group.
 - [ ] Eye openness in the shared engine: blocked on a model. `TakeFaceAnalyzer`/`YuNetFaces` (commands/catalog_take_auto.rs) is ready for it, but YuNet returns only five landmarks (eye centres, nose, mouth corners), not eyelid contours, so it cannot judge open/closed; the Mac uses Vision's eye-contour landmarks. Needs a permissively licensed eye-state or dense-landmark model vetted in MODELS.md (owner decision on a new model).
 - [x] Capture time with sub-seconds (2026-11-05): both engines add EXIF SubSecTimeOriginal/Digitized to `created_at` (Sony JPEGs now store e.g. …822.498), so burst frames keep their order; burst splitting itself still uses its existing gaps.
