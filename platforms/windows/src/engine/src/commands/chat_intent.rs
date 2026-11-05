@@ -72,6 +72,17 @@ pub struct Question {
     /// File extensions named in the question ("RAW", "PNGs"), lowercase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub formats: Option<Vec<String>>,
+    /// "the 3 largest", "top 10": how many files to list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+    /// "bigger than 1 GB" / "under 500 KB", in bytes (exclusive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<i64>,
+    /// "per year" / "by month": counts grouped by "year" or "month".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakdown: Option<String>,
 }
 
 impl Default for Question {
@@ -86,6 +97,10 @@ impl Default for Question {
             undescribed: false,
             reduced: String::new(),
             formats: None,
+            limit: None,
+            min_bytes: None,
+            max_bytes: None,
+            breakdown: None,
         }
     }
 }
@@ -93,6 +108,7 @@ impl Default for Question {
 impl Question {
     pub fn structured(&self) -> bool {
         self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
+            || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some() || self.breakdown.is_some()
     }
 }
 
@@ -537,6 +553,68 @@ pub fn parse_question(text: &str) -> Question {
     if !formats.is_empty() {
         question.formats = Some(formats);
     }
+    let order_words = ["largest", "biggest", "heaviest", "smallest", "tiniest", "newest", "latest", "recent", "oldest", "earliest"];
+    for (index, word) in words.iter().enumerate() {
+        let Ok(n) = word.parse::<i64>() else { continue };
+        if !(1..=500).contains(&n) || n.to_string() != *word {
+            continue;
+        }
+        let before = index.checked_sub(1).map(|at| words[at].as_str()).unwrap_or_default();
+        let after = words.get(index + 1).map(String::as_str).unwrap_or_default();
+        if before == "top" || before == "first" || order_words.contains(&after) {
+            question.limit = Some(n);
+            used.insert(index);
+            if before == "top" || before == "first" {
+                used.insert(index - 1);
+            }
+            if before == "top" && !question.explicit_order {
+                question.order = "largest".into();
+                question.explicit_order = true;
+            }
+            break;
+        }
+    }
+    for index in 0..words.len().saturating_sub(1) {
+        if !["per", "by", "each", "every"].contains(&words[index].as_str()) {
+            continue;
+        }
+        let unit = words[index + 1].as_str();
+        if ["size", "sizes"].contains(&unit) && !question.explicit_order {
+            question.order = "largest".into();
+            question.explicit_order = true;
+            mark(&mut used, index..index + 2);
+        } else if ["date", "time"].contains(&unit) && !question.explicit_order {
+            question.order = "newest".into();
+            question.explicit_order = true;
+            mark(&mut used, index..index + 2);
+        } else if ["year", "years", "month", "months"].contains(&unit) {
+            question.breakdown = Some(if unit.starts_with("year") { "year" } else { "month" }.into());
+            if question.measure == "list" {
+                question.measure = "count".into();
+            }
+            mark(&mut used, index..index + 2);
+        }
+    }
+    if has(&words, &["yearly", "annually"]) {
+        question.breakdown = Some("year".into());
+        if question.measure == "list" {
+            question.measure = "count".into();
+        }
+        for (index, word) in words.iter().enumerate() {
+            if word == "yearly" || word == "annually" {
+                used.insert(index);
+            }
+        }
+    }
+    if question.measure == "size" && words.iter().any(|word| word == "most") && !question.explicit_order {
+        question.order = "largest".into();
+        question.explicit_order = true;
+    }
+    if let Some((minimum, maximum, range)) = size_bounds(&words) {
+        question.min_bytes = minimum;
+        question.max_bytes = maximum;
+        used.extend(range);
+    }
     if let Some((filter, range)) = date_filter(&words) {
         question.date = Some(filter);
         mark(&mut used, range);
@@ -547,7 +625,7 @@ pub fn parse_question(text: &str) -> Question {
     }
     if question.structured() {
         let filler = [
-            "how", "many", "much", "what", "which", "is", "are", "there", "do", "does", "did", "i", "we", "you", "have", "has", "got",
+            "how", "many", "much", "what", "whats", "which", "is", "are", "there", "do", "does", "did", "i", "we", "you", "have", "has", "got",
             "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
             "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
             "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
@@ -563,6 +641,79 @@ pub fn parse_question(text: &str) -> Question {
         text.clone_into(&mut question.reduced);
     }
     question
+}
+
+/// "bigger than 1 GB", "over 500MB", "under 2.5 gb", "at least 10 MB": byte
+/// bounds and the words they used. Decimal units, as sizes are shown.
+/// Mirrors macOS `ChatIntent.sizeBounds`.
+pub fn size_bounds(words: &[String]) -> Option<(Option<i64>, Option<i64>, BTreeSet<usize>)> {
+    let unit = |word: &str| -> Option<f64> {
+        Some(match word {
+            "b" | "byte" | "bytes" => 1.0,
+            "kb" => 1e3,
+            "mb" => 1e6,
+            "gb" => 1e9,
+            "tb" => 1e12,
+            _ => return None,
+        })
+    };
+    let above = ["bigger", "larger", "over", "above", "more", "exceeding", "heavier"];
+    let below = ["smaller", "under", "below", "less", "lighter"];
+    let amount = |index: usize| -> Option<(f64, usize)> {
+        let word = words.get(index)?;
+        if let Ok(number) = word.parse::<f64>()
+            && number >= 0.0
+            && let Some(unit) = words.get(index + 1).and_then(|next| unit(next))
+        {
+            return Some((number * unit, 2));
+        }
+        let digits = word.len() - word.trim_start_matches(|c: char| c.is_numeric() || c == '.').len();
+        if digits > 0
+            && let Ok(number) = word[..digits].parse::<f64>()
+            && let Some(unit) = unit(&word[digits..])
+        {
+            return Some((number * unit, 1));
+        }
+        None
+    };
+    let (mut minimum, mut maximum) = (None, None);
+    let mut used = BTreeSet::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = words[index].as_str();
+        let mut start = index + 1;
+        let mut direction = if above.contains(&word) {
+            Some(true)
+        } else if below.contains(&word) {
+            Some(false)
+        } else {
+            None
+        };
+        if word == "at" && let Some(next) = words.get(index + 1).filter(|next| *next == "least" || *next == "most") {
+            direction = Some(next == "least");
+            start = index + 2;
+        }
+        let Some(direction) = direction else {
+            index += 1;
+            continue;
+        };
+        if words.get(start).is_some_and(|word| word == "than") {
+            start += 1;
+        }
+        let Some((bytes, length)) = amount(start).filter(|(bytes, _)| bytes.is_finite() && *bytes < 9e18) else {
+            index += 1;
+            continue;
+        };
+        let value = bytes.round() as i64;
+        if direction {
+            minimum = Some(value);
+        } else {
+            maximum = Some(value);
+        }
+        used.extend(index..start + length);
+        index = start + length;
+    }
+    (!used.is_empty()).then_some((minimum, maximum, used))
 }
 
 const RAW_EXTENSIONS: [&str; 20] = [
@@ -788,6 +939,17 @@ fn date_at(words: &[String], index: usize) -> Option<Span> {
             }
             return Some(month_day(m, d, 1));
         }
+    }
+    let season = match word {
+        "spring" => Some(3),
+        "summer" => Some(6),
+        "fall" | "autumn" => Some(9),
+        "winter" => Some(12),
+        _ => None,
+    };
+    if let (Some(first), Some(y)) = (season, year(next)) {
+        let start = format!("{y:04}-{first:02}-01");
+        return Some(Span { filter: exact(vec![start.clone()], vec![start, "+3 months".into()], format!("{word} {y}")), length: 2 });
     }
     if let Some(m) = month(word) {
         if let Some(d) = day(next) {
