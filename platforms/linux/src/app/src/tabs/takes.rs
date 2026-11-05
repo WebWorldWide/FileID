@@ -1,9 +1,9 @@
 // Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated
 // clips by itself, scores each try without a model, and this page lets the
 // user check the starred best try, keep or skip, or move the rest to Trash
-// with Undo. The goal ranking panel is not offered: the shared engine
-// reports it as unavailable. Manual groups (YOUR GROUPS / MAKE A GROUP BY
-// HAND) are not ported yet.
+// with Undo. Manual groups with a goal (YOUR GROUPS / MAKE A GROUP BY HAND)
+// live in takes_groups.rs. The goal ranking panel is not offered: the shared
+// engine reports it as unavailable.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
@@ -13,6 +13,7 @@ use adw::prelude::*;
 use fileid_engine::ipc::*;
 use gtk::glib;
 
+use super::takes_groups::Manual;
 use super::takes_model as model;
 use super::takes_widgets::{ComparePane, Shot, ShotView, Tile};
 use super::workbench_state::{Requests, catalog_request};
@@ -32,13 +33,14 @@ struct PendingTrash {
     kept_tries: usize,
 }
 
-struct Ui {
-    engine: Engine,
+pub(super) struct Ui {
+    pub(super) engine: Engine,
+    pub(super) manual: Manual,
     requests: RefCell<Requests>,
     groups: RefCell<Vec<CatalogTakeAutoGroup>>,
     loaded: Cell<bool>,
     regroup: Cell<bool>,
-    current: RefCell<Option<CatalogTakeAutoGroup>>,
+    pub(super) current: RefCell<Option<CatalogTakeAutoGroup>>,
     resolved: RefCell<Option<(String, usize)>>,
     qualities: RefCell<Vec<CatalogTakeQuality>>,
     keep: RefCell<BTreeSet<i64>>,
@@ -52,12 +54,12 @@ struct Ui {
     shots: RefCell<HashMap<i64, Shot>>,
     tiles: RefCell<Vec<Tile>>,
     scroll_animation: RefCell<Option<adw::SpringAnimation>>,
-    root: adw::ToastOverlay,
+    pub(super) root: adw::ToastOverlay,
     groups_header: gtk::Label,
     groups_bar: gtk::ProgressBar,
     look_again: gtk::Button,
     groups_list: gtk::Box,
-    stack: gtk::Stack,
+    pub(super) stack: gtk::Stack,
     loading_label: gtk::Label,
     failed_title: gtk::Label,
     failed_text: gtk::Label,
@@ -78,10 +80,50 @@ struct Ui {
 }
 
 pub fn takes(engine: Engine) -> gtk::Widget {
-    build(engine)
+    build(engine, vec![], true).0
 }
 
-fn build(engine: Engine) -> gtk::Widget {
+/// Best Takes over the clips a search found (the macOS sheet from Search &
+/// Moments): the same page in a dialog, its clip pool seeded with `candidates`.
+pub(super) fn open_dialog(
+    engine: Engine,
+    candidates: Vec<CatalogHit>,
+    parent: &impl IsA<gtk::Widget>,
+) {
+    let (content, ui) = build(engine, candidates, false);
+    let dialog = adw::Dialog::builder()
+        .title("Best Takes")
+        .content_width(1100)
+        .content_height(760)
+        .build();
+    let header = adw::HeaderBar::new();
+    header.set_show_end_title_buttons(false);
+    let done = v3::secondary("Done", false);
+    done.set_tooltip_text(Some("Done (Esc)"));
+    let weak = dialog.downgrade();
+    done.connect_clicked(move |_| {
+        if let Some(dialog) = weak.upgrade() {
+            dialog.close();
+        }
+    });
+    header.pack_end(&done);
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&header);
+    toolbar.set_content(Some(&content));
+    dialog.set_child(Some(&toolbar));
+    let owner = RefCell::new(Some(ui));
+    dialog.connect_closed(move |_| {
+        if let Some(ui) = owner.borrow_mut().take() {
+            ui.best_pane.stop();
+            ui.other_pane.stop();
+            ui.manual.stop_cards();
+        }
+    });
+    dialog.present(Some(parent));
+}
+
+fn build(engine: Engine, candidates: Vec<CatalogHit>, keep_alive: bool) -> (gtk::Widget, Rc<Ui>) {
+    let manual = Manual::new(candidates);
     let page = v3::hbox(0);
 
     let pane = v3::vbox(0);
@@ -106,10 +148,13 @@ fn build(engine: Engine) -> gtk::Widget {
     pane.append(&top);
     let groups_list = v3::vbox(2);
     groups_list.set_margin_top(8);
-    groups_list.set_margin_bottom(8);
-    let list_scroll = v3::scroller(&groups_list);
+    let pane_body = v3::vbox(0);
+    pane_body.append(&groups_list);
+    pane_body.append(&manual.pane);
+    let list_scroll = v3::scroller(&pane_body);
     list_scroll.set_vexpand(true);
     pane.append(&list_scroll);
+    pane.append(&manual.footer);
     page.append(&pane);
     page.append(&gtk::Separator::new(gtk::Orientation::Vertical));
 
@@ -119,11 +164,19 @@ fn build(engine: Engine) -> gtk::Widget {
 
     let empty = v3::dashed_notice(
         "No tries to compare yet",
-        "After a scan, Best Takes groups bursts and repeated clips here by itself. Scan a folder with photo bursts or several tries of a clip.",
+        "After a scan, Best Takes groups bursts and repeated clips here by itself. Scan a folder with photo bursts, or make a group by hand on the left.",
     );
     empty.set_valign(gtk::Align::Start);
     empty.add_css_class("v3-page-pad-inner");
     stack.add_named(&empty, Some("empty"));
+    let pick = v3::dashed_notice(
+        "Pick a group",
+        "Choose a possible group on the left to compare its tries.",
+    );
+    pick.set_valign(gtk::Align::Start);
+    pick.add_css_class("v3-page-pad-inner");
+    stack.add_named(&pick, Some("pick"));
+    stack.add_named(&manual.page, Some("manual"));
 
     let loading = v3::vbox(10);
     loading.add_css_class("v3-page-pad");
@@ -224,6 +277,7 @@ fn build(engine: Engine) -> gtk::Widget {
 
     let ui = Rc::new(Ui {
         engine,
+        manual,
         requests: RefCell::new(Requests::default()),
         groups: RefCell::new(vec![]),
         loaded: Cell::new(false),
@@ -294,11 +348,17 @@ fn build(engine: Engine) -> gtk::Widget {
             }
         });
     }
-    let run = with(|ui| ui.request_groups());
+    let run = with(|ui| {
+        ui.request_groups();
+        if ui.engine.borrow().is_ready() && !ui.requests.borrow().busy("manual") {
+            ui.manual.send(ui, "listEvents", |_| {});
+        }
+    });
     root.connect_map(move |_| run());
     let run = with(|ui| {
         ui.best_pane.stop();
         ui.other_pane.stop();
+        ui.manual.stop_cards();
     });
     root.connect_unmap(move |_| run());
 
@@ -346,12 +406,28 @@ fn build(engine: Engine) -> gtk::Widget {
     });
     review.add_controller(enter);
 
-    subscribe(&ui);
-    root.upcast()
+    let weak = Rc::downgrade(&ui);
+    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+        let Some(ui) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if ui.root.is_mapped()
+            && ui.manual.wants_jobs()
+            && ui.engine.borrow().is_ready()
+            && !ui.requests.borrow().busy("jobs")
+        {
+            ui.send("jobs", catalog_request("jobs"));
+        }
+        glib::ControlFlow::Continue
+    });
+
+    super::takes_groups::wire(&ui);
+    subscribe(&ui, keep_alive);
+    (root.upcast(), ui)
 }
 
 impl Ui {
-    fn send(&self, slot: &str, request: CatalogRequest) -> bool {
+    pub(super) fn send(&self, slot: &str, request: CatalogRequest) -> bool {
         self.requests.borrow_mut().begin(slot, &request.request_id);
         let sent = self
             .engine
@@ -369,7 +445,7 @@ impl Ui {
         true
     }
 
-    fn toast(&self, text: &str) {
+    pub(super) fn toast(&self, text: &str) {
         let toast = adw::Toast::builder().title(text).use_markup(false).build();
         self.root.add_toast(toast);
     }
@@ -400,7 +476,7 @@ impl Ui {
         }
         self.groups_bar.set_visible(true);
         self.look_again.set_sensitive(false);
-        if !self.loaded.get() && self.current.borrow().is_none() {
+        if !self.loaded.get() && self.current.borrow().is_none() && !self.manual.engaged() {
             self.loading_label
                 .set_text("Looking for bursts and repeated clips…");
             self.stack.set_visible_child_name("loading");
@@ -408,6 +484,34 @@ impl Ui {
         let mut request = catalog_request("autoTakeGroups");
         request.limit = Some(100);
         self.send("groups", request);
+    }
+
+    /// Closes the open possible group (the manual editor is taking over).
+    pub(super) fn leave_auto(&self) {
+        self.tile_token
+            .borrow()
+            .store(true, std::sync::atomic::Ordering::Release);
+        *self.tile_token.borrow_mut() = CancelToken::default();
+        self.current.borrow_mut().take();
+        self.best_pane.reset();
+        self.other_pane.reset();
+        let mut child = self.groups_list.first_child();
+        while let Some(widget) = child {
+            v3::set_selected(&widget, false);
+            child = widget.next_sibling();
+        }
+    }
+
+    /// The right side with nothing open: first load, no groups, or a hint.
+    pub(super) fn show_idle(&self) {
+        let name = if !self.loaded.get() && self.requests.borrow().busy("groups") {
+            "loading"
+        } else if self.groups.borrow().is_empty() {
+            "empty"
+        } else {
+            "pick"
+        };
+        self.stack.set_visible_child_name(name);
     }
 
     fn groups_finished(self: &Rc<Self>) {
@@ -439,13 +543,18 @@ impl Ui {
             .set_text(&format!("POSSIBLE GROUPS · {}", model::open_count(&groups)));
         let current_key = self.current.borrow().as_ref().map(|g| g.group_key.clone());
         let resolved = self.resolved.borrow_mut().take();
-        let target = model::next_selection(
-            &groups,
-            current_key.as_deref(),
-            resolved
-                .as_ref()
-                .map(|(key, position)| (key.as_str(), *position)),
-        );
+        let manual = self.manual.engaged() && current_key.is_none();
+        let target = if manual {
+            None
+        } else {
+            model::next_selection(
+                &groups,
+                current_key.as_deref(),
+                resolved
+                    .as_ref()
+                    .map(|(key, position)| (key.as_str(), *position)),
+            )
+        };
         let mut fans = Vec::new();
         for (index, group) in groups.iter().enumerate() {
             let row = v3::hbox(10);
@@ -508,6 +617,9 @@ impl Ui {
         }
         *self.groups.borrow_mut() = groups;
         load_in_order(&self.engine, fans, self.fan_token.borrow().clone());
+        if manual {
+            return;
+        }
         let target_key = target.and_then(|index| {
             self.groups
                 .borrow()
@@ -527,7 +639,7 @@ impl Ui {
                 *self.current.borrow_mut() = None;
                 self.best_pane.reset();
                 self.other_pane.reset();
-                self.stack.set_visible_child_name("empty");
+                self.show_idle();
             }
         }
     }
@@ -547,6 +659,7 @@ impl Ui {
         let Some(group) = self.groups.borrow().get(index).cloned() else {
             return;
         };
+        self.manual.leave();
         self.tile_token
             .borrow()
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1040,7 +1153,11 @@ impl Ui {
 /// Decodes thumbnails one at a time in list order, so a long list never
 /// overflows the tile queue (which drops its oldest jobs) and the first rows
 /// arrive first. A cancelled token stops the walk.
-fn load_in_order(engine: &Engine, jobs: Vec<(String, bool, i32, ShotView)>, token: CancelToken) {
+pub(super) fn load_in_order(
+    engine: &Engine,
+    jobs: Vec<(String, bool, i32, ShotView)>,
+    token: CancelToken,
+) {
     let engine = Rc::downgrade(engine);
     glib::MainContext::default().spawn_local(async move {
         for (path, video, dim, view) in jobs {
@@ -1070,11 +1187,16 @@ fn date_text(seconds: f64) -> String {
         .map_or_else(String::new, |text| text.to_string())
 }
 
-fn subscribe(ui: &Rc<Ui>) {
+/// The page in the main window lives as long as the app (`keep_alive`); the
+/// dialog copy stops listening once the dialog lets go of it.
+fn subscribe(ui: &Rc<Ui>, keep_alive: bool) {
     let rx = ui.engine.borrow_mut().subscribe();
-    let ui = ui.clone();
+    let strong = keep_alive.then(|| ui.clone());
+    let weak = Rc::downgrade(ui);
     glib::MainContext::default().spawn_local(async move {
+        let _strong = strong;
         while let Ok(event) = rx.recv().await {
+            let Some(ui) = weak.upgrade() else { return };
             match event {
                 EngineState::CatalogResponse(r) => {
                     let Some(slot) = ui.requests.borrow_mut().accept(&r.request_id, true) else {
@@ -1101,6 +1223,11 @@ fn subscribe(ui: &Rc<Ui>) {
                         ),
                         "decision" => ui.finish_decision(ok),
                         "reopen" | "keep-rest" => ui.request_groups(),
+                        "manual" => ui.manual.consume(&ui, r),
+                        "jobs" if ok => ui.manual.set_jobs(&ui, r.jobs),
+                        "job-control" => {
+                            ui.send("jobs", catalog_request("jobs"));
+                        }
                         _ => {}
                     }
                 }
@@ -1110,9 +1237,16 @@ fn subscribe(ui: &Rc<Ui>) {
                 EngineState::BulkActionResult(result) if result.action.starts_with("restoreFromTrash") => {
                     ui.finish_restore(result)
                 }
-                EngineState::Ready | EngineState::ScanComplete(_) => ui.request_groups(),
+                EngineState::Ready => {
+                    ui.request_groups();
+                    if ui.root.is_mapped() && !ui.requests.borrow().busy("manual") {
+                        ui.manual.send(&ui, "listEvents", |_| {});
+                    }
+                }
+                EngineState::ScanComplete(_) => ui.request_groups(),
                 EngineState::Failed(message) => {
                     ui.requests.borrow_mut().clear();
+                    ui.manual.request_failed();
                     ui.pending_decision.borrow_mut().take();
                     ui.groups_finished();
                     if ui.end_trash().is_some() || ui.root.is_mapped() {
@@ -1121,6 +1255,7 @@ fn subscribe(ui: &Rc<Ui>) {
                 }
                 EngineState::Exited => {
                     ui.requests.borrow_mut().clear();
+                    ui.manual.request_failed();
                     ui.pending_decision.borrow_mut().take();
                     ui.restoring.borrow_mut().take();
                     ui.groups_finished();

@@ -613,6 +613,14 @@ button.v3-play-circle:hover { background-color: #FFD84D; }
 .v3-take-badge { padding: 1px 5px; border-radius: 3px; background-color: alpha(#000000, 0.6); color: @fileid_text1; }
 .v3-take-badge.best { background-color: @fileid_gold; color: #141414; }
 .v3-take-check { min-width: 15px; min-height: 15px; border-radius: 99px; background-color: @fileid_pink; color: #141414; font-size: 9px; font-weight: 800; }
+.v3-soft-line { background-color: alpha(#FFFFFF, 0.06); }
+.v3-pane-footer { padding: 8px 14px; border-top: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-suggestion-card { padding: 8px 10px; border-radius: 8px; background-color: alpha(@fileid_lavender, 0.08); border: 1px solid alpha(@fileid_lavender, 0.3); }
+.v3-take-card-footer { padding: 8px 10px; background-color: alpha(#FFFFFF, 0.02); border-top: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-rec-rail.tone-gold { box-shadow: inset 3px 0 @fileid_gold; }
+.v3-rec-rail.tone-ai { box-shadow: inset 3px 0 @fileid_lavender; }
+.v3-rec-rail.tone-muted { box-shadow: inset 3px 0 @fileid_text3; }
+.v3-text-13 { font-size: 13px; color: @fileid_text1; }
 button.v3-cite {
     min-height: 24px; padding: 0 8px; border-radius: 6px; box-shadow: none;
     background-color: alpha(#FFFFFF, 0.04); border: 1px solid alpha(#FFFFFF, 0.14);
@@ -791,6 +799,8 @@ separator { background-color: alpha(#FFFFFF, 0.34); }
 .v3-dashed { border-color: alpha(#FFFFFF, 0.5); }
 .v3-take-tile { border-color: alpha(#FFFFFF, 0.5); }
 .v3-take-head { border-color: alpha(#FFFFFF, 0.34); }
+.v3-pane-footer, .v3-take-card-footer { border-color: alpha(#FFFFFF, 0.34); }
+.v3-soft-line { background-color: alpha(#FFFFFF, 0.26); }
 .v3-take-tile.best { border-color: @fileid_gold; }
 .v3-take-tile.focused { border-color: @fileid_text1; }
 "#;
