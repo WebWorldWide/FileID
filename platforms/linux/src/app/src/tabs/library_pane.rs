@@ -263,6 +263,28 @@ impl SelectedPane {
             self.revealer.set_reveal_child(true);
             return;
         }
+        self.render(row, true);
+        self.revealer.set_reveal_child(true);
+    }
+
+    /// Redraws the pane when the file on it changed under a reload (a scan
+    /// added a caption, smart name or faces). `details` also re-reads people
+    /// and tags, which live outside the row; the picture reloads only when
+    /// the file itself changed, so a refresh never flickers.
+    pub fn refresh(&self, row: FileRow, details: bool) {
+        let Some(current) = self.current.borrow().clone() else {
+            return;
+        };
+        if current.id != row.id {
+            return;
+        }
+        let change = row_change(&current, &row);
+        if change.facts || details {
+            self.render(row, change.picture);
+        }
+    }
+
+    fn render(&self, row: FileRow, picture: bool) {
         self.name.set_text(&row.name);
         let folder = crate::v3::parent_name(&row.path);
         self.folder.set_text(&folder);
@@ -291,9 +313,10 @@ impl SelectedPane {
             }
         }
         append_details(&self.facts, row.id);
-        self.load_picture(&row);
+        if picture {
+            self.load_picture(&row);
+        }
         self.current.replace(Some(row));
-        self.revealer.set_reveal_child(true);
     }
 
     pub fn hide(&self) {
@@ -334,9 +357,77 @@ impl SelectedPane {
     }
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct RowChange {
+    pub facts: bool,
+    pub picture: bool,
+}
+
+pub(super) fn row_change(old: &FileRow, new: &FileRow) -> RowChange {
+    let picture = old.path != new.path
+        || old.kind != new.kind
+        || old.content_hash != new.content_hash
+        || old.modified_at != new.modified_at
+        || old.size_bytes != new.size_bytes;
+    let facts = picture
+        || old.name != new.name
+        || old.created_at != new.created_at
+        || old.proposed_name != new.proposed_name
+        || old.description != new.description
+        || old.caption_inherited != new.caption_inherited
+        || old.has_faces != new.has_faces
+        || old.has_text != new.has_text;
+    RowChange { facts, picture }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row() -> FileRow {
+        FileRow {
+            id: 7,
+            path: "/photos/beach.jpg".into(),
+            name: "beach.jpg".into(),
+            kind: "image".into(),
+            extension: "jpg".into(),
+            size_bytes: 1_000,
+            created_at: Some(1.0),
+            modified_at: Some(2.0),
+            has_faces: false,
+            has_text: false,
+            file_ref: None,
+            content_hash: Some(vec![1, 2]),
+            description: None,
+            proposed_name: None,
+            caption_inherited: false,
+        }
+    }
+
+    #[test]
+    fn a_scan_that_adds_a_caption_redraws_the_facts_but_keeps_the_picture() {
+        let old = row();
+        assert_eq!(row_change(&old, &old.clone()), RowChange::default());
+        let mut captioned = old.clone();
+        captioned.description = Some("Two people on a beach".into());
+        captioned.has_faces = true;
+        assert_eq!(
+            row_change(&old, &captioned),
+            RowChange {
+                facts: true,
+                picture: false
+            }
+        );
+        let mut edited = old.clone();
+        edited.content_hash = Some(vec![3]);
+        assert_eq!(
+            row_change(&old, &edited),
+            RowChange {
+                facts: true,
+                picture: true
+            }
+        );
+    }
 
     #[test]
     fn details_list_named_people_and_top_tags_once() {

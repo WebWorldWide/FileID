@@ -1767,6 +1767,51 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
         let items: Vec<glib::BoxedAnyObject> = files.into_iter().map(glib::BoxedAnyObject::new).collect();
         photos.splice(0, photos.n_items(), &items);
     });
+
+    // A scan or face grouping that finishes while the dialog is open can
+    // give this person new photos; the grid is replaced only if they changed.
+    let events = ui.engine.borrow_mut().subscribe();
+    let photos_weak = photos.downgrade();
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(event) = events.recv().await {
+            if photos_weak.upgrade().is_none() {
+                return;
+            }
+            if !matches!(
+                event,
+                EngineEvent::ScanComplete(_) | EngineEvent::FaceClusteringComplete(_)
+            ) {
+                continue;
+            }
+            let files = read_person_files_async(pid)
+                .recv()
+                .await
+                .unwrap_or_default();
+            let Some(photos) = photos_weak.upgrade() else {
+                return;
+            };
+            let shown: Vec<i64> = (0..photos.n_items())
+                .filter_map(|index| photos.item(index).and_downcast::<glib::BoxedAnyObject>())
+                .map(|object| object.borrow::<PersonFace>().face_id)
+                .collect();
+            if !person_photos_changed(&shown, &files) {
+                continue;
+            }
+            let items: Vec<glib::BoxedAnyObject> =
+                files.into_iter().map(glib::BoxedAnyObject::new).collect();
+            photos.splice(0, photos.n_items(), &items);
+        }
+    });
+}
+
+/// An empty read (the person was merged away, or the read failed) keeps the
+/// photos already on screen.
+fn person_photos_changed(shown: &[i64], fresh: &[PersonFace]) -> bool {
+    !fresh.is_empty()
+        && !shown
+            .iter()
+            .copied()
+            .eq(fresh.iter().map(|face| face.face_id))
 }
 
 fn build_photo_tile() -> gtk::Box {
@@ -2551,8 +2596,9 @@ fn sim_markup(s: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_rename_terminal, face_thumbnail_source_in, BoundedLru, FaceClusteringLifecycle,
-        PersonActionGate, PersonDialogLifecycle, PersonDialogOperation, RenameTerminal,
+        BoundedLru, FaceClusteringLifecycle, PersonActionGate, PersonDialogLifecycle,
+        PersonDialogOperation, PersonFace, RenameTerminal, classify_rename_terminal,
+        face_thumbnail_source_in, person_photos_changed,
     };
     use fileid_engine::ipc::{BulkActionItem, BulkActionResult};
 
@@ -2890,6 +2936,20 @@ mod tests {
         assert!(lifecycle.begin(PersonDialogOperation::Renaming));
         lifecycle.complete();
         assert!(!lifecycle.begin(PersonDialogOperation::Renaming));
+    }
+
+    #[test]
+    fn the_open_person_grid_refreshes_only_when_its_faces_change() {
+        let face = |face_id: i64| PersonFace {
+            face_id,
+            file_id: face_id * 10,
+            path: format!("/p/{face_id}.jpg"),
+            bbox: None,
+        };
+        assert!(!person_photos_changed(&[1, 2], &[face(1), face(2)]));
+        assert!(person_photos_changed(&[1, 2], &[face(1), face(2), face(3)]));
+        assert!(person_photos_changed(&[], &[face(1)]));
+        assert!(!person_photos_changed(&[1, 2], &[]));
     }
 
     #[test]

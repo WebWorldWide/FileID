@@ -11,6 +11,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     let checkedIDs: Set<Int64>
     let selectedID: Int64?
     let refreshToken: String
+    var textSize: TextSize = .standard
     var onSelect: (FileRow) -> Void
     var onOpen: (FileRow) -> Void
     var onToggleCheck: (FileRow) -> Void
@@ -56,6 +57,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastSelectMode = false
         private var lastChecked: Set<Int64> = []
         private var lastSelected: Int64?
+        private var lastTextSize: TextSize = .standard
         private var lastRows: [FileRow] = []
         private var lastTags: [Int64: [String]] = [:]
         private var lastClickRowID: Int64?
@@ -67,8 +69,11 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             guard let collection else { return }
             let newIDs = grid.rows.map(\.id)
             let stateChanged = grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
-                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected
+                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize
             if !grid.selectMode { cursorID = nil }
+            if let layout = collection.collectionViewLayout as? AdaptiveGridLayout, layout.textSize != grid.textSize {
+                layout.textSize = grid.textSize
+            }
             if force || newIDs != ids {
                 let appended = !ids.isEmpty && newIDs.count > ids.count && Array(newIDs.prefix(ids.count)) == ids
                 let old = ids.count
@@ -92,6 +97,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastSelectMode = grid.selectMode
             lastChecked = grid.checkedIDs
             lastSelected = grid.selectedID
+            lastTextSize = grid.textSize
             lastRows = grid.rows
             lastTags = grid.tagsByFile
         }
@@ -165,6 +171,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 selected: model.selectMode ? cursorID == row.id : model.selectedID == row.id,
                 selectMode: model.selectMode,
                 checked: model.checkedIDs.contains(row.id),
+                textSize: model.textSize,
                 reloadImage: reloadImage)
             tile.onClick = { [weak self] count in
                 guard let self, let model = self.model else { return }
@@ -186,6 +193,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
 /// Columns of 160–220 pt with 12 pt gaps and 20 pt insets, like the SwiftUI grid.
 final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
     private(set) var columnCount = 1
+    var textSize: TextSize = .standard { didSet { if textSize != oldValue { invalidateLayout() } } }
     override init() {
         super.init()
         minimumInteritemSpacing = 12
@@ -200,7 +208,7 @@ final class AdaptiveGridLayout: NSCollectionViewFlowLayout {
             let columns = max(1, Int((usable + minimumInteritemSpacing) / (160 + minimumInteritemSpacing)))
             columnCount = columns
             let itemWidth = floor((usable - CGFloat(columns - 1) * minimumInteritemSpacing) / CGFloat(columns))
-            itemSize = NSSize(width: itemWidth, height: (itemWidth * 3 / 4).rounded() + LibraryTileItem.captionHeight)
+            itemSize = NSSize(width: itemWidth, height: (itemWidth * 3 / 4).rounded() + TileTextMetrics(textSize).captionHeight)
         }
         super.prepare()
     }
@@ -266,7 +274,9 @@ final class TileCollectionView: NSCollectionView {
 
 /// Single-line text drawn by Core Animation: no Auto Layout, no view redraw.
 final class TextLayer: CATextLayer {
-    private let textFont: NSFont
+    private var textFont: NSFont
+    private let baseSize: CGFloat
+    private let weight: NSFont.Weight
     var text: String = "" { didSet { if text != oldValue { string = text } } }
     var textWidth: CGFloat { ceil((text as NSString).size(withAttributes: [.font: textFont]).width) }
 
@@ -275,6 +285,8 @@ final class TextLayer: CATextLayer {
     init(size: CGFloat, weight: NSFont.Weight, color: NSColor, align: CATextLayerAlignmentMode = .left,
          truncation: CATextLayerTruncationMode = .end) {
         textFont = LibraryTileItem.brandFont(size: size, weight: weight)
+        baseSize = size
+        self.weight = weight
         self.color = color
         super.init()
         font = textFont
@@ -287,11 +299,23 @@ final class TextLayer: CATextLayer {
         actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "hidden": NSNull()]
     }
     override init(layer: Any) {
-        textFont = (layer as? TextLayer)?.textFont ?? .systemFont(ofSize: 11)
-        color = (layer as? TextLayer)?.color ?? .white
+        let source = layer as? TextLayer
+        textFont = source?.textFont ?? .systemFont(ofSize: 11)
+        baseSize = source?.baseSize ?? 11
+        weight = source?.weight ?? .regular
+        color = source?.color ?? .white
         super.init(layer: layer)
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    func apply(_ textSize: TextSize) {
+        let size = textSize.scaled(baseSize)
+        guard size != fontSize else { return }
+        textFont = LibraryTileItem.brandFont(size: size, weight: weight)
+        font = textFont
+        fontSize = size
+        setNeedsDisplay()
+    }
 
     /// Vertically centres the single line in the layer's frame.
     override func draw(in ctx: CGContext) {
@@ -304,12 +328,34 @@ final class TextLayer: CATextLayer {
     }
 }
 
+/// Caption line heights under the thumbnail. Default is the designed
+/// 17 / 18 / 15 pt lines in a 68 pt caption; other text sizes scale the lines
+/// and keep the gaps.
+struct TileTextMetrics: Equatable {
+    static let gap: CGFloat = 6
+    static let lineGap: CGFloat = 4
+    static let bottom: CGFloat = 4
+    let badge: CGFloat
+    let name: CGFloat
+    let chip: CGFloat
+    let meta: CGFloat
+
+    init(_ textSize: TextSize) {
+        func line(_ height: CGFloat) -> CGFloat { textSize == .standard ? height : (height * textSize.factor).rounded(.up) }
+        badge = line(17)
+        name = line(17)
+        chip = line(18)
+        meta = line(15)
+    }
+
+    var captionHeight: CGFloat { Self.gap + name + Self.lineGap + chip + Self.lineGap + meta + Self.bottom }
+}
+
 /// One reusable tile: layer-backed thumbnail, kind badge, name, two tag chips,
 /// size and date. Thumbnails load off the main thread and are dropped if the
 /// cell is reused for another file first.
 final class LibraryTileItem: NSCollectionViewItem {
     static let identifier = NSUserInterfaceItemIdentifier("LibraryTile")
-    static let captionHeight: CGFloat = 68
 
     var onClick: ((Int) -> Void)?
     var onFindSimilar: (() -> Void)?
@@ -332,6 +378,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private var hovering = false { didSet { updateRing() } }
     private var isChosen = false
     private var checked = false
+    private var textSize: TextSize = .standard
     private var tracking: NSTrackingArea?
 
     override func loadView() {
@@ -382,27 +429,34 @@ final class LibraryTileItem: NSCollectionViewItem {
         ringLayer.frame = (isChosen || checked) ? thumbFrame.insetBy(dx: -4, dy: -4) : thumbFrame
         CATransaction.commit()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        badge.frame = CGRect(x: 6, y: b.height - 6 - 17, width: badge.textWidth + 12, height: 17)
+        let metrics = TileTextMetrics(textSize)
+        badge.frame = CGRect(x: 6, y: b.height - 6 - metrics.badge, width: badge.textWidth + 12, height: metrics.badge)
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
         textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
         unreadableGlyph.frame = CGRect(x: thumbFrame.midX - 18, y: thumbFrame.midY - 18, width: 36, height: 36)
-        var y = b.height - thumbHeight - 6 - 17
-        name.frame = CGRect(x: 0, y: y, width: b.width, height: 17)
-        y -= 4 + 18
+        var y = b.height - thumbHeight - TileTextMetrics.gap - metrics.name
+        name.frame = CGRect(x: 0, y: y, width: b.width, height: metrics.name)
+        y -= TileTextMetrics.lineGap + metrics.chip
         var x: CGFloat = 0
         for chip in chips where !chip.isHidden {
             let w = min(chip.textWidth + 14, (b.width - 4) / 2)
-            chip.frame = CGRect(x: x, y: y, width: w, height: 18)
+            chip.frame = CGRect(x: x, y: y, width: w, height: metrics.chip)
             x += w + 4
         }
-        y -= 4 + 15
-        size.frame = CGRect(x: 0, y: y, width: b.width / 2, height: 15)
-        date.frame = CGRect(x: b.width / 2, y: y, width: b.width / 2, height: 15)
+        y -= TileTextMetrics.lineGap + metrics.meta
+        size.frame = CGRect(x: 0, y: y, width: b.width / 2, height: metrics.meta)
+        date.frame = CGRect(x: b.width / 2, y: y, width: b.width / 2, height: metrics.meta)
         CATransaction.commit()
     }
 
-    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, reloadImage: Bool) {
+    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, textSize: TextSize, reloadImage: Bool) {
         let changedFile = rowID != row.id
+        if textSize != self.textSize {
+            self.textSize = textSize
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            for layer in [badge, name, size, date] + chips { layer.apply(textSize) }
+            CATransaction.commit()
+        }
         rowID = row.id
         self.isChosen = selected
         self.checked = checked

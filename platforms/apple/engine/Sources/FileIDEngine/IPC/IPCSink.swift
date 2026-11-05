@@ -9,7 +9,7 @@
 // The pipe write is synchronous and blocking — if the parent stops draining
 // the pipe fills and the write stalls. So emit() never writes: it enqueues
 // non-blockingly, and a single drainer task performs the blocking write on a
-// dedicated serial queue OFF the actor (`writeBlocking`), which SUSPENDS — not
+// dedicated serial queue OFF the actor (`enqueueWrite`), which SUSPENDS — not
 // blocks — the actor while a full pipe backs up, so emit()/DBWriter.commitBatch
 // keep running. When the buffer is full, new
 // `progress` events overwrite the latest one in place and other
@@ -187,7 +187,7 @@ public actor IPCSink {
             // Concatenate then write once — fewer syscalls. The write runs off
             // the actor on `writeQueue`; this task SUSPENDS (not blocks) on it.
             let blob = batch.reduce(Data(), +)
-            await Self.writeBlocking(blob, fd: wireFD)
+            await enqueueWrite(blob)
         }
     }
 
@@ -241,10 +241,17 @@ public actor IPCSink {
     /// actor task SUSPENDS (does not block) until it finishes. The newline-
     /// delimited JSON contract is preserved: each buffered line is already
     /// newline-terminated and the bytes are written in order.
-    private static func writeBlocking(_ data: Data, fd: Int32) async {
+    /// Actor-isolated on purpose: the continuation body runs on the actor, so the
+    /// write is queued on `writeQueue` before any other actor work. A nonisolated
+    /// hop here left a gap after `takeBatch` emptied the buffer in which
+    /// `drainAndClose` saw nothing buffered or queued, returned, and let the
+    /// caller close the wire; the batch was then written to a closed pipe (the
+    /// last event of a session lost, seen as an intermittent test failure).
+    private func enqueueWrite(_ data: Data) async {
+        let fd = wireFD
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            writeQueue.async {
-                writeAllSync(data, fd: fd)
+            Self.writeQueue.async {
+                Self.writeAllSync(data, fd: fd)
                 cont.resume()
             }
         }

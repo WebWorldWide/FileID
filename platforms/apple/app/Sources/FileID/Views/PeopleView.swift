@@ -756,12 +756,18 @@ private struct PersonCard: View {
 
     private func loadThumb() async {
         guard !Task.isCancelled else { return }
+        let key = thumbnailIdentity
+        if let cached = FaceCropCache.image(for: key) {
+            thumbnail = cached
+            return
+        }
         thumbnail = nil
         guard let path = person.representativePath else { return }
         let url = URL(fileURLWithPath: path)
         guard let full = await ThumbnailService.shared.thumbnail(for: url, size: 360,
                   revision: person.representativeCacheRevision), !Task.isCancelled else { return }
         guard let bbox = person.representativeBBox else {
+            FaceCropCache.store(full, for: key)
             thumbnail = full
             return
         }
@@ -781,9 +787,30 @@ private struct PersonCard: View {
             ThumbnailService.cropFace(in: box.image, bbox: bbox, sourceOrientation: orientation).map(UncheckedImage.init)
         }.value
         guard !Task.isCancelled else { return }
-        thumbnail = cropped?.image ?? full
+        let face = cropped?.image ?? full
+        FaceCropCache.store(face, for: key)
+        thumbnail = face
     }
 
+}
+
+/// Face crops by card identity. A card's `.task` restarts each time the lazy
+/// grid scrolls it back into view; without this it re-read the photo's
+/// orientation from disk and cropped again on every pass.
+@MainActor
+enum FaceCropCache {
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
+
+    static func image(for key: String) -> NSImage? { cache.object(forKey: key as NSString) }
+
+    static func store(_ image: NSImage, for key: String) {
+        let pixels = image.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? Int(image.size.width * image.size.height * 4)
+        cache.setObject(image, forKey: key as NSString, cost: max(pixels, 1) * 4)
+    }
 }
 
 // MARK: - Person detail sheet
@@ -1418,14 +1445,18 @@ private struct MergeTargetPickerSheet: View {
     let checked: [ReadStore.PersonRow]
     let onPick: (ReadStore.PersonRow) -> Void
     let onCancel: () -> Void
+    private let sortedCandidates: [ReadStore.PersonRow]
 
-    private var sortedCandidates: [ReadStore.PersonRow] {
+    init(checked: [ReadStore.PersonRow], onPick: @escaping (ReadStore.PersonRow) -> Void, onCancel: @escaping () -> Void) {
+        self.checked = checked
+        self.onPick = onPick
+        self.onCancel = onCancel
         // Named first (alphabetical), then unnamed (by file count desc).
         let named = checked.filter { $0.hasAnyName }
             .sorted { $0.displayName < $1.displayName }
         let unnamed = checked.filter { !$0.hasAnyName }
             .sorted { $0.fileCount > $1.fileCount }
-        return named + unnamed
+        sortedCandidates = named + unnamed
     }
 
     var body: some View {
@@ -1444,7 +1475,7 @@ private struct MergeTargetPickerSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             Divider().opacity(0.3)
             ScrollView {
-                VStack(spacing: 8) {
+                LazyVStack(spacing: 8) {
                     ForEach(sortedCandidates) { person in
                         Button { onPick(person) } label: {
                             HStack(spacing: 12) {

@@ -536,9 +536,10 @@ extension ModelInstallCard {
 }
 
 
-/// Prototype v3 appearance: lava lamp Full / Calm / Off.
+/// Prototype v3 appearance: lava lamp Full / Calm / Off, and the page text size.
 struct AppearanceCard: View {
     @AppStorage("lavaMode") private var lavaMode: String = LavaMode.full.rawValue
+    @AppStorage(TextSize.storageKey) private var textSize: String = TextSize.standard.rawValue
     var body: some View {
         Panel(padding: 16) {
             VStack(alignment: .leading, spacing: 10) {
@@ -548,8 +549,22 @@ struct AppearanceCard: View {
                         Text("Lava lamp").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
                         MetaText("Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it.")
                     }
+                    .accessibilityHidden(true)
                     Spacer()
                     SegmentedBar(selection: $lavaMode, options: LavaMode.allCases.map { ($0.rawValue, $0.label) }, height: 26)
+                        .accessibilityLabel("Lava lamp")
+                        .accessibilityHint("Wax glows rise behind the panes; the light turns lavender while a model runs. Reduce Motion pauses it.")
+                }
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Text size").font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
+                        MetaText("File names, details, descriptions and chat. The title bar and sidebar stay the same size.")
+                    }
+                    .accessibilityHidden(true)
+                    Spacer()
+                    SegmentedBar(selection: $textSize, options: TextSize.allCases.map { ($0.rawValue, $0.title) }, height: 26)
+                        .accessibilityLabel("Text size")
+                        .accessibilityHint("Changes the size of text on every page. The title bar and sidebar stay the same size.")
                 }
             }
         }

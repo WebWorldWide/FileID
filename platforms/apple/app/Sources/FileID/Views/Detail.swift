@@ -114,7 +114,7 @@ private struct EmptyState: View {
                     PanelHeader("How it works")
                     ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                         HStack(alignment: .firstTextBaseline, spacing: 14) {
-                            Text(String(index + 1)).font(Theme.Font.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
+                            Text(String(index + 1)).font(Theme.ChromeFont.mono(10.5, .semibold)).foregroundStyle(Theme.gold)
                                 .frame(width: 16, height: 16).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Theme.gold, lineWidth: 1))
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 8) {

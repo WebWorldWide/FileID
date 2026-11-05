@@ -47,30 +47,40 @@ struct CleanupView: View {
     }
 
     private var visibleGroups: [DuplicateGroup] {
-        groups.filter { !skippedGroups.contains($0.id) }
+        skippedGroups.isEmpty ? groups : groups.filter { !skippedGroups.contains($0.id) }
     }
 
-    private var totalSelected: Int {
-        visibleGroups.reduce(0) { acc, g in
-            acc + g.files.reduce(0) { $0 + (selection.contains($1.id) ? 1 : 0) }
-        }
+    /// Counted once per render: the header reads these several times, and each
+    /// read used to walk every file of every group.
+    private struct SelectionTotals {
+        var count = 0
+        var bytes: Int64 = 0
+        var size: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
     }
 
-    private var totalSelectedSize: String {
-        let bytes = visibleGroups.reduce(Int64(0)) { acc, g in
-            acc + g.files.reduce(Int64(0)) { $0 + (selection.contains($1.id) ? $1.sizeBytes : 0) }
+    private func selectionTotals(in visible: [DuplicateGroup]) -> SelectionTotals {
+        var totals = SelectionTotals()
+        guard !selection.isEmpty else { return totals }
+        for group in visible {
+            for file in group.files where selection.contains(file.id) {
+                totals.count += 1
+                totals.bytes += file.sizeBytes
+            }
         }
-        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return totals
     }
+
+    private var totalSelectedSize: String { selectionTotals(in: visibleGroups).size }
 
     var body: some View {
+        let visible = visibleGroups
         VStack(spacing: 0) {
-            header
+            header(visible: visible, totals: selectionTotals(in: visible))
             Divider().opacity(0.4)
-            if visibleGroups.isEmpty {
+            if visible.isEmpty {
                 empty
             } else {
-                list
+                list(visible: visible)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -124,9 +134,10 @@ struct CleanupView: View {
     // MARK: - Header
 
     @ViewBuilder
-    private var header: some View {
+    private func header(visible: [DuplicateGroup], totals: SelectionTotals) -> some View {
+        let totalSelected = totals.count
         HStack(alignment: .center, spacing: 12) {
-            MetaText(headerSubtitle, color: Theme.text2)
+            MetaText(headerSubtitle(visible: visible), color: Theme.text2)
                 .lineLimit(2)
                 .layoutPriority(-1)
             SegmentedBar(selection: $mode, options: [("exact", "Exact copies"), ("similar", "Look-alikes")])
@@ -139,7 +150,7 @@ struct CleanupView: View {
                     .disabled(deleting)
                     .help("Puts the copies FileID last moved to Trash back where they were")
             }
-            if !visibleGroups.isEmpty {
+            if !visible.isEmpty {
                 HStack(spacing: 6) {
                     // Bulk "select every non-keeper" is hidden in Similar mode: those
                     // copies are NOT byte-identical, so one-click mass selection would
@@ -160,7 +171,7 @@ struct CleanupView: View {
                     confirmDeleteSelected()
                 } label: {
                     Label(
-                        totalSelected == 0 ? "Move to Trash" : "Move \(totalSelected) to Trash · \(totalSelectedSize)",
+                        totalSelected == 0 ? "Move to Trash" : "Move \(totalSelected) to Trash · \(totals.size)",
                         systemImage: "trash"
                     )
                     .fontWeight(.semibold)
@@ -195,8 +206,8 @@ struct CleanupView: View {
         .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, 14)
     }
 
-    private var headerSubtitle: String {
-        let g = visibleGroups.count
+    private func headerSubtitle(visible: [DuplicateGroup]) -> String {
+        let g = visible.count
         let skipped = skippedGroups.count
         let base: String
         if isSimilar {
@@ -204,7 +215,7 @@ struct CleanupView: View {
                 ? "Photos that look nearly the same but aren't identical"
                 : "\(g) group\(g == 1 ? "" : "s") of look-alikes · check each before removing"
         } else {
-            let bytes = visibleGroups.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
+            let bytes = visible.reduce(Int64(0)) { $0 + $1.reclaimableBytes }
             base = g == 0
                 ? "No extra copies found"
                 : "\(g.formatted()) file\(g == 1 ? "" : "s") with extra copies · \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)) can be freed"
@@ -259,7 +270,7 @@ struct CleanupView: View {
     }
 
     @ViewBuilder
-    private var list: some View {
+    private func list(visible: [DuplicateGroup]) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 // First-timer explainer above the groups. Inline (not a
@@ -298,7 +309,7 @@ struct CleanupView: View {
                         lineWidth: 1))
                     .padding(.bottom, 4)
                 }
-                ForEach(visibleGroups) { group in
+                ForEach(visible) { group in
                     GroupCard(
                         group: group,
                         selection: $selection,
@@ -344,6 +355,7 @@ struct CleanupView: View {
             }
             .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
         }
+        .hoverPausedWhileScrolling()
     }
 
     // MARK: - Selection helpers
@@ -571,6 +583,8 @@ private struct GroupCard: View {
     let onInvert: () -> Void
     let onSkip: () -> Void
     let onDeleteGroup: () -> Void
+    @State private var hoveredFile: Int64?
+    @Environment(\.hoverPaused) private var hoverPaused
 
     private var selectedInGroup: Int {
         group.files.reduce(0) { $0 + (selection.contains($1.id) ? 1 : 0) }
@@ -628,12 +642,13 @@ private struct GroupCard: View {
                 .padding(.horizontal, 14)
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
+                    LazyHStack(spacing: CopyStrip.spacing) {
                         ForEach(Array(group.files.enumerated()), id: \.element.id) { idx, file in
                             CopyTile(
                                 file: file,
                                 isKeeper: idx == 0,
                                 isSelected: selection.contains(file.id),
+                                hovering: hoveredFile == file.id,
                                 onToggle: {
                                     if selection.contains(file.id) {
                                         selection.remove(file.id)
@@ -644,6 +659,15 @@ private struct GroupCard: View {
                             )
                         }
                     }
+                    .onContinuousHover { phase in
+                        var next: Int64?
+                        if !hoverPaused, case .active(let point) = phase,
+                           let index = CopyStrip.thumbnailIndex(at: point, count: group.files.count) {
+                            next = group.files[index].id
+                        }
+                        if next != hoveredFile { hoveredFile = next }
+                    }
+                    .onChange(of: hoverPaused) { _, paused in if paused { hoveredFile = nil } }
                     .padding(.horizontal, 14)
                 }
                 .padding(.bottom, 12)
@@ -652,12 +676,27 @@ private struct GroupCard: View {
     }
 }
 
+/// The copies row in a duplicate group. One hover tracker for the row picks the
+/// thumbnail under the pointer, instead of one tracker per copy.
+enum CopyStrip {
+    static let tile: CGFloat = 132
+    static let spacing: CGFloat = 12
+
+    static func thumbnailIndex(at point: CGPoint, count: Int) -> Int? {
+        guard point.x >= 0, point.y >= 0, point.y < tile else { return nil }
+        let pitch = tile + spacing
+        let index = Int(point.x / pitch)
+        guard index < count, point.x - CGFloat(index) * pitch < tile else { return nil }
+        return index
+    }
+}
+
 private struct CopyTile: View {
     let file: FileRow
     let isKeeper: Bool
     let isSelected: Bool
+    let hovering: Bool
     let onToggle: () -> Void
-    @State private var hovering = false
 
     private var borderColor: Color {
         if isSelected { return Theme.danger }
@@ -672,7 +711,7 @@ private struct CopyTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Color.white.opacity(0.04)
-                .frame(width: 132, height: 132)
+                .frame(width: CopyStrip.tile, height: CopyStrip.tile)
                 .overlay(thumbContent)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous))
                 .overlay(
@@ -682,7 +721,6 @@ private struct CopyTile: View {
                 .overlay(badgeOverlay)
                 .scaleEffect(hovering ? 1.02 : 1.0)
                 .animation(.easeInOut(duration: 0.12), value: hovering)
-                .onHover { hovering = $0 }
                 .contentShape(Rectangle())
                 .onTapGesture { onToggle() }
                 .contextMenu {
@@ -697,7 +735,7 @@ private struct CopyTile: View {
                 .font(Theme.Font.body(12, .medium))
                 .foregroundStyle(Theme.text1)
                 .lineLimit(1).truncationMode(.middle)
-                .frame(width: 132, alignment: .leading)
+                .frame(width: CopyStrip.tile, alignment: .leading)
                 .padding(.top, 2)
             HStack(spacing: 4) {
                 Text(ByteCountFormatter.string(fromByteCount: file.sizeBytes, countStyle: .file))
@@ -709,7 +747,7 @@ private struct CopyTile: View {
             .font(Theme.Font.body(11.5))
             .monospacedDigit()
             .foregroundStyle(Theme.text3)
-            .frame(width: 132)
+            .frame(width: CopyStrip.tile)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityDescription)

@@ -609,6 +609,7 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     output_footer.append(&destination_label);
     let choose = v3::secondary("Choose…", false);
     choose.set_tooltip_text(Some("Choose a folder to save to"));
+    choose.update_property(&[gtk::accessible::Property::Label("Choose output folder")]);
     output_footer.append(&choose);
     left.append(&output_panel.root);
     let status = v3::wrapped("", &["v3-meta"]);

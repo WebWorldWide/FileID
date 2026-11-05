@@ -1097,6 +1097,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
             // The anchor follows a plain move (matches click); Shift+move keeps it.
             _lastClickedTile = tile;
+            ShowPane(tile);
         }
 
         _focusedIndex = target;
@@ -1465,6 +1466,31 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { await dialog.ShowAsync(); }
         catch { /* dialog already open */ }
         finally { sheet.CloseFromHost(); }
+        FollowPreviewedFile(sheet.FileId);
+    }
+
+    /// <summary>macOS: closing the preview leaves the open Selected pane (and the
+    /// grid selection) on the file the preview ended on.</summary>
+    private void FollowPreviewedFile(long fileId)
+    {
+        if (_unloaded || !IsPaneOpen || fileId == 0 || SelectedPane.Tile?.Id == fileId) return;
+        int index = -1;
+        for (int i = 0; i < ViewModel.Items.Count; i++)
+        {
+            if (ViewModel.Items[i].Id == fileId) { index = i; break; }
+        }
+        if (index < 0) return;
+        var tile = ViewModel.Items[index];
+        using (ViewModel.BulkSelectionScope())
+        {
+            foreach (var t in ViewModel.Items) t.IsSelected = false;
+            tile.IsSelected = true;
+        }
+        _lastClickedTile = tile;
+        _focusedIndex = index;
+        ShowPane(tile);
+        BringIndexIntoView(index);
+        UpdateSelectionBar();
     }
 
     private void OnContextOpen(object sender, RoutedEventArgs e)

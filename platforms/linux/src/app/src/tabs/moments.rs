@@ -64,6 +64,8 @@ pub(super) struct CatalogUi {
     people: v3::Panel,
     jobs_panel: v3::Panel,
     pending_seek: Cell<Option<f64>>,
+    found: RefCell<Vec<CatalogHit>>,
+    best_takes: gtk::Button,
 }
 
 impl CatalogUi {
@@ -540,7 +542,16 @@ impl CatalogUi {
             .and_then(|hit| hit.start_seconds)
     }
 
+    fn set_found(&self, hits: &[CatalogHit]) {
+        *self.found.borrow_mut() = hits.to_vec();
+        self.best_takes
+            .set_sensitive(super::takes_groups_model::can_open_from_search(hits));
+        self.best_takes
+            .set_tooltip_text(Some(super::takes_groups_model::search_tooltip(hits)));
+    }
+
     fn render_hits(self: &Rc<Self>, hits: Vec<CatalogHit>) {
+        self.set_found(&hits);
         v3::clear(&self.hits);
         self.searching.set_visible(false);
         self.result_count.set_text(&format!(
@@ -715,7 +726,7 @@ pub(super) fn hit_kind(hit: &CatalogHit) -> (&'static str, bool) {
     }
 }
 
-fn job_title(kind: &str) -> &'static str {
+pub(super) fn job_title(kind: &str) -> &'static str {
     match kind {
         "timelineSample" => "Video analysis",
         "catalogIndex" => "Search index",
@@ -723,7 +734,7 @@ fn job_title(kind: &str) -> &'static str {
     }
 }
 
-fn job_state(state: &str) -> (&'static str, Tone) {
+pub(super) fn job_state(state: &str) -> (&'static str, Tone) {
     match state {
         "running" => ("Running", Tone::Gold),
         "queued" => ("Queued", Tone::Gold),
@@ -771,6 +782,10 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     count_row.append(&result_count);
     let searching = v3::busy_bar(80);
     count_row.append(&searching);
+    let best_takes = v3::secondary("Best takes", false);
+    best_takes.set_sensitive(false);
+    best_takes.set_tooltip_text(Some(super::takes_groups_model::search_tooltip(&[])));
+    count_row.append(&best_takes);
     top.append(&count_row);
     let search_notice = v3::wrapped("", &["v3-meta"]);
     search_notice.set_visible(false);
@@ -991,6 +1006,8 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         people,
         jobs_panel,
         pending_seek: Cell::new(None),
+        found: RefCell::new(Vec::new()),
+        best_takes: best_takes.clone(),
     });
     ui_slot.replace(Some(Rc::downgrade(&ui)));
     wire(
@@ -1020,6 +1037,13 @@ fn wire(
     end_here: &gtk::Button,
     cancel: &gtk::Button,
 ) {
+    let weak = Rc::downgrade(ui);
+    ui.best_takes.connect_clicked(move |button| {
+        if let Some(ui) = weak.upgrade() {
+            let hits = ui.found.borrow().clone();
+            super::takes::open_dialog(ui.engine.clone(), hits, button);
+        }
+    });
     let weak = Rc::downgrade(ui);
     ui.query.connect_activate(move |_| {
         if let Some(ui) = weak.upgrade() {
@@ -1194,6 +1218,7 @@ fn run_search(ui: &Rc<CatalogUi>) {
     ui.reset_editor();
     v3::clear(&ui.chapters);
     v3::clear(&ui.hits);
+    ui.set_found(&[]);
     ui.requests.borrow_mut().forget("search");
     ui.hybrid.borrow_mut().cancel();
     if ui.mode.selected() == 0 {

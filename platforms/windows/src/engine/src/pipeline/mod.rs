@@ -7,6 +7,7 @@
 // cancellation that lands within milliseconds without an actor hop per file.
 
 pub mod archive_names;
+pub(crate) mod capture_date_backfill;
 pub mod discovery;
 pub mod tagging;
 pub mod batch_clip;

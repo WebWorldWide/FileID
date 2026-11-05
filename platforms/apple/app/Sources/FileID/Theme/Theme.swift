@@ -81,7 +81,24 @@ enum Theme {
         static let railInset: CGFloat = 16
     }
 
+    /// Page text: follows Settings ▸ Appearance ▸ Text size. Serif display
+    /// titles keep their size; they already read at a distance and sit in
+    /// fixed-height headers.
     enum Font {
+        static func display(_ size: CGFloat) -> SwiftUI.Font { ChromeFont.display(size) }
+        static func mono(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { ChromeFont.mono(scaled(size), weight) }
+        static func body(_ size: CGFloat = 14, _ weight: SwiftUI.Font.Weight = .regular) -> SwiftUI.Font { ChromeFont.body(scaled(size), weight) }
+        static var sectionLabel: SwiftUI.Font { body(11, .semibold) }
+        static var meta: SwiftUI.Font { body(12) }
+        static var pageTitle: SwiftUI.Font { ChromeFont.pageTitle }
+        /// For design-system controls that appear in both the chrome and the page.
+        static func body(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular, fixed: Bool) -> SwiftUI.Font { fixed ? ChromeFont.body(size, weight) : body(size, weight) }
+        static func mono(_ size: CGFloat, _ weight: SwiftUI.Font.Weight = .regular, fixed: Bool) -> SwiftUI.Font { fixed ? ChromeFont.mono(size, weight) : mono(size, weight) }
+        static func scaled(_ size: CGFloat) -> CGFloat { ContentTextScale.shared.size.scaled(size) }
+    }
+
+    /// Title bar and sidebar text: always the designed size.
+    enum ChromeFont {
         /// Instrument Serif and Archivo ship in Resources/Fonts (SIL OFL) and are
         /// registered at launch by `BrandFonts`; SwiftUI falls back to the system
         /// faces if registration fails.
@@ -150,11 +167,12 @@ struct BadgePill: View {
     /// Over photos and video frames the tint wash alone disappears on bright
     /// skies, so the pill sits on a dark backing like the Library kind badge.
     var onImage = false
+    @Environment(\.fixedTextSize) private var fixed
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Theme.Radius.xs, style: .continuous)
         Text(label)
-            .font(Theme.Font.body(11, .semibold))
+            .font(Theme.Font.body(11, .semibold, fixed: fixed))
             .foregroundStyle(color)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 7)
