@@ -980,16 +980,16 @@ struct FileIDEngineMain {
             guard let database else { await emitDbUnavailable(sink, action: "renameFiles"); return }
             await sink.emit(.bulkActionResult(await renameFiles(database: database, renames: renames)))
         case .trashFiles(let fileIDs, let exactIdentities):
-            guard exactIdentities == nil else {
+            let identities = exactIdentities ?? []
+            let exact = Dictionary(identities.map { ($0.fileID, $0) }, uniquingKeysWith: { first, _ in first })
+            guard exact.count == identities.count else {
                 await sink.emit(.bulkActionResult(BulkActionResult(
                     action: "trashFiles", succeeded: 0, failed: fileIDs.count,
-                    messages: fileIDs.map {
-                        item($0, ok: false, "Exact Trash evidence is not accepted by the macOS engine; use the native Cleanup flow.")
-                    })))
+                    messages: fileIDs.map { item($0, ok: false, "The request named a file's duplicate evidence twice. Nothing was moved.") })))
                 return
             }
             guard let database else { await emitDbUnavailable(sink, action: "trashFiles"); return }
-            await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs)))
+            await sink.emit(.bulkActionResult(await trashFiles(database: database, fileIDs: fileIDs, exact: exact)))
         case .restoreFromTrash(let batchID):
             guard let database else { await emitDbUnavailable(sink, action: "restoreFromTrash"); return }
             await sink.emit(.bulkActionResult(await TrashJournal.restore(batchID: batchID, database: database)))
@@ -1093,6 +1093,7 @@ struct FileIDEngineMain {
     struct BulkFileState: Sendable {
         let path: String
         let fileRef: Int64?
+        var sizeBytes: Int64 = 0
     }
 
     static func fetchBulkStates(
@@ -1107,11 +1108,11 @@ struct FileIDEngineMain {
                 let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
                 let rows = try Row.fetchAll(
                     db,
-                    sql: "SELECT id, path_text, file_ref FROM files WHERE id IN (\(placeholders))",
+                    sql: "SELECT id, path_text, file_ref, size_bytes FROM files WHERE id IN (\(placeholders))",
                     arguments: StatementArguments(chunk))
                 for row in rows {
                     let id: Int64 = row["id"]
-                    result[id] = BulkFileState(path: row["path_text"], fileRef: row["file_ref"])
+                    result[id] = BulkFileState(path: row["path_text"], fileRef: row["file_ref"], sizeBytes: row["size_bytes"] ?? 0)
                 }
             }
             return result
@@ -1183,8 +1184,35 @@ struct FileIDEngineMain {
         return fileIDs.filter { seen.insert($0).inserted }
     }
 
+    /// Cleanup's exact-duplicate evidence, re-proved right before the move (mirrors the
+    /// shared engine's `validate_trash_candidate_at`): the copy and the kept file must
+    /// both still hash to the SHA-256 the app verified, with equal sizes. Returns the
+    /// copy's identity to re-check immediately before Trash, or the reason to refuse.
+    static func verifyExactDuplicate(_ expected: ExactTrashIdentity, state: BulkFileState) -> Result<ExactFileDigest.CacheKey, BulkRefusal> {
+        let copy = URL(fileURLWithPath: state.path), kept = URL(fileURLWithPath: expected.keeperPath)
+        guard Restructure.pathsEqual(expected.path, state.path), expected.sizeBytes == state.sizeBytes,
+              expected.sizeBytes == expected.keeperSizeBytes, expected.sha256Hex == expected.keeperSha256Hex,
+              !Restructure.pathsEqual(expected.path, expected.keeperPath) else {
+            return .failure(BulkRefusal("The duplicate check doesn't match this file any more. Nothing was moved."))
+        }
+        guard let keeper = ExactFileDigest.computeWithIdentity(url: kept, expectedSize: expected.keeperSizeBytes),
+              hex(keeper.digest) == expected.keeperSha256Hex else {
+            return .failure(BulkRefusal("The copy you're keeping changed or moved. Nothing was moved."))
+        }
+        guard let victim = ExactFileDigest.computeWithIdentity(url: copy, expectedSize: expected.sizeBytes),
+              hex(victim.digest) == expected.sha256Hex else {
+            return .failure(BulkRefusal("This copy changed since it was checked. Nothing was moved."))
+        }
+        return .success(victim.identity)
+    }
+
+    struct BulkRefusal: Error { let message: String; init(_ message: String) { self.message = message } }
+
+    private static func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
     static func trashFiles(
-        database: Database, fileIDs: [Int64], journal journalURL: URL = TrashJournal.defaultURL,
+        database: Database, fileIDs: [Int64], exact: [Int64: ExactTrashIdentity] = [:],
+        journal journalURL: URL = TrashJournal.defaultURL,
         trash: (URL) throws -> URL? = { url in
             var landed: NSURL?
             try FileManager.default.trashItem(at: url, resultingItemURL: &landed)
@@ -1227,9 +1255,22 @@ struct FileIDEngineMain {
                 messages.append(item(id, ok: false, "File changed since it was indexed."))
                 continue
             }
+            var verifiedCopy: ExactFileDigest.CacheKey?
+            if let expected = exact[id] {
+                switch verifyExactDuplicate(expected, state: state) {
+                case .success(let identity): verifiedCopy = identity
+                case .failure(let refusal):
+                    messages.append(item(id, ok: false, refusal.message))
+                    continue
+                }
+            }
             do {
                 try ReadOnlyLocations.requireSourceMutation(url)
                 let rows = (try? await database.pool.read { db in try TrashJournal.snapshot(db, fileID: id) }) ?? []
+                if let verifiedCopy, !ExactFileDigest.pathStillMatches(verifiedCopy) {
+                    messages.append(item(id, ok: false, "This copy changed since it was checked. Nothing was moved."))
+                    continue
+                }
                 // Write-ahead: record the file before it moves, so a kill right after the move
                 // still leaves an entry; restore finds it in the Trash by inode. Each rewrite is
                 // O(batch), so past the first files it is capped at ~4/s to keep thousands-file
@@ -1654,6 +1695,7 @@ struct FileIDEngineMain {
         // without the global O(N) sort.
         let discovery = Discovery()
         let scanStart = Date()
+        let changeMark = FileSystemChanges.currentEventID()
 
         // Pre-warm both ANE-bound models on the main task before workers
         // start so all workers don't race the cold-start slow path
@@ -1773,6 +1815,46 @@ struct FileIDEngineMain {
         taggedChan.finish()
         await writerTask.value
 
+        // Files added, renamed, edited or deleted while the scan ran: the walk
+        // above never saw the new names, and rows of files deleted after they
+        // were processed carry this scan's time, so the orphan sweep would keep
+        // them. One incremental follow-up walk picks up the new and changed files
+        // (a rename heals by inode) and stamps every file still present, so the
+        // sweep below, keyed to the follow-up's start, drops the deleted ones.
+        var sweepStart = scanStart
+        if await !coordinator.isCancelled,
+           FileSystemChanges.changed(under: url, since: changeMark) == true {
+            sweepStart = Date()
+            var changedFiles: [DiscoveredFile] = []
+            _ = await discovery.walkStreaming(
+                root: url, database: database, forceReprocess: false,
+                excludedPaths: effectiveExcludedPaths,
+                cancelCheck: { ScanCoordinator.isCancelledSync() }
+            ) { changedFiles.append($0) }
+            await coordinator.addFiles(changedFiles.count)
+            let followUpChan = AsyncChannel<TaggedFile>()
+            let followUpWriter = Task.detached(priority: .userInitiated) {
+                await dbWriter.drain(followUpChan)
+            }
+            for start in stride(from: 0, to: changedFiles.count, by: workerCap) {
+                if ScanCoordinator.isCancelledSync() { break }
+                let chunk = changedFiles[start..<min(start + workerCap, changedFiles.count)]
+                let tagged = await withTaskGroup(of: TaggedFile?.self) { group -> [TaggedFile] in
+                    for file in chunk {
+                        group.addTask { (try? await Self.processScanFile(file, pool: pool)) ?? nil }
+                    }
+                    var results: [TaggedFile] = []
+                    for await result in group { if let result { results.append(result) } }
+                    return results
+                }
+                for file in tagged { await followUpChan.send(file) }
+            }
+            followUpChan.finish()
+            await followUpWriter.value
+            JSONLog.shared.info(ev: "scan_followup", sess: session.id,
+                                extra: ["files": AnyCodable(changedFiles.count)])
+        }
+
         // Stage D — post-scan orphan sweep + auto-enqueue face clustering.
         // Files the user deleted from Finder leave behind DB rows that show
         // up in Library as broken tiles. Walk the rows under THIS scan root,
@@ -1792,7 +1874,7 @@ struct FileIDEngineMain {
             await coordinator.setPhase(.postScan)
             await sink.emit(.phaseChanged(.postScan))
             await sweepOrphans(database: database, scanRootPath: url.path,
-                                scanStart: scanStart, sink: sink, sessionID: session.id)
+                                scanStart: sweepStart, sink: sink, sessionID: session.id)
             await autoEnqueueFaceClusteringIfNeeded(database: database, sink: sink)
         }
 

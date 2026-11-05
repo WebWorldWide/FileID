@@ -1245,6 +1245,27 @@ struct ReverseUndoIter {
     file: File,
     spans: Vec<(u64, u32)>,
     next: usize,
+    /// Set for the replay pass so each entry can be re-bound to its current row.
+    db: Option<Arc<Mutex<Connection>>>,
+}
+
+/// The catalog row an undo entry should move. Wiping the catalog and rescanning
+/// renumbers files, so a journaled id can name nothing or a different file; then
+/// the row now at the entry's moved path is the one to put back. A row that
+/// already names the original path keeps its id so a re-run undo still skips it.
+/// The replay re-checks that row's file identity against the bytes on disk.
+fn undo_file_id(db: &Arc<Mutex<Connection>>, file_id: i64, from: &str, to: &str) -> i64 {
+    if let Ok(Some((path, _))) = current_identity_in_db(db, file_id)
+        && (paths_equal(&path, from) || paths_equal(&path, to))
+    {
+        return file_id;
+    }
+    let conn = db.lock();
+    conn.prepare_cached("SELECT id FROM files WHERE path_text = ?1")
+        .and_then(|mut stmt| stmt.query_row(params![from], |row| row.get::<_, i64>(0)).optional())
+        .ok()
+        .flatten()
+        .unwrap_or(file_id)
 }
 
 impl Iterator for ReverseUndoIter {
@@ -1267,8 +1288,12 @@ impl Iterator for ReverseUndoIter {
                 .context("reading undo journal entry")?;
             let e: UndoEntry = serde_json::from_slice(&buf)
                 .context("parsing restructure undo journal entry")?;
+            let file_id = match &self.db {
+                Some(db) => undo_file_id(db, e.file_id, &e.from, &e.to),
+                None => e.file_id,
+            };
             Ok(RestructureMove {
-                file_id: e.file_id,
+                file_id,
                 source: e.from,
                 destination: e.to,
                 category: String::new(),
@@ -2468,6 +2493,7 @@ impl RestructureApply {
             file: validation_file,
             spans: spans.clone(),
             next: total,
+            db: None,
         }) {
             let entry = entry?;
             if ensure_inside_root(Path::new(&entry.source), &canonical_root).is_err()
@@ -2478,7 +2504,7 @@ impl RestructureApply {
         }
         let file = File::open(&path)
             .with_context(|| format!("reopening undo journal {}", path.display()))?;
-        let inverse = ReverseUndoIter { file, spans, next: total };
+        let inverse = ReverseUndoIter { file, spans, next: total, db: Some(self.db_conn.clone()) };
         // record_undo:false so the undo's own moves DON'T overwrite the journal — a
         // cancelled undo must leave the original intact so the user can re-run it and
         // put the REMAINING files back (already-restored ones stale-skip on the
@@ -4242,6 +4268,48 @@ mod tests {
             .query_row("SELECT path_text FROM files WHERE id = 1", [], |row| row.get(0))
             .unwrap();
         assert_eq!(stored_path, source.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn undo_after_wipe_and_rescan_rebinds_by_moved_path() {
+        let root = undo_fixture_root("undo-after-wipe");
+        std::fs::create_dir_all(&root).unwrap();
+        let (src_a, src_b) = (root.join("a.jpg"), root.join("b.jpg"));
+        let (dst_a, dst_b) = (root.join("Sorted").join("a.jpg"), root.join("Sorted").join("b.jpg"));
+        std::fs::write(&src_a, b"AAAA").unwrap();
+        std::fs::write(&src_b, b"BBBB").unwrap();
+        let conn = crate::db::test_support::memory_db();
+        insert_file_row(&conn, 1, &src_a.to_string_lossy());
+        insert_file_row(&conn, 2, &src_b.to_string_lossy());
+        let db = Arc::new(Mutex::new(conn));
+        let journal = root.join("undo.ndjson");
+        let apply = RestructureApply::new(db.clone(), root.clone(), false).with_undo_journal_path(journal.clone());
+        let forward = apply
+            .apply(&[
+                move_fixture(1, &src_a.to_string_lossy(), &dst_a.to_string_lossy()),
+                move_fixture(2, &src_b.to_string_lossy(), &dst_b.to_string_lossy()),
+            ])
+            .unwrap();
+        assert_eq!((forward.applied, forward.failed), (2, 0));
+
+        // Wipe + rescan: new ids, and old id 1 now names the other file.
+        {
+            let conn = db.lock();
+            conn.execute("DELETE FROM files", []).unwrap();
+            insert_file_row(&conn, 1, &dst_b.to_string_lossy());
+            insert_file_row(&conn, 7, &dst_a.to_string_lossy());
+        }
+        let undone = apply.undo_last().unwrap();
+        assert_eq!((undone.applied, undone.failed), (2, 0));
+        assert_eq!(std::fs::read(&src_a).unwrap(), b"AAAA");
+        assert_eq!(std::fs::read(&src_b).unwrap(), b"BBBB");
+        let path_of = |id: i64| -> String {
+            db.lock().query_row("SELECT path_text FROM files WHERE id = ?1", [id], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(path_of(7), src_a.to_string_lossy());
+        assert_eq!(path_of(1), src_b.to_string_lossy());
+        assert!(!journal.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

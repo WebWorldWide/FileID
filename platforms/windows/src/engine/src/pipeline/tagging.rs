@@ -3005,12 +3005,29 @@ fn exif_capture_unix(exif: &exif::Exif, tag: exif::Tag) -> Option<f64> {
         exif::Value::Ascii(parts) => String::from_utf8_lossy(parts.first()?).into_owned(),
         _ => return None,
     };
-    let offset_tag = if tag == exif::Tag::DateTimeOriginal { exif::Tag::OffsetTimeOriginal } else { exif::Tag::OffsetTimeDigitized };
-    let offset = exif.get_field(offset_tag, exif::In::PRIMARY).and_then(|field| match &field.value {
-        exif::Value::Ascii(parts) => parts.first().map(|p| String::from_utf8_lossy(p).into_owned()),
-        _ => None,
-    });
-    exif_datetime_to_unix(&text, offset.as_deref(), chrono::Utc::now().timestamp() as f64)
+    let (offset_tag, subsec_tag) = if tag == exif::Tag::DateTimeOriginal {
+        (exif::Tag::OffsetTimeOriginal, exif::Tag::SubSecTimeOriginal)
+    } else {
+        (exif::Tag::OffsetTimeDigitized, exif::Tag::SubSecTimeDigitized)
+    };
+    let ascii = |tag: exif::Tag| {
+        exif.get_field(tag, exif::In::PRIMARY).and_then(|field| match &field.value {
+            exif::Value::Ascii(parts) => parts.first().map(|p| String::from_utf8_lossy(p).into_owned()),
+            _ => None,
+        })
+    };
+    let seconds = exif_datetime_to_unix(&text, ascii(offset_tag).as_deref(), chrono::Utc::now().timestamp() as f64)?;
+    Some(seconds + ascii(subsec_tag).as_deref().map_or(0.0, exif_subsec_fraction))
+}
+
+/// SubSecTime* digits as a fraction of a second ("5" → 0.5, "123" → 0.123), so
+/// burst frames shot within one second keep their order. Non-digits end it.
+pub(crate) fn exif_subsec_fraction(text: &str) -> f64 {
+    let digits: String = text.trim().chars().take_while(char::is_ascii_digit).take(9).collect();
+    if digits.is_empty() {
+        return 0.0;
+    }
+    digits.parse::<f64>().map_or(0.0, |value| value / 10f64.powi(digits.len() as i32))
 }
 
 pub(crate) fn exif_datetime_to_unix(text: &str, offset: Option<&str>, now_unix: f64) -> Option<f64> {
@@ -3769,6 +3786,9 @@ mod tests {
         assert_eq!(exif_datetime_to_unix("1980:01:01 00:00:00", Some("+00:00"), now), None);
         assert_eq!(exif_datetime_to_unix("2099:01:01 00:00:00", Some("+00:00"), now), None);
         assert_eq!(exif_datetime_to_unix("    :  :     :  :  ", None, now), None);
+        for (text, want) in [("5", 0.5), ("123", 0.123), (" 07\0", 0.07), ("", 0.0), ("ab", 0.0)] {
+            assert!((exif_subsec_fraction(text) - want).abs() < 1e-9, "{text:?}");
+        }
     }
 
     #[test]

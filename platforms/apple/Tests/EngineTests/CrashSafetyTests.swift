@@ -60,6 +60,46 @@ struct CrashSafetyTests {
         #expect(try String(contentsOf: first, encoding: .utf8) == "one")
     }
 
+    @Test("Cleanup's exact duplicates are re-proved by the engine, journaled and restorable")
+    func exactDuplicateTrashIsVerifiedAndUndoable() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        let bin = root.appendingPathComponent("FakeTrash")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let keep = root.appendingPathComponent("keep.jpg"), copy = root.appendingPathComponent("copy.jpg")
+        let changed = root.appendingPathComponent("changed.jpg"), orphan = root.appendingPathComponent("orphan.jpg")
+        for url in [keep, copy, changed, orphan] { try Data("same".utf8).write(to: url) }
+        for (id, url) in [(Int64(1), copy), (2, changed), (3, orphan)] {
+            try await insert(db, id: id, path: url.path)
+            try await db.pool.write { try $0.execute(sql: "UPDATE files SET size_bytes = 4 WHERE id = ?", arguments: [id]) }
+        }
+        let sha = ExactFileDigest.compute(url: keep, expectedSize: 4)!.map { String(format: "%02x", $0) }.joined()
+        func evidence(_ id: Int64, _ url: URL, keeper: URL) -> ExactTrashIdentity {
+            ExactTrashIdentity(fileID: id, path: url.path, sizeBytes: 4, sha256Hex: sha,
+                               keeperPath: keeper.path, keeperSizeBytes: 4, keeperSha256Hex: sha)
+        }
+        try Data("diff".utf8).write(to: changed)
+        let missingKeeper = root.appendingPathComponent("gone.jpg")
+        let exact: [Int64: ExactTrashIdentity] = [1: evidence(1, copy, keeper: keep), 2: evidence(2, changed, keeper: keep), 3: evidence(3, orphan, keeper: missingKeeper)]
+        let journal = root.appendingPathComponent("trash-journal.json")
+        let result = await FileIDEngineMain.trashFiles(database: db, fileIDs: [1, 2, 3], exact: exact, journal: journal) { url in
+            let landed = bin.appendingPathComponent(url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: landed)
+            return landed
+        }
+        #expect(result.succeeded == 1 && result.failed == 2)
+        #expect(!FileManager.default.fileExists(atPath: copy.path))
+        #expect(FileManager.default.fileExists(atPath: changed.path) && FileManager.default.fileExists(atPath: orphan.path))
+        #expect(TrashJournal.load(at: journal).first?.items.map(\.fileID) == [1])
+        let batchID = try #require(result.action.split(separator: ":").last.map(String.init))
+        let restored = await TrashJournal.restore(batchID: batchID, database: db, journal: journal)
+        #expect(restored.succeeded == 1)
+        #expect(try String(contentsOf: copy, encoding: .utf8) == "same")
+        let tag = try await db.pool.read { try String.fetchOne($0, sql: "SELECT tag FROM tags WHERE file_id = 1") }
+        #expect(tag == "mine")
+    }
+
     @Test("restoreFromTrash keeps the batch journaled while files are moving back")
     func restoreKeepsTheJournalUntilEachFileIsBack() async throws {
         let root = try makeRoot()

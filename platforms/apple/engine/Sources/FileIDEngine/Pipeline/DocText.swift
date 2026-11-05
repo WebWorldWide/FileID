@@ -7,7 +7,8 @@ import PDFKit
 import FileIDShared
 
 enum DocText {
-    private static let maxBytes = 16_384
+    /// Same cap as the shared engine's `doc_extract::MAX_TEXT_BYTES`.
+    private static let maxBytes = 256 * 1024
     private static let procTimeout: TimeInterval = 8
     private static let deepAnalyzeQueue = DispatchQueue(
         label: "com.fileid.deep-analyze.document-text",
@@ -86,7 +87,21 @@ enum DocText {
         guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? h.close() }
         guard let data = (try? h.read(upToCount: maxBytes)) ?? nil, !data.isEmpty else { return nil }
-        return String(data: data, encoding: .utf8)
+        return utf8Text(data)
+    }
+
+    /// UTF-8 text of a capped read. The cap can split a multi-byte character, which
+    /// made `String(data:encoding:)` return nil for the whole file; a cut character
+    /// is dropped instead. Bytes that are not UTF-8 anywhere else still yield nil.
+    static func utf8Text(_ data: Data) -> String? {
+        let bytes = [UInt8](data.suffix(4))
+        var keep = data.count
+        if let lead = bytes.lastIndex(where: { $0 & 0xC0 != 0x80 }), bytes[lead] >= 0xC0 {
+            let length = bytes[lead] >= 0xF0 ? 4 : bytes[lead] >= 0xE0 ? 3 : 2
+            if bytes.count - lead < length { keep -= bytes.count - lead }
+        }
+        guard keep > 0 else { return nil }
+        return String(data: data.prefix(keep), encoding: .utf8)
     }
 
     /// Extract PDF text page-by-page, stopping once `maxChars` is reached.
@@ -105,14 +120,14 @@ enum DocText {
         guard let data = runBounded("/usr/bin/textutil", ["-convert", "txt", "-stdout", url.path]) else {
             return nil
         }
-        return String(data: data, encoding: .utf8)
+        return utf8Text(data)
     }
 
     /// pptx/xlsx → the text inside `<tag>…</tag>` runs of a zipped OOXML member, via
     /// `unzip -p`. Mirrors the Windows `doc_extract` (which reads the same `a:t`/`t` runs).
     private static func officeXML(_ url: URL, member: String, tag: String) -> String? {
         guard let data = runBounded("/usr/bin/unzip", ["-p", url.path, member]),
-              let xml = String(data: data, encoding: .utf8) else { return nil }
+              let xml = utf8Text(data) else { return nil }
         // Pull the text content of each <tag ...>…</tag>; cheap regex is fine for a snippet.
         guard let re = try? NSRegularExpression(pattern: "<\(tag)[^>]*>([^<]*)</\(tag)>") else { return nil }
         let ns = xml as NSString
@@ -121,7 +136,7 @@ enum DocText {
             if m.numberOfRanges > 1 {
                 parts.append(decodeXMLEntities(ns.substring(with: m.range(at: 1))))
             }
-            if parts.count > 4000 { break }
+            if parts.count > 40_000 { break }
         }
         let joined = parts.joined(separator: " ")
         return joined.isEmpty ? nil : joined
@@ -157,12 +172,11 @@ enum DocText {
     }
 
     /// EPUB → text: an EPUB is a zip of XHTML, so concatenate the content members (`unzip`'s
-    /// member glob pulls them in one shot, bounded by runBounded) and strip the tags. Only
-    /// the first ~256 tokens reach BGE, so the 16 KB read cap is plenty. Mirrors the Windows
+    /// member glob pulls them in one shot, bounded by runBounded) and strip the tags. Mirrors the Windows
     /// `doc_extract` EPUB path.
     private static func epubText(_ url: URL) -> String? {
         guard let data = runBounded("/usr/bin/unzip", ["-p", url.path, "*.xhtml", "*.html", "*.htm"]),
-              let html = String(data: data, encoding: .utf8) else { return nil }
+              let html = utf8Text(data) else { return nil }
         let stripped = html.replacingOccurrences(of: "<[^>]+>", with: " ", options: .regularExpression)
         let collapsed = stripped.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)

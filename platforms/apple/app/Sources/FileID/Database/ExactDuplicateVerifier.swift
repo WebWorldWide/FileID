@@ -149,58 +149,85 @@ struct DuplicateTrashItem: Sendable {
     let exactKeeper: URL?
 }
 
-struct DuplicateTrashResult: Sendable {
-    let id: Int64
-    let size: Int64
-    let success: Bool
-    let verificationFailed: Bool
+/// What the engine did with a Cleanup batch. `batchID` undoes it with `restoreFromTrash`;
+/// nil `batchID` with nothing moved means the engine never answered.
+struct DuplicateTrashOutcome: Sendable {
+    var trashed: [(id: Int64, size: Int64)] = []
+    var verificationFailed = 0
+    var failed = 0
+    var batchID: String?
+    var engineUnavailable = false
+    var timedOut = false
 }
 
 extension ExactDuplicateVerifier {
-    /// The Cleanup trash path, shared with Chat: verify each copy byte by
-    /// byte against its keeper, refuse protected locations, then move it to
-    /// the Trash. Up to 8 files at once.
-    static func trash(_ work: [DuplicateTrashItem], progress: (@MainActor @Sendable (Int) -> Void)? = nil) async -> [DuplicateTrashResult] {
-        await withTaskGroup(of: DuplicateTrashResult.self) { group in
-            var inFlight = 0
-            var i = 0
-            var collected: [DuplicateTrashResult] = []
-            collected.reserveCapacity(work.count)
-            let maxConcurrency = 8
-            while i < work.count {
-                if inFlight >= maxConcurrency, let r = await group.next() {
-                    collected.append(r); inFlight -= 1
-                    if let progress { await progress(collected.count) }
-                }
-                let item = work[i]
+    /// The Cleanup trash path, shared with Chat. Each exact copy is hashed with its
+    /// keeper (8 at a time) and sent as evidence; the engine re-proves it right before
+    /// the move, refuses protected locations, journals the batch so Undo puts files
+    /// and their catalog rows back, and removes the rows of moved files.
+    @MainActor
+    static func trashThroughEngine(_ work: [DuplicateTrashItem], engine: EngineClient,
+                                   progress: (@MainActor @Sendable (String) -> Void)? = nil) async -> DuplicateTrashOutcome {
+        var outcome = DuplicateTrashOutcome()
+        progress?("Checking copies")
+        let evidence = await withTaskGroup(of: (Int64, ExactTrashIdentity?, Bool).self) { group -> [(Int64, ExactTrashIdentity?, Bool)] in
+            var results: [(Int64, ExactTrashIdentity?, Bool)] = []
+            var next = 0
+            func add(_ item: DuplicateTrashItem) {
                 group.addTask {
-                    if let keeper = item.exactKeeper {
-                        guard let verifiedVictim = await ExactDuplicateVerifier.matchesImmediately(
-                            keeper: keeper, victim: item.url, expectedSize: item.size),
-                              ExactFileDigest.pathStillMatches(verifiedVictim) else {
-                            return DuplicateTrashResult(id: item.id, size: item.size, success: false, verificationFailed: true)
+                    guard let keeper = item.exactKeeper else { return (item.id, nil, true) }
+                    let identity: ExactTrashIdentity? = await withCheckedContinuation { continuation in
+                        destructiveQueue.async {
+                            guard let copy = ExactFileDigest.computeWithIdentity(url: item.url, expectedSize: item.size),
+                                  let kept = ExactFileDigest.computeWithIdentity(url: keeper, expectedSize: item.size),
+                                  copy.digest == kept.digest else { return continuation.resume(returning: nil) }
+                            let hex = copy.digest.map { String(format: "%02x", $0) }.joined()
+                            continuation.resume(returning: ExactTrashIdentity(
+                                fileID: item.id, path: item.url.path, sizeBytes: item.size, sha256Hex: hex,
+                                keeperPath: keeper.path, keeperSizeBytes: item.size, keeperSha256Hex: hex))
                         }
                     }
-                    do {
-                        try ReadOnlyLocations.requireSourceMutation(item.url)
-                        try FileManager.default.trashItem(at: item.url, resultingItemURL: nil)
-                        return DuplicateTrashResult(id: item.id, size: item.size, success: true, verificationFailed: false)
-                    } catch {
-                        // NSError descriptions embed the full path — log
-                        // domain+code only, beside the redacted copy.
-                        let ns = error as NSError
-                        NSLog("FileID v2 cleanup: could not trash %@: %@ (%ld)", redactPathForLog(item.url.path), ns.domain, ns.code)
-                        return DuplicateTrashResult(id: item.id, size: item.size, success: false, verificationFailed: false)
-                    }
+                    return (item.id, identity, identity != nil)
                 }
-                inFlight += 1
-                i += 1
             }
-            for await r in group {
-                collected.append(r)
-                if let progress { await progress(collected.count) }
+            while next < min(8, work.count) { add(work[next]); next += 1 }
+            for await result in group {
+                results.append(result)
+                if next < work.count { add(work[next]); next += 1 }
             }
-            return collected
+            return results
         }
+        let sizes = Dictionary(work.map { ($0.id, $0.size) }, uniquingKeysWith: { first, _ in first })
+        let accepted = evidence.filter(\.2)
+        outcome.verificationFailed = evidence.count - accepted.count
+        guard !accepted.isEmpty else { return outcome }
+        let identities = accepted.compactMap(\.1)
+        progress?("Moving \(accepted.count.formatted()) to Trash")
+        let signal = engine.bulkActionResultSignal
+        guard engine.send(.trashFiles(fileIDs: accepted.map(\.0), exactIdentities: identities.isEmpty ? nil : identities)) else {
+            outcome.engineUnavailable = true
+            return outcome
+        }
+        guard let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "trashFiles",
+                                                         timeout: 300 + Double(accepted.count) / 5) else {
+            outcome.timedOut = true
+            return outcome
+        }
+        outcome.trashed = result.messages.filter(\.ok).compactMap(\.fileID).map { ($0, sizes[$0] ?? 0) }
+        let refused = result.messages.filter { !$0.ok }
+        outcome.verificationFailed += refused.filter { ($0.message ?? "").contains("changed") || ($0.message ?? "").contains("match") }.count
+        outcome.failed = refused.count - refused.filter { ($0.message ?? "").contains("changed") || ($0.message ?? "").contains("match") }.count
+        outcome.batchID = result.action.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init)
+        return outcome
+    }
+
+    /// Puts a Cleanup batch back: files return to where they were and their catalog
+    /// rows (tags, faces, embeddings) are restored. Returns how many came back.
+    @MainActor
+    static func undoTrash(batchID: String, engine: EngineClient) async -> (restored: Int, message: String?) {
+        let signal = engine.bulkActionResultSignal
+        guard engine.send(.restoreFromTrash(batchID: batchID)) else { return (0, "FileID is still getting ready. Try again in a moment.") }
+        let result = await TakeRequests.bulkResult(engine, after: signal, prefix: "restoreFromTrash", timeout: 300)
+        return (result?.succeeded ?? 0, result == nil ? "Putting files back didn't finish. Check the Trash." : result?.messages.first(where: { !$0.ok })?.message)
     }
 }
