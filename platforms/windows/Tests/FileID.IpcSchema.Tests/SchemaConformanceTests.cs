@@ -231,6 +231,7 @@ public class SchemaConformanceTests
         new CancelPrewarmCommand("clip_text"),
         new PlanRestructureCommand(@"C:\Users\adam\Pictures"),
         new UndoRestructureCommand(@"C:\Users\adam\Pictures"),
+        new UndoRestructureCommand(@"C:\Users\adam\Pictures", "6f1d3a52-8c4e-4b7a-9e21-3d5c0b8a7f10"),
         new ApplyRestructureCommand(
             @"C:\Users\adam\Pictures",
             new[] { ExampleMove() },

@@ -100,8 +100,12 @@ public sealed record ApplyRestructureCommand(
 
 /// <summary>Reverse the most recent applyRestructure — the engine replays its
 /// on-disk undo journal to move every relocated file back. Reply is a
-/// RestructureApplyResult (Applied = files moved back). (RESTRUCTURE.md §6)</summary>
-public sealed record UndoRestructureCommand(string LibraryRoot) : CommandPayload;
+/// RestructureApplyResult (Applied = files moved back). (RESTRUCTURE.md §6)
+/// A ShortcutUndoToken from a shortcut-mode apply removes only that run's
+/// shortcuts instead.</summary>
+public sealed record UndoRestructureCommand(
+    string LibraryRoot,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ShortcutUndoToken = null) : CommandPayload;
 
 public sealed record RestructureMove(
     [property: JsonPropertyName("fileID")] long FileId,

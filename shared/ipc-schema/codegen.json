@@ -716,10 +716,7 @@
     },
     "known_drift": {
       "CommandPayload.planRestructure: schema fields missing from csharp: supportsPagedPlans": "Windows app never opts into paged plans; the engine sends it the legacy full plan.",
-      "CommandPayload.applyRestructure: schema fields missing from csharp: planID": "Follows from the missing supportsPagedPlans opt-in.",
-      "CommandPayload.undoRestructure: schema fields missing from csharp: shortcutUndoToken": "Windows app receives the token on restructureApplyResult but cannot send it back yet.",
-      "RestructurePlan (RestructurePlan): schema fields missing from csharp: planID": "C# RestructurePlan.PlanId lacks [JsonPropertyName(\"planID\")], so it reads and writes planId.",
-      "RestructurePlan (RestructurePlan): csharp fields absent from the schema: planId": "Same casing bug as the entry above."
+      "CommandPayload.applyRestructure: schema fields missing from csharp: planID": "Follows from the missing supportsPagedPlans opt-in."
     }
   },
   "swift": {

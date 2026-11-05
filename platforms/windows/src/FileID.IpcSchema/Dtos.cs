@@ -107,7 +107,7 @@ public sealed record RestructurePlan(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] ulong? TotalMoves = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] RestructureConfidenceCounts? ConfidenceCounts = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Truncated = false,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] string? PlanId = null);
+    [property: JsonPropertyName("planID"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] string? PlanId = null);
 
 public sealed record RestructureCategoryCount(string Category, uint Count);
 
