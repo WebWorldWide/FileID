@@ -594,6 +594,30 @@ public class LibraryMergeTests
         Assert.Equal(new long[] { 1, 2, 3 }, items.Select(t => t.Id).ToArray());
     }
 
+    private static readonly long[] FirstFillIds = { 1, 2, 3 };
+
+    [Fact]
+    public void MergeById_FirstFillIsOneAddEvent()
+    {
+        var items = new BatchObservableCollection<FileTile>();
+        var events = new List<System.Collections.Specialized.NotifyCollectionChangedEventArgs>();
+        items.CollectionChanged += (_, e) => events.Add(e);
+        LibraryViewModel.MergeById(items, new[] { Tile(1), Tile(2), Tile(2), Tile(3) });
+        var only = Assert.Single(events);
+        Assert.Equal(System.Collections.Specialized.NotifyCollectionChangedAction.Add, only.Action);
+        Assert.Equal(3, only.NewItems!.Count);
+        Assert.Equal(FirstFillIds, items.Select(t => t.Id).ToArray());
+    }
+
+    [Fact]
+    public void RefreshWindow_KeepsLoadedPagesForTheSameListingOnly()
+    {
+        Assert.Equal(300, LibraryViewModel.RefreshWindow(sameListing: true, 0));
+        Assert.Equal(900, LibraryViewModel.RefreshWindow(sameListing: true, 900));
+        Assert.Equal(3000, LibraryViewModel.RefreshWindow(sameListing: true, 4200));
+        Assert.Equal(300, LibraryViewModel.RefreshWindow(sameListing: false, 900));
+    }
+
     [Fact]
     public void WithoutKnownIds_SkipsTilesAlreadyShownAndRepeatsInPage()
     {

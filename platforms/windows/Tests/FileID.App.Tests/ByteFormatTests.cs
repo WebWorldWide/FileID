@@ -40,6 +40,9 @@ public sealed class ByteFormatTests
         {
             Assert.Equal("No extra copies found", CleanupView.FormatHeadline(0, 0, 0));
             Assert.Equal("No extra copies found · 3 skipped", CleanupView.FormatHeadline(0, 0, 3));
+            Assert.Equal("No extra copies found", CleanupView.EmptyHeadline(loading: false, failed: false));
+            Assert.Equal(string.Empty, CleanupView.EmptyHeadline(loading: true, failed: false));
+            Assert.Equal(string.Empty, CleanupView.EmptyHeadline(loading: false, failed: true));
             Assert.Equal(
                 "1,204 files with extra copies · 1.23 GB can be freed · 2 skipped",
                 CleanupView.FormatHeadline(1204, 1_234_567_890, 2));
