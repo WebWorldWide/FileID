@@ -42,6 +42,28 @@ internal sealed class EvidencePanel : StackPanel
         Unloaded += (_, _) => Stop();
     }
 
+    /// <summary>The inline player while a media source plays here, else null.</summary>
+    public MediaPlayer? Player => _player;
+
+    /// <summary>Raised on the UI thread when the inline player starts or stops.</summary>
+    public event EventHandler? PlayerChanged;
+
+    public void HideLabel() => _label.Visibility = Visibility.Collapsed;
+
+    /// <summary>Moves the inline player to <paramref name="seconds"/>, or opens the
+    /// selected media there when nothing is playing yet.</summary>
+    public async Task SeekAsync(double seconds)
+    {
+        if (!double.IsFinite(seconds) || seconds < 0) seconds = 0;
+        if (_player is { } player)
+        {
+            player.PlaybackSession.Position = TimeSpan.FromSeconds(seconds);
+            return;
+        }
+        try { await OpenAsync(seconds); }
+        catch (Exception) { _status("This file can't be opened. Its drive may be disconnected."); }
+    }
+
     public static string Label(CatalogHit hit) =>
         $"{hit.Path}\n{KindLabel(hit.Kind)}"
         + (hit.StartSeconds is { } seconds ? $" · {seconds:0.0} s" : "")
@@ -77,13 +99,15 @@ internal sealed class EvidencePanel : StackPanel
     private void Stop()
     {
         _revision++;
-        _player?.Dispose();
+        var player = _player;
         _player = null;
         _preview.SetMediaPlayer(null);
+        player?.Dispose();
         _preview.Visibility = Visibility.Collapsed;
+        if (player is not null) PlayerChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private async Task OpenAsync()
+    private async Task OpenAsync(double? start = null)
     {
         var hit = _hit;
         if (hit is null) return;
@@ -91,7 +115,7 @@ internal sealed class EvidencePanel : StackPanel
         if (!File.Exists(hit.Path)) { _status("This file can't be found. Its drive may be disconnected."); return; }
         if (IsMedia(hit.Path))
         {
-            double seconds = hit.StartSeconds is { } s && double.IsFinite(s) && s >= 0 ? s : 0;
+            double seconds = (start ?? hit.StartSeconds) is { } s && double.IsFinite(s) && s >= 0 ? s : 0;
             var file = await StorageFile.GetFileFromPathAsync(hit.Path);
             if (revision != _revision) return;
             Stop();
@@ -110,6 +134,7 @@ internal sealed class EvidencePanel : StackPanel
             _preview.SetMediaPlayer(player);
             _preview.Visibility = Visibility.Visible;
             player.Source = MediaSource.CreateFromStorageFile(file);
+            PlayerChanged?.Invoke(this, EventArgs.Empty);
         }
         else if (!SafeOpen.TryOpenFile(hit.Path))
         {
