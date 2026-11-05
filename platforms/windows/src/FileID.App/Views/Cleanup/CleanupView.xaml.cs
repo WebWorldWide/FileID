@@ -121,6 +121,7 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
         if (_unloaded) return;
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(FooterVisibility));
+        OnPropertyChanged(nameof(HeaderStats));
     }
 
     // Groups (+ their members) we've wired OnGroupOrMemberChanged on. Tracked
@@ -306,7 +307,10 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
     {
         get
         {
-            if (ViewModel.Groups.Count == 0) return string.Empty;
+            if (ViewModel.Groups.Count == 0)
+            {
+                return EmptyHeadline(ViewModel.IsLoading, !string.IsNullOrEmpty(ViewModel.ErrorMessage));
+            }
             long bytes = 0;
             int eligibleGroups = 0;
             int skipped = 0;
@@ -322,6 +326,11 @@ public sealed partial class CleanupView : UserControl, INotifyPropertyChanged
             return FormatHeadline(eligibleGroups, bytes, skipped);
         }
     }
+
+    /// <summary>macOS says "No extra copies found" once a check finishes empty;
+    /// nothing while it is still looking or when the footer shows an error.</summary>
+    internal static string EmptyHeadline(bool loading, bool failed)
+        => loading || failed ? string.Empty : FormatHeadline(0, 0, 0);
 
     /// <summary>macOS CleanupView headline: verified groups, decimal size
     /// reclaimable if one copy per group is kept, and skipped groups.</summary>

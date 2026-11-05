@@ -16,6 +16,7 @@ namespace FileID.ViewModels;
 internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 {
     private const int PageSize = 300;
+    private const int RefreshCap = 3000;
     private static readonly TimeSpan DebounceWindow = TimeSpan.FromMilliseconds(200);
 
     private readonly ReadStore _store;
@@ -42,6 +43,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     private int _loadedRows;
     private bool _hasMore;
     private int _loadingMore;
+    private volatile string? _listedKind;
     private string _query = string.Empty;
     private string _kindFilter = "all";
     private bool _isLoading;
@@ -325,6 +327,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             IReadOnlyList<FileRow> rows;
             int? total = null;
             bool pageable = false;
+            string? listedKind = null;
             if (string.IsNullOrWhiteSpace(_query))
             {
                 // Microsoft.Data.Sqlite is fake-async (the query runs inline on
@@ -336,8 +339,9 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
                 // yields via the IPC round-trip, so leave it as-is.
                 // Keep every page already scrolled into, so a live-scan refresh
                 // doesn't snap the grid back to the first page.
-                int want = Math.Max(PageSize, Volatile.Read(ref _loadedRows));
-                string? kind = _kindFilter == "all" ? null : _kindFilter;
+                listedKind = _kindFilter;
+                int want = RefreshWindow(_listedKind == listedKind, Volatile.Read(ref _loadedRows));
+                string? kind = listedKind == "all" ? null : listedKind;
                 var listing = await Task.Run(async () =>
                 {
                     var recent = await _store.RecentAsync(want, token, kind).ConfigureAwait(false);
@@ -365,7 +369,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             }
 
             int loaded = rows.Count;
-            ApplyOnUi(filtered, myGen, pageable, loaded, total);
+            ApplyOnUi(filtered, myGen, pageable, loaded, total, listedKind);
         }
         catch (OperationCanceledException)
         {
@@ -480,7 +484,13 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null)
+    /// <summary>Rows a refresh asks for: a refresh of the same plain listing keeps every
+    /// page already loaded (up to <see cref="RefreshCap"/>, as macOS); a new kind filter,
+    /// a cleared search or a similar-files result starts again at one page.</summary>
+    internal static int RefreshWindow(bool sameListing, int loadedRows) =>
+        sameListing ? Math.Min(Math.Max(PageSize, loadedRows), RefreshCap) : PageSize;
+
+    private void ApplyOnUi(IReadOnlyList<FileTile> next, long gen, bool hasMore = false, int loadedRows = 0, int? total = null, string? listedKind = null)
     {
         // Drop results from a refresh a newer one has already superseded — checked
         // on the UI thread right before the swap so it also catches a refresh that
@@ -490,6 +500,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             if (Interlocked.Read(ref _refreshGen) != gen) return;
             ReplaceItems(next);
             TotalCount = total;
+            _listedKind = listedKind;
             _hasMore = hasMore;
             Volatile.Write(ref _loadedRows, hasMore || loadedRows > 0 ? loadedRows : 0);
         }
@@ -615,7 +626,15 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
     {
         if (items.Count == 0)
         {
-            foreach (var t in next) items.Add(t);
+            var fresh = WithoutKnownIds(items, next);
+            if (items is BatchObservableCollection<FileTile> batch)
+            {
+                batch.AppendRange(fresh);
+            }
+            else
+            {
+                foreach (var t in fresh) items.Add(t);
+            }
             return;
         }
 

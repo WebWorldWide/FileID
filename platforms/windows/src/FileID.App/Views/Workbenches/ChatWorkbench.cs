@@ -23,6 +23,8 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     private CancellationTokenSource? _sendObservation;
     private string? _conversationID;
     private readonly TextBlock _sourcesCount = Meta("");
+    private readonly StackPanel _empty = new() { Spacing = 12, Padding = new Thickness(0, 8, 0, 8) };
+    private static readonly string[] Suggestions = { "Find birthday gift opening", "How many videos are from last month?", "How much space do duplicates use?" };
 
     public ChatWorkbench() : base("FileID Chat")
     {
@@ -46,10 +48,20 @@ internal sealed class ChatWorkbench : WorkbenchPanel
         _messages.Height = 420;
         _messages.MaxWidth = 760;
         _messages.HorizontalAlignment = HorizontalAlignment.Left;
+        _messages.Visibility = Visibility.Collapsed;
+        BuildEmptyState();
+        Inputs.Children.Add(_empty);
         Inputs.Children.Add(_messages);
         _input.AcceptsReturn = false;
         _input.MinHeight = 30;
         _send = Primary(ActionButton("Send", SendAsync));
+        var send = _send;
+        _input.KeyDown += (_, e) => DebugLog.SafeRun("ChatWorkbench.ReturnSends", () =>
+        {
+            if (e.Key != Windows.System.VirtualKey.Enter || !send.IsEnabled) return;
+            e.Handled = true;
+            Run(SendAsync);
+        });
         _input.TextChanged += (_, _) => SyncSend();
         SyncSend();
         Inputs.Children.Add(Row(_input, _send));
@@ -119,6 +131,62 @@ internal sealed class ChatWorkbench : WorkbenchPanel
             ? "Type a question first"
             : _input.Text.Length > 2000 ? "Shorten the question to 2,000 characters" : "Send");
     }
+    private void BuildEmptyState()
+    {
+        var title = new TextBlock { Text = "Find the moment.", FontSize = 34, Foreground = ThemeHelper.GetBrushSafe("Text1Brush") };
+        var body = new TextBlock
+        {
+            Text = "Ask about files, people and moments in this library. Answers list the files they come from.",
+            FontSize = 13.5,
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 560,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Foreground = ThemeHelper.GetBrushSafe("Text2Brush"),
+        };
+        try
+        {
+            if (Application.Current.Resources["DisplayFontFamily"] is Microsoft.UI.Xaml.Media.FontFamily display) title.FontFamily = display;
+            if (Application.Current.Resources["BodyFontFamily"] is Microsoft.UI.Xaml.Media.FontFamily font) body.FontFamily = font;
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Warn("ChatWorkbench: fonts unavailable: " + ex.Message);
+        }
+        _empty.Children.Add(title);
+        _empty.Children.Add(body);
+        var list = new StackPanel { Spacing = 6, MaxWidth = 460, HorizontalAlignment = HorizontalAlignment.Left };
+        foreach (var suggestion in Suggestions)
+        {
+            var row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var arrow = new TextBlock { Text = "↖", FontSize = 11, Foreground = ThemeHelper.GetBrushSafe("Text3Brush"), VerticalAlignment = VerticalAlignment.Center };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(arrow, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+            Grid.SetColumn(arrow, 1);
+            row.Children.Add(new TextBlock { Text = suggestion, FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
+            row.Children.Add(arrow);
+            var button = Secondary(new Button
+            {
+                Content = row,
+                Height = 34,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            });
+            button.Background = ThemeHelper.GetBrushSafe("PaneFillBrush");
+            button.BorderBrush = ThemeHelper.GetBrushSafe("HairlineBrush");
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, suggestion);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetHelpText(button, "Puts this question in the message field");
+            button.Click += (_, _) => DebugLog.SafeRun("ChatWorkbench.Suggestion", () =>
+            {
+                _input.Text = suggestion;
+                _input.SelectionStart = suggestion.Length;
+                _input.Focus(FocusState.Programmatic);
+            });
+            list.Children.Add(button);
+        }
+        _empty.Children.Add(list);
+    }
+
     private void SyncClear(bool hasContent)
     {
         _clear.IsEnabled = hasContent;
@@ -272,6 +340,8 @@ internal sealed class ChatWorkbench : WorkbenchPanel
     {
         if (response.Status == "error") return;
         _messages.ItemsSource = response.Messages.Select(message => $"{(message.Role == "user" ? "You" : "FileID")}\n{message.Text}").ToArray();
+        _messages.Visibility = response.Messages.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        _empty.Visibility = response.Messages.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
         SyncClear(response.Messages.Count > 0 || response.Hits.Count > 0);
         if (ChatFrontendPolicy.ShouldReplaceCitations(action, response))
         {

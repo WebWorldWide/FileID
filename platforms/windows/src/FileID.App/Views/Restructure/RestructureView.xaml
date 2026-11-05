@@ -676,7 +676,7 @@
                         <FontIcon Glyph="&#xE73E;" FontSize="22" Foreground="{StaticResource RestructureKeepBrush}" VerticalAlignment="Center" />
                         <StackPanel Spacing="2" VerticalAlignment="Center">
                             <TextBlock Text="Nothing to move" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="This folder is already tidy. Every folder already has a clear name, so nothing needs to move."
+                            <TextBlock Text="This library is already organized: every folder has a clear name and matching contents."
                                        Style="{StaticResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
