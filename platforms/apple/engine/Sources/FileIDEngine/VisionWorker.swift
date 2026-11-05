@@ -32,11 +32,11 @@ let visionConcurrencyGate = DispatchSemaphore(value: Hardware.workerCap)
 /// engine exits). Bounded leak, unbounded responsiveness.
 let visionPerformTimeoutSeconds: Double = 10.0
 
-/// At most two accurate text reads in flight. Measured on an M1 Pro: fourteen
-/// cold concurrent reads each loaded the model and took 70 s wall (every one
-/// past the 10 s timeout), two took 3 s, and warm throughput is the same
-/// (~210 ms per image) at one, two or fourteen.
-let accurateOCRGate = DispatchSemaphore(value: 2)
+/// At most four accurate text reads in flight. Fourteen cold concurrent reads
+/// each loaded the model and took 70 s wall (M1 Pro, every one past the 10 s
+/// timeout). Through `RecognizeTextRequest` a warm scan finishes accurate reads
+/// at about the same rate with four, six or eight in flight.
+let accurateOCRGate = DispatchSemaphore(value: 4)
 
 /// Run `body` on a background queue with a wall-clock timeout. Returns
 /// true if body completed before the deadline, false on timeout. On
@@ -261,27 +261,18 @@ public final class VisionWorker: @unchecked Sendable {
     }
 
     private func recognizeText(_ cgImage: CGImage, level: VNRequestTextRecognitionLevel, completed: inout Bool) -> String {
+        if level == .accurate { return Self.recognizeAccurately(cgImage, completed: &completed) }
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = level
-        if level == .accurate {
-            req.usesLanguageCorrection = true
-            req.automaticallyDetectsLanguage = true
-        } else {
-            req.usesLanguageCorrection = false
-            req.recognitionLanguages = ["en-US"]
-        }
+        req.usesLanguageCorrection = false
+        req.recognitionLanguages = ["en-US"]
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         // Same gate + timeout as runPrimaryPass — OCR also goes through ANE.
-        // Gates released inside the worker thread so a timed-out perform holds
-        // its slot until it actually finishes.
-        let accurate = level == .accurate
-        if accurate { accurateOCRGate.wait() }
+        // The gate is released inside the worker thread so a timed-out perform
+        // holds its slot until it actually finishes.
         visionConcurrencyGate.wait()
         let didReturn = runVisionWithTimeout { [handler] in
-            defer {
-                visionConcurrencyGate.signal()
-                if accurate { accurateOCRGate.signal() }
-            }
+            defer { visionConcurrencyGate.signal() }
             do { try handler.perform([req]) } catch { /* swallow */ }
         }
         guard didReturn, let results = req.results else { return "" }
@@ -289,6 +280,46 @@ public final class VisionWorker: @unchecked Sendable {
         return results
             .compactMap { $0.topCandidates(1).first?.string }
             .joined(separator: "\n")
+    }
+
+    /// The accurate tier goes through Vision's Swift `RecognizeTextRequest`: the
+    /// `VNRecognizeTextRequest` path serialises accurate reads inside one process
+    /// (9.5 images/s at any concurrency on an M1 Pro), the Swift request runs them
+    /// in parallel (25/s at four), with the same revision and the same text on
+    /// printed pages. The fast tier stays on `VNRecognizeTextRequest`, whose Swift
+    /// counterpart reads far less.
+    static func recognizeAccurately(_ cgImage: CGImage, completed: inout Bool) -> String {
+        accurateOCRGate.wait()
+        visionConcurrencyGate.wait()
+        let box = Tagging.ScanSideResult<String?>()
+        let didReturn = runVisionWithTimeout {
+            defer {
+                visionConcurrencyGate.signal()
+                accurateOCRGate.signal()
+            }
+            box.set(performAccurateRead(cgImage))
+        }
+        guard didReturn, let text = box.get() ?? nil else { return "" }
+        completed = true
+        return text
+    }
+
+    /// Blocks the calling thread (never a Swift concurrency thread) until the read ends.
+    static func performAccurateRead(_ cgImage: CGImage) -> String? {
+        let box = Tagging.ScanSideResult<String>()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached(priority: .userInitiated) {
+            var request = RecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.automaticallyDetectsLanguage = true
+            if let observations = try? await request.perform(on: cgImage) {
+                box.set(observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n"))
+            }
+            done.signal()
+        }
+        done.wait()
+        return box.get()
     }
 }
 
@@ -333,14 +364,12 @@ final class AccurateOCRWarmup: @unchecked Sendable {
             // (a blank image never reaches them). Both tiers: the fast one also
             // compiles on first use.
             if let sample = Self.sampleText() {
-                for level in [VNRequestTextRecognitionLevel.accurate, .fast] {
-                    let req = VNRecognizeTextRequest()
-                    req.recognitionLevel = level
-                    req.usesLanguageCorrection = level == .accurate
-                    req.automaticallyDetectsLanguage = level == .accurate
-                    autoreleasepool {
-                        try? VNImageRequestHandler(cgImage: sample, options: [:]).perform([req])
-                    }
+                _ = VisionWorker.performAccurateRead(sample)
+                let req = VNRecognizeTextRequest()
+                req.recognitionLevel = .fast
+                req.usesLanguageCorrection = false
+                autoreleasepool {
+                    try? VNImageRequestHandler(cgImage: sample, options: [:]).perform([req])
                 }
             }
             self.lock.lock(); self.ready = true; self.lock.unlock()

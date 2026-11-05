@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import CoreText
 import GRDB
 import AsyncAlgorithms
 import Testing
@@ -70,6 +72,37 @@ struct TextReadingTests {
         #expect(breaker.allowed)
         for _ in 0..<AccurateOCRBreaker.failureLimit { breaker.record(success: false) }
         #expect(!breaker.allowed)
+    }
+
+    /// Opt-in like the GPU tests: the first accurate read compiles Vision's model
+    /// (minutes on a fresh machine) and hosted runners may lack a Neural Engine.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["FILEID_OCR_TESTS"] == "1"))
+    func accurateReadsRunInParallelAndReadPrintedText() throws {
+        let ctx = try #require(CGContext(data: nil, width: 900, height: 160, bitsPerComponent: 8, bytesPerRow: 0,
+                                         space: CGColorSpaceCreateDeviceRGB(),
+                                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: 900, height: 160))
+        let font = CTFontCreateWithName("Helvetica" as CFString, 56, nil)
+        let text = NSAttributedString(string: "Quarterly report 2026", attributes: [
+            NSAttributedString.Key(kCTFontAttributeName as String): font,
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0, alpha: 1)])
+        ctx.textPosition = CGPoint(x: 30, y: 55)
+        CTLineDraw(CTLineCreateWithAttributedString(text), ctx)
+        let image = try #require(ctx.makeImage())
+        _ = VisionWorker.performAccurateRead(image)
+
+        let reads = Tagging.ScanSideResult<[String]>()
+        reads.set([])
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: 6) { _ in
+            var completed = false
+            let read = VisionWorker.recognizeAccurately(image, completed: &completed)
+            lock.lock(); reads.set((reads.get() ?? []) + [completed ? read : "<timed out>"]); lock.unlock()
+        }
+        let results = try #require(reads.get())
+        #expect(results.count == 6)
+        for read in results { #expect(read.contains("Quarterly report 2026")) }
     }
 
     @Test func documentShapeMatchesLetterAndA4ButNotPhotos() {

@@ -1,6 +1,22 @@
 # FileID — State
 
-## 2026-11-04 — Mac scan 2.4–2.6× faster: one decode per photo, more photos in flight, no face-model preload
+## 2026-11-04 (late) — Real-world scans: careful text reads were the bottleneck; now parallel (about 2× main)
+
+Correction to the entry below: its numbers came from scans started right after engine launch, before the accurate-OCR warm-up finishes, so careful text reads were silently skipped. In normal use the warm-up finishes while the app sits idle, and careful reads then dominate photo scans: `VNRecognizeTextRequest` serialises accurate reads inside one process (9.5 images/s at any concurrency on the M1 Pro; three processes ran 35/s together). Vision's Swift `RecognizeTextRequest` (macOS 15, revision 3, same as before) runs them in parallel (25/s at four standalone, ~10/s inside a scan where it shares the Neural Engine with Vision's classify/face pass). The accurate tier now uses it, four in flight (6 and 8 measured no faster); the fast tier stays on `VNRecognizeTextRequest`, whose Swift counterpart read about an eighth of the words on screenshots.
+
+Warm scans (warm-up finished first; release engines, isolated catalogs, APFS-clone libraries on the internal SSD):
+
+| Library | main | after #283 | now |
+|---|---|---|---|
+| 900 Sony ARWs (sports, 14% need a careful read) | 25.4 s (36/s) | 24.2 s | 12.4–14.0 s (75–77/s) |
+| 1,173 JPEGs, 24–33 MP (8% careful) | 32.3 s (40/s) | 20.3 s | 15.7–16.4 s (76–80/s) |
+| 400 iPhone HEICs, 12–24 MP | 18.6 s (25/s) | — | 16.3 s (25/s) |
+
+Results: faces, tags, dates, hashes, failures and CLIP embeddings match main (RAW identical; JPEG as in the entry below). Stored OCR text: same files have text and the same handwriting flags; dictionary words −5% on RAW sports scenes (720 vs 759), −1% on JPEGs, +0.4% share on 60 screenshots (42 of 60 identical). Careful reads are worth keeping: on the sports RAWs they recovered sign text ("Liberty Bank", "IBEW LOCAL 649", "Prairie Farms", a phone number) where the fast read had garbage.
+
+Where each format stops on this Mac (measured, not tunable from our code): camera JPEG decode at 1536 px tops out at ~123 files/s in the hardware JPEG decoder (identical at 8–28 threads; 768 px would reach 178 but loses small faces); iPhone HEIC decode at ~25–28 files/s in the HEVC decoder (every ImageIO path tried, any output size; embedded previews are 320–576 px); text-bearing photos at ~10 careful reads/s of Neural Engine time; RAW previews cost ~19.5 ms CPU inside Apple's RAW plugin. Without text, RAW reaches ~130–150/s. Ruled out: more workers (14–32), Vision requests on the GPU (45–107 vs 177/s on the Neural Engine), a shared CLIP/dHash downscale (−3.4 ms but changes dHash by up to 8 bits against existing catalogs), ImageIO's undocumented hardware-off key (no gain and not public API). The 140 files/s goal is not reachable on an M1 Pro for these libraries; it is plausible only for text-free RAW/JPEG under ~20 MP.
+
+## 2026-11-04 — Mac scan: one decode per photo, more photos in flight, no face-model preload (cold-start numbers; see the entry above)
 
 Owner asked to improve scan speed. Measured on the M1 Pro with release engines and isolated catalogs, scanning scratch copies of Adlon photos on the internal SSD (alternating runs, warm cache): 391 JPEGs (mostly 24–33 MP) 10.6–10.7 s on main → 4.2–4.6 s; 59 Sony ARWs 2.7–3.0 s → 1.0–1.1 s. Steady JPEG rate ~44 → ~110 files/s; engine CPU for the JPEG scan 46 → 25 s; first file after ~3 s → under 1 s. Three causes, found by profiling (`sample`) and isolating each stage:
 1. **Every camera JPEG was decoded twice.** `decodeBoundedImage` first probed for an embedded preview with a 2048 px limit; for JPEGs ImageIO answered by scaling the full image to 2048 px, which the code rejected before decoding again at 1536 px (73 vs 26 ms CPU per photo standalone; it also doubled page faults). The probe now runs only for camera RAW files, which do carry large previews.
