@@ -115,7 +115,7 @@ import FileIDShared
         let capture = WireCapture()
         await ChatService().handle(ChatRequest(requestID: "send", conversationID: "c", action: "send", text: "show the contract", useModel: false), database: db, sink: capture.sink)
         let reply = try #require(try await replies(capture).last { $0.requestID == "send" })
-        #expect(reply.status == "completed")
+        #expect(reply.status == "completed", "\(reply.status): \(reply.message)")
         #expect(reply.actions == nil)
         #expect(reply.hits.contains { $0.fileID == 1 })
         #expect(try await db.pool.read { sql in try Int.fetchOne(sql, sql: "SELECT COUNT(*) FROM files") } == 2)
