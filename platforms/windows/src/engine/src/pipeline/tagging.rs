@@ -2985,42 +2985,79 @@ fn apply_exif_orientation(
 pub(crate) type ExifFields = (Option<String>, Option<f64>, Option<f64>, Option<f64>);
 
 pub(crate) fn parse_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
-    let exif = exif::Reader::new()
-        .read_from_container(&mut std::io::Cursor::new(bytes))
-        .ok()?;
-    let camera_model = exif
-        .get_field(exif::Tag::Model, exif::In::PRIMARY)
-        .map(|f| f.display_value().with_unit(&exif).to_string().trim_matches('"').to_string())
+    match exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes)) {
+        Ok(exif) => Some(exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY))),
+        Err(_) => raw_exif_fields(bytes),
+    }
+}
+
+/// Camera RAWs the generic reader rejects (ORF, RW2, CR3, RAF), as ImageIO
+/// reads them on macOS: the container's own EXIF first, gaps filled from the
+/// embedded preview's EXIF.
+fn raw_exif_fields(bytes: &[u8]) -> Option<ExifFields> {
+    use super::raw_preview::RawExif;
+    let read = |block: Vec<u8>| {
+        exif::Reader::new()
+            .continue_on_error(true)
+            .read_raw(block)
+            .or_else(|error| error.distill_partial_result(|_| {}))
+            .ok()
+    };
+    let container = match super::raw_preview::exif_blocks(bytes) {
+        Some(RawExif::Tiff(tiff)) => read(tiff).map(|exif| exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY))),
+        Some(RawExif::Cr3 { ifd0, exif, gps }) => {
+            let [ifd0, exif, gps] = [ifd0, exif, gps].map(|block| block.and_then(|block| read(block.to_vec())));
+            Some(exif_fields(|tag| {
+                let block = match tag.context() {
+                    exif::Context::Exif => exif.as_ref(),
+                    exif::Context::Gps => gps.as_ref(),
+                    _ => ifd0.as_ref(),
+                }?;
+                block.get_field(exif::Tag(exif::Context::Tiff, tag.number()), exif::In::PRIMARY)
+            }))
+        }
+        None => None,
+    };
+    let preview = super::raw_preview::embedded_jpeg_head(bytes)
+        .and_then(|jpeg| exif::Reader::new().read_from_container(&mut std::io::Cursor::new(jpeg)).ok())
+        .map(|exif| exif_fields(|tag| exif.get_field(tag, exif::In::PRIMARY)));
+    match (container, preview) {
+        (Some((model, lat, lon, captured)), Some((p_model, p_lat, p_lon, p_captured))) => {
+            let (lat, lon) = if lat.is_some() && lon.is_some() { (lat, lon) } else { (p_lat, p_lon) };
+            Some((model.or(p_model), lat, lon, captured.or(p_captured)))
+        }
+        (container, preview) => container.or(preview),
+    }
+}
+
+fn exif_fields<'a>(field: impl Fn(exif::Tag) -> Option<&'a exif::Field>) -> ExifFields {
+    let camera_model = field(exif::Tag::Model)
+        .map(|f| f.display_value().to_string().trim_matches('"').to_string())
         .filter(|s| !s.is_empty());
     // A zero denominator or a junk value would store NaN/inf or an impossible place.
-    let lat = read_gps_coord(&exif, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef)
+    let lat = read_gps_coord(&field, exif::Tag::GPSLatitude, exif::Tag::GPSLatitudeRef)
         .filter(|v| v.is_finite() && v.abs() <= 90.0);
-    let lon = read_gps_coord(&exif, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef)
+    let lon = read_gps_coord(&field, exif::Tag::GPSLongitude, exif::Tag::GPSLongitudeRef)
         .filter(|v| v.is_finite() && v.abs() <= 180.0);
     let captured = [exif::Tag::DateTimeOriginal, exif::Tag::DateTimeDigitized]
         .into_iter()
-        .find_map(|tag| exif_capture_unix(&exif, tag));
-    Some((camera_model, lat, lon, captured))
+        .find_map(|tag| exif_capture_unix(&field, tag));
+    (camera_model, lat, lon, captured)
 }
 
 /// EXIF wall-clock time with its OffsetTime* companion when present, else read
 /// in the machine's zone (what the camera clock meant). Out-of-range or
 /// placeholder ("0000:00:00 …") values yield None.
-fn exif_capture_unix(exif: &exif::Exif, tag: exif::Tag) -> Option<f64> {
-    let text = match &exif.get_field(tag, exif::In::PRIMARY)?.value {
-        exif::Value::Ascii(parts) => String::from_utf8_lossy(parts.first()?).into_owned(),
-        _ => return None,
+fn exif_capture_unix<'a>(field: &impl Fn(exif::Tag) -> Option<&'a exif::Field>, tag: exif::Tag) -> Option<f64> {
+    let ascii = |tag: exif::Tag| match &field(tag)?.value {
+        exif::Value::Ascii(parts) => parts.first().map(|p| String::from_utf8_lossy(p).into_owned()),
+        _ => None,
     };
+    let text = ascii(tag)?;
     let (offset_tag, subsec_tag) = if tag == exif::Tag::DateTimeOriginal {
         (exif::Tag::OffsetTimeOriginal, exif::Tag::SubSecTimeOriginal)
     } else {
         (exif::Tag::OffsetTimeDigitized, exif::Tag::SubSecTimeDigitized)
-    };
-    let ascii = |tag: exif::Tag| {
-        exif.get_field(tag, exif::In::PRIMARY).and_then(|field| match &field.value {
-            exif::Value::Ascii(parts) => parts.first().map(|p| String::from_utf8_lossy(p).into_owned()),
-            _ => None,
-        })
     };
     let seconds = exif_datetime_to_unix(&text, ascii(offset_tag).as_deref(), chrono::Utc::now().timestamp() as f64)?;
     Some(seconds + ascii(subsec_tag).as_deref().map_or(0.0, exif_subsec_fraction))
@@ -3037,14 +3074,34 @@ pub(crate) fn exif_subsec_fraction(text: &str) -> f64 {
 }
 
 pub(crate) fn exif_datetime_to_unix(text: &str, offset: Option<&str>, now_unix: f64) -> Option<f64> {
+    exif_datetime_in(text, offset, now_unix, &chrono::Local)
+}
+
+/// Like macOS `Tagging.exifCaptureDate`: a wall time that occurs twice when
+/// clocks fall back reads as the later (standard-time) instant, and one that
+/// never occurs when they spring forward is rejected.
+fn exif_datetime_in<Tz: chrono::TimeZone>(text: &str, offset: Option<&str>, now_unix: f64, zone: &Tz) -> Option<f64> {
     use chrono::TimeZone;
     let naive = chrono::NaiveDateTime::parse_from_str(text.trim().trim_end_matches('\0'), "%Y:%m:%d %H:%M:%S").ok()?;
-    let unix = match offset.and_then(|o| o.trim().parse::<chrono::FixedOffset>().ok()) {
-        Some(zone) => zone.from_local_datetime(&naive).single()?.timestamp(),
-        None => chrono::Local.from_local_datetime(&naive).earliest()?.timestamp(),
+    let unix = match offset.and_then(exif_offset) {
+        Some(fixed) => fixed.from_local_datetime(&naive).single()?.timestamp(),
+        None => zone.from_local_datetime(&naive).latest()?.timestamp(),
     } as f64;
     // Before 1990 is almost always a reset camera clock; the future is a wrong one.
     (unix >= 631_152_000.0 && unix <= now_unix + 86_400.0).then_some(unix)
+}
+
+/// `±HH:MM`, the only OffsetTime* form macOS accepts.
+fn exif_offset(text: &str) -> Option<chrono::FixedOffset> {
+    let text = text.trim();
+    let sign = match text.as_bytes() {
+        [b'+', _, _, _, _, _] => 1,
+        [b'-', _, _, _, _, _] => -1,
+        _ => return None,
+    };
+    let hours: i32 = text.get(1..3)?.parse().ok()?;
+    let minutes: i32 = text.get(4..6)?.parse().ok()?;
+    chrono::FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60))
 }
 
 /// EXIF for an image too large to read fully into memory: the APP1 segment
@@ -3060,9 +3117,13 @@ fn exif_from_head(path: &std::path::Path) -> Option<ExifFields> {
     Some(parse_exif_fields(&head).unwrap_or((None, None, None, None)))
 }
 
-fn read_gps_coord(exif: &exif::Exif, value_tag: exif::Tag, ref_tag: exif::Tag) -> Option<f64> {
-    let value_field = exif.get_field(value_tag, exif::In::PRIMARY)?;
-    let ref_field = exif.get_field(ref_tag, exif::In::PRIMARY)?;
+fn read_gps_coord<'a>(
+    field: &impl Fn(exif::Tag) -> Option<&'a exif::Field>,
+    value_tag: exif::Tag,
+    ref_tag: exif::Tag,
+) -> Option<f64> {
+    let value_field = field(value_tag)?;
+    let ref_field = field(ref_tag)?;
 
     let dms = match &value_field.value {
         exif::Value::Rational(r) if r.len() >= 3 => [
@@ -3074,8 +3135,11 @@ fn read_gps_coord(exif: &exif::Exif, value_tag: exif::Tag, ref_tag: exif::Tag) -
     };
     let mut decimal = dms[0] + dms[1] / 60.0 + dms[2] / 3600.0;
 
-    let ref_str = ref_field.display_value().to_string();
-    if ref_str.starts_with('S') || ref_str.starts_with('W') {
+    let hemisphere = match &ref_field.value {
+        exif::Value::Ascii(parts) => parts.first().and_then(|part| part.first()).copied(),
+        _ => None,
+    };
+    if matches!(hemisphere, Some(b'S' | b'W')) {
         decimal = -decimal;
     }
     Some(decimal)
@@ -3795,6 +3859,66 @@ mod tests {
         for (text, want) in [("5", 0.5), ("123", 0.123), (" 07\0", 0.07), ("", 0.0), ("ab", 0.0)] {
             assert!((exif_subsec_fraction(text) - want).abs() < 1e-9, "{text:?}");
         }
+        for malformed in ["+0200", "+02", "Z", "02:00", "+02:00:00"] {
+            assert_eq!(exif_offset(malformed), None, "{malformed}");
+        }
+        assert_eq!(exif_offset(" -05:30 "), chrono::FixedOffset::west_opt(5 * 3_600 + 30 * 60));
+    }
+
+    /// America/Chicago in 2026: CDT from 2026-03-08 08:00 UTC to 2026-11-01 07:00 UTC.
+    #[derive(Clone, Copy)]
+    struct Chicago2026;
+
+    impl Chicago2026 {
+        const SPRING: i64 = 1_772_956_800;
+        const FALL: i64 = 1_793_516_400;
+
+        fn at(utc: i64) -> chrono::FixedOffset {
+            let hours = if (Self::SPRING..Self::FALL).contains(&utc) { 5 } else { 6 };
+            chrono::FixedOffset::west_opt(hours * 3_600).unwrap()
+        }
+    }
+
+    impl chrono::TimeZone for Chicago2026 {
+        type Offset = chrono::FixedOffset;
+        fn from_offset(_: &chrono::FixedOffset) -> Self {
+            Chicago2026
+        }
+        fn offset_from_local_date(&self, local: &chrono::NaiveDate) -> chrono::MappedLocalTime<chrono::FixedOffset> {
+            self.offset_from_local_datetime(&local.and_hms_opt(12, 0, 0).unwrap())
+        }
+        fn offset_from_local_datetime(&self, local: &chrono::NaiveDateTime) -> chrono::MappedLocalTime<chrono::FixedOffset> {
+            let wall = local.and_utc().timestamp();
+            let [cdt, cst] = [5, 6].map(|hours| chrono::FixedOffset::west_opt(hours * 3_600).unwrap());
+            let fits = |offset: chrono::FixedOffset| Self::at(wall - i64::from(offset.local_minus_utc())) == offset;
+            match (fits(cdt), fits(cst)) {
+                (true, true) => chrono::MappedLocalTime::Ambiguous(cdt, cst),
+                (true, false) => chrono::MappedLocalTime::Single(cdt),
+                (false, true) => chrono::MappedLocalTime::Single(cst),
+                (false, false) => chrono::MappedLocalTime::None,
+            }
+        }
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> chrono::FixedOffset {
+            Self::at(utc.and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp())
+        }
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            Self::at(utc.and_utc().timestamp())
+        }
+    }
+
+    /// Values macOS `Tagging.exifCaptureDate` returns in America/Chicago: the
+    /// repeated 01:30 on 2026-11-01 is the CST instant, the skipped 02:30 on
+    /// 2026-03-08 is no date, and its neighbours are unchanged.
+    #[test]
+    fn exif_wall_times_across_daylight_saving_match_macos() {
+        let now = 1_900_000_000.0;
+        let at = |text: &str| exif_datetime_in(text, None, now, &Chicago2026);
+        assert_eq!(at("2026:11:01 01:30:00"), Some(1_793_518_200.0));
+        assert_eq!(at("2026:11:01 00:59:59"), Some(1_793_512_799.0));
+        assert_eq!(at("2026:11:01 02:00:00"), Some(1_793_520_000.0));
+        assert_eq!(at("2026:03:08 02:30:00"), None);
+        assert_eq!(at("2026:03:08 03:30:00"), Some(1_772_958_600.0));
+        assert_eq!(exif_datetime_in("2026:11:01 01:30:00", Some("-05:00"), now, &Chicago2026), Some(1_793_514_600.0));
     }
 
     #[test]
