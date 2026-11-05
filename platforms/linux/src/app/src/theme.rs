@@ -629,6 +629,11 @@ button.v3-cite.selected { background-color: alpha(@fileid_gold, 0.12); border-co
 .v3-message { padding-left: 12px; }
 .v3-message.you { box-shadow: inset 2px 0 alpha(@fileid_gold, 0.5); }
 .v3-message.model { box-shadow: inset 2px 0 alpha(@fileid_lavender, 0.5); }
+.v3-action-cards { margin-left: 12px; }
+.v3-action-card { padding: 12px; border-radius: 8px; background-color: alpha(#FFFFFF, 0.035); border: 1px solid alpha(@fileid_cyan, 0.35); }
+.v3-action-card.accent-gold { border-color: alpha(@fileid_gold, 0.35); }
+.v3-action-card.accent-danger { border-color: alpha(@fileid_danger, 0.35); }
+.v3-action-well { padding: 10px; border-radius: 6px; background-color: alpha(#000000, 0.22); }
 textview.v3-composer, textview.v3-composer > text { background-color: transparent; color: @fileid_text1; font-size: 13.5px; }
 .v3-composer-frame { min-height: 30px; padding: 5px 8px; border-radius: 6px; background-color: alpha(#000000, 0.3); border: 1px solid alpha(#FFFFFF, 0.14); }
 button.v3-suggestion {
