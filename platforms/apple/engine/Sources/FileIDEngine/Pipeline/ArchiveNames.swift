@@ -20,10 +20,22 @@ enum ArchiveNames {
         guard let eocd = stride(from: bytes.count - 22, through: 0, by: -1).first(where: {
             bytes[$0] == 0x50 && bytes[$0 + 1] == 0x4B && bytes[$0 + 2] == 0x05 && bytes[$0 + 3] == 0x06
         }) else { return nil }
-        let entries = Int(le16(bytes, eocd + 10)), length = UInt64(le32(bytes, eocd + 12)), offset = UInt64(le32(bytes, eocd + 16))
-        // ZIP64 archives store 0xFFFFFFFF here; they are rare for user archives and left unlisted.
-        guard length > 0, length <= UInt64(maxDirectoryBytes), offset != 0xFFFF_FFFF,
-              offset + length <= size - tailLength + UInt64(eocd),
+        var entries = Int(le16(bytes, eocd + 10)), length = UInt64(le32(bytes, eocd + 12)), offset = UInt64(le32(bytes, eocd + 16))
+        let eocdOffset = size - tailLength + UInt64(eocd)
+        if entries == 0xFFFF || length == 0xFFFF_FFFF || offset == 0xFFFF_FFFF {
+            // ZIP64: a locator just before the end record points at the 64-bit end record.
+            guard eocd >= 20, bytes[eocd - 20] == 0x50, bytes[eocd - 19] == 0x4B, bytes[eocd - 18] == 0x06, bytes[eocd - 17] == 0x07,
+                  let record64 = le64(bytes, eocd - 12).flatMap({ $0 < eocdOffset ? $0 : nil }),
+                  (try? handle.seek(toOffset: record64)) != nil,
+                  let raw = try? handle.read(upToCount: 56), raw.count == 56 else { return nil }
+            let r = [UInt8](raw)
+            guard r[0] == 0x50, r[1] == 0x4B, r[2] == 0x06, r[3] == 0x06,
+                  let count = le64(r, 32), let dirLength = le64(r, 40), let dirOffset = le64(r, 48),
+                  count <= UInt64(Int.max) else { return nil }
+            entries = Int(count); length = dirLength; offset = dirOffset
+        }
+        guard length > 0, length <= UInt64(maxDirectoryBytes),
+              offset.addingReportingOverflow(length).overflow == false, offset + length <= eocdOffset,
               (try? handle.seek(toOffset: offset)) != nil,
               let directory = try? handle.read(upToCount: Int(length)), directory.count == Int(length) else { return nil }
         let dir = [UInt8](directory)
@@ -42,6 +54,10 @@ enum ArchiveNames {
         return names.isEmpty ? nil : names.joined(separator: "\n")
     }
 
+    private static func le64(_ b: [UInt8], _ i: Int) -> UInt64? {
+        guard i >= 0, i + 8 <= b.count else { return nil }
+        return (0..<8).reduce(UInt64(0)) { $0 | UInt64(b[i + $1]) << (8 * UInt64($1)) }
+    }
     private static func le16(_ b: [UInt8], _ i: Int) -> UInt16 { UInt16(b[i]) | UInt16(b[i + 1]) << 8 }
     private static func le32(_ b: [UInt8], _ i: Int) -> UInt32 {
         UInt32(b[i]) | UInt32(b[i + 1]) << 8 | UInt32(b[i + 2]) << 16 | UInt32(b[i + 3]) << 24

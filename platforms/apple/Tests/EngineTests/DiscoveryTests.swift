@@ -339,3 +339,31 @@ struct FileTypeTableTests {
                 "purge needles must use the stored-row form, /private included")
     }
 }
+
+@Suite("Discovery shortfall notice")
+struct DiscoveryShortfallTests {
+    @Test("unreadable folders and oversized files produce one plain notice; a clean walk none")
+    func shortfall() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDShortfall-\(UUID().uuidString)")
+        let locked = tmp.appendingPathComponent("locked")
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        try Data("x".utf8).write(to: tmp.appendingPathComponent("a.jpg"))
+        try Data(count: 2 * 1024 * 1024).write(to: tmp.appendingPathComponent("huge.tif"))
+        try Data("y".utf8).write(to: locked.appendingPathComponent("b.jpg"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+
+        let discovery = Discovery()
+        _ = await discovery.walk(root: tmp, maxSizeMB: 1)
+        let shortfall = await discovery.lastShortfall
+        #expect(shortfall.oversizedFiles == 1)
+        #expect(shortfall.unreadablePaths >= 1)
+        let notice = try #require(Discovery.shortfallNotice(shortfall, maxSizeMB: 1))
+        #expect(notice.kind == "discovery_partial")
+        #expect(notice.message.contains("over 1 MB") && notice.message.contains("couldn't be opened"))
+        #expect(Discovery.shortfallNotice(Discovery.Shortfall()) == nil)
+    }
+}

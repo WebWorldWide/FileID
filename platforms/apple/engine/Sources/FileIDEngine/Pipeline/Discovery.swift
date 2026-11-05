@@ -41,6 +41,27 @@ public struct DiscoveredFile: Sendable {
 
 public actor Discovery {
 
+    /// Plain-language notice for the app, or nil when the walk was complete.
+    /// Kind `discovery_partial` mirrors the shared engine's notice.
+    public static func shortfallNotice(_ s: Shortfall, maxSizeMB: Int = 500) -> EngineError? {
+        var parts: [String] = []
+        if s.unreadablePaths > 0 {
+            parts.append("\(s.unreadablePaths) \(s.unreadablePaths == 1 ? "item" : "items") couldn't be opened (no permission, or removed during the scan)")
+        }
+        if s.oversizedFiles > 0 {
+            parts.append("\(s.oversizedFiles) \(s.oversizedFiles == 1 ? "file is" : "files are") over \(maxSizeMB) MB and \(s.oversizedFiles == 1 ? "was" : "were") left out")
+        }
+        guard !parts.isEmpty else { return nil }
+        return EngineError(kind: "discovery_partial", message: parts.joined(separator: "; ") + ". Everything else was scanned.")
+    }
+
+    /// What the last walk could not include: unreadable paths and files over the size cap.
+    public struct Shortfall: Sendable, Equatable {
+        public var unreadablePaths = 0
+        public var oversizedFiles = 0
+    }
+    public private(set) var lastShortfall = Shortfall()
+
     public struct Progress: Sendable {
         public let discovered: Int
         public let isComplete: Bool
@@ -232,6 +253,7 @@ public actor Discovery {
         // non-fatal `discovery_partial` summary below, mirroring the Windows engine
         // (scan_session.rs error_count → "discovery_partial").
         var discoveryErrorCount = 0
+        var oversizedCount = 0
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: resourceKeys,
@@ -280,6 +302,7 @@ public actor Discovery {
             // Video, audio and other files are never decoded whole, so the size cap does not apply.
             let streamed = fileKind == .video || fileKind == .audio || fileKind == .other
             if size > maxBytes, !streamed {
+                oversizedCount += 1
                 JSONLog.shared.info(ev: "skip_large_file", path: redactPathForLog(url.path),
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
                 continue
@@ -329,6 +352,7 @@ public actor Discovery {
         // the app (Settings → Logs) can tell the user the library may be incomplete
         // instead of silently dropping them. Mirrors the Windows `discovery_partial`
         // event (scan_session.rs); the scan still completes.
+        lastShortfall = Shortfall(unreadablePaths: discoveryErrorCount, oversizedFiles: oversizedCount)
         if discoveryErrorCount > 0 {
             JSONLog.shared.info(ev: "discovery_partial",
                                 path: redactPathForLog(root.path),

@@ -4,7 +4,7 @@ import Testing
 
 @Suite("Zip entry names")
 struct ArchiveNamesTests {
-    private func makeZip(in dir: URL, files: [String: String], comment: String? = nil) throws -> URL {
+    private func makeZip(in dir: URL, files: [String: String], comment: String? = nil, zip64: Bool = false) throws -> URL {
         for (name, body) in files {
             let url = dir.appendingPathComponent("src").appendingPathComponent(name)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -14,7 +14,7 @@ struct ArchiveNamesTests {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
         process.currentDirectoryURL = dir.appendingPathComponent("src")
-        process.arguments = ["-qr", zip.path, "."] + (comment == nil ? [] : ["-z"])
+        process.arguments = ["-qr"] + (zip64 ? ["-fz"] : []) + [zip.path, "."] + (comment == nil ? [] : ["-z"])
         let input = Pipe()
         process.standardInput = input
         try process.run()
@@ -34,6 +34,18 @@ struct ArchiveNamesTests {
         let names = Set(try #require(ArchiveNames.list(url: zip)).split(separator: "\n").map(String.init))
         #expect(names.contains("notes/jeff-rule-changes.txt") && names.contains("photo.jpg"))
         #expect(!names.contains(where: { $0.hasSuffix("/") || $0.contains("DS_Store") }))
+    }
+
+    @Test("ZIP64 archives are listed too")
+    func listsZip64() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDZip64-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let zip = try makeZip(in: dir, files: ["big/report.rpt": "r", "notes.txt": "n"], zip64: true)
+        let raw = try Data(contentsOf: zip)
+        #expect(raw.range(of: Data([0x50, 0x4B, 0x06, 0x06])) != nil, "fixture must carry a ZIP64 end record")
+        let names = Set(try #require(ArchiveNames.list(url: zip)).split(separator: "\n").map(String.init))
+        #expect(names == ["big/report.rpt", "notes.txt"])
     }
 
     @Test("corrupt or truncated zips return nil without crashing")
