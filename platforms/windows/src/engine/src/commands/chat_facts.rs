@@ -470,14 +470,44 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
         let ordered = if question.explicit_order { format!("{} ", question.order) } else { String::new() };
         return Ok((format!("The {number}{ordered}{}{qualifiers}: {names}.", noun(&kinds, top)), hits));
     }
+    if let Some(unit) = &question.breakdown {
+        let mut args = Vec::new();
+        let clause = filter.clause(&mut args);
+        let format = if unit == "year" { "%Y" } else { "%Y-%m" };
+        let mut statement = conn.prepare(&format!(
+            "SELECT strftime('{format}',{TAKEN},'unixepoch','localtime') AS g,COUNT(*) AS c,COALESCE(SUM(f.size_bytes),0) AS b FROM files f WHERE {clause} GROUP BY g ORDER BY g IS NULL,g DESC"
+        ))?;
+        let groups = statement
+            .query_map(rusqlite::params_from_iter(args), |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let parts: Vec<String> = groups
+            .iter()
+            .take(24)
+            .map(|(label, n, b)| {
+                let label = label.as_deref().unwrap_or("no date");
+                if question.measure == "size" { format!("{label}: {}", bytes_label(*b)) } else { format!("{label}: {}", count_label(*n)) }
+            })
+            .collect();
+        let more = if groups.len() > 24 { format!(" and {} more", groups.len() - 24) } else { String::new() };
+        return Ok((format!("{}{qualifiers} by {unit}: {}{more}.", capitalized(&noun(&kinds, 2)), parts.join(", ")), hits));
+    }
     let message = match question.measure.as_str() {
-        "size" => format!(
-            "{}{qualifiers} use {} ({} {}).",
-            capitalized(&noun(&kinds, 2)),
-            bytes_label(bytes),
-            count_label(count),
-            noun(&kinds, count)
-        ),
+        "size" => {
+            let largest = if question.explicit_order && question.order == "largest" && !hits.is_empty() {
+                let names: Vec<String> =
+                    hits.iter().take(3).map(|hit| format!("{} ({})", file_name(&hit.path), hit.text.split(" · ").next().unwrap_or_default())).collect();
+                format!(" Largest: {}.", names.join(", "))
+            } else {
+                String::new()
+            };
+            format!(
+                "{}{qualifiers} use {} ({} {}).{largest}",
+                capitalized(&noun(&kinds, 2)),
+                bytes_label(bytes),
+                count_label(count),
+                noun(&kinds, count)
+            )
+        }
         "count" => format!("Found {} {}{qualifiers}, using {}.", count_label(count), noun(&kinds, count), bytes_label(bytes)),
         _ => {
             let order = if question.explicit_order { format!(" {} first.", capitalized(&question.order)) } else { String::new() };
@@ -488,10 +518,11 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
 }
 
 /// Words that only join a subject to the question ("about taxes", "photos showing a dog").
-const SUBJECT_FILLERS: [&str; 39] = [
+const SUBJECT_FILLERS: [&str; 49] = [
     "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show", "containing",
     "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where", "who", "me", "my", "i", "do",
-    "does", "have", "has", "s", "",
+    "does", "have", "has", "s", "mentioning", "mention", "mentions", "named", "called", "titled", "labeled", "labelled", "regarding",
+    "related", "",
 ];
 pub(crate) const SUBJECT_LIMIT: usize = 200_000;
 

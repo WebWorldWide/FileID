@@ -164,7 +164,8 @@ impl SearchPlan {
             "find", "show", "me", "please", "search", "for", "from", "at", "around", "near", "the", "a", "an", "where",
             "of", "my", "files", "file", "with", "in", "all", "only", "just", "now", "these", "those", "instead",
             "also", "and", "what", "whats", "which", "who", "is", "are", "was", "were", "do", "does", "did", "have", "has",
-            "there", "any", "about", "that", "i", "ones",
+            "there", "any", "about", "that", "i", "mentioning", "mention", "mentions", "named", "called", "titled",
+            "regarding", "ones",
         ];
         let refinement = follow_up
             || normalized

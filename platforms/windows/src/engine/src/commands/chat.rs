@@ -1302,6 +1302,9 @@ mod tests {
         assert_eq!(ask("e", "files bigger than 1 GB"), ("Found 1 file over 1.0 GB.".into(), vec![304]));
         let (message, hits) = ask("f", "beach or sunset photos");
         assert_eq!((message.as_str(), hits.len()), ("Found 3 matches for “beach or sunset” (photos).", 3));
+        assert_eq!(ask("h", "how many photos per year?").0, "Photos by year: 2023: 3, 2019: 68, 2018: 182.");
+        assert_eq!(ask("i", "photos from summer 2023").0, "Found 3 photos from summer 2023.");
+        assert_eq!(ask("j", "what's taking up the most space?").0, "Files use 2.5 GB (254 files). Largest: surf.mov (2.5 GB), c.arw (9.0 KB), b.jpg (5.0 KB).");
         ask("g", "dog photos");
         assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
     }

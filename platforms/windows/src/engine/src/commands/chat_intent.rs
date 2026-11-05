@@ -80,6 +80,9 @@ pub struct Question {
     pub min_bytes: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<i64>,
+    /// "per year" / "by month": counts grouped by "year" or "month".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breakdown: Option<String>,
 }
 
 impl Default for Question {
@@ -97,6 +100,7 @@ impl Default for Question {
             limit: None,
             min_bytes: None,
             max_bytes: None,
+            breakdown: None,
         }
     }
 }
@@ -104,7 +108,7 @@ impl Default for Question {
 impl Question {
     pub fn structured(&self) -> bool {
         self.measure != "list" || self.explicit_order || self.date.is_some() || self.folder.is_some() || self.duplicates || self.undescribed || self.formats.is_some()
-            || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some()
+            || self.limit.is_some() || self.min_bytes.is_some() || self.max_bytes.is_some() || self.breakdown.is_some()
     }
 }
 
@@ -570,6 +574,42 @@ pub fn parse_question(text: &str) -> Question {
             break;
         }
     }
+    for index in 0..words.len().saturating_sub(1) {
+        if !["per", "by", "each", "every"].contains(&words[index].as_str()) {
+            continue;
+        }
+        let unit = words[index + 1].as_str();
+        if ["size", "sizes"].contains(&unit) && !question.explicit_order {
+            question.order = "largest".into();
+            question.explicit_order = true;
+            mark(&mut used, index..index + 2);
+        } else if ["date", "time"].contains(&unit) && !question.explicit_order {
+            question.order = "newest".into();
+            question.explicit_order = true;
+            mark(&mut used, index..index + 2);
+        } else if ["year", "years", "month", "months"].contains(&unit) {
+            question.breakdown = Some(if unit.starts_with("year") { "year" } else { "month" }.into());
+            if question.measure == "list" {
+                question.measure = "count".into();
+            }
+            mark(&mut used, index..index + 2);
+        }
+    }
+    if has(&words, &["yearly", "annually"]) {
+        question.breakdown = Some("year".into());
+        if question.measure == "list" {
+            question.measure = "count".into();
+        }
+        for (index, word) in words.iter().enumerate() {
+            if word == "yearly" || word == "annually" {
+                used.insert(index);
+            }
+        }
+    }
+    if question.measure == "size" && words.iter().any(|word| word == "most") && !question.explicit_order {
+        question.order = "largest".into();
+        question.explicit_order = true;
+    }
     if let Some((minimum, maximum, range)) = size_bounds(&words) {
         question.min_bytes = minimum;
         question.max_bytes = maximum;
@@ -899,6 +939,17 @@ fn date_at(words: &[String], index: usize) -> Option<Span> {
             }
             return Some(month_day(m, d, 1));
         }
+    }
+    let season = match word {
+        "spring" => Some(3),
+        "summer" => Some(6),
+        "fall" | "autumn" => Some(9),
+        "winter" => Some(12),
+        _ => None,
+    };
+    if let (Some(first), Some(y)) = (season, year(next)) {
+        let start = format!("{y:04}-{first:02}-01");
+        return Some(Span { filter: exact(vec![start.clone()], vec![start, "+3 months".into()], format!("{word} {y}")), length: 2 });
     }
     if let Some(m) = month(word) {
         if let Some(d) = day(next) {
