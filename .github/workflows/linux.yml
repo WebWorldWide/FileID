@@ -275,6 +275,15 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Display tests (Xvfb)
+        # Widget-tree tests need a display; state goes to a throwaway folder.
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends xvfb
+          export XDG_DATA_HOME="$RUNNER_TEMP/xdg-data" XDG_CONFIG_HOME="$RUNNER_TEMP/xdg-config"
+          mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME"
+          xvfb-run -a cargo test --locked -- --ignored --exact tabs::model_catalog::tests::locations_move_to_the_top_of_settings
+
       - name: Verify binary exists
         run: |
           set -euo pipefail
