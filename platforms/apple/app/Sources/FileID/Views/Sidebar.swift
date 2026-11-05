@@ -189,11 +189,24 @@ struct Sidebar: View {
     }
 
     @ViewBuilder
+    /// Readable titles for engine notices; unknown kinds keep their code so they stay searchable in logs.
+    static func errorTitle(_ kind: String) -> String {
+        switch kind {
+        case "discovery_partial": return "Some files were left out"
+        case "empty_folder": return "No files to scan"
+        case "scan_failed": return "The scan stopped"
+        case "db_unavailable": return "The library couldn't be opened"
+        case "model_load_failed": return "An AI model didn't load"
+        case "restructure_busy": return "A folder move is already running"
+        default: return kind
+        }
+    }
+
     private func engineErrorRow(_ err: EngineError) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
-                Text(err.kind).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
+                Text(Self.errorTitle(err.kind)).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
                 Text(err.message).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
             }
             Spacer(minLength: 4)

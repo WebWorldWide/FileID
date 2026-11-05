@@ -13,6 +13,10 @@ fn le16(b: &[u8], i: usize) -> u16 {
     u16::from_le_bytes([b[i], b[i + 1]])
 }
 
+fn le64(b: &[u8], i: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(b.get(i..i + 8)?.try_into().ok()?))
+}
+
 fn le32(b: &[u8], i: usize) -> u32 {
     u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]])
 }
@@ -32,15 +36,27 @@ pub(crate) fn list(path: &Path) -> Option<String> {
     let mut tail = vec![0u8; tail_len as usize];
     file.read_exact(&mut tail).ok()?;
     let eocd = (0..=tail.len() - 22).rev().find(|&i| tail[i..i + 4] == [0x50, 0x4B, 0x05, 0x06])?;
-    let entries = le16(&tail, eocd + 10) as usize;
-    let length = u64::from(le32(&tail, eocd + 12));
-    let offset = u64::from(le32(&tail, eocd + 16));
-    // ZIP64 archives store 0xFFFFFFFF here; they are rare for user archives and left unlisted.
-    if length == 0
-        || length > MAX_DIRECTORY_BYTES
-        || offset == 0xFFFF_FFFF
-        || offset.checked_add(length)? > size - tail_len + eocd as u64
-    {
+    let mut entries = le16(&tail, eocd + 10) as usize;
+    let mut length = u64::from(le32(&tail, eocd + 12));
+    let mut offset = u64::from(le32(&tail, eocd + 16));
+    let eocd_offset = size - tail_len + eocd as u64;
+    if entries == 0xFFFF || length == 0xFFFF_FFFF || offset == 0xFFFF_FFFF {
+        // ZIP64: a locator just before the end record points at the 64-bit end record.
+        if eocd < 20 || tail[eocd - 20..eocd - 16] != [0x50, 0x4B, 0x06, 0x07] {
+            return None;
+        }
+        let record = le64(&tail, eocd - 12).filter(|&r| r < eocd_offset)?;
+        file.seek(SeekFrom::Start(record)).ok()?;
+        let mut r = [0u8; 56];
+        file.read_exact(&mut r).ok()?;
+        if r[0..4] != [0x50, 0x4B, 0x06, 0x06] {
+            return None;
+        }
+        entries = usize::try_from(le64(&r, 32)?).ok()?;
+        length = le64(&r, 40)?;
+        offset = le64(&r, 48)?;
+    }
+    if length == 0 || length > MAX_DIRECTORY_BYTES || offset.checked_add(length)? > eocd_offset {
         return None;
     }
     file.seek(SeekFrom::Start(offset)).ok()?;
@@ -80,6 +96,11 @@ mod tests {
 
     #[cfg(unix)]
     fn zip_with(dir: &Path, files: &[&str]) -> std::path::PathBuf {
+        zip_with_flags(dir, files, &[])
+    }
+
+    #[cfg(unix)]
+    fn zip_with_flags(dir: &Path, files: &[&str], flags: &[&str]) -> std::path::PathBuf {
         let src = dir.join("src");
         for name in files {
             let p = src.join(name);
@@ -87,9 +108,23 @@ mod tests {
             std::fs::write(&p, name.as_bytes()).unwrap();
         }
         let zip = dir.join("bundle.zip");
-        let status = std::process::Command::new("zip").arg("-qr").arg(&zip).arg(".").current_dir(&src).status();
+        let status = std::process::Command::new("zip").arg("-qr").args(flags).arg(&zip).arg(".").current_dir(&src).status();
         assert!(status.is_ok_and(|s| s.success()), "zip tool needed for this test");
         zip
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lists_zip64_archives() {
+        let dir = std::env::temp_dir().join(format!("fileid-zip64-{}-{}", std::process::id(), uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip = zip_with_flags(&dir, &["big/report.rpt", "notes.txt"], &["-fz"]);
+        let raw = std::fs::read(&zip).unwrap();
+        assert!(raw.windows(4).any(|w| w == [0x50, 0x4B, 0x06, 0x06]), "fixture must carry a ZIP64 end record");
+        let listed = list(&zip).unwrap();
+        let names: std::collections::HashSet<&str> = listed.lines().collect();
+        assert_eq!(names, ["big/report.rpt", "notes.txt"].into_iter().collect());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

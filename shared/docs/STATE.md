@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-05 (late night) — ZIP64 zips, scan shortfall notice, 1M-file search measured; four agents on the ports
+
+- Zip listing (both engines) now reads ZIP64 archives too (the 64-bit end record via its locator); tests use `zip -fz` fixtures. The owner approved a DocText digest refresh for zip listing, but it was not needed: the reader is plain Swift/Rust over the central directory, with no subprocess.
+- The Mac engine tells the user when a scan left something out (unreadable items, files over the 500 MB cap) with the shared engine's `discovery_partial` notice; sidebar notices now have readable titles.
+- Keyword search at a million files measured on a synthetic catalog: 0.16–0.66 s; a trigram index was prototyped and declined (DECISIONS.md).
+- Started four agents in separate worktrees (`~/Library/Developer/FileIDWorktrees`): GTK port gaps, shared-engine audit items, Mac text size and list scrolling, WinUI port gaps.
+
 ## 2026-11-05 (night) — Other files cataloged; photos that time out are retried in the same scan; old catalogs get EXIF dates; Cleanup Undo survives restarts
 
 - **Other files:** archives, installers and unknown types (`.zip`, `.rpt`, `.one`, `.gdoc`, extensionless files) are now `kind='other'` rows in both engines: name, size, dates and a content hash, so they count, search by name, show in Duplicates and are seen by Organize Folders. Never cataloged: unfinished downloads, scratch and SQLite temporary files, system files (Thumbs.db, desktop.ini), and FileID's own state folder when it sits inside a scanned folder. The Mac Library shows an "Other" filter when there are any. Verified on a scratch folder (zip and LICENSE cataloged with hashes; `.part` and Thumbs.db skipped; no follow-up pass triggered by the engine's own catalog writes).

@@ -1780,6 +1780,9 @@ struct FileIDEngineMain {
                             discoveryDur > 0 ? Double(discovered) / discoveryDur : 0)
                     ])
                 await sink.emit(.discoveryComplete(totalFiles: discovered))
+                if let notice = Discovery.shortfallNotice(await discovery.lastShortfall) {
+                    await sink.emit(.error(notice))
+                }
             }
             // Workers — N concurrent. Each pulls files until the channel
             // closes, processes via the Vision pool, pushes to tagged.
