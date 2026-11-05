@@ -72,7 +72,7 @@ public sealed class MomentsPresentationTests
         Assert.True(MomentTimelinePolicy.IsCurrent(chapters[0], 15, playing: true));
         Assert.False(MomentTimelinePolicy.IsCurrent(chapters[0], 15, playing: false));
         Assert.True(MomentTimelinePolicy.IsCurrent(chapters[1], 40.2, playing: true));
-        Assert.Equal("2 chapters, playhead at 0:15", MomentTimelinePolicy.LaneSpoken(2, 15));
+        Assert.Equal("2 chapters, playhead at 0:15", MomentTimelinePolicy.LaneSpoken(MomentTimelinePolicy.LaneValue(2), 15));
         Assert.Equal("None", MomentTimelinePolicy.LaneValue(0));
         Assert.Equal("0:15 / 1:40", MomentTimelinePolicy.PlayerMeta(15, 100));
     }
@@ -87,4 +87,44 @@ public sealed class MomentsPresentationTests
         Assert.StartsWith("Suggested chapters come from a few frames", MomentTimelinePolicy.DraftNote(new[] { Chapter(0, 1, model: "timeline-chapter-suggestion-v1/x") }), StringComparison.Ordinal);
         Assert.Null(MomentTimelinePolicy.DraftNote(new[] { Chapter(0, 1, userEdited: true), Chapter(0, 1, stale: true) }));
     }
+
+    [Fact]
+    public void LaneSpansAreClampedSortedAndMergedWithinTheGap()
+    {
+        var spans = new (double Start, double End)[] { (30, 35), (-4, 2), (10, 12), (11, 15), (double.NaN, 3), (16, double.NaN), (90, 120), (50, 40) };
+        var merged = MomentTimelinePolicy.MergeSpans(spans, 100);
+        Assert.Equal("0-2 10-15 16-16 30-35 50-50 90-100", Describe(merged));
+        Assert.Equal("0-2 10-16 30-35 50-50 90-100", Describe(MomentTimelinePolicy.MergeSpans(spans, 100, gap: 1)));
+        Assert.Equal("0-35 50-50 90-100", Describe(MomentTimelinePolicy.MergeSpans(spans, 100, gap: 14)));
+        Assert.Empty(MomentTimelinePolicy.MergeSpans(Array.Empty<(double, double)>(), 100));
+        Assert.Equal(0.5, MomentTimelinePolicy.PixelSeconds(100, 200));
+        Assert.Equal(0, MomentTimelinePolicy.PixelSeconds(100, 0));
+    }
+
+    [Fact]
+    public void ExaminedPointsBecomeTicksAndSpeechKeepsAMinimumWidth()
+    {
+        Assert.Equal((9.5, 1d, true), MomentTimelinePolicy.ExaminedMark((10, 10.5), 100, 100));
+        Assert.Equal((0d, 1d, true), MomentTimelinePolicy.ExaminedMark((0, 0), 100, 100));
+        Assert.Equal((10d, 5d, false), MomentTimelinePolicy.ExaminedMark((10, 15), 100, 100));
+        Assert.Equal((20d, 2d), MomentTimelinePolicy.SpeechMark((20, 20), 100, 100));
+        Assert.Equal((20d, 10d), MomentTimelinePolicy.SpeechMark((20, 30), 100, 100));
+        Assert.Equal("Not analyzed yet", MomentTimelinePolicy.ExaminedValue(0));
+        Assert.Equal("1 sampled frame", MomentTimelinePolicy.ExaminedValue(1));
+        Assert.Equal("3 passages", MomentTimelinePolicy.SpeechValue(3));
+        Assert.Equal("None", MomentTimelinePolicy.SpeechValue(0));
+    }
+
+    [Fact]
+    public void DurationFallsBackToTheLatestEndOfAnyLane()
+    {
+        var examined = new (double Start, double End)[] { (0, 12), (55, 60) };
+        var speech = new (double Start, double End)[] { (70, 72), (double.NaN, double.NaN) };
+        Assert.Equal(72, MomentTimelinePolicy.Duration(null, new[] { Chapter(10, 20) }, examined, speech));
+        Assert.Equal(20, MomentTimelinePolicy.Duration(null, new[] { Chapter(10, 20) }));
+        Assert.Equal(30, MomentTimelinePolicy.Duration(30, new[] { Chapter(10, 20) }, examined, speech));
+    }
+
+    private static string Describe(IReadOnlyList<(double Start, double End)> spans) =>
+        string.Join(" ", spans.Select(span => FormattableString.Invariant($"{span.Start:0.##}-{span.End:0.##}")));
 }

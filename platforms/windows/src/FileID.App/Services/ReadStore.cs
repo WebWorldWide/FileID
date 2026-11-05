@@ -717,6 +717,60 @@ internal sealed class ReadStore : IAsyncDisposable, IDisposable, INotifyProperty
         finally { _gate.Release(); }
     }
 
+    /// <summary>Most spans read per lane; the timeline merges them to its pixel width anyway.</summary>
+    internal const int TimelineSpanLimit = 5000;
+
+    /// <summary>Search &amp; Moments Examined and Speech lanes (GTK moments_timeline.rs
+    /// read_coverage): sampled or verified coverage that is not speech, and current
+    /// speech passages. A catalog without these tables gives empty lanes.</summary>
+    public async Task<TimelineTracks> TimelineTracksAsync(long fileId, CancellationToken ct)
+    {
+        if (_connection == null) return TimelineTracks.Empty;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connection == null) return TimelineTracks.Empty;
+            var examined = await TimelineSpansAsync(_connection, """
+                SELECT start_seconds, end_seconds FROM catalog_coverage
+                WHERE file_id = $id AND status IN ('sampled', 'verified') AND id NOT LIKE 'speech:%'
+                ORDER BY start_seconds LIMIT $limit
+                """, fileId, ct).ConfigureAwait(false);
+            var speech = await TimelineSpansAsync(_connection, """
+                SELECT start_seconds, COALESCE(end_seconds, start_seconds) FROM catalog_passages
+                WHERE file_id = $id AND stale = 0 AND id LIKE 'speech:%' AND start_seconds IS NOT NULL
+                ORDER BY start_seconds LIMIT $limit
+                """, fileId, ct).ConfigureAwait(false);
+            return new TimelineTracks(examined, speech);
+        }
+        finally { _gate.Release(); }
+    }
+
+    private static async Task<IReadOnlyList<(double Start, double End)>> TimelineSpansAsync(
+        SqliteConnection connection, string sql, long fileId, CancellationToken ct)
+    {
+        var spans = new List<(double Start, double End)>();
+        try
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("$id", fileId);
+            cmd.Parameters.AddWithValue("$limit", TimelineSpanLimit);
+            using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+            while (await reader.ReadAsync(ct).ConfigureAwait(false))
+            {
+                if (reader.IsDBNull(0)) continue;
+                var start = reader.GetDouble(0);
+                spans.Add((start, reader.IsDBNull(1) ? start : reader.GetDouble(1)));
+            }
+        }
+        catch (SqliteException ex)
+        {
+            DebugLog.Warn("ReadStore.TimelineTracksAsync: lane unavailable: " + ex.Message);
+            spans.Clear();
+        }
+        return spans;
+    }
+
     public async Task<IReadOnlyDictionary<string, int>> KindCountsAsync(CancellationToken ct)
     {
         if (_connection == null) return new Dictionary<string, int>();
@@ -898,6 +952,14 @@ internal sealed record FileRow(
     string? ProposedName = null);
 
 internal sealed record FileRowWithScore(FileRow Row, float Score);
+
+/// <summary>Examined and Speech spans (seconds) for one video's timeline.</summary>
+internal sealed record TimelineTracks(
+    System.Collections.Generic.IReadOnlyList<(double Start, double End)> Examined,
+    System.Collections.Generic.IReadOnlyList<(double Start, double End)> Speech)
+{
+    public static TimelineTracks Empty { get; } = new(Array.Empty<(double, double)>(), Array.Empty<(double, double)>());
+}
 
 internal sealed record FileDetails(
     string? CameraModel,

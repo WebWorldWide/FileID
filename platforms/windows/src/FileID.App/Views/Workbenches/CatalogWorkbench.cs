@@ -56,6 +56,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private IReadOnlyList<CatalogHit> _lastHits = Array.Empty<CatalogHit>();
     private IReadOnlyList<CatalogChapter> _chapterList = Array.Empty<CatalogChapter>();
     private CatalogHit? _selectedHit;
+    private TimelineTracks _tracks = TimelineTracks.Empty;
+    private long _tracksRevision;
     private long? _fileID;
 
     public CatalogWorkbench() : base("Search & Moments")
@@ -326,6 +328,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     {
         _selectedHit = hit;
         _chapterList = Array.Empty<CatalogChapter>();
+        _tracks = TimelineTracks.Empty;
+        Interlocked.Increment(ref _tracksRevision);
         _evidence.Select(hit);
         _timeline.Reset();
         var selected = hit is not null;
@@ -339,6 +343,41 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         ToolTipService.SetToolTip(_playerFolder, HitPresentation.Folder(hit.Path));
         _timeline.Visibility = TakeGroupsPolicy.IsVideoPath(hit.Path) ? Visibility.Visible : Visibility.Collapsed;
         _playerMeta.Text = HitPresentation.ResultMeta(hit);
+        LoadTracks(hit);
+    }
+
+    /// <summary>Reads the Examined and Speech lanes from the read-only catalog on a worker
+    /// thread; a stale answer for an earlier selection is dropped.</summary>
+    private void LoadTracks(CatalogHit hit)
+    {
+        if (!TakeGroupsPolicy.IsVideoPath(hit.Path)) return;
+        var revision = Interlocked.Increment(ref _tracksRevision);
+        var fileID = hit.FileID;
+        var ct = Lifetime;
+        var ui = DispatcherQueue;
+        _ = DebugLog.SafeRunAsync("CatalogWorkbench.Tracks", async () =>
+        {
+            TimelineTracks tracks;
+            try
+            {
+                tracks = await Task.Run(async () =>
+                {
+                    await using var store = new ReadStore(AppPaths.DbPath);
+                    await store.OpenAsync(ct).ConfigureAwait(false);
+                    return await store.TimelineTracksAsync(fileID, ct).ConfigureAwait(false);
+                }, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            ui.TryEnqueue(() =>
+            {
+                if (ct.IsCancellationRequested || revision != Interlocked.Read(ref _tracksRevision) || _fileID != fileID) return;
+                _tracks = tracks;
+                _timeline.SetTracks(tracks.Examined, tracks.Speech, KnownDuration());
+            });
+        });
     }
 
     private void OnPlayerChanged()
@@ -349,7 +388,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             return;
         }
         _playhead.Stop();
-        _timeline.Update(MomentTimelinePolicy.Duration(null, _chapterList), 0);
+        _timeline.Update(MomentTimelinePolicy.Duration(null, _chapterList, _tracks.Examined, _tracks.Speech), 0);
         if (_selectedHit is { } hit) _playerMeta.Text = HitPresentation.ResultMeta(hit);
     }
 
@@ -373,7 +412,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             _playhead.Stop();
             return;
         }
-        _timeline.Update(MomentTimelinePolicy.Duration(natural, _chapterList), position);
+        _timeline.Update(MomentTimelinePolicy.Duration(natural, _chapterList, _tracks.Examined, _tracks.Speech), position);
         if (natural > 0) _playerMeta.Text = MomentTimelinePolicy.PlayerMeta(position, natural);
     }
 
@@ -381,11 +420,11 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     {
         try
         {
-            return MomentTimelinePolicy.Duration(_evidence.Player?.PlaybackSession.NaturalDuration.TotalSeconds, _chapterList);
+            return MomentTimelinePolicy.Duration(_evidence.Player?.PlaybackSession.NaturalDuration.TotalSeconds, _chapterList, _tracks.Examined, _tracks.Speech);
         }
         catch (Exception ex) when (ex is ObjectDisposedException or System.Runtime.InteropServices.COMException)
         {
-            return MomentTimelinePolicy.Duration(null, _chapterList);
+            return MomentTimelinePolicy.Duration(null, _chapterList, _tracks.Examined, _tracks.Speech);
         }
     }
 
@@ -446,6 +485,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             _chapters.ItemsSource = result.Chapters.Select(chapter => new ChapterItem(chapter)).ToArray();
             _chapterList = result.Status == "ok" ? result.Chapters : Array.Empty<CatalogChapter>();
             _timeline.SetChapters(_chapterList, KnownDuration());
+            if (_selectedHit is { } selected && selected.FileID == file) LoadTracks(selected);
         }, ct);
     }
     private Task SaveAsync(CancellationToken ct)
