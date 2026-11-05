@@ -97,6 +97,23 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         LibraryQueryRequested?.Invoke(this, EventArgs.Empty);
     }
 
+    private IReadOnlyList<CatalogHit>? _pendingTakeCandidates;
+
+    /// <summary>Opens Best Takes with these search results as its clip pool
+    /// (the macOS "Best takes" sheet from Search &amp; Moments).</summary>
+    public void RequestBestTakes(IReadOnlyList<CatalogHit> candidates)
+    {
+        _pendingTakeCandidates = candidates;
+        ActiveTab = SidebarTab.Takes;
+    }
+
+    public IReadOnlyList<CatalogHit>? TakeBestTakesCandidates()
+    {
+        var candidates = _pendingTakeCandidates;
+        _pendingTakeCandidates = null;
+        return candidates;
+    }
+
     public string? TakeChatDraft()
     {
         var draft = _pendingChatDraft;
