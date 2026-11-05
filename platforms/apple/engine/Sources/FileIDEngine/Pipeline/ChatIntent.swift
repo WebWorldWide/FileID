@@ -76,10 +76,12 @@ struct ChatIntent: Codable, Equatable, Sendable {
         /// "bigger than 1 GB" / "under 500 KB", in bytes (exclusive).
         var minBytes: Int64?
         var maxBytes: Int64?
+        /// "per year" / "by month": counts grouped by "year" or "month".
+        var breakdown: String?
 
         var structured: Bool {
             measure != "list" || explicitOrder || date != nil || folder != nil || duplicates || undescribed || formats != nil
-                || limit != nil || minBytes != nil || maxBytes != nil
+                || limit != nil || minBytes != nil || maxBytes != nil || breakdown != nil
         }
     }
 
@@ -475,6 +477,26 @@ struct ChatIntent: Codable, Equatable, Sendable {
                 break
             }
         }
+        for index in words.indices.dropLast() where ["per", "by", "each", "every"].contains(words[index]) {
+            let unit = words[index + 1]
+            if ["size", "sizes"].contains(unit), !question.explicitOrder {
+                question.order = "largest"; question.explicitOrder = true; used.formUnion([index, index + 1])
+            } else if ["date", "time"].contains(unit), !question.explicitOrder {
+                question.order = "newest"; question.explicitOrder = true; used.formUnion([index, index + 1])
+            } else if ["year", "years", "month", "months"].contains(unit) {
+                question.breakdown = unit.hasPrefix("year") ? "year" : "month"
+                if question.measure == "list" { question.measure = "count" }
+                used.formUnion([index, index + 1])
+            }
+        }
+        if words.contains(where: { ["yearly", "annually"].contains($0) }) {
+            question.breakdown = "year"
+            if question.measure == "list" { question.measure = "count" }
+            for (index, word) in words.enumerated() where ["yearly", "annually"].contains(word) { used.insert(index) }
+        }
+        if question.measure == "size", words.contains("most"), !question.explicitOrder {
+            question.order = "largest"; question.explicitOrder = true
+        }
         if let (minimum, maximum, range) = sizeBounds(words) {
             question.minBytes = minimum; question.maxBytes = maximum; used.formUnion(range)
         }
@@ -664,6 +686,11 @@ struct ChatIntent: Codable, Equatable, Sendable {
                 }
                 return monthDay(m, d, length: 1)
             }
+        }
+        let seasons = ["spring": 3, "summer": 6, "fall": 9, "autumn": 9, "winter": 12]
+        if let first = seasons[word], let y = year(next) {
+            let start = String(format: "%04d-%02d-01", y, first)
+            return Span(filter: exact([start], [start, "+3 months"], "\(word) \(y)"), length: 2)
         }
         if let m = month(word) {
             if let d = day(next) {

@@ -119,6 +119,15 @@ struct ChatComplexQueryTests {
             Case(text: "how many beach photos are there?") { says($0, "23 photos") },
             Case(text: "count the photos with Kyle") { says($0, "20 photos") },
             Case(text: "what's the total size of Kyle's videos?") { says($0, "2.5 GB") },
+            Case(text: "documents in Downloads mentioning invoice") { every($0, { $0.contains("invoice") }, "wrong") },
+            Case(text: "photos of Kyle sorted by size") { p in p.hits.first.map { $0.path.hasSuffix(".ARW") ? nil : "first is \($0.path)" } ?? "no hits (\(p.message))" },
+            Case(text: "find the biggest video of Kyle") { p in p.hits.first.map { $0.path.hasSuffix("surf.mov") ? nil : "first is \($0.path)" } ?? "no hits (\(p.message))" },
+            Case(text: "do I have any duplicates in Downloads?") { every($0, { $0.contains("beach copy") }, "wrong") },
+            Case(text: "what's taking up the most space?") { says($0, "surf.mov") },
+            Case(text: "how many photos per year?") { p in says(p, "2019") ?? says(p, "2023") },
+            Case(text: "Kyle's photos from summer 2023") { every($0, { $0.contains("2023") || $0.contains("beach") }, "wrong") },
+            Case(text: "show me sunset photos taken with Kyle in them") { every($0, { $0.hasSuffix(".ARW") }, "wrong") },
+            Case(text: "pictures of the sea") { every($0, { $0.contains("IMG_") }, "wrong") },
         ]
         var failures: [String] = []
         let followUps: [(String, String, (ChatService.Prepared) -> String?)] = [
@@ -139,6 +148,9 @@ struct ChatComplexQueryTests {
             let request = ChatRequest(requestID: UUID().uuidString, conversationID: UUID().uuidString, action: "send", text: item.text)
             let prepared = try await ChatService.prepare(request, text: item.text, database: db)
             if let problem = item.check(prepared) { failures.append("“\(item.text)” → \(problem) [\(prepared.hits.count) hits]") }
+        }
+        if let out = ProcessInfo.processInfo.environment["FILEID_CHAT_BENCH_OUT"] {
+            try? failures.joined(separator: "\n").write(toFile: out, atomically: true, encoding: .utf8)
         }
         #expect(failures.isEmpty, "\(failures.count) of \(cases.count + followUps.count) failed:\n\(failures.joined(separator: "\n"))")
     }
