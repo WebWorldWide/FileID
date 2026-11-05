@@ -55,6 +55,9 @@ pub struct SessionResult {
     pub processed: u64,
     pub failed: u64,
     pub elapsed_seconds: f64,
+    /// Files under the root were added, renamed or deleted while this pass ran;
+    /// the caller runs one incremental follow-up pass, which reports the totals.
+    pub changed_during_scan: bool,
 }
 
 pub struct ScanSession {
@@ -71,6 +74,20 @@ pub struct ScanSession {
     /// against the root at run() time. Plumbed from
     /// `StartScanPayload::excluded_paths`.
     excluded_paths: Vec<String>,
+    /// False for the follow-up pass, so a folder that keeps changing cannot loop.
+    allow_follow_up: bool,
+    /// Counts from the pass this one follows up, added to its final totals.
+    carried: (u64, u64, f64),
+}
+
+/// True when a directory the walk read was modified after `since` or is gone.
+/// Creating, deleting or renaming a file changes its parent directory's mtime on
+/// APFS, NTFS, ext4 and the other volumes FileID supports.
+fn dirs_changed_since(dirs: &[std::path::PathBuf], since: std::time::SystemTime) -> bool {
+    dirs.iter().any(|dir| match std::fs::symlink_metadata(dir).and_then(|m| m.modified()) {
+        Ok(modified) => modified >= since,
+        Err(_) => true,
+    })
 }
 
 impl ScanSession {
@@ -92,7 +109,17 @@ impl ScanSession {
             models,
             rescan,
             excluded_paths,
+            allow_follow_up: true,
+            carried: (0, 0, 0.0),
         }
+    }
+
+    /// The incremental pass that follows a pass during which files changed.
+    pub fn follow_up(mut self, previous: &SessionResult) -> Self {
+        self.rescan = false;
+        self.allow_follow_up = false;
+        self.carried = (previous.processed, previous.failed, previous.elapsed_seconds);
+        self
     }
 
     /// Run an end-to-end scan against `root`. Returns when DBWriter has
@@ -108,6 +135,7 @@ impl ScanSession {
         let _sleep = SleepGuard::acquire();
 
         let started = Instant::now();
+        let scan_started = std::time::SystemTime::now();
         let session_id = self.session_id.clone();
         let sink = self.sink.clone();
 
@@ -334,6 +362,7 @@ impl ScanSession {
         let discovered_done = handle.done.clone();
         let discovered_errors = handle.error_count.clone();
         let discovered_seen_paths = handle.seen_paths.clone();
+        let discovered_seen_dirs = handle.seen_dirs.clone();
         let discovery_join = handle.join;
         let discovered_rx = handle.rx;
         let mut zero_byte_rx = handle.zero_byte_rx;
@@ -658,6 +687,26 @@ impl ScanSession {
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0),
         );
+        if clean_walk
+            && self.allow_follow_up
+            && dirs_changed_since(&discovered_seen_dirs.lock(), scan_started)
+        {
+            // Rows of files deleted after they were processed are in the seen set,
+            // and renamed files were never visited, so the missing-file pass below
+            // would be wrong. Hand over to the follow-up pass, which owns the
+            // scan_sessions row, the missing-file pass and the terminal events.
+            let _ = self
+                .db_conn
+                .lock()
+                .execute("DELETE FROM scan_sessions WHERE id = ?1", rusqlite::params![session_id]);
+            tracing::info!(processed = total, "[SCAN] files changed during the scan; running a follow-up pass");
+            return Ok(SessionResult {
+                processed: total,
+                failed,
+                elapsed_seconds: started.elapsed().as_secs_f64(),
+                changed_during_scan: true,
+            });
+        }
         if clean_walk {
             let mut seen = discovered_seen_paths.lock();
             let mut conn = self.db_conn.lock();
@@ -740,10 +789,10 @@ impl ScanSession {
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
                     session_id: session_id.clone(),
-                    total_files: discovered_count.load(std::sync::atomic::Ordering::Relaxed),
-                    processed_files: total,
-                    failed_files: failed,
-                    total_seconds: elapsed,
+                    total_files: discovered_count.load(std::sync::atomic::Ordering::Relaxed) + self.carried.0,
+                    processed_files: total + self.carried.0,
+                    failed_files: failed + self.carried.1,
+                    total_seconds: elapsed + self.carried.2,
                 },
             ))))
             .await;
@@ -757,19 +806,20 @@ impl ScanSession {
             sink.send(IpcEvent::now(EventPayload::ScanComplete(Wrap::new(
                 ScanComplete {
                     session_id: session_id.clone(),
-                    total_files: total,
-                    processed_files: total,
-                    failed_files: failed,
-                    total_seconds: elapsed,
+                    total_files: total + self.carried.0,
+                    processed_files: total + self.carried.0,
+                    failed_files: failed + self.carried.1,
+                    total_seconds: elapsed + self.carried.2,
                 },
             ))))
             .await;
         }
 
         Ok(SessionResult {
-            processed: total,
-            failed,
-            elapsed_seconds: elapsed,
+            processed: total + self.carried.0,
+            failed: failed + self.carried.1,
+            elapsed_seconds: elapsed + self.carried.2,
+            changed_during_scan: false,
         })
     }
 }

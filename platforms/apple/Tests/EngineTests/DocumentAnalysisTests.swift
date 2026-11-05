@@ -58,6 +58,23 @@ struct DocumentExtractionTests {
         #expect(extracted.hasPrefix("quarterly revenue"))
     }
 
+    @Test("long text files index up to 256 KiB, even when the cap splits a character")
+    func longTextKeepsUTF8() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileID-Document-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: file) }
+        // 3-byte characters with one leading ASCII byte: the 256 KiB cap lands mid-character.
+        let body = "a" + String(repeating: "日本語のメモ", count: 20_000) + " closing words"
+        try body.write(to: file, atomically: true, encoding: .utf8)
+        let extracted = try #require(DocText.extract(path: file.path, maxChars: Tagging.storedTextChars))
+        #expect(extracted.utf8.count > 200_000 && extracted.utf8.count <= 256 * 1024)
+        #expect(extracted.hasPrefix("a日本語"))
+        #expect(!extracted.contains("\u{FFFD}"))
+        #expect(DocText.utf8Text(Data([0xE6, 0x97])) == nil)
+        #expect(DocText.utf8Text(Data([0x61, 0xFF, 0x62])) == nil)
+        #expect(DocText.utf8Text(Data("ok".utf8) + Data([0xE6, 0x97])) == "ok")
+    }
+
     @Test("PowerPoint slide text and entities are extracted")
     func powerpoint() throws {
         let root = FileManager.default.temporaryDirectory

@@ -137,6 +137,14 @@ public actor ScanCoordinator {
         current = s
     }
 
+    /// Counts files a follow-up pass found after discovery finished.
+    public func addFiles(_ count: Int) {
+        guard var s = current, count > 0 else { return }
+        s.discovered += count
+        s.totalFiles += count
+        current = s
+    }
+
     /// Discovery and tagging overlap in the streaming pipeline, so tagging can
     /// begin before the final discovery total is known.
     public func beginTagging() {

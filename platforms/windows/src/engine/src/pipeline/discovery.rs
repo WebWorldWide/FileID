@@ -229,6 +229,9 @@ pub struct DiscoveryHandle {
     /// Stable path hashes of every physically present eligible or skipped file
     /// observed during the walk, including zero-byte files.
     pub seen_paths: Arc<Mutex<Vec<i64>>>,
+    /// Every directory the walk read, so the scan can re-stat them afterwards
+    /// and notice files added, renamed or deleted while it ran.
+    pub seen_dirs: Arc<Mutex<Vec<PathBuf>>>,
     /// Walk errors swallowed during traversal. Surfaced as a non-fatal
     /// `discovery_partial` event by the scan orchestrator.
     pub error_count: Arc<AtomicU64>,
@@ -280,6 +283,8 @@ impl Discovery {
         let done = Arc::new(AtomicBool::new(false));
         let error_count = Arc::new(AtomicU64::new(0));
         let seen_paths = Arc::new(Mutex::new(Vec::new()));
+        let seen_dirs: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_dirs_inner = seen_dirs.clone();
         let count_inner = count.clone();
         let heavy_count_inner = heavy_count.clone();
         let done_inner = done.clone();
@@ -337,6 +342,7 @@ impl Discovery {
             let excl_for_dir = exclusions.clone();
             let err_for_dir = error_count_inner.clone();
             let seen_for_dir = seen_paths_inner.clone();
+            let dirs_for_dir = seen_dirs_inner.clone();
             // Walk a verbatim ("\\?\") root so directories whose full path
             // exceeds MAX_PATH (260) are traversable — std/jwalk silently
             // fail on them otherwise (this engine .exe has no long-path
@@ -364,6 +370,7 @@ impl Discovery {
                         children.clear();
                         return;
                     }
+                    dirs_for_dir.lock().push(dir_path.to_path_buf());
                     // A directory looks like a dev tree only if a build-system
                     // marker sits directly in it. Used to gate the ambiguous
                     // build-dir names (target/build/obj/bin/venv) so we don't
@@ -533,6 +540,7 @@ impl Discovery {
             heavy_count,
             done,
             seen_paths,
+            seen_dirs,
             error_count,
             join,
         }

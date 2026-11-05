@@ -502,7 +502,7 @@ public enum Tagging {
     /// even when BGE isn't installed (blob nil), so doc_fts keyword search still works —
     /// mirrors the Windows decoder-thread extract + optional BGE embed (tagging.rs). Bounded
     /// by DocText's readers + BGE's 256-token cap. Call ON visionQueue.
-    static let storedTextChars = 32_000
+    static let storedTextChars = 256 * 1024
 
     static func bgeTextAndEmbedding(url: URL) -> (text: String?, blob: Data?) {
         guard let text = DocText.extract(path: url.path, maxChars: storedTextChars),
@@ -801,10 +801,11 @@ public enum Tagging {
             return (nil, nil, nil, nil)
         }
         let exifDict = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        let capturedAt = [(kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifOffsetTimeOriginal),
-                          (kCGImagePropertyExifDateTimeDigitized, kCGImagePropertyExifOffsetTimeDigitized)]
-            .lazy.compactMap { key, offsetKey in
+        let capturedAt = [(kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifOffsetTimeOriginal, kCGImagePropertyExifSubsecTimeOriginal),
+                          (kCGImagePropertyExifDateTimeDigitized, kCGImagePropertyExifOffsetTimeDigitized, kCGImagePropertyExifSubsecTimeDigitized)]
+            .lazy.compactMap { key, offsetKey, subsecKey in
                 (exifDict?[key] as? String).flatMap { exifCaptureDate($0, offset: exifDict?[offsetKey] as? String) }
+                    .map { $0.addingTimeInterval(exifSubsecFraction(exifDict?[subsecKey] as? String)) }
             }.first
         let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
         let cameraModel = tiff?[kCGImagePropertyTIFFModel] as? String
@@ -821,6 +822,15 @@ public enum Tagging {
     /// Mirrors the Rust `exif_datetime_to_unix`: the OffsetTime* companion when
     /// present, else the machine's zone; pre-1990 (reset clocks), future and
     /// placeholder values are rejected.
+    /// SubSecTime* digits as a fraction of a second ("5" → 0.5, "123" → 0.123), so
+    /// burst frames shot within one second keep their order. Mirrors the Rust
+    /// `exif_subsec_fraction`.
+    static func exifSubsecFraction(_ text: String?) -> Double {
+        let digits = String((text ?? "").trimmingCharacters(in: .whitespaces).prefix { $0.isASCII && $0.isNumber }.prefix(9))
+        guard !digits.isEmpty, let value = Double(digits) else { return 0 }
+        return value / pow(10, Double(digits.count))
+    }
+
     static func exifCaptureDate(_ text: String, offset: String?, now: Date = Date()) -> Date? {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")

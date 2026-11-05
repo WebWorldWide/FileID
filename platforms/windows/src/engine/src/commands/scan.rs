@@ -365,17 +365,34 @@ pub(crate) async fn handle_start_scan(
         _ => platform::default_worker_cap() as usize,
     };
     let session = ScanSession::new(
-        coord,
-        db,
+        coord.clone(),
+        db.clone(),
         worker_count,
         sink.clone(),
-        models,
+        models.clone(),
         payload.rescan,
         payload.excluded_paths.clone().unwrap_or_default(),
     );
     let root = PathBuf::from(payload.root_path.clone());
 
-    let result = match session.run(&root, |_| {}).await {
+    let outcome = match session.run(&root, |_| {}).await {
+        Ok(first) if first.changed_during_scan => {
+            ScanSession::new(
+                coord,
+                db,
+                worker_count,
+                sink.clone(),
+                models,
+                false,
+                payload.excluded_paths.clone().unwrap_or_default(),
+            )
+            .follow_up(&first)
+            .run(&root, |_| {})
+            .await
+        }
+        other => other,
+    };
+    let result = match outcome {
         Ok(result) => result,
         Err(err) => {
             tracing::warn!(?err, root = %platform::redact_path_for_log(&root), "scan failed");

@@ -168,7 +168,9 @@ class Lab:
             ok = self.sql("PRAGMA integrity_check")[0][0]
             if ok != "ok":
                 problems.append(f"integrity_check: {ok}")
-            rows = self.sql("SELECT id, path_text FROM files WHERE path_text LIKE ?", (self.lib + "/%",))
+            # The Rust engine soft-hides rows of files gone from a completed walk instead of deleting them.
+            rows = self.sql("SELECT id, path_text FROM files WHERE path_text LIKE ? AND NOT (failed = 1 AND "
+                            "error_message LIKE 'File is no longer present%')", (self.lib + "/%",))
             ghosts = [p for _, p in rows if not os.path.exists(p)]
             if ghosts and before_restart:
                 # The engine repairs rows of journaled Trash items when it next starts; the

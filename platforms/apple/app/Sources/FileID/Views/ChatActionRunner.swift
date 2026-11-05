@@ -283,7 +283,7 @@ final class ChatActionRunner {
                 "Moved \(engine.restructureApplyResult?.applied.formatted() ?? "the") files back."
             }
         case "moveDuplicatesToTrash":
-            await trashDuplicates(action)
+            await trashDuplicates(action, engine: engine)
         case "renameToSuggested":
             guard let store = handoff.store, let renames = action.renames else { return }
             phases[action.id] = .running("Renaming \(renames.count.formatted()) files")
@@ -333,7 +333,7 @@ final class ChatActionRunner {
         }
     }
 
-    private func trashDuplicates(_ action: ChatAction) async {
+    private func trashDuplicates(_ action: ChatAction, engine: EngineClient) async {
         guard let store = ChatHandoff.shared.store, let victims = action.fileIDs, let keepers = action.keeperFileIDs, victims.count == keepers.count else { return }
         phases[action.id] = .running("Checking copies")
         let rows = await Task.detached(priority: .userInitiated) { store.files(forFileIDs: Array(Set(victims + keepers))) }.value
@@ -344,21 +344,26 @@ final class ChatActionRunner {
             guard let file = byID[victim], let kept = byID[keeper] else { missing += 1; continue }
             work.append(DuplicateTrashItem(id: file.id, url: file.url, size: file.sizeBytes, exactKeeper: kept.url))
         }
-        let total = work.count
         let id = action.id
-        let results = await ExactDuplicateVerifier.trash(work) { [weak self] finished in
-            self?.phases[id] = .running("Moving to Trash · \(finished.formatted()) of \(total.formatted())")
+        let outcome = await ExactDuplicateVerifier.trashThroughEngine(work, engine: engine) { [weak self] text in
+            self?.phases[id] = .running(text)
         }
-        let trashed = results.filter(\.success)
-        let freed = ByteCountFormatter.string(fromByteCount: trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
-        let changed = results.filter(\.verificationFailed).count + missing
-        let failed = results.filter { !$0.success && !$0.verificationFailed }.count
-        let ids = trashed.map(\.id)
-        _ = await Task.detached(priority: .userInitiated) { store.deleteFiles(ids: ids) }.value
-        var summary = "Moved \(trashed.count.formatted()) \(trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
+        if outcome.engineUnavailable { phases[action.id] = .failed("FileID is still getting ready. Try again in a moment."); return }
+        if outcome.timedOut { phases[action.id] = .failed("Moving to Trash didn't finish. Check the Trash before trying again."); return }
+        let freed = ByteCountFormatter.string(fromByteCount: outcome.trashed.reduce(0) { $0 + $1.size }, countStyle: .file)
+        let changed = outcome.verificationFailed + missing
+        var summary = "Moved \(outcome.trashed.count.formatted()) \(outcome.trashed.count == 1 ? "copy" : "copies") to Trash · freed \(freed)"
         if changed > 0 { summary += " · \(changed.formatted()) skipped because the file changed since the scan" }
-        if failed > 0 { summary += " · \(failed.formatted()) couldn't be moved" }
-        phases[action.id] = .done(summary + ". To undo, open Trash and choose Put Back.")
+        if outcome.failed > 0 { summary += " · \(outcome.failed.formatted()) couldn't be moved" }
+        store.notifyChanged()
+        phases[action.id] = .done(summary + ".")
+        if let batch = outcome.batchID, !outcome.trashed.isEmpty {
+            offerUndo(action, label: "Put them back") {
+                let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
+                store.notifyChanged()
+                return undone.restored > 0 ? "Put back \(undone.restored.formatted()) \(undone.restored == 1 ? "copy" : "copies")." : (undone.message ?? "Nothing was put back. Check the Trash.")
+            }
+        }
     }
 
     private func offerUndo(_ action: ChatAction, label: String, _ undo: @escaping () async -> String) {

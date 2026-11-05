@@ -19,6 +19,8 @@ struct CleanupView: View {
     @State private var lastSeenBatchIndex: Int = -1
     @State private var status: String?
     @State private var statusWarning = false
+    /// The last Trash batch, while it can still be put back from the status banner.
+    @State private var undoBatch: String?
     @State private var exactPreviewPartial = false
     @State private var exactCandidateCount = 0
     @State private var exactSkipped = 0
@@ -274,7 +276,7 @@ struct CleanupView: View {
                             .foregroundStyle(exactPreviewPartial ? Theme.warning : Theme.delight)
                         Text(exactPreviewPartial
                              ? "**Some files weren't checked yet.** Every group below is an exact copy, checked byte by byte, but more copies may exist. Rescan later to check the rest."
-                             : "Each group is the same file saved more than once, checked byte by byte. FileID marks one copy **KEEP**; click any other copy to choose it, then press Move to Trash. You can put files back from Trash.")
+                             : "Each group is the same file saved more than once, checked byte by byte. FileID marks one copy **KEEP**; click any other copy to choose it, then press Move to Trash. You can undo it right after.")
                             .font(Theme.Font.body(12))
                             .foregroundStyle(Theme.text3)
                     }
@@ -307,6 +309,11 @@ struct CleanupView: View {
                         Text(s)
                             .font(Theme.Font.body(13.5))
                         Spacer()
+                        if let batch = undoBatch {
+                            Button("Undo") { Task { await undoTrash(batch) } }
+                                .buttonStyle(.dsSecondary)
+                                .disabled(deleting)
+                        }
                         Button("Open Trash") {
                             NSWorkspace.shared.open(UserHome.trashURL)
                         }
@@ -314,6 +321,7 @@ struct CleanupView: View {
                         Button("Dismiss") {
                             status = nil
                             statusWarning = false
+                            undoBatch = nil
                         }
                             .buttonStyle(.borderless)
                     }
@@ -323,7 +331,7 @@ struct CleanupView: View {
                     .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(
                         (statusWarning ? Theme.warning : Theme.delight).opacity(0.4),
                         lineWidth: 1))
-                    .help("To undo, open Trash in Finder, right-click a file and choose Put Back.")
+                    .help(undoBatch == nil ? "To put a file back, open Trash in Finder, right-click it and choose Put Back." : "Undo puts the moved copies back where they were.")
                 }
             }
             .padding(.horizontal, Theme.Metrics.pageInsetX).padding(.vertical, Theme.Metrics.pageInsetY)
@@ -360,7 +368,7 @@ struct CleanupView: View {
 
     private var confirmDeleteMessage: String {
         let mb = totalSelectedSize
-        return "Moves the selected copies to Trash. Frees about \(mb). You can restore them from Trash if you change your mind."
+        return "Moves the selected copies to Trash. Frees about \(mb). You can undo it right after, or put them back from the Trash later."
     }
 
     private func confirmDeleteSelected() {
@@ -397,19 +405,19 @@ struct CleanupView: View {
             }
         }
 
-        // Trash up to 8 files concurrently. Foundation's trashItem isn't
-        // thread-hostile (Finder serializes journaling underneath), but
-        // doing them sequentially on a 10K dedup pass = 10–50 s freeze.
-        let results = await ExactDuplicateVerifier.trash(work)
-
-        var trashedIDs: [Int64] = []
-        var freedBytes: Int64 = 0
-        verificationRejected += results.filter(\.verificationFailed).count
-        let trashFailures = results.filter { !$0.success && !$0.verificationFailed }.count
-        for result in results where result.success {
-            trashedIDs.append(result.id)
-            freedBytes += result.size
+        let outcome = await ExactDuplicateVerifier.trashThroughEngine(work, engine: engine)
+        if outcome.engineUnavailable || outcome.timedOut {
+            statusWarning = true
+            status = outcome.engineUnavailable
+                ? "FileID is still getting ready. Try again in a moment."
+                : "Moving to Trash didn't finish. Check the Trash before trying again."
+            reload()
+            return
         }
+        let trashedIDs = outcome.trashed.map(\.id)
+        let freedBytes = outcome.trashed.reduce(Int64(0)) { $0 + $1.size }
+        verificationRejected += outcome.verificationFailed
+        let trashFailures = outcome.failed
         let freed = ByteCountFormatter.string(fromByteCount: freedBytes, countStyle: .file)
         var keeperURLSet = Set<URL>()
         for id in trashedIDs {
@@ -430,8 +438,7 @@ struct CleanupView: View {
         // off-main trashing above just avoided. Resume on the MainActor only
         // to mutate @State. (mirrors BulkTagSheet.apply)
         let taggedAdded: Int = await Task.detached(priority: .userInitiated) {
-            [store, trashedIDs, keeperURLsToTag, shouldTag] in
-            _ = store.deleteFiles(ids: trashedIDs)
+            [keeperURLsToTag, shouldTag] in
             guard shouldTag else { return 0 }
             return TagWriter.addTagsBulk([AppSettings.cleanupAutoTagName],
                                          to: keeperURLsToTag).added
@@ -458,6 +465,22 @@ struct CleanupView: View {
         }
         statusWarning = verificationRejected > 0 || trashFailures > 0
         status = summary
+        store.notifyChanged()
+        reload()
+        undoBatch = trashedIDs.isEmpty ? nil : outcome.batchID
+    }
+
+    private func undoTrash(_ batch: String) async {
+        guard !deleting else { return }
+        deleting = true
+        defer { deleting = false }
+        let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
+        undoBatch = nil
+        statusWarning = undone.restored == 0
+        status = undone.restored > 0
+            ? "Put back \(undone.restored) file\(undone.restored == 1 ? "" : "s") where \(undone.restored == 1 ? "it was" : "they were")."
+            : (undone.message ?? "Nothing was put back. Check the Trash.")
+        store.notifyChanged()
         reload()
     }
 
