@@ -63,13 +63,13 @@ struct TitleBar: View {
 
             Button { folderOpen.toggle() } label: {
                 HStack(spacing: 10) {
-                    Text("FileID").font(Theme.Font.display(18)).foregroundStyle(Theme.text1)
+                    Text("FileID").font(Theme.ChromeFont.display(18)).foregroundStyle(Theme.text1)
                     VHairline(color: Color.white.opacity(0.18)).frame(height: 14)
-                    Text(pickedURL?.lastPathComponent ?? "Choose a folder").font(Theme.Font.body(13.5, .semibold))
+                    Text(pickedURL?.lastPathComponent ?? "Choose a folder").font(Theme.ChromeFont.body(13.5, .semibold))
                         .foregroundStyle(pickedURL == nil ? Theme.text3 : Theme.text1).lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: 180, alignment: .leading)
-                    Text("▾").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+                    Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: Theme.Metrics.controlLarge)
@@ -79,7 +79,7 @@ struct TitleBar: View {
             }
             .buttonStyle(.plain)
             .help("Choose, rescan or close the folder FileID is working on")
-            .popover(isPresented: $folderOpen, arrowEdge: .bottom) { folderPopover }
+            .popover(isPresented: $folderOpen, arrowEdge: .bottom) { folderPopover.chromeTextSize() }
             .onChange(of: folderOpen) { _, open in if open { engine.refreshLibraryRoots() } }
         }
     }
@@ -101,8 +101,8 @@ struct TitleBar: View {
                 HStack(alignment: .top, spacing: 10) {
                     Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(url.lastPathComponent).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
-                        Text(url.path).font(Theme.Font.meta).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
+                        Text(url.lastPathComponent).font(Theme.ChromeFont.body(14, .semibold)).foregroundStyle(Theme.text1)
+                        Text(url.path).font(Theme.ChromeFont.meta).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.middle)
                     }
                     Spacer(minLength: 8)
                     MetaText(folderCountText(url), color: Theme.text2)
@@ -180,7 +180,7 @@ struct TitleBar: View {
             Image(systemName: "magnifyingglass").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3)
             TextField("Search or ask", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(Theme.Font.body(13.5))
+                .font(Theme.ChromeFont.body(13.5))
                 .foregroundStyle(Theme.text1)
                 .focused($searchFocused)
                 .onSubmit { pickFirst() }
@@ -190,7 +190,7 @@ struct TitleBar: View {
                 .onChange(of: searchText) { _, text in if searchFocused && !text.isEmpty { searchOpen = true } }
                 .onTapGesture { userOpened = true; searchFocused = true; searchOpen = true }
                 .onExitCommand { searchFocused = false; searchText = "" }
-            Text("⌘K").font(Theme.Font.mono(11)).foregroundStyle(Theme.text3)
+            Text("⌘K").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
                 .padding(.horizontal, 5).padding(.vertical, 2)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)).overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous).stroke(Color.white.opacity(0.16), lineWidth: 1))
         }
@@ -201,7 +201,7 @@ struct TitleBar: View {
         .background {
             Button("") { userOpened = true; searchFocused = true; searchOpen = true }.keyboardShortcut("k", modifiers: .command).opacity(0).frame(width: 0, height: 0)
         }
-        .popover(isPresented: $searchOpen, arrowEdge: .bottom) { searchPopover }
+        .popover(isPresented: $searchOpen, arrowEdge: .bottom) { searchPopover.chromeTextSize() }
     }
 
     private struct SearchItem: Identifiable { let id: String; let label: String; let hint: String; let color: Color; let run: () -> Void }
@@ -249,7 +249,7 @@ struct TitleBar: View {
                 ForEach(Array(group.items.enumerated()), id: \.element.id) { itemIndex, item in
                     Button { run(item) } label: {
                         HStack(spacing: 12) {
-                            Text(item.label).font(Theme.Font.body(14)).foregroundStyle(item.color).lineLimit(1)
+                            Text(item.label).font(Theme.ChromeFont.body(14)).foregroundStyle(item.color).lineLimit(1)
                             Spacer()
                             MetaText(item.hint, size: 11)
                         }
@@ -344,9 +344,9 @@ struct TitleBar: View {
         return Button { activityOpen.toggle() } label: {
             HStack(spacing: 8) {
                 Circle().fill(a.color).frame(width: 6, height: 6)
-                Text(a.label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text1)
+                Text(a.label).font(Theme.ChromeFont.body(12.5, .medium)).foregroundStyle(Theme.text1)
                 GrainProgressBar(progress: a.progress, tone: a.tone).frame(width: 54)
-                if !a.idle { Text("\(Int(a.progress * 100))%").font(Theme.Font.body(12.5, .semibold)).monospacedDigit().foregroundStyle(a.color).frame(minWidth: 28, alignment: .trailing) }
+                if !a.idle { Text("\(Int(a.progress * 100))%").font(Theme.ChromeFont.body(12.5, .semibold)).monospacedDigit().foregroundStyle(a.color).frame(minWidth: 28, alignment: .trailing) }
             }
             .padding(.horizontal, 10)
             .frame(height: Theme.Metrics.controlLarge)
@@ -356,7 +356,7 @@ struct TitleBar: View {
         }
         .buttonStyle(.plain)
         .help("What FileID is working on right now")
-        .popover(isPresented: $activityOpen, arrowEdge: .bottom) { activityPopover }
+        .popover(isPresented: $activityOpen, arrowEdge: .bottom) { activityPopover.chromeTextSize() }
     }
 
     private var activityPopover: some View {
@@ -372,7 +372,7 @@ struct TitleBar: View {
             ForEach(list) { row in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(row.name).font(Theme.Font.body(14, .semibold)).foregroundStyle(Theme.text1)
+                        Text(row.name).font(Theme.ChromeFont.body(14, .semibold)).foregroundStyle(Theme.text1)
                         MetaText(row.sub).lineLimit(1)
                         Spacer(minLength: 4)
                         MetaText(row.state, color: row.color)

@@ -656,6 +656,7 @@ struct LibraryView: View {
             checkedIDs: Set(checkedFiles.keys),
             selectedID: previewSelectedID ?? paneSelectedID,
             refreshToken: tileRefreshToken,
+            textSize: ContentTextScale.shared.size,
             onSelect: { paneSelectedID = $0.id },
             onOpen: { openPreview($0) },
             onToggleCheck: { row in

@@ -56,13 +56,13 @@ struct ProcessingControl: View {
             Image(systemName: startRequested ? "hourglass" : "moon.zzz")
                 .foregroundStyle(Theme.text3)
             Text(startRequested ? "Starting…" : "Idle")
-                .font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text3)
+                .font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text3)
             Spacer()
         }
         Text(startRequested
              ? "Sent to engine. The first phase event will appear shortly."
              : "Ready to scan this folder. Click Start when you're ready.")
-            .font(Theme.Font.body(11))
+            .font(Theme.ChromeFont.body(11))
             .foregroundStyle(Theme.text3)
         pillButton("Start Scan", color: Theme.gold, system: "play.fill",
                     filled: true, disabled: startRequested) {
@@ -78,7 +78,7 @@ struct ProcessingControl: View {
     private func liveOrDone(_ p: ScanProgress) -> some View {
         HStack(spacing: 8) {
             Image(systemName: phaseIcon(p.phase))
-                .font(Theme.Font.body(13.5))
+                .font(Theme.ChromeFont.body(13.5))
                 .foregroundStyle(Theme.gold)
             BadgePill(label: p.phase.rawValue.capitalized)
             Spacer()
@@ -94,11 +94,11 @@ struct ProcessingControl: View {
                 .tint(Theme.gold)
             HStack {
                 Text("\(p.processed) / \(p.total)")
-                    .font(Theme.Font.body(11).monospacedDigit())
+                    .font(Theme.ChromeFont.body(11).monospacedDigit())
                 Spacer()
                 let pct = Double(p.processed) / Double(max(p.total, 1)) * 100
                 Text(String(format: "%.1f%%", pct))
-                    .font(Theme.Font.body(11, .semibold).monospacedDigit())
+                    .font(Theme.ChromeFont.body(11, .semibold).monospacedDigit())
                     .foregroundStyle(Theme.gold)
             }
         } else if p.phase == .discovering {
@@ -147,10 +147,10 @@ struct ProcessingControl: View {
                 Image(systemName: "pause.circle.fill").foregroundStyle(Theme.warning)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Paused")
-                        .font(Theme.Font.body(12, .semibold))
+                        .font(Theme.ChromeFont.body(12, .semibold))
                         .foregroundStyle(Theme.warning)
                     Text("Workers idle. Click Resume to continue or Cancel to stop.")
-                        .font(Theme.Font.body(11))
+                        .font(Theme.ChromeFont.body(11))
                         .foregroundStyle(Theme.text3)
                 }
                 Spacer()
@@ -194,16 +194,16 @@ struct ProcessingControl: View {
                           trailingTint: Color) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon)
-                .font(Theme.Font.body(11))
+                .font(Theme.ChromeFont.body(11))
                 .foregroundStyle(labelTint)
                 .frame(width: 14, alignment: .leading)
             Text(label)
-                .font(Theme.Font.body(11).monospacedDigit())
+                .font(Theme.ChromeFont.body(11).monospacedDigit())
                 .foregroundStyle(labelTint)
             Spacer(minLength: 8)
             if let trailing {
                 Text(trailing)
-                    .font(Theme.Font.body(11, .semibold).monospacedDigit())
+                    .font(Theme.ChromeFont.body(11, .semibold).monospacedDigit())
                     .foregroundStyle(trailingTint)
             }
         }
@@ -240,7 +240,7 @@ struct ProcessingControl: View {
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: system)
-                .font(Theme.Font.body(12, .semibold))
+                .font(Theme.ChromeFont.body(12, .semibold))
                 .foregroundStyle(disabled ? color.opacity(0.5)
                                   : (filled ? Color.black : color))
                 .frame(maxWidth: .infinity)

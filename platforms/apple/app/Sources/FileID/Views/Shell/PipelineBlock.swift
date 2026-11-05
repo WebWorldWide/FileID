@@ -81,9 +81,9 @@ struct PipelineBlock: View {
         let s = state
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
-                Text(s.title).font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
+                Text(s.title).font(Theme.ChromeFont.body(13, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
                 Spacer()
-                if s.fraction > 0 { Text("\(Int(s.fraction * 100))%").font(Theme.Font.body(12.5, .semibold)).monospacedDigit().foregroundStyle(s.color) }
+                if s.fraction > 0 { Text("\(Int(s.fraction * 100))%").font(Theme.ChromeFont.body(12.5, .semibold)).monospacedDigit().foregroundStyle(s.color) }
             }
             GrainProgressBar(progress: s.fraction, tone: s.tone, height: 6)
             HStack(spacing: 4) {
@@ -95,7 +95,7 @@ struct PipelineBlock: View {
                 }
             }
             HStack(spacing: 4) {
-                Text("Step \(stage.rawValue + 1) of 5 · \(stage.label)").font(Theme.Font.body(12)).foregroundStyle(Theme.text2)
+                Text("Step \(stage.rawValue + 1) of 5 · \(stage.label)").font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.text2)
                 Spacer(minLength: 4)
                 if let p = progress, p.phase != .idle {
                     Button { withAnimation(Theme.spring) { showDetails.toggle() } } label: {
@@ -109,14 +109,14 @@ struct PipelineBlock: View {
                     .accessibilityLabel(showDetails ? "Hide scan details" : "Show scan details")
                 }
             }
-            Text(s.sub).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            Text(s.sub).font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.text3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
             if showsNextStep {
                 Button { openPage(.deep) } label: {
                     HStack(spacing: 4) {
                         Text("Next: describe files")
                         Image(systemName: "arrow.right").font(.system(size: 10, weight: .semibold))
                     }
-                    .font(Theme.Font.body(12, .medium))
+                    .font(Theme.ChromeFont.body(12, .medium))
                     .foregroundStyle(Theme.gold)
                     .frame(minHeight: 22)
                     .contentShape(Rectangle())
@@ -151,10 +151,10 @@ struct PipelineBlock: View {
 
     private func statRow(_ key: String, _ value: String, trailing: String?, warn: Bool = false, danger: Bool = false) -> some View {
         HStack(spacing: 6) {
-            Text(key).font(Theme.Font.body(12)).foregroundStyle(Theme.text3).frame(width: 62, alignment: .leading)
-            Text(value).font(Theme.Font.body(12, .medium)).monospacedDigit().foregroundStyle(danger ? Theme.danger : warn ? Theme.warning : Theme.text1)
+            Text(key).font(Theme.ChromeFont.body(12)).foregroundStyle(Theme.text3).frame(width: 62, alignment: .leading)
+            Text(value).font(Theme.ChromeFont.body(12, .medium)).monospacedDigit().foregroundStyle(danger ? Theme.danger : warn ? Theme.warning : Theme.text1)
             Spacer(minLength: 4)
-            if let trailing { Text(trailing).font(Theme.Font.body(11.5)).monospacedDigit().foregroundStyle(Theme.text3) }
+            if let trailing { Text(trailing).font(Theme.ChromeFont.body(11.5)).monospacedDigit().foregroundStyle(Theme.text3) }
         }
     }
 

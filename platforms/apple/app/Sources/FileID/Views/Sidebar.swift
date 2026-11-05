@@ -48,7 +48,7 @@ struct Sidebar: View {
                     PipelineBlock(engine: engine, store: store, pickedURL: url, openPage: { activeTab = $0 })
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Start with a folder").font(Theme.Font.body(13, .semibold)).foregroundStyle(Theme.text1)
+                        Text("Start with a folder").font(Theme.ChromeFont.body(13, .semibold)).foregroundStyle(Theme.text1)
                         if store.totalFiles == 0 {
                             Button { pickFolder() } label: { Label("Choose folder…", systemImage: "folder.badge.plus") }
                                 .buttonStyle(DSSecondaryButtonStyle(height: 30))
@@ -84,7 +84,7 @@ struct Sidebar: View {
                     activeTab = area.remembered(current: activeTab)
                 } label: {
                     Text(area.rawValue)
-                        .font(Theme.Font.body(12.5, on ? .semibold : .medium))
+                        .font(Theme.ChromeFont.body(12.5, on ? .semibold : .medium))
                         .foregroundStyle(on ? Theme.onGold : Theme.text2)
                         .frame(maxWidth: .infinity)
                         .frame(height: 26)
@@ -166,12 +166,12 @@ struct Sidebar: View {
                     .foregroundStyle(on ? Theme.gold : Theme.text2)
                     .frame(width: 18)
                 Text(tab.title)
-                    .font(Theme.Font.body(13.5, on ? .semibold : .regular))
+                    .font(Theme.ChromeFont.body(13.5, on ? .semibold : .regular))
                     .foregroundStyle(on ? Theme.gold : Theme.text1)
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 if let b = badge(for: tab) {
-                    Text(b.text).font(Theme.Font.body(11.5, .medium)).foregroundStyle(b.color).monospacedDigit()
+                    Text(b.text).font(Theme.ChromeFont.body(11.5, .medium)).foregroundStyle(b.color).monospacedDigit()
                 }
             }
             .padding(.horizontal, 10)
@@ -193,8 +193,8 @@ struct Sidebar: View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
             VStack(alignment: .leading, spacing: 2) {
-                Text(err.kind).font(Theme.Font.body(12, .semibold)).foregroundStyle(Theme.text1)
-                Text(err.message).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
+                Text(err.kind).font(Theme.ChromeFont.body(12, .semibold)).foregroundStyle(Theme.text1)
+                Text(err.message).font(Theme.ChromeFont.body(11.5)).foregroundStyle(Theme.text3).lineLimit(3)
             }
             Spacer(minLength: 4)
             DSIconButton("Dismiss error", systemImage: "xmark", tint: Theme.text3) { engine.clearLastError() }

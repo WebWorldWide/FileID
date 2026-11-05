@@ -12,6 +12,7 @@ struct MainWindow: View {
     @State private var atmospherePaused = false
     @AppStorage("activeTabRawValue") private var activeTabRaw: String = Tab.library.rawValue
     @AppStorage("sidebarVisible") private var sidebarVisible: Bool = true
+    @AppStorage(TextSize.storageKey) private var textSizeRaw: String = TextSize.standard.rawValue
     @State private var pickedURL: URL?
     @State private var isDragHovering = false
     @State private var chatPresented = false
@@ -120,12 +121,14 @@ struct MainWindow: View {
             VStack(spacing: 0) {
                 TitleBar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL,
                          sidebarVisible: $sidebarVisible, chatPresented: $chatPresented, pickFolder: pickFolder)
+                    .chromeTextSize()
                     .background(TrafficLightAligner(barHeight: Theme.Metrics.titleBar))
                     .focusSection()
                 GeometryReader { geometry in
                 HStack(spacing: 0) {
                     if sidebarVisible && (!chatPresented || geometry.size.width >= 1440) {
                         Sidebar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL, pickFolder: pickFolder)
+                            .chromeTextSize()
                             .frame(width: Theme.Metrics.sidebar)
                             .focusSection()
                             .transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
@@ -133,6 +136,7 @@ struct MainWindow: View {
                     }
                     Detail(engine: engine, store: store, toolsSession: toolsSession, activeTab: activeTab,
                            pickedURL: $pickedURL, onSwitchTab: { activeTabBinding.wrappedValue = $0 }, pickFolder: pickFolder)
+                        .font(Theme.Font.body(13.5))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .focusSection()
                     // Chat stays beside the current page, as before the redesign;
@@ -140,6 +144,7 @@ struct MainWindow: View {
                     if chatPresented && activeTab != .chat {
                         VHairline()
                         ChatWorkbench(engine: engine, onClose: { chatPresented = false })
+                            .font(Theme.Font.body(13.5))
                             .frame(width: 380)
                             .focusSection()
                             .background(Color(red: 15/255, green: 15/255, blue: 17/255).opacity(0.86), ignoresSafeAreaEdges: [])
@@ -171,6 +176,7 @@ struct MainWindow: View {
                 ChatHandoff.shared.libraryRoot = newValue
             }
             .onChange(of: activeTabRaw) { _, _ in ChatHandoff.shared.activeTab = activeTab }
+            .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {
                 guard let result = engine.lastFaceClustering, result.personCount > 0, activeTab == .library else { return }
