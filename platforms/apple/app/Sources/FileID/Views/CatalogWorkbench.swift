@@ -10,6 +10,8 @@ struct CatalogWorkbench: View {
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var hits: [CatalogHit] = []
+    @State private var resultRows: [MomentResultRow] = []
+    @State private var hitFileCount = 0
     @State private var chapters: [CatalogChapter] = []
     @State private var cast: [CatalogHit] = []
     @State private var selected: CatalogHit?
@@ -113,33 +115,16 @@ struct CatalogWorkbench: View {
                     Spacer(minLength: 4)
                     Button("Best takes") { showingTakes = true }
                         .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.hitTarget))
-                        .disabled(Set(hits.map(\.fileID)).count < 2)
+                        .disabled(hitFileCount < 2)
                         .help(hits.count < 2 ? "Find at least two clips first" : "Compare these clips as tries of the same shot and pick the best one")
                 }
             }
             .padding(.horizontal, Theme.Metrics.railInset).padding(.vertical, 14)
             Hairline()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(hits.enumerated()), id: \.offset) { index, hit in
-                        RailRow(selected: selectedIndex == index, action: { select(hit, at: index) }) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(URL(fileURLWithPath: hit.path).lastPathComponent)
-                                    .font(Theme.Font.mono(12.5, .medium)).foregroundStyle(Theme.text1)
-                                    .lineLimit(1).truncationMode(.middle)
-                                Text(hitMeta(hit)).font(Theme.Font.body(11.5)).foregroundStyle(hit.kind == "sampledFrame" ? Theme.ai : Theme.text3).lineLimit(1)
-                                if !hit.text.isEmpty {
-                                    Text(hit.text).font(Theme.Font.body(12)).foregroundStyle(Theme.text2).lineLimit(2)
-                                }
-                            }
-                            .padding(.vertical, 7)
-                        }
-                        .accessibilityLabel("\(URL(fileURLWithPath: hit.path).lastPathComponent), \(hitMeta(hit))")
-                        .accessibilityHint(hit.text)
-                    }
-                }
-                .padding(.vertical, 8)
+            MomentResultsList(rows: resultRows, selectedIndex: selectedIndex, textSize: ContentTextScale.shared.size) { index in
+                if hits.indices.contains(index) { select(hits[index], at: index) }
             }
+            .equatable()
             .overlay {
                 if hits.isEmpty && pendingAction != "search" {
                     MetaText(message.isEmpty ? "Results show here: matching file names, descriptions, chapters and moments inside videos." : message)
@@ -155,22 +140,7 @@ struct CatalogWorkbench: View {
         return "\(hits.count.formatted()) result\(hits.count == 1 ? "" : "s")"
     }
 
-    private func hitMeta(_ hit: CatalogHit) -> String {
-        var parts: [String] = []
-        if let time = hit.startSeconds { parts.append(DurationText.clock(time)) }
-        if let page = hit.page { parts.append("Page \(page)") }
-        switch hit.kind {
-        case "sampledFrame": parts.append("Video frame, not checked")
-        case "chapter": parts.append("Chapter")
-        case "passage": parts.append("Speech or text")
-        case "person": parts.append("Person")
-        case "documentText": parts.append("Text in document")
-        case "ocrText": parts.append("Text in image")
-        case "handwrittenText": parts.append("Handwritten text")
-        default: parts.append(FileKindLabel.title(hit.kind))
-        }
-        return parts.joined(separator: " · ")
-    }
+    private func hitMeta(_ hit: CatalogHit) -> String { MomentResultRow.meta(for: hit) }
 
     // MARK: - Player card
 
@@ -544,6 +514,8 @@ struct CatalogWorkbench: View {
         switch action {
         case "search":
             hits = response.hits
+            resultRows = hits.enumerated().map { MomentResultRow(index: $0.offset, hit: $0.element) }
+            hitFileCount = Set(hits.map(\.fileID)).count
             selectedIndex = nil
             if hits.isEmpty { message = "No matches. Try another word, or describe more files so there is more to search." }
         case "jobs":
@@ -560,6 +532,82 @@ struct CatalogWorkbench: View {
         }
     }
 
+}
+
+// MARK: - Results list
+
+/// One search result, with its display strings built once per search rather
+/// than on every render of the page.
+struct MomentResultRow: Equatable, Identifiable {
+    let id: Int
+    let name: String
+    let meta: String
+    let text: String
+    let sampled: Bool
+
+    init(index: Int, hit: CatalogHit) {
+        id = index
+        name = URL(fileURLWithPath: hit.path).lastPathComponent
+        meta = Self.meta(for: hit)
+        text = hit.text
+        sampled = hit.kind == "sampledFrame"
+    }
+
+    static func meta(for hit: CatalogHit) -> String {
+        var parts: [String] = []
+        if let time = hit.startSeconds { parts.append(DurationText.clock(time)) }
+        if let page = hit.page { parts.append("Page \(page)") }
+        switch hit.kind {
+        case "sampledFrame": parts.append("Video frame, not checked")
+        case "chapter": parts.append("Chapter")
+        case "passage": parts.append("Speech or text")
+        case "person": parts.append("Person")
+        case "documentText": parts.append("Text in document")
+        case "ocrText": parts.append("Text in image")
+        case "handwrittenText": parts.append("Handwritten text")
+        default: parts.append(FileKindLabel.title(hit.kind))
+        }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The page re-renders at 1 Hz from the job poll and 4 Hz from the playhead;
+/// as an equatable view the list skips those passes unless its rows,
+/// selection or text size changed.
+private struct MomentResultsList: View, Equatable {
+    let rows: [MomentResultRow]
+    let selectedIndex: Int?
+    let textSize: TextSize
+    let onSelect: (Int) -> Void
+
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.rows == rhs.rows && lhs.selectedIndex == rhs.selectedIndex && lhs.textSize == rhs.textSize
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(rows) { row in
+                    RailRow(selected: selectedIndex == row.id, action: { onSelect(row.id) }) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(row.name)
+                                .font(Theme.Font.mono(12.5, .medium)).foregroundStyle(Theme.text1)
+                                .lineLimit(1).truncationMode(.middle)
+                            Text(row.meta).font(Theme.Font.body(11.5)).foregroundStyle(row.sampled ? Theme.ai : Theme.text3).lineLimit(1)
+                            if !row.text.isEmpty {
+                                Text(row.text).font(Theme.Font.body(12)).foregroundStyle(Theme.text2).lineLimit(2)
+                            }
+                        }
+                        .padding(.vertical, 7)
+                    }
+                    .accessibilityLabel("\(row.name), \(row.meta)")
+                    .accessibilityHint(row.text)
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .hoverPausedWhileScrolling()
+    }
 }
 
 // MARK: - Playhead

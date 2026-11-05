@@ -14,10 +14,11 @@ private func rounded(_ radius: CGFloat) -> RoundedRectangle {
 struct SectionLabel: View {
     let text: String
     var color: Color = Theme.label
+    @Environment(\.fixedTextSize) private var fixed
     init(_ text: String, color: Color = Theme.label) { self.text = text; self.color = color }
     var body: some View {
         Text(text)
-            .font(Theme.Font.sectionLabel)
+            .font(Theme.Font.body(11, .semibold, fixed: fixed))
             .tracking(0.6)
             .textCase(.uppercase)
             .foregroundStyle(color)
@@ -29,9 +30,10 @@ struct MetaText: View {
     let text: String
     var color: Color = Theme.text3
     var size: CGFloat = 12
+    @Environment(\.fixedTextSize) private var fixed
     init(_ text: String, color: Color = Theme.text3, size: CGFloat = 12) { self.text = text; self.color = color; self.size = max(size, 11.5) }
     var body: some View {
-        Text(text).font(Theme.Font.body(size)).foregroundStyle(color)
+        Text(text).font(Theme.Font.body(size, fixed: fixed)).foregroundStyle(color)
     }
 }
 
@@ -123,12 +125,48 @@ private struct FocusHostedButton<Face: ButtonStyle>: View {
 // MARK: - Buttons
 
 /// Hover is tracked per button so every control shows it is clickable before
-/// the click, and pressed state shows the click landed.
+/// the click, and pressed state shows the click landed. Inside a list marked
+/// `hoverPausedWhileScrolling()` rows don't light up as they slide under a
+/// still pointer; continuous hover relights the row under it once the pointer moves.
 private struct HoverTracking: ViewModifier {
     @Binding var hovering: Bool
+    @Environment(\.hoverPaused) private var paused
     func body(content: Content) -> some View {
-        content.onHover { inside in withAnimation(Theme.quick) { hovering = inside } }
+        content
+            .onContinuousHover { phase in
+                let inside = !paused && phase != .ended
+                guard inside != hovering else { return }
+                withAnimation(Theme.quick) { hovering = inside }
+            }
+            .onChange(of: paused) { _, now in if now && hovering { hovering = false } }
     }
+}
+
+private struct HoverPausedKey: EnvironmentKey { static let defaultValue = false }
+
+extension EnvironmentValues {
+    var hoverPaused: Bool {
+        get { self[HoverPausedKey.self] }
+        set { self[HoverPausedKey.self] = newValue }
+    }
+}
+
+/// Scroll flings pass hundreds of rows under the pointer; pausing hover while
+/// the list moves keeps each row from re-rendering twice on the way past.
+private struct HoverPausedWhileScrolling: ViewModifier {
+    @State private var scrolling = false
+    func body(content: Content) -> some View {
+        content
+            .onScrollPhaseChange { _, phase in
+                let moving = phase != .idle
+                if moving != scrolling { scrolling = moving }
+            }
+            .environment(\.hoverPaused, scrolling)
+    }
+}
+
+extension View {
+    func hoverPausedWhileScrolling() -> some View { modifier(HoverPausedWhileScrolling()) }
 }
 
 private func resolvedHeight(_ explicit: CGFloat?, _ size: ControlSize, regular: CGFloat) -> CGFloat {
@@ -152,11 +190,12 @@ struct DSPrimaryButtonStyle: PrimitiveButtonStyle {
         let height: CGFloat?
         @Environment(\.isEnabled) private var isEnabled
         @Environment(\.controlSize) private var controlSize
+        @Environment(\.fixedTextSize) private var fixed
         @State private var hovering = false
         var body: some View {
             let small = controlSize == .small || controlSize == .mini
             configuration.label
-                .font(Theme.Font.body(small ? 12 : 13, .semibold))
+                .font(Theme.Font.body(small ? 12 : 13, .semibold, fixed: fixed))
                 .foregroundStyle(Theme.onGold)
                 .padding(.horizontal, small ? 10 : 14)
                 .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.controlLarge))
@@ -183,11 +222,12 @@ struct DSSecondaryButtonStyle: PrimitiveButtonStyle {
         let height: CGFloat?
         @Environment(\.isEnabled) private var isEnabled
         @Environment(\.controlSize) private var controlSize
+        @Environment(\.fixedTextSize) private var fixed
         @State private var hovering = false
         var body: some View {
             let small = controlSize == .small || controlSize == .mini
             configuration.label
-                .font(Theme.Font.body(small ? 12 : 13, .medium))
+                .font(Theme.Font.body(small ? 12 : 13, .medium, fixed: fixed))
                 .foregroundStyle(Theme.text1)
                 .padding(.horizontal, small ? 9 : 12)
                 .frame(height: resolvedHeight(height, controlSize, regular: Theme.Metrics.control))
@@ -215,10 +255,11 @@ struct DSGhostButtonStyle: PrimitiveButtonStyle {
         let configuration: ButtonStyleConfiguration
         let color: Color
         @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.fixedTextSize) private var fixed
         @State private var hovering = false
         var body: some View {
             configuration.label
-                .font(Theme.Font.body(12.5, .medium))
+                .font(Theme.Font.body(12.5, .medium, fixed: fixed))
                 .foregroundStyle((configuration.isPressed || hovering) && isEnabled ? Theme.text1 : color)
                 .padding(.horizontal, 6)
                 .frame(minHeight: Theme.Metrics.hitTarget)
@@ -245,10 +286,11 @@ struct DSAccentOutlineButtonStyle: PrimitiveButtonStyle {
         let color: Color
         let height: CGFloat
         @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.fixedTextSize) private var fixed
         @State private var hovering = false
         var body: some View {
             configuration.label
-                .font(Theme.Font.body(12, .semibold))
+                .font(Theme.Font.body(12, .semibold, fixed: fixed))
                 .foregroundStyle(color)
                 .padding(.horizontal, 10)
                 .frame(height: height)
@@ -273,12 +315,13 @@ struct DSDangerButtonStyle: PrimitiveButtonStyle {
         let configuration: ButtonStyleConfiguration
         let height: CGFloat
         @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.fixedTextSize) private var fixed
         @State private var hovering = false
         var body: some View {
             let red = Color(hex: 0xE8433A)
             let active = (configuration.isPressed || hovering) && isEnabled
             configuration.label
-                .font(Theme.Font.body(13, .semibold))
+                .font(Theme.Font.body(13, .semibold, fixed: fixed))
                 .foregroundStyle(active ? .white : Theme.danger)
                 .padding(.horizontal, 12)
                 .frame(height: height)
@@ -405,13 +448,14 @@ struct SegmentedBar<T: Hashable>: View {
     let options: [(T, String)]
     var height: CGFloat = Theme.Metrics.hitTarget
     @Namespace private var pill
+    @Environment(\.fixedTextSize) private var fixed
     var body: some View {
         HStack(spacing: 0) {
             ForEach(options, id: \.0) { option in
                 let on = selection == option.0
                 Button { withAnimation(Theme.spring) { selection = option.0 } } label: {
                     Text(option.1)
-                        .font(Theme.Font.body(12.5, on ? .semibold : .medium))
+                        .font(Theme.Font.body(12.5, on ? .semibold : .medium, fixed: fixed))
                         .foregroundStyle(on ? Theme.onGold : Theme.text2)
                         .lineLimit(1).fixedSize()
                         .padding(.horizontal, 12)
@@ -546,8 +590,9 @@ struct RailRow<Content: View>: View {
 
 struct TagChip: View {
     let text: String
+    @Environment(\.fixedTextSize) private var fixed
     var body: some View {
-        Text(text).font(Theme.Font.body(11.5, .medium)).foregroundStyle(Theme.text2)
+        Text(text).font(Theme.Font.body(11.5, .medium, fixed: fixed)).foregroundStyle(Theme.text2)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(Color.white.opacity(0.07), in: rounded(Theme.Radius.xs))
     }
@@ -565,12 +610,13 @@ struct DSTextField: View {
     var mono = false
     var onSubmit: () -> Void = {}
     @FocusState private var focused: Bool
+    @Environment(\.fixedTextSize) private var fixed
     var body: some View {
         HStack(spacing: 8) {
             if let icon { Image(systemName: icon).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.text3).accessibilityHidden(true) }
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .font(mono ? Theme.Font.mono(12.5) : Theme.Font.body(13.5))
+                .font(mono ? Theme.Font.mono(12.5, fixed: fixed) : Theme.Font.body(13.5, fixed: fixed))
                 .foregroundStyle(Theme.text1)
                 .focused($focused)
                 .onSubmit(onSubmit)
@@ -598,10 +644,11 @@ struct DSNumberField<F: ParseableFormatStyle>: View where F.FormatOutput == Stri
     var width: CGFloat = 96
     var height: CGFloat = Theme.Metrics.control
     @FocusState private var focused: Bool
+    @Environment(\.fixedTextSize) private var fixed
     var body: some View {
         TextField(placeholder, value: $value, format: format)
             .textFieldStyle(.plain)
-            .font(Theme.Font.mono(12.5))
+            .font(Theme.Font.mono(12.5, fixed: fixed))
             .foregroundStyle(Theme.text1)
             .focused($focused)
             .accessibilityLabel(placeholder)
@@ -681,11 +728,12 @@ struct AnyButtonStyle: PrimitiveButtonStyle {
 /// Checkbox: 15 pt rounded box, gold fill with a check when on, label beside it.
 struct DSCheckboxToggleStyle: ToggleStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.fixedTextSize) private var fixed
     func makeBody(configuration: Configuration) -> some View {
         Button { configuration.isOn.toggle() } label: {
             HStack(alignment: .center, spacing: 8) {
                 DSCheck(on: configuration.isOn)
-                configuration.label.font(Theme.Font.body(13.5)).foregroundStyle(Theme.text1)
+                configuration.label.font(Theme.Font.body(13.5, fixed: fixed)).foregroundStyle(Theme.text1)
             }
             .frame(minHeight: Theme.Metrics.hitTarget)
             .contentShape(Rectangle())
@@ -699,6 +747,7 @@ struct DSCheckboxToggleStyle: ToggleStyle {
 /// Determinate progress draws the grained gold bar; indeterminate progress
 /// draws a short gold segment sweeping across the same track.
 struct DSProgressViewStyle: ProgressViewStyle {
+    @Environment(\.fixedTextSize) private var fixed
     func makeBody(configuration: Configuration) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if let fraction = configuration.fractionCompleted {
@@ -706,8 +755,8 @@ struct DSProgressViewStyle: ProgressViewStyle {
             } else {
                 IndeterminateBar()
             }
-            configuration.label.font(Theme.Font.meta).foregroundStyle(Theme.text3)
-            configuration.currentValueLabel.font(Theme.Font.meta).foregroundStyle(Theme.text3)
+            configuration.label.font(Theme.Font.body(12, fixed: fixed)).foregroundStyle(Theme.text3)
+            configuration.currentValueLabel.font(Theme.Font.body(12, fixed: fixed)).foregroundStyle(Theme.text3)
         }
     }
 }
@@ -740,10 +789,11 @@ struct IndeterminateBar: View {
 struct LabeledSegment<Content: View>: View {
     let label: String
     @ViewBuilder var content: Content
+    @Environment(\.fixedTextSize) private var fixed
     init(_ label: String, @ViewBuilder content: () -> Content) { self.label = label; self.content = content() }
     var body: some View {
         HStack(spacing: 10) {
-            Text(label).font(Theme.Font.body(12.5, .medium)).foregroundStyle(Theme.text2)
+            Text(label).font(Theme.Font.body(12.5, .medium, fixed: fixed)).foregroundStyle(Theme.text2)
             content
         }
     }

@@ -19,7 +19,7 @@ struct FileIDApp: App {
     var body: some Scene {
         WindowGroup("FileID") {
             MainWindow(engine: engine)
-                .font(Theme.Font.body(13.5))
+                .font(Theme.ChromeFont.body(13.5))
                 .toggleStyle(DSCheckboxToggleStyle())
                 .progressViewStyle(DSProgressViewStyle())
                 .buttonStyle(DSSecondaryButtonStyle())
