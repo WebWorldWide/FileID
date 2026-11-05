@@ -1825,7 +1825,7 @@ public enum Restructure {
                     guard let line = try reader.nextLine() else { return nil }
                     let entry = try decoder.decode(UndoEntry.self, from: line)
                     return RestructureProposal(
-                        fileID: entry.fileID, oldPath: entry.from,
+                        fileID: try Self.undoFileID(for: entry, database: database), oldPath: entry.from,
                         newPath: entry.to, bucket: "")
                 },
                 database: database, libraryRoot: libraryRoot,
@@ -1844,6 +1844,20 @@ public enum Restructure {
             clearUndoJournal(journalURL)
         }
         return result
+    }
+
+    /// The catalog row an undo entry should move. Wiping the catalog and rescanning
+    /// renumbers files, so a journaled id can name nothing or a different file; then
+    /// the row now at the entry's moved path is the one to put back. A row that
+    /// already names the original path keeps its id so a re-run undo still skips it.
+    /// The move itself re-checks that row's inode against the bytes on disk.
+    static func undoFileID(for entry: UndoEntry, database: Database) throws -> Int64 {
+        try database.pool.read { db in
+            let journaled = try String.fetchOne(db, sql: "SELECT path_text FROM files WHERE id = ?", arguments: [entry.fileID])
+            if let journaled, pathsEqual(journaled, entry.from) || pathsEqual(journaled, entry.to) { return entry.fileID }
+            let byPath = try Int64.fetchOne(db, sql: "SELECT id FROM files WHERE path_text = ?", arguments: [entry.from])
+            return byPath ?? entry.fileID
+        }
     }
 
     /// Apply-progress throttle: log on the first move, on the last, and once per

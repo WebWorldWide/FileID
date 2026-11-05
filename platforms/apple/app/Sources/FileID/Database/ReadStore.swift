@@ -30,6 +30,9 @@ public final class ReadStore: @unchecked Sendable {
     public private(set) var version: Int = 0
     public private(set) var totalFiles: Int = 0
     public private(set) var totalImages: Int = 0
+    /// Files the scan could not decode or read; the Library hides them unless
+    /// the Unreadable filter is chosen.
+    public private(set) var unreadableFiles: Int = 0
     public private(set) var totalDuplicateGroups: Int = 0
     public private(set) var totalReclaimableMB: Double = 0
     public private(set) var hasFacePrints = false
@@ -76,6 +79,7 @@ public final class ReadStore: @unchecked Sendable {
             self.queue = nil
             self.totalFiles = 0
             self.totalImages = 0
+            self.unreadableFiles = 0
             self.totalDuplicateGroups = 0
             self.totalReclaimableMB = 0
             self.hasFacePrints = false
@@ -169,6 +173,7 @@ public final class ReadStore: @unchecked Sendable {
     private struct CounterSnapshot {
         let totalFiles: Int
         let totalImages: Int
+        let unreadableFiles: Int
         let totalDuplicateGroups: Int
         let totalReclaimableMB: Double
         let hasFacePrints: Bool
@@ -239,6 +244,7 @@ public final class ReadStore: @unchecked Sendable {
             return try q.read { db -> CounterResult in
                 let totalFiles  = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files") ?? 0
                 let totalImages = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE kind = 'image' AND failed = 0") ?? 0
+                let unreadableFiles = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM files WHERE failed = 1") ?? 0
 
                 // Fast stored-hash candidate metrics for Settings only. Cleanup itself
                 // performs bounded live full-file verification before display and Trash.
@@ -267,6 +273,7 @@ public final class ReadStore: @unchecked Sendable {
                 return .ok(CounterSnapshot(
                     totalFiles: totalFiles,
                     totalImages: totalImages,
+                    unreadableFiles: unreadableFiles,
                     totalDuplicateGroups: groups,
                     totalReclaimableMB: Double(reclaimableBytes) / 1_048_576,
                     hasFacePrints: hasFacePrints,
@@ -283,6 +290,7 @@ public final class ReadStore: @unchecked Sendable {
     private func applyCounters(_ snapshot: CounterSnapshot) {
         self.totalFiles = snapshot.totalFiles
         self.totalImages = snapshot.totalImages
+        self.unreadableFiles = snapshot.unreadableFiles
         self.totalDuplicateGroups = snapshot.totalDuplicateGroups
         self.totalReclaimableMB = snapshot.totalReclaimableMB
         self.hasFacePrints = snapshot.hasFacePrints
@@ -292,13 +300,17 @@ public final class ReadStore: @unchecked Sendable {
 
     // MARK: - Library queries
 
+    /// `kindFilter` value that lists the files the scan could not read.
+    public static let unreadableFilter = "unreadable"
+
     public func files(offset: Int = 0, limit: Int = 200,
                       search: String = "",
                       kindFilter: String? = nil) -> [FileRow] {
         guard let q = queue else { return [] }
         do {
             return try q.read { db in
-                var sql = "SELECT * FROM files WHERE failed = 0"
+                let unreadable = kindFilter == Self.unreadableFilter
+                var sql = unreadable ? "SELECT * FROM files WHERE failed = 1" : "SELECT * FROM files WHERE failed = 0"
                 var args: StatementArguments = []
                 let trimmedSearch = search.trimmingCharacters(in: .whitespaces)
                 if !trimmedSearch.isEmpty {
@@ -343,7 +355,7 @@ public final class ReadStore: @unchecked Sendable {
                         """
                     args += [ftsQuery, ftsQuery, like, like, like, like, like, like, like, like, like, like]
                 }
-                if let k = kindFilter {
+                if let k = kindFilter, !unreadable {
                     sql += " AND kind = ?"
                     args += [k]
                 }

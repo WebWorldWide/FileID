@@ -3,7 +3,7 @@ scripts do not cover, checked against the database and the files on disk.
 
 usage: FILEID_E2E_DIR=<scratch dir containing lib/> FILEID_ENGINE=<engine binary> python3 feature_audit.py
 The library must be a scratch copy: this moves, renames, tags and hides files (and restores them).
-Expected layout: lib/Game (photos with people), lib/Clips (1-2 short videos), lib/Docs (txt/docx/pdf), lib/Skip.
+Expected layout: lib/Game (photos with people, including one exact duplicate), lib/Clips (1-2 short videos), lib/Docs (txt/docx/pdf), lib/Skip.
 """
 import hashlib, json, os, plistlib, shutil, sqlite3, subprocess, sys, time, traceback, uuid
 
@@ -53,6 +53,9 @@ def inner(payload, k):
 
 
 START = tree()
+IMAGE_EXT = {".jpg", ".jpeg", ".heic", ".heif", ".png", ".arw", ".dng", ".tif", ".tiff", ".gif", ".webp"}
+VIDEO_EXT = {".mov", ".mp4", ".m4v"}
+DOC_EXT = {".txt", ".doc", ".docx", ".pdf", ".rtf", ".md"}
 e = Engine(W)
 e.wait(lambda p: kind(p) == "ready", 60)
 db = lambda: sqlite3.connect(f"file:{W}/fileid.sqlite?mode=ro", uri=True)  # noqa: E731
@@ -92,7 +95,10 @@ def _():
     files = sum(1 for _ in START)
     step("first scan catalogs every file", v["processedFiles"] == files and v["failedFiles"] == 0, f"{v['processedFiles']}/{files} in {s}s")
     kinds = dict(db().execute("select kind,count(*) from files group by 1").fetchall())
-    step("file kinds classified", kinds.get("image") == 41 and kinds.get("video") == 2 and kinds.get("doc", 0) + kinds.get("pdf", 0) == 4, kinds)
+    ext = [os.path.splitext(path)[1].lower() for path in START]
+    want = (sum(x in IMAGE_EXT for x in ext), sum(x in VIDEO_EXT for x in ext), sum(x in DOC_EXT for x in ext))
+    got = (kinds.get("image", 0), kinds.get("video", 0), kinds.get("doc", 0) + kinds.get("pdf", 0))
+    step("file kinds classified", got == want, f"{kinds} expected image/video/doc {want}")
 
 
 @check("incremental rescan")

@@ -156,12 +156,16 @@ struct HEIFDecoderTests {
         #expect(loaded.0.dataProvider?.data == direct.dataProvider?.data)
     }
 
-    @Test("face clustering and Takes load HEICs through the HEIF decoder, other formats through ImageIO")
-    func analysisUsesDecoder() throws {
+    @Test("Deep Analyze, face clustering and Takes load HEICs through the HEIF decoder, other formats through ImageIO")
+    func analysisUsesDecoder() async throws {
         let directory = try Self.temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         guard let url = Self.writeHEIC(try Self.quadrants(width: 2100, height: 1400),
                                        orientation: 6, in: directory, name: "photo.heic") else { return }
+        let deep = try #require(await DeepAnalyze.loadCGImage(url: url, maxPixelSize: 1024))
+        let deepDirect = try #require(HEIFDecoder.decode(path: url.path, maxPixelSize: 1024))
+        #expect(deep.height == 1024 && deep.width < deep.height)
+        #expect(deep.dataProvider?.data == deepDirect.dataProvider?.data)
         let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
         let clustering = try #require(decodeBoundedImage(source, path: url.path, maxPixelSize: 2048))
         let clusteringDirect = try #require(HEIFDecoder.decode(path: url.path, maxPixelSize: 2048))

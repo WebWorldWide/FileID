@@ -172,7 +172,7 @@ struct BulkRenameSheet: View {
                 if result.failed == 0 {
                     status = "Renamed \(result.renamed.count) file\(result.renamed.count == 1 ? "" : "s")"
                 } else {
-                    status = "Renamed \(result.renamed.count), \(result.failed) failed"
+                    status = "Renamed \(result.renamed.count) · \(result.failed) couldn't be renamed"
                         + (result.firstError.map { " — \($0)" } ?? "")
                 }
             }
