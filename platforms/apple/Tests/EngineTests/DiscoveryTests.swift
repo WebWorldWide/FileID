@@ -44,13 +44,15 @@ struct DiscoveryTests {
             sub.appendingPathComponent("a.jpg"),
             sub.appendingPathComponent("b.png"),
             tmp.appendingPathComponent("c.pdf"),
-            tmp.appendingPathComponent("d.mp4")
+            tmp.appendingPathComponent("d.mp4"),
+            tmp.appendingPathComponent("notes.xyz"),        // unknown ext → other
+            tmp.appendingPathComponent("README")            // no ext → other
         ]
         // Files we expect to be filtered out.
         let badFiles = [
             tmp.appendingPathComponent(".hidden.jpg"),     // hidden
-            tmp.appendingPathComponent("notes.xyz"),        // unknown ext
-            tmp.appendingPathComponent("README")            // no ext
+            tmp.appendingPathComponent("movie.mp4.part"),   // unfinished download
+            tmp.appendingPathComponent("Thumbs.db")         // system file
         ]
         let payload = Data("hello".utf8)
         for url in goodFiles + badFiles {
@@ -75,6 +77,8 @@ struct DiscoveryTests {
         #expect(byExt["png"] == .image)
         #expect(byExt["pdf"] == .pdf)
         #expect(byExt["mp4"] == .video)
+        #expect(byExt["xyz"] == .other)
+        #expect(byExt[""] == .other)
     }
 
     @Test("Streaming discovery publishes small-library progress before completion")

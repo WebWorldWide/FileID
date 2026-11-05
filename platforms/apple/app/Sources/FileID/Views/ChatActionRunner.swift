@@ -358,6 +358,7 @@ final class ChatActionRunner {
         store.notifyChanged()
         phases[action.id] = .done(summary + ".")
         if let batch = outcome.batchID, !outcome.trashed.isEmpty {
+            UserDefaults.standard.set(batch, forKey: "cleanup.lastTrashBatch")
             offerUndo(action, label: "Put them back") {
                 let undone = await ExactDuplicateVerifier.undoTrash(batchID: batch, engine: engine)
                 store.notifyChanged()

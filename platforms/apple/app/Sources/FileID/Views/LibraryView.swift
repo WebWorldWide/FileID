@@ -620,7 +620,7 @@ struct LibraryView: View {
             ("Docs",     "doc"),
             ("PDFs",     "pdf"),
             ("Audio",    "audio")
-        ] + unreadableKind
+        ] + (store.otherFiles > 0 || kindFilter == "other" ? [(label: "Other", value: "other")] : []) + unreadableKind
         HStack(spacing: 0) {
             ForEach(Array(kinds.enumerated()), id: \.offset) { _, k in
                 let active = kindFilter == k.value

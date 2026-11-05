@@ -436,6 +436,7 @@ struct TakeReview: View {
         if result.failed > 0 { text += " · \(result.failed) couldn't be moved" }
         let engine = self.engine, onResolved = self.onResolved, group = self.group, keepAllShots = keptShots.count >= 2
         if let batch {
+            UserDefaults.standard.set(batch, forKey: "cleanup.lastTrashBatch")
             ToastCenter.shared.show(text, actionLabel: "Undo", duration: 10) {
                 Task {
                     let before = engine.bulkActionResultSignal

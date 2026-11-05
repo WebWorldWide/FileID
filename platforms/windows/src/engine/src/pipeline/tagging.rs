@@ -1686,6 +1686,8 @@ fn predecode_one(
                         .ok()
                         .flatten()
                 }
+                // The names inside a zip, so searching for a file finds its archive.
+                FileKind::Other => crate::pipeline::archive_names::list(&file.path),
                 _ => None,
             }
         };
@@ -2194,7 +2196,10 @@ async fn process_file_predecoded(
     // doc-kind input that isn't a cloud placeholder) — the dbwriter keys its
     // stale doc_text/doc_fts DELETE on this so a re-process that now yields
     // empty text clears phantom FTS hits (#11).
-    tagged.doc_stage_ran = matches!(file.kind, FileKind::Doc | FileKind::Pdf) && !file.online_only;
+    tagged.doc_stage_ran = (matches!(file.kind, FileKind::Doc | FileKind::Pdf)
+        || (file.kind == FileKind::Other
+            && file.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"))))
+        && !file.online_only;
     // The content-derivation stage ran iff we attempted doc-text extraction OR a model
     // render. Persisted to text_stage_done so BOTH the BGE doc carve-out and the model CLIP
     // carve-out stop re-walking a file that can never produce its embedding (a text-less
@@ -2203,7 +2208,8 @@ async fn process_file_predecoded(
         tagged.doc_stage_ran || (matches!(file.kind, FileKind::Model) && !file.online_only);
     if let Some(text) = doc_text
         && !text.trim().is_empty() {
-            for (label, score) in crate::util::keywords::extract(&text) {
+            let keywords = if file.kind == FileKind::Other { Vec::new() } else { crate::util::keywords::extract(&text) };
+            for (label, score) in keywords {
                 tagged.tags.push((label, Some(score)));
             }
             // BGE-small semantic embedding for the doc text. Sync inference
@@ -2211,7 +2217,7 @@ async fn process_file_predecoded(
             // on an async worker every waiting doc would pin a runtime thread
             // and starve IPC. Skipped when BGE isn't installed — FTS5 still
             // serves keyword search.
-            if !coord.is_gpu_dead() && models.bge_text.is_some() {
+            if !coord.is_gpu_dead() && models.bge_text.is_some() && file.kind != FileKind::Other {
                 let (embed_models, embed_text) = (models.clone(), text.clone());
                 let embedded = tokio::task::spawn_blocking(move || {
                     embed_models.bge_text.as_ref().map(|bge| bge.lock().embed(&embed_text))

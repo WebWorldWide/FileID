@@ -15,13 +15,15 @@ enum FileSystemChanges {
     private final class Collector: @unchecked Sendable {
         let prefix: String
         let root: String
+        let ignored: [String]
         let done = DispatchSemaphore(value: 0)
         private let lock = NSLock()
         private var found = false
         private var finished = false
 
-        init(root: String) {
+        init(root: String, ignored: [String]) {
             self.root = root
+            self.ignored = ignored
             prefix = root.hasSuffix("/") ? root : root + "/"
         }
 
@@ -36,7 +38,8 @@ enum FileSystemChanges {
             }
             guard flags & FileSystemChanges.contentFlags != 0,
                   path == root || path.hasPrefix(prefix) || root.hasPrefix(path.hasSuffix("/") ? path : path + "/"),
-                  !path.dropFirst(prefix.count).split(separator: "/").contains(where: { $0.hasPrefix(".") }) else { return }
+                  !path.dropFirst(prefix.count).split(separator: "/").contains(where: { $0.hasPrefix(".") }),
+                  !ignored.contains(where: { path.hasPrefix($0) || path + "/" == $0 }) else { return }
             lock.lock(); found = true; lock.unlock()
         }
 
@@ -45,13 +48,14 @@ enum FileSystemChanges {
 
     /// True when FSEvents recorded a change to a visible item under `root` after
     /// `since`; nil when the history could not be read in time.
-    static func changed(under root: URL, since: FSEventStreamEventId, timeout: TimeInterval = 3) -> Bool? {
+    static func changed(under root: URL, since: FSEventStreamEventId, ignoring ignored: [String] = [],
+                        timeout: TimeInterval = 3) -> Bool? {
         // realpath, not resolvingSymlinksInPath: Foundation strips "/private" from
         // /private/tmp and /private/var, but FSEvents reports the real path.
         guard let resolved = realpath(root.path, nil) else { return nil }
         let path = String(cString: resolved)
         free(resolved)
-        let collector = Collector(root: path)
+        let collector = Collector(root: path, ignored: ignored)
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(collector).toOpaque(),
                                            retain: nil, release: nil, copyDescription: nil)
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in

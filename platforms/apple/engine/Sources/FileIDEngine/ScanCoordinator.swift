@@ -137,11 +137,15 @@ public actor ScanCoordinator {
         current = s
     }
 
-    /// Counts files a follow-up pass found after discovery finished.
-    public func addFiles(_ count: Int) {
-        guard var s = current, count > 0 else { return }
-        s.discovered += count
-        s.totalFiles += count
+    /// Counts files a follow-up pass found after discovery finished. `retried` of
+    /// them already failed once in this scan: their earlier failure is withdrawn so
+    /// the retry's outcome counts once.
+    public func addFiles(_ count: Int, retried: Int = 0) {
+        guard var s = current else { return }
+        let retried = min(max(0, retried), count, s.failed)
+        s.failed -= retried
+        s.discovered += count - retried
+        s.totalFiles += count - retried
         current = s
     }
 

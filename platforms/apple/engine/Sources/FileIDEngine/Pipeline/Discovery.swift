@@ -110,6 +110,15 @@ public actor Discovery {
             cancelCheck: cancelCheck, progress: progress, emit: onFile)
     }
 
+    /// FileID's own catalog, journals and logs never become library files.
+    static let engineStatePrefix: String = {
+        // realpath: the enumerator reports /private/var and /private/tmp, which
+        // resolvingSymlinksInPath would strip.
+        var path = EngineStateRoot.directory.path
+        if let resolved = realpath(path, nil) { path = String(cString: resolved); free(resolved) }
+        return path.hasSuffix("/") ? path : path + "/"
+    }()
+
     // MARK: - Enumeration core
 
     private struct Exclusion: Sendable {
@@ -263,10 +272,13 @@ public actor Discovery {
             }
             if Self.isExcluded(url.path, by: exclusions) { continue }
             if values?.isRegularFile != true { continue }
+            if url.path.hasPrefix(Self.engineStatePrefix) { continue }
             let ext = url.pathExtension
-            guard FileTypes.isTaggable(ext) else { continue }
+            guard FileTypes.isCataloged(name: url.lastPathComponent) else { continue }
             let size = Int64(values?.fileSize ?? 0)
-            let streamed = FileTypes.kind(forExtension: ext) == .video || FileTypes.kind(forExtension: ext) == .audio
+            let fileKind = FileTypes.kind(forExtension: ext)
+            // Video, audio and other files are never decoded whole, so the size cap does not apply.
+            let streamed = fileKind == .video || fileKind == .audio || fileKind == .other
             if size > maxBytes, !streamed {
                 JSONLog.shared.info(ev: "skip_large_file", path: redactPathForLog(url.path),
                                     extra: ["sizeMB": AnyCodable(size / 1_048_576)])
