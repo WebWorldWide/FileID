@@ -131,6 +131,13 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         #[strong]
         restoring,
         move |selection| {
+            super::chat_handoff::set_files(
+                selection
+                    .selected_item()
+                    .and_downcast::<BoxedAnyObject>()
+                    .map(|object| vec![object.borrow::<FileRow>().id])
+                    .unwrap_or_default(),
+            );
             if restoring.get() {
                 return;
             }

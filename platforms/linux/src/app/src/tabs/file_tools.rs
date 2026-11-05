@@ -12,7 +12,7 @@ use gtk::glib;
 use super::workbench_state::*;
 use super::workbenches::{Engine, LINUX_TOOL_UNDO_SAFETY_ACCEPTED, TOOL_UNDO_UNAVAILABLE_REASON};
 use crate::engine_client::{
-    texture_from_decoded, EngineState, FileRow, QueryChannel, QuerySpec, ThumbReply,
+    read_file_row, texture_from_decoded, EngineState, FileRow, QueryChannel, QuerySpec, ThumbReply,
 };
 use crate::shell::status::Tone;
 use crate::spring::{animate_with, Spring};
@@ -138,9 +138,90 @@ pub(super) struct ToolsUi {
     busy: gtk::ProgressBar,
     cancel: gtk::Button,
     running: RefCell<Option<String>>,
+    lookup: Cell<u64>,
+    loading: Cell<bool>,
+    handoff: RefCell<Option<Rc<dyn Fn(Vec<i64>)>>>,
+}
+
+/// The export kind that fits every handed file, if one does.
+pub(super) fn kind_for(kinds: &[&str]) -> Option<usize> {
+    if kinds.is_empty() {
+        None
+    } else if kinds.iter().all(|kind| *kind == "image") {
+        Some(0)
+    } else if kinds.iter().all(|kind| *kind == "video") {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+pub(super) fn handoff_status(chosen: usize, asked: usize) -> String {
+    if asked > chosen {
+        format!(
+            "Chat chose {asked} files; the first {chosen} are ticked. Up to {MAX_FILES} files per export."
+        )
+    } else {
+        format!(
+            "Chat chose {chosen} {}. Pick a format, then Preview.",
+            if chosen == 1 { "file" } else { "files" }
+        )
+    }
 }
 
 impl ToolsUi {
+    fn begin_lookup(&self) -> u64 {
+        let lookup = self.lookup.get().wrapping_add(1);
+        self.lookup.set(lookup);
+        self.loading.set(true);
+        lookup
+    }
+
+    fn end_lookup(&self, lookup: u64) -> bool {
+        let current = self.lookup.get() == lookup;
+        if current {
+            self.loading.set(false);
+        }
+        current
+    }
+
+    /// Chat's export card: tick the files it chose, up to the export limit.
+    fn receive(self: &Rc<Self>, ids: Vec<i64>) {
+        let asked = ids.len();
+        let mut ids: Vec<i64> = ids.into_iter().filter(|id| *id > 0).collect();
+        ids.dedup();
+        ids.truncate(MAX_FILES);
+        let lookup = self.begin_lookup();
+        self.query.set_text("");
+        self.status.set_label("Loading the files Chat chose…");
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let mut rows = Vec::new();
+            for id in ids {
+                if let Ok(Some(row)) = read_file_row(id).recv().await {
+                    rows.push(row);
+                }
+            }
+            let Some(ui) = weak.upgrade() else { return };
+            if !ui.end_lookup(lookup) {
+                return;
+            }
+            let kinds: Vec<&str> = rows.iter().map(|row| row.kind.as_str()).collect();
+            if let Some(kind) = kind_for(&kinds).filter(|kind| *kind != ui.choice.borrow().kind) {
+                ui.kind.select(kind, false);
+                ui.choice.borrow_mut().kind = kind;
+                ui.format_stack.set_visible_child_name(KINDS[kind]);
+                ui.photo_rows.set_visible(kind == 0);
+                ui.video_rows.set_visible(kind == 1);
+                ui.animate_frame();
+            }
+            ui.selected.replace(rows.iter().map(|row| row.id).collect());
+            ui.status.set_label(&handoff_status(rows.len(), asked));
+            ui.render_files(rows);
+            ui.changed();
+        });
+    }
+
     fn recipe(&self) -> ToolRecipe {
         self.choice.borrow().recipe()
     }
@@ -312,6 +393,7 @@ impl ToolsUi {
     }
 
     fn find_files(self: &Rc<Self>) {
+        let lookup = self.begin_lookup();
         let kind = self.choice.borrow().file_kind();
         let rx = self.engine.borrow().query_files(QuerySpec {
             search: self.query.text().trim().to_owned(),
@@ -324,6 +406,9 @@ impl ToolsUi {
         glib::MainContext::default().spawn_local(async move {
             let result = rx.recv().await;
             let Some(ui) = weak.upgrade() else { return };
+            if !ui.end_lookup(lookup) {
+                return;
+            }
             match result {
                 Ok(Ok((files, _))) => ui.render_files(files),
                 Ok(Err(error)) => ui
@@ -732,7 +817,18 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         busy,
         cancel,
         running: RefCell::new(None),
+        lookup: Cell::new(0),
+        loading: Cell::new(false),
+        handoff: RefCell::new(None),
     });
+    let weak = Rc::downgrade(&ui);
+    let receiver: Rc<dyn Fn(Vec<i64>)> = Rc::new(move |ids| {
+        if let Some(ui) = weak.upgrade() {
+            ui.receive(ids);
+        }
+    });
+    super::chat_handoff::receive_in_tools(&receiver);
+    ui.handoff.replace(Some(receiver));
     wire(&ui, &find, &select_all, &select_none, &choose, &last, &root);
     ui.update();
     (root.upcast(), ui)
@@ -888,7 +984,7 @@ fn wire(
     root.add_controller(keys);
     let weak = Rc::downgrade(ui);
     root.connect_map(move |_| {
-        if let Some(ui) = weak.upgrade().filter(|ui| ui.rows.borrow().is_empty()) {
+        if let Some(ui) = weak.upgrade().filter(|ui| ui.rows.borrow().is_empty() && !ui.loading.get()) {
             ui.find_files();
         }
     });
@@ -989,6 +1085,19 @@ fn plain_kind_detail(kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handed_files_pick_a_fitting_kind_and_report_the_limit() {
+        assert_eq!(kind_for(&["image", "image"]), Some(0));
+        assert_eq!(kind_for(&["video"]), Some(1));
+        assert_eq!(kind_for(&["image", "video"]), None);
+        assert_eq!(kind_for(&[]), None);
+        assert_eq!(handoff_status(1, 1), "Chat chose 1 file. Pick a format, then Preview.");
+        assert_eq!(
+            handoff_status(100, 250),
+            "Chat chose 250 files; the first 100 are ticked. Up to 100 files per export."
+        );
+    }
 
     fn choice(kind: usize) -> RecipeChoice {
         RecipeChoice {

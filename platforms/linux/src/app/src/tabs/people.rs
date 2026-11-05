@@ -885,7 +885,22 @@ fn set_mode(ui: &Rc<Ui>, mode: Mode) {
     ui.mode.set(mode);
     ui.merge_checked.borrow_mut().clear();
     ui.unknown_checked.borrow_mut().clear();
+    publish_selection(ui, None);
     refresh_view(ui);
+}
+
+/// The person open in detail, or the people checked for merging, so Chat can
+/// resolve "this person" and "these people" (macOS `publishSelection`).
+fn publish_selection(ui: &Ui, open: Option<i64>) {
+    let ids = match open {
+        Some(id) => vec![id],
+        None => {
+            let mut ids: Vec<i64> = ui.merge_checked.borrow().iter().copied().collect();
+            ids.sort_unstable();
+            ids
+        }
+    };
+    super::chat_handoff::set_people(ids);
 }
 
 fn on_bulk_clicked(ui: &Rc<Ui>) {
@@ -1078,6 +1093,7 @@ fn build_card(ui: &Rc<Ui>, p: &PersonRow) -> gtk::Widget {
             }
             Mode::Merge => {
                 let on = toggle(&ui_g.merge_checked, pid);
+                publish_selection(&ui_g, None);
                 button.set_active(on);
                 update_check_visual(&check, &vbox, on);
                 update_bulk_strip(&ui_g);
@@ -1280,6 +1296,13 @@ fn open_person_detail(ui: &Rc<Ui>, pid: i64) {
     };
 
     let dialog = adw::Dialog::new();
+    publish_selection(ui, Some(pid));
+    let closing = Rc::downgrade(ui);
+    dialog.connect_closed(move |_| {
+        if let Some(ui) = closing.upgrade() {
+            publish_selection(&ui, None);
+        }
+    });
     dialog.set_title(&person.display_name());
     dialog.set_content_width(760);
     dialog.set_content_height(640);

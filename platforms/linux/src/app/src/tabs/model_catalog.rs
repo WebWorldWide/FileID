@@ -214,16 +214,36 @@ impl Catalog {
     }
 }
 
-/// Settings composes this section; Locations follows the catalog because
-/// settings.rs is digest-locked by the runtime egress review.
+/// Settings composes this section. settings.rs is digest-locked by the runtime
+/// egress review, so Locations rides along here and, once Settings has added
+/// it, moves to the top of the page as on macOS (or stays here if the page
+/// isn't a plain vertical box).
 pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(18)
         .build();
     page.append(&catalog(engine.clone()));
-    page.append(&super::locations::build(engine));
+    let locations = super::locations::build(engine);
+    page.append(&locations);
+    page.connect_parent_notify(move |page| {
+        let (page, locations) = (page.clone(), locations.clone());
+        glib::idle_add_local_once(move || move_to_top(&page, &locations));
+    });
     page.upcast()
+}
+
+fn move_to_top(page: &gtk::Box, locations: &gtk::Widget) {
+    let Some(settings) = page.parent().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    if settings.orientation() != gtk::Orientation::Vertical
+        || locations.parent().as_ref() != Some(page.upcast_ref())
+    {
+        return;
+    }
+    page.remove(locations);
+    settings.insert_child_after(locations, gtk::Widget::NONE);
 }
 
 fn catalog(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
@@ -345,6 +365,29 @@ fn catalog(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a display; run alone with XDG_DATA_HOME pointing at scratch"]
+    fn locations_move_to_the_top_of_settings() {
+        adw::init().unwrap();
+        let engine = Rc::new(RefCell::new(EngineClient::new()));
+        let settings = super::super::settings::build(engine);
+        let context = glib::MainContext::default();
+        while context.pending() {
+            context.iteration(false);
+        }
+        let column = settings
+            .first_child()
+            .and_then(|viewport| viewport.first_child())
+            .expect("settings column");
+        let first = column.first_child().expect("first section");
+        let heading = first
+            .first_child()
+            .and_then(|header| header.first_child())
+            .and_downcast::<gtk::Label>()
+            .map(|label| label.text().to_string());
+        assert_eq!(heading.as_deref(), Some("Locations"));
+    }
 
     fn model(
         id: &str,

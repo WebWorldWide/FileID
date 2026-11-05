@@ -274,10 +274,11 @@ impl ChatUi {
 fn context() -> ChatContext {
     let folder = crate::app_settings::last_folder().map(|path| path.to_string_lossy().into_owned());
     let page = crate::app_settings::active_tab().unwrap_or_default();
+    let (file_ids, person_ids) = super::chat_handoff::context_ids();
     ChatContext {
         page: Some(super::chat_actions::context_page(&page).to_owned()),
-        file_ids: None,
-        person_ids: None,
+        file_ids,
+        person_ids,
         folder: folder.clone(),
         library_root: folder,
     }
