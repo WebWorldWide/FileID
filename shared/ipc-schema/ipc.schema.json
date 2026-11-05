@@ -232,7 +232,9 @@
         { "type": "object", "required": ["undoRestructure"], "additionalProperties": false,
           "properties": { "undoRestructure": { "type": "object", "additionalProperties": false,
             "required": ["libraryRoot"],
-            "properties": { "libraryRoot": { "type": "string" } } } } },
+            "properties": {
+              "libraryRoot": { "type": "string" },
+              "shortcutUndoToken": { "type": ["string", "null"], "description": "Optional token from restructureApplyResult.shortcutUndoToken. Undoes only the shortcuts that apply created. Engines without shortcut mode reject a non-null token." } } } } },
         { "type": "object", "required": ["applyTags"], "additionalProperties": false,
           "properties": { "applyTags": { "type": "object", "additionalProperties": false,
             "required": ["fileIDs", "tags", "mode"],
