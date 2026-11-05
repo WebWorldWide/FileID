@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 /// at the system level if you set it, but otherwise default to the
 /// XDG path which is also the natural location for a cross-platform engine.
 #[cfg(windows)]
-pub fn root() -> Result<PathBuf> {
+fn resolve_root() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("LOCALAPPDATA") && !s.is_empty() {
         return Ok(PathBuf::from(s).join("FileID"));
     }
@@ -33,7 +33,7 @@ pub fn root() -> Result<PathBuf> {
 }
 
 #[cfg(not(windows))]
-pub fn root() -> Result<PathBuf> {
+fn resolve_root() -> Result<PathBuf> {
     if let Ok(s) = std::env::var("XDG_DATA_HOME")
         && !s.is_empty() {
             return Ok(PathBuf::from(s).join("FileID"));
@@ -42,6 +42,18 @@ pub fn root() -> Result<PathBuf> {
         return Ok(PathBuf::from(home).join(".local").join("share").join("FileID"));
     }
     anyhow::bail!("could not resolve $XDG_DATA_HOME or $HOME for FileID state dir")
+}
+
+#[cfg(not(test))]
+pub fn root() -> Result<PathBuf> {
+    resolve_root()
+}
+
+/// Unit tests never write the owner's real state folder: undo journals,
+/// recovery sidecars and logs go to a per-process temporary root.
+#[cfg(test)]
+pub fn root() -> Result<PathBuf> {
+    Ok(std::env::temp_dir().join(format!("fileid-engine-tests-{}", std::process::id())).join("FileID"))
 }
 
 /// Library database path. `FILEID_DB` is an explicit front-end/test override;
@@ -194,11 +206,11 @@ mod tests {
             .expect("USERPROFILE must be set to exercise the fallback");
 
         unsafe { std::env::set_var("LOCALAPPDATA", "") };
-        let empty = root();
+        let empty = resolve_root();
         unsafe { std::env::set_var("LOCALAPPDATA", r"D:\State\Local") };
-        let set = root();
+        let set = resolve_root();
         unsafe { std::env::remove_var("LOCALAPPDATA") };
-        let unset = root();
+        let unset = resolve_root();
 
         restore("LOCALAPPDATA", saved);
 
@@ -224,11 +236,11 @@ mod tests {
             .expect("HOME must be set to exercise the fallback");
 
         unsafe { std::env::set_var("XDG_DATA_HOME", "") };
-        let empty = root();
+        let empty = resolve_root();
         unsafe { std::env::set_var("XDG_DATA_HOME", "/data/xdg") };
-        let set = root();
+        let set = resolve_root();
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
-        let unset = root();
+        let unset = resolve_root();
 
         restore("XDG_DATA_HOME", saved);
 
