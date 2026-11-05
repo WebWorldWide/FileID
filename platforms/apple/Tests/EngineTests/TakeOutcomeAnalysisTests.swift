@@ -166,3 +166,16 @@ struct TakeOutcomeAnalysisTests {
         #expect(restored.takes?.allSatisfy { !$0.stale } == true)
     }
 }
+
+@Suite("Take goal windows from the frame pool")
+struct TakeGoalPoolFrameTests {
+    @Test("each window time takes its nearest pool frame, once, within one pool step")
+    func nearestPoolFrames() {
+        let frames = stride(from: 0.0, through: 10.0, by: 0.5).map { VideoFramePool.Frame(seconds: $0, file: "f\($0).png", signature: []) }
+        let pool = VideoFramePool.Pool(directory: URL(fileURLWithPath: "/tmp/pool"),
+                                       manifest: .init(duration: 10, size: 1, modifiedAt: 0, frames: frames))
+        let picked = TimelineAnalysis.poolFrames(pool, near: [1.1, 1.2, 2.74, 30])
+        #expect(picked?.map(\.seconds) == [1.0, 2.5])
+        #expect(TimelineAnalysis.poolFrames(pool, near: [3.0]) == nil, "one frame is not a sequence")
+    }
+}
