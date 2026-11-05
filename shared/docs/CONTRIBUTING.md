@@ -98,9 +98,9 @@ On-hardware verification (the third TESTING.md layer) runs on an RTX 2060 agains
 The IPC schema is the contract — it lands first, then each platform mirrors it.
 
 1. Add the variant to `shared/ipc-schema/ipc.schema.json`. Bump the schema version.
-2. Add the Rust variant to the `CommandPayload` enum in `platforms/windows/src/engine/src/ipc/mod.rs`.
+2. Run `python3 shared/scripts/gen_ipc_dtos.py` to regenerate the Rust variant in `platforms/windows/src/engine/src/ipc/generated.rs` (add names or numeric widths to `shared/ipc-schema/codegen.json` when the defaults don't fit).
 3. Add the C# DTO in `platforms/windows/src/FileID.IpcSchema/CommandPayload.cs`.
-4. Add the Swift variant in `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift`.
+4. Add the Swift variant in `platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift`. `python3 shared/scripts/gen_ipc_dtos.py --check` passes once both mirrors match the schema.
 5. Write the handler: `platforms/windows/src/engine/src/commands/<domain>.rs` (Windows) and the Swift dispatcher (macOS).
 6. Wire the dispatch arm: `handle_line` in `platforms/windows/src/engine/src/main.rs` (Windows) and `FileIDEngineMain.swift` (macOS).
 7. Add a round-trip test in `FileID.IpcSchema.Tests/IpcCommandTests.cs` **and** `Tests/SharedTests/IPCProtocolTests.swift`.
