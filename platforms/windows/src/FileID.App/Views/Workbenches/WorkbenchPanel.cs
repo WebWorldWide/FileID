@@ -139,6 +139,59 @@ internal abstract class WorkbenchPanel : UserControl
         };
     }
 
+    protected static void UseFont(TextBlock text, string key)
+    {
+        try { if (Application.Current.Resources[key] is FontFamily family) text.FontFamily = family; }
+        catch (Exception) { }
+    }
+
+    /// <summary>One line of text in a theme face, trimmed with an ellipsis.</summary>
+    protected static TextBlock TextLine(string text, double size, Brush foreground, string font = "BodyFontFamily")
+    {
+        var line = new TextBlock { Text = text, FontSize = size, Foreground = foreground, TextTrimming = TextTrimming.CharacterEllipsis };
+        UseFont(line, font);
+        return line;
+    }
+
+    /// <summary>v3 dashed notice: radius 10, dash 5/4, a serif 28 title over a
+    /// centred subtitle (DESIGN_V3_PORT "No selection").</summary>
+    protected static Grid DashedNoticeBox(string title, string subtitle, out TextBlock titleText, out TextBlock subtitleText)
+    {
+        titleText = new TextBlock
+        {
+            Text = title,
+            FontSize = 28,
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            Foreground = ThemeHelper.GetBrushSafe("Text1Brush"),
+        };
+        UseFont(titleText, "DisplayFontFamily");
+        subtitleText = Meta(subtitle);
+        subtitleText.FontSize = 13;
+        subtitleText.MaxWidth = 460;
+        subtitleText.TextAlignment = TextAlignment.Center;
+        var stack = new StackPanel
+        {
+            Spacing = 8,
+            Padding = new Thickness(24, 32, 24, 32),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        stack.Children.Add(titleText);
+        stack.Children.Add(subtitleText);
+        var grid = new Grid { MinHeight = 220 };
+        grid.Children.Add(new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            RadiusX = 10,
+            RadiusY = 10,
+            Stroke = new SolidColorBrush(Windows.UI.Color.FromArgb(0x29, 0xFF, 0xFF, 0xFF)),
+            StrokeThickness = 1,
+            StrokeDashArray = new DoubleCollection { 5, 4 },
+        });
+        grid.Children.Add(stack);
+        return grid;
+    }
+
     protected static T Styled<T>(T button, string style) where T : Button
     {
         if (ThemeHelper.GetStyleSafe(style) is { } resolved) button.Style = resolved;

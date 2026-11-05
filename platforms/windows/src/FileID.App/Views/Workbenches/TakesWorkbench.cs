@@ -22,9 +22,9 @@ namespace FileID.Views.Workbenches;
 
 /// <summary>Best Takes (DESIGN_V3_PORT "Best Takes"): the engine groups bursts and repeated clips by
 /// itself and scores each try without a model. The user checks the starred best try, keeps all, skips,
-/// or moves the rest to Trash with Undo. The goal-ranking panel is left out: the shared engine reports
-/// it as unavailable.</summary>
-internal sealed class TakesWorkbench : WorkbenchPanel
+/// or moves the rest to Trash with Undo. Groups made by hand live in TakesWorkbench.Manual.cs. The
+/// goal-ranking panel is left out: the shared engine reports it as unavailable.</summary>
+internal sealed partial class TakesWorkbench : WorkbenchPanel
 {
     private static readonly TimeSpan TrashUndoWindow = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan DecisionUndoWindow = TimeSpan.FromSeconds(8);
@@ -147,13 +147,22 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         pane.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        pane.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var manualPane = BuildManualPane();
         Grid.SetRow(intro, 1);
         Grid.SetRow(_groupsEmpty, 2);
         Grid.SetRow(_groupList, 3);
+        Grid.SetRow(manualPane, 4);
+        Grid.SetRow(_deletedFooter, 5);
         pane.Children.Add(header);
         pane.Children.Add(intro);
         pane.Children.Add(_groupsEmpty);
         pane.Children.Add(_groupList);
+        pane.Children.Add(manualPane);
+        pane.Children.Add(_deletedFooter);
+        pane.SizeChanged += (_, e) => DebugLog.SafeRun("TakesWorkbench.PaneSized", () =>
+            manualPane.MaxHeight = Math.Max(180, e.NewSize.Height * 0.55));
         UseSidePane(pane, 280, paneOnLeft: true);
 
         _groupList.ContainerContentChanging += (_, args) => DebugLog.SafeRun("TakesWorkbench.RowRealized", () =>
@@ -165,6 +174,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
             if (_rendering || _groupList.SelectedIndex < 0 || _groupList.SelectedIndex >= _groups.Count) return;
             var group = _groups[_groupList.SelectedIndex];
             if (_current?.GroupKey == group.GroupKey) return;
+            LeaveManual();
             Run(ct => ScoreAsync(group, focusStrip: false, ct));
         });
 
@@ -295,6 +305,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         Inputs.Children.Add(_firstLoad);
         Inputs.Children.Add(_notice);
         Inputs.Children.Add(_review);
+        Inputs.Children.Add(BuildManualPage());
         ShowNotice();
     }
 
@@ -302,15 +313,23 @@ internal sealed class TakesWorkbench : WorkbenchPanel
     {
         _thumbs ??= new ThumbnailService();
         Engine.PropertyChanged += OnEngineChanged;
-        Run(ct => LoadGroupsAsync(keepCurrent: true, ct));
+        if (AppViewModel.Instance.TakeBestTakesCandidates() is { Count: > 0 } handed) OpenWithCandidates(handed);
+        _jobPoll.Start();
+        Run(async ct =>
+        {
+            await ListEventsAsync(ct);
+            await LoadGroupsAsync(keepCurrent: true, ct);
+        });
     }
 
     protected override void OnClosed()
     {
         Engine.PropertyChanged -= OnEngineChanged;
         _toastTimer.Stop();
+        _jobPoll.Stop();
         StopPlayer(_left);
         StopPlayer(_right);
+        StopCards();
         _thumbs?.Dispose();
         _thumbs = null;
     }
@@ -331,6 +350,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
 
     protected override void UpdateControls()
     {
+        RunQueuedManual();
         if (!_focusStripWhenReady || _filmstrip.Visibility != Visibility.Visible) return;
         _focusStripWhenReady = false;
         _stripHost.Focus(FocusState.Programmatic);
@@ -348,7 +368,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         {
             if (!keepCurrent) _current = null;
             _groupBar.Visibility = Visibility.Visible;
-            if (!_loadedOnce)
+            if (!_loadedOnce && !ManualEngaged)
             {
                 _notice.Visibility = Visibility.Collapsed;
                 _firstLoad.Visibility = Visibility.Visible;
@@ -404,7 +424,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
             }
             _current = null;
             _qualities = Array.Empty<CatalogTakeQuality>();
-            if (TakeReviewPolicy.FirstOpen(groups) is { } first)
+            if (!ManualEngaged && TakeReviewPolicy.FirstOpen(groups) is { } first)
             {
                 _groupList.SelectedIndex = first;
                 return groups[first];
@@ -521,9 +541,18 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         _current = null;
         _qualities = Array.Empty<CatalogTakeQuality>();
         _review.Visibility = Visibility.Collapsed;
+        if (ManualEngaged)
+        {
+            ShowManualPage();
+            return;
+        }
+        _manualPage.Visibility = Visibility.Collapsed;
         if (_firstLoad.Visibility == Visibility.Visible) return;
-        _noticeTitle.Text = "No tries to compare yet";
-        _noticeBody.Text = "After a scan, Best Takes groups bursts and repeated clips here by itself. Scan a folder with photo bursts, or make a group by hand on the left.";
+        var anyGroups = _groups.Count > 0;
+        _noticeTitle.Text = anyGroups ? "Pick a group" : "No tries to compare yet";
+        _noticeBody.Text = anyGroups
+            ? "Choose a possible group on the left to compare its tries."
+            : "After a scan, Best Takes groups bursts and repeated clips here by itself. Scan a folder with photo bursts, or make a group by hand on the left.";
         _notice.Visibility = Visibility.Visible;
     }
 
@@ -537,6 +566,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         _zoom = false;
         RenderHeader(group);
         _notice.Visibility = Visibility.Collapsed;
+        _manualPage.Visibility = Visibility.Collapsed;
         _review.Visibility = Visibility.Visible;
         _scoringText.Text = $"Checking sharpness, faces and exposure in {group.Shots.Count} {TakeReviewPolicy.Noun(group, group.Shots.Count)}…";
         _scoring.Visibility = Visibility.Visible;
@@ -991,7 +1021,7 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         AutomationProperties.SetName(pane.Play, "Play");
         if (IsVideo)
         {
-            LoadShellPicture(pane, path, 640);
+            LoadPanePoster(pane, path);
             return;
         }
         try
@@ -1010,8 +1040,26 @@ internal sealed class TakesWorkbench : WorkbenchPanel
         }
     }
 
+    private void LoadPanePoster(ComparePane pane, string path)
+    {
+        var thumbs = _thumbs;
+        if (thumbs is null) return;
+        var ui = DispatcherQueue;
+        var ct = Lifetime;
+        _ = DebugLog.SafeRunAsync("TakesWorkbench.Poster", async () =>
+        {
+            var bitmap = await thumbs.RequestAsync(path, null, ct).ConfigureAwait(false);
+            if (bitmap is null || ct.IsCancellationRequested) return;
+            ui.TryEnqueue(() =>
+            {
+                if (!ct.IsCancellationRequested && pane.LoadedPath == path) pane.Picture.Source = bitmap;
+            });
+        });
+    }
+
     private void LoadShellPicture(ComparePane pane, string path, uint size)
     {
+        if (ThumbnailService.SkipShellThumbnailForExtension(path)) return;
         var ui = DispatcherQueue;
         _ = DebugLog.SafeRunAsync("TakesWorkbench.ShellPicture", async () =>
         {
