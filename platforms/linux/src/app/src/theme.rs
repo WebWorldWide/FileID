@@ -592,6 +592,27 @@ button.v3-rail.selected { background-color: alpha(@fileid_gold, 0.12); border-co
 .v3-dot.tone-done { background-color: @fileid_pink; } .v3-dot.tone-warning { background-color: @fileid_warning; }
 .v3-dot.tone-muted { background-color: @fileid_text3; }
 .v3-chip { font-size: 11.5px; font-weight: 500; color: @fileid_text2; background-color: alpha(#FFFFFF, 0.07); border-radius: 4px; padding: 2px 7px; }
+.v3-chip.tone-gold { color: @fileid_gold; background-color: alpha(@fileid_gold, 0.12); }
+.v3-chip.tone-ai { color: @fileid_lavender; background-color: alpha(@fileid_lavender, 0.12); }
+.v3-meta-13 { font-size: 13px; }
+.v3-panel.v3-take-best { border: 2px solid @fileid_gold; }
+.v3-take-head { min-height: 18px; padding: 9px 12px; border-bottom: 1px solid alpha(#FFFFFF, 0.08); }
+.v3-take-well { background-color: alpha(#000000, 0.35); }
+.v3-take-body { padding: 12px; }
+.v3-take-keep { font-size: 11.5px; font-weight: 600; }
+.v3-take-star { color: @fileid_gold; font-size: 10px; font-weight: 700; }
+button.v3-play-circle {
+    min-width: 36px; min-height: 36px; padding: 0; border: none; border-radius: 99px; box-shadow: none;
+    background-color: alpha(@fileid_gold, 0.92); background-image: none; color: #141414;
+}
+button.v3-play-circle:hover { background-color: #FFD84D; }
+.v3-filmstrip { padding: 4px; border-radius: 8px; }
+.v3-take-tile { margin: 1px; border-radius: 8px; border: 1px solid alpha(#FFFFFF, 0.14); transition: transform 200ms ease-out; }
+.v3-take-tile.best { margin: 0; border: 2px solid @fileid_gold; }
+.v3-take-tile.focused { margin: 0; border: 2px solid @fileid_text1; transform: scale(1.04); }
+.v3-take-badge { padding: 1px 5px; border-radius: 3px; background-color: alpha(#000000, 0.6); color: @fileid_text1; }
+.v3-take-badge.best { background-color: @fileid_gold; color: #141414; }
+.v3-take-check { min-width: 15px; min-height: 15px; border-radius: 99px; background-color: @fileid_pink; color: #141414; font-size: 9px; font-weight: 800; }
 button.v3-cite {
     min-height: 24px; padding: 0 8px; border-radius: 6px; box-shadow: none;
     background-color: alpha(#FFFFFF, 0.04); border: 1px solid alpha(#FFFFFF, 0.14);
@@ -768,4 +789,8 @@ separator { background-color: alpha(#FFFFFF, 0.34); }
 .v3-panel, .v3-segmented, button.v3-secondary, entry.v3-field, spinbutton.v3-number, .v3-composer-frame, button.v3-cite, button.v3-aspect { border-color: alpha(#FFFFFF, 0.5); }
 .v3-panel-header, .v3-panel-footer, .v3-soft-row, .v3-expanded, .v3-editor { border-color: alpha(#FFFFFF, 0.26); }
 .v3-dashed { border-color: alpha(#FFFFFF, 0.5); }
+.v3-take-tile { border-color: alpha(#FFFFFF, 0.5); }
+.v3-take-head { border-color: alpha(#FFFFFF, 0.34); }
+.v3-take-tile.best { border-color: @fileid_gold; }
+.v3-take-tile.focused { border-color: @fileid_text1; }
 "#;

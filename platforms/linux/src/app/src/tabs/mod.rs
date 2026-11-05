@@ -17,6 +17,7 @@ mod restructure_model;
 pub mod settings;
 pub mod takes;
 mod takes_model;
+mod takes_widgets;
 pub(crate) mod util;
 
 mod workbench_state;
