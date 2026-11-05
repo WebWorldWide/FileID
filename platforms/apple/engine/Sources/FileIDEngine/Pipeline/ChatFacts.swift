@@ -24,6 +24,16 @@ enum ChatFacts {
         var ids: [Int64]?
         /// Lowercase file extensions ("raw" covers every RAW type).
         var extensions: [String] = []
+        /// Every named person must appear ("Kyle and Maya"), not any of them.
+        var allPeople = false
+        /// The subject words behind `ids`, for the reply.
+        var subject: String?
+        /// People the question leaves out ("without Maya").
+        var excludedPersonIDs: [Int64] = []
+        var excludedPersonNames: [String] = []
+        /// Exclusive byte bounds.
+        var minBytes: Int64?
+        var maxBytes: Int64?
 
         var effectiveKinds: [String] { kinds.isEmpty && undescribed ? ChatFacts.analyzable : kinds }
 
@@ -40,10 +50,21 @@ enum ChatFacts {
             if !extensions.isEmpty {
                 parts.append("lower(f.extension) IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(extensions))
             }
-            if !personIDs.isEmpty {
+            if allPeople, personIDs.count > 1 {
+                for person in Set(personIDs).sorted() {
+                    parts.append("f.id IN (SELECT file_id FROM face_prints WHERE person_id=? UNION SELECT file_id FROM catalog_observations WHERE person_id=? AND stale=0)")
+                    args.append(person); args.append(person)
+                }
+            } else if !personIDs.isEmpty {
                 parts.append("f.id IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)")
                 args.append(ChatFacts.json(personIDs)); args.append(ChatFacts.json(personIDs))
             }
+            if !excludedPersonIDs.isEmpty {
+                parts.append("f.id NOT IN (SELECT file_id FROM face_prints WHERE person_id IN (SELECT value FROM json_each(?)) UNION SELECT file_id FROM catalog_observations WHERE person_id IN (SELECT value FROM json_each(?)) AND stale=0)")
+                args.append(ChatFacts.json(excludedPersonIDs)); args.append(ChatFacts.json(excludedPersonIDs))
+            }
+            if let minBytes { parts.append("f.size_bytes>?"); args.append(minBytes) }
+            if let maxBytes { parts.append("f.size_bytes<?"); args.append(maxBytes) }
             if let ids {
                 parts.append("f.id IN (SELECT value FROM json_each(?))"); args.append(ChatFacts.json(ids))
             }
@@ -74,8 +95,12 @@ enum ChatFacts {
         /// " of Kyle in Downloads from 2023 not described yet".
         var qualifiers: String {
             var text = ""
+            if let subject, !subject.isEmpty { text += " matching “\(subject)”" }
             if !extensions.isEmpty { text += " in \(ChatFacts.formatLabel(extensions)) format" }
-            if !personNames.isEmpty { text += " of \(personNames.joined(separator: " and "))" }
+            if !personNames.isEmpty { text += " of \(personNames.joined(separator: allPeople || personNames.count == 1 ? " and " : " or "))" }
+            if !excludedPersonNames.isEmpty { text += " without \(excludedPersonNames.joined(separator: " or "))" }
+            if let minBytes { text += " over \(ChatIntent.bytesLabel(minBytes))" }
+            if let maxBytes { text += " under \(ChatIntent.bytesLabel(maxBytes))" }
             if let folder { text += " in \(folder.hasPrefix("named:") ? String(folder.dropFirst(6)) : folder)" }
             if let date { text += " \(date.phrase)" }
             if undescribed { text += " not described yet" }
@@ -263,8 +288,14 @@ enum ChatFacts {
         }
         let kinds = filter.kinds
         let (count, bytes) = try totals(db, filter)
-        let hits = try listed(db, filter, order: question.order, limit: shown, count: count)
+        let hits = try listed(db, filter, order: question.order, limit: min(question.limit ?? shown, shown), count: count)
         guard count > 0 else { return ("No \(ChatIntent.noun(kinds, 2))\(qualifiers).", hits) }
+        if let limit = question.limit, question.measure == "list" {
+            let names = hits.map { "\(fileName($0.path)) (\($0.text))" }.joined(separator: ", ")
+            let top = Int64(min(Int64(limit), count))
+            let ordered = question.explicitOrder ? "\(question.order) " : ""
+            return ("The \(top == 1 ? "" : "\(ChatIntent.countLabel(top)) ")\(ordered)\(ChatIntent.noun(kinds, top))\(qualifiers): \(names).", hits)
+        }
         let message: String
         switch question.measure {
         case "size":
@@ -276,6 +307,74 @@ enum ChatFacts {
             message = "Found \(ChatIntent.countLabel(count)) \(ChatIntent.noun(kinds, count))\(qualifiers).\(order)"
         }
         return (message, hits)
+    }
+
+    /// Words that only join a subject to the question ("about taxes", "photos showing a dog").
+    static let subjectFillers: Set<String> = [
+        "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show",
+        "containing", "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where",
+        "who", "me", "my", "i", "do", "does", "have", "has", "s"
+    ]
+    static let subjectLimit = 200_000
+
+    /// Subject words split into alternatives on "or": "beach or sunset" → [[beach], [sunset]].
+    static func subjectGroups(_ query: String) -> [[String]] {
+        var groups: [[String]] = [[]]
+        for word in query.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init) {
+            if word == "or" {
+                if !(groups.last?.isEmpty ?? true) { groups.append([]) }
+            } else if !subjectFillers.contains(word) {
+                groups[groups.count - 1].append(word)
+            }
+        }
+        return groups.filter { !$0.isEmpty }
+    }
+
+    /// Every file the subject describes, so counts, sizes and orders see all
+    /// matches rather than the best hundred search keeps. A word matches a file's
+    /// name, description, scan tags, document or photo text, or current video
+    /// evidence, in its written or singular form; every word must match, and "or"
+    /// joins alternatives. Nil when no subject word remains. Mirrors Rust
+    /// `chat_facts::subject_ids`.
+    static func subjectIDs(_ db: GRDB.Database, _ query: String) throws -> [Int64]? {
+        let groups = subjectGroups(query)
+        guard !groups.isEmpty else { return nil }
+        var cache: [String: Set<Int64>] = [:]
+        var result = Set<Int64>()
+        for group in groups {
+            var matched: Set<Int64>?
+            for word in group {
+                let found: Set<Int64>
+                if let known = cache[word] { found = known } else { found = try filesMatching(db, word); cache[word] = found }
+                matched = matched.map { $0.intersection(found) } ?? found
+                if matched?.isEmpty == true { break }
+            }
+            result.formUnion(matched ?? [])
+            if result.count >= subjectLimit { break }
+        }
+        return Array(result).sorted().prefix(subjectLimit).map { $0 }
+    }
+
+    private static func filesMatching(_ db: GRDB.Database, _ word: String) throws -> Set<Int64> {
+        let forms = CatalogStore.wordForms(word)
+        let match = forms.map(FTSQuery.quoted).joined(separator: " OR ")
+        var ids = Set<Int64>()
+        for table in ["catalog_file_fts", "doc_fts", "ocr_fts"] {
+            ids.formUnion(try Int64.fetchAll(db, sql: "SELECT rowid FROM \(table) WHERE \(table) MATCH ? LIMIT ?", arguments: [match, subjectLimit]))
+        }
+        ids.formUnion(try Int64.fetchAll(db, sql: """
+            SELECT DISTINCT CAST(e.file_id AS INTEGER) FROM catalog_evidence_fts e
+            LEFT JOIN catalog_chapters c ON c.id=e.evidence_id AND e.kind='chapter'
+            LEFT JOIN catalog_passages p ON p.id=e.evidence_id AND e.kind='passage'
+            WHERE catalog_evidence_fts MATCH ? AND (c.stale=0 OR p.stale=0) LIMIT ?
+            """, arguments: [match, subjectLimit]))
+        if word.count >= 3 {
+            let likes = forms.map { _ in "(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?" }.joined(separator: " OR ")
+            let arguments: [DatabaseValueConvertible?] = forms.map { "% \($0)%" } + [subjectLimit]
+            ids.formUnion(try Int64.fetchAll(db, sql: "SELECT DISTINCT file_id FROM tags WHERE source IN ('auto','user','vlm') AND tag IN (SELECT tag FROM catalog_tag_vocab WHERE \(likes)) LIMIT ?",
+                                             arguments: StatementArguments(arguments)))
+        }
+        return ids
     }
 
     /// Keeps only hits whose files pass the structured filter, preserving order.

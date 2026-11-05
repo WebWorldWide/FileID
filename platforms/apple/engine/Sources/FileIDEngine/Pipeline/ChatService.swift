@@ -161,7 +161,15 @@ actor ChatService {
     /// The search plan a message implies, with its structured part.
     private static func searchPlan(_ text: String, previous: ChatSearchPlan?, people: [ChatSearchPlan.KnownPerson], events: [ChatSearchPlan.KnownEvent]) -> (ChatIntent.Question, ChatSearchPlan) {
         let question = ChatIntent.question(text)
-        return (question, ChatSearchPlan.resolve(question.reduced, previous: previous, knownPeople: people, knownEvents: events))
+        let plan = ChatSearchPlan.resolve(question.reduced, previous: previous, knownPeople: people, knownEvents: events)
+        // "how many are from 2018?" names nothing of its own: it narrows the last search.
+        let bare = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.excludedPersonIDs.isEmpty
+        let lower = Set(text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init))
+        if let previous, bare, question.structured, !["overview", "folders", "formats"].contains(question.measure),
+           lower.isDisjoint(with: ["files", "file", "library", "everything", "all", "total", "overall", "collection"]) {
+            return (question, ChatSearchPlan.resolve(question.reduced, previous: previous, knownPeople: people, knownEvents: events, followUp: true))
+        }
+        return (question, plan)
     }
 
     /// Parses requests and questions and gathers evidence. Reads only.
@@ -179,14 +187,26 @@ actor ChatService {
             let previous = previousTexts.filter { ChatIntent.parse($0) == nil }
                 .reduce(nil as ChatSearchPlan?) { searchPlan($1, previous: $0, people: knownPeople, events: knownEvents).1 }
             let (question, plan) = searchPlan(text, previous: previous, people: knownPeople, events: knownEvents)
-            let structured = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, personNames: plan.personNames,
+            var structured = ChatFacts.Filter(kinds: plan.kinds, personIDs: plan.personIDs, personNames: plan.personNames,
                                               date: question.date, folder: question.folder, undescribed: question.undescribed,
-                                              extensions: question.formats ?? [])
-            if question.structured, plan.query.isEmpty, plan.eventIDs.isEmpty, plan.timeSeconds == nil {
+                                              extensions: question.formats ?? [], allPeople: plan.allPeople,
+                                              excludedPersonIDs: plan.excludedPersonIDs, excludedPersonNames: plan.excludedPersonNames,
+                                              minBytes: question.minBytes, maxBytes: question.maxBytes)
+            // Counts, sizes, orders and duplicates must see every match, so a
+            // subject becomes the full set of files it describes.
+            let wantsAll = question.measure != "list" || question.explicitOrder || question.duplicates
+            if question.structured, plan.eventIDs.isEmpty, plan.timeSeconds == nil, plan.query.isEmpty || wantsAll {
+                if !plan.query.isEmpty, let ids = try ChatFacts.subjectIDs(db, plan.query) {
+                    structured.ids = ids
+                    structured.subject = plan.query
+                }
                 let (message, hits) = try ChatFacts.answer(db, question, structured)
                 return (Prepared(message: message, hits: hits, summarize: false), plan, question, [])
             }
-            let hits = try CatalogStore.search(db, query: plan.query, kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds)
+            let groups = ChatFacts.subjectGroups(plan.query)
+            let hits = groups.count > 1
+                ? fuse(try groups.map { try CatalogStore.search(db, query: $0.joined(separator: " "), kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds) })
+                : try CatalogStore.search(db, query: plan.query, kinds: plan.kinds, personIDs: plan.personIDs, eventIDs: plan.eventIDs, timeSeconds: plan.timeSeconds)
             return (nil, plan, question, hits)
         }
         if let done = stage.0 { return done }
@@ -202,18 +222,44 @@ actor ChatService {
             }
         }
         var extraFilter: ChatFacts.Filter?
-        if question.structured {
-            extraFilter = ChatFacts.Filter(date: question.date, folder: question.folder, undescribed: question.undescribed)
+        if question.structured || plan.allPeople || !plan.excludedPersonIDs.isEmpty {
+            extraFilter = ChatFacts.Filter(personIDs: plan.allPeople ? plan.personIDs : [], date: question.date, folder: question.folder,
+                                           undescribed: question.undescribed, extensions: question.formats ?? [], allPeople: plan.allPeople,
+                                           excludedPersonIDs: plan.excludedPersonIDs, excludedPersonNames: plan.excludedPersonNames,
+                                           minBytes: question.minBytes, maxBytes: question.maxBytes)
             let filter = extraFilter!
             let current = hits
             hits = try await database.pool.read { db in try ChatFacts.restrict(db, current, filter) }
         }
+        // Search keeps its best hundred and matches words as written; fill a short
+        // list from every file the subject describes (singulars too) that passes
+        // the same filters.
+        if hits.count < ChatFacts.shown, plan.eventIDs.isEmpty, plan.timeSeconds == nil, !plan.query.isEmpty || extraFilter != nil {
+            var fill = extraFilter ?? ChatFacts.Filter()
+            fill.kinds = plan.kinds
+            fill.personIDs = plan.personIDs
+            fill.allPeople = plan.allPeople
+            let current = hits
+            let base = fill
+            let more = try await database.pool.read { db -> [CatalogHit] in
+                var fill = base
+                if !plan.query.isEmpty {
+                    guard let ids = try ChatFacts.subjectIDs(db, plan.query) else { return [] }
+                    fill.ids = ids
+                }
+                let seen = Set(current.map(\.fileID))
+                let count = try ChatFacts.totals(db, fill).count
+                return try ChatFacts.listed(db, fill, order: question.order, limit: ChatFacts.shown + seen.count, count: count)
+                    .filter { !seen.contains($0.fileID) }
+            }
+            hits += more.prefix(ChatFacts.shown - hits.count)
+        }
         let scope = plan.query.isEmpty ? "in the library" : "for “\(plan.query)”"
         let filter = plan.kinds.isEmpty ? "" : " (\(plan.kinds.map(kindLabel).joined(separator: ", ")))"
-        let people = plan.personNames.isEmpty ? "" : " (people: \(plan.personNames.joined(separator: ", ")))"
+        let people = plan.personNames.isEmpty ? "" : " (people: \(plan.personNames.joined(separator: plan.allPeople ? " and " : ", ")))"
         let events = plan.eventNames.isEmpty ? "" : " (event: \(plan.eventNames.joined(separator: ", ")))"
         let time = plan.timeSeconds.map { " (near \(DurationText.clock($0)))" } ?? ""
-        let structure = extraFilter.map(\.qualifiers).flatMap { $0.isEmpty ? nil : " (\($0.trimmingCharacters(in: .whitespaces)))" } ?? ""
+        let structure = extraFilter.map { filter -> String in var shown = filter; shown.personNames = []; return shown.qualifiers }.flatMap { $0.isEmpty ? nil : " (\($0.trimmingCharacters(in: .whitespaces)))" } ?? ""
         let qualifiers = filter + people + events + time + structure
         let message = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.timeSeconds == nil
             ? "Add a subject, event, time, or media type such as videos or photos. No search was run."
