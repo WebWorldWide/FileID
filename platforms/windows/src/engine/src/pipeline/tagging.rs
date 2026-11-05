@@ -3109,8 +3109,30 @@ fn exif_offset(text: &str) -> Option<chrono::FixedOffset> {
 /// bounded 4 MB head read recovers camera/GPS without the full-file read the
 /// in-memory branch does. Returns `Some((None, None, None))` on a readable
 /// file with no parseable EXIF — same contract as that branch.
+const EXIF_HEAD_BYTES: u64 = 4 * 1024 * 1024;
+
+/// EXIF capture time read from the front of the file only. JPEG, PNG, CR3,
+/// RAF and the TIFF RAWs keep it in the first 256 KiB; HEIF/AVIF and TIFF
+/// containers can place it later, so they get the full head window.
+pub(crate) fn capture_time_from_head(path: &std::path::Path) -> Option<f64> {
+    use std::io::Read;
+    const FIRST: u64 = 256 * 1024;
+    let file = open_image_file(path).ok()?;
+    let mut head = Vec::new();
+    (&file).take(FIRST).read_to_end(&mut head).ok()?;
+    if let Some(captured) = parse_exif_fields(&head).and_then(|fields| fields.3) {
+        return Some(captured);
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    let deep = matches!(ext.as_str(), "heic" | "heif" | "avif" | "tif" | "tiff") || super::raw_preview::is_raw_extension(&ext);
+    if !deep || (head.len() as u64) < FIRST {
+        return None;
+    }
+    (&file).take(EXIF_HEAD_BYTES - FIRST).read_to_end(&mut head).ok()?;
+    parse_exif_fields(&head)?.3
+}
+
 fn exif_from_head(path: &std::path::Path) -> Option<ExifFields> {
-    const EXIF_HEAD_BYTES: u64 = 4 * 1024 * 1024;
     let f = open_image_file(path).ok()?;
     let mut head = Vec::new();
     std::io::Read::read_to_end(&mut std::io::Read::take(f, EXIF_HEAD_BYTES), &mut head).ok()?;

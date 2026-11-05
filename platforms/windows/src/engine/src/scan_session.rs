@@ -58,6 +58,9 @@ pub struct SessionResult {
     /// Files under the root were added, renamed or deleted while this pass ran;
     /// the caller runs one incremental follow-up pass, which reports the totals.
     pub changed_during_scan: bool,
+    /// Every photo's stored date already came from its EXIF in this scan (a
+    /// forced rescan, or a root with no catalog rows when it started).
+    pub capture_dates_current: bool,
 }
 
 pub struct ScanSession {
@@ -78,6 +81,8 @@ pub struct ScanSession {
     allow_follow_up: bool,
     /// Counts from the pass this one follows up, added to its final totals.
     carried: (u64, u64, f64),
+    /// Decided by the first pass; a follow-up starts with that pass's rows.
+    capture_dates_current: Option<bool>,
 }
 
 /// True when a directory the walk read was modified after `since` or is gone.
@@ -111,6 +116,7 @@ impl ScanSession {
             excluded_paths,
             allow_follow_up: true,
             carried: (0, 0, 0.0),
+            capture_dates_current: None,
         }
     }
 
@@ -119,6 +125,7 @@ impl ScanSession {
         self.rescan = false;
         self.allow_follow_up = false;
         self.carried = (previous.processed, previous.failed, previous.elapsed_seconds);
+        self.capture_dates_current = Some(previous.capture_dates_current);
         self
     }
 
@@ -197,6 +204,10 @@ impl ScanSession {
                 rusqlite::params![root_text, kind, started_unix],
             );
         }
+
+        let capture_dates_current = self.capture_dates_current.unwrap_or_else(|| {
+            self.rescan || !crate::pipeline::capture_date_backfill::catalog_has_rows(&self.db_conn.lock(), root)
+        });
 
         // Resolve user exclusions against this root, then purge already-
         // cataloged rows beneath them BEFORE the skip-set preload so a
@@ -705,19 +716,39 @@ impl ScanSession {
                 failed,
                 elapsed_seconds: started.elapsed().as_secs_f64(),
                 changed_during_scan: true,
+                capture_dates_current,
             });
         }
         if clean_walk {
-            let mut seen = discovered_seen_paths.lock();
-            let mut conn = self.db_conn.lock();
-            match soft_hide_missing_rows(&mut conn, root, &mut seen) {
-                Ok(marked) if marked > 0 => {
-                    tracing::info!(marked, "[SCAN] soft-hid catalog rows missing from completed walk");
+            {
+                let mut seen = discovered_seen_paths.lock();
+                let mut conn = self.db_conn.lock();
+                match soft_hide_missing_rows(&mut conn, root, &mut seen) {
+                    Ok(marked) if marked > 0 => {
+                        tracing::info!(marked, "[SCAN] soft-hid catalog rows missing from completed walk");
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(error = %err, "[SCAN] missing-file reconciliation failed; preserving catalog rows");
+                    }
                 }
-                Ok(_) => {}
-                Err(err) => {
-                    tracing::error!(error = %err, "[SCAN] missing-file reconciliation failed; preserving catalog rows");
+            }
+            match crate::paths::root() {
+                Ok(state_dir) if capture_dates_current => {
+                    crate::pipeline::capture_date_backfill::mark_done(&state_dir, root);
                 }
+                Ok(state_dir) => {
+                    let (database, coordinator, root) = (self.db_conn.clone(), self.coordinator.clone(), root.to_path_buf());
+                    let backfill = tokio::task::spawn_blocking(move || {
+                        crate::pipeline::capture_date_backfill::run_if_needed(&database, &state_dir, &root, &|| {
+                            coordinator.is_cancelled()
+                        })
+                    });
+                    if let Err(error) = backfill.await {
+                        tracing::warn!(%error, "[SCAN] capture-date backfill stopped");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "[SCAN] no state folder for the capture-date backfill marker"),
             }
         } else {
             tracing::info!("[SCAN] skipped missing-file reconciliation because the walk was partial, cancelled, failed, or test-capped");
@@ -820,6 +851,7 @@ impl ScanSession {
             failed: failed + self.carried.1,
             elapsed_seconds: elapsed + self.carried.2,
             changed_during_scan: false,
+            capture_dates_current,
         })
     }
 }
@@ -1135,7 +1167,7 @@ fn should_reconcile_missing_rows(
     !cancelled && !gpu_dead && discovery_done && discovery_errors == 0 && test_file_cap == 0
 }
 
-fn root_descendant_prefix(root: &Path) -> String {
+pub(crate) fn root_descendant_prefix(root: &Path) -> String {
     let mut prefix = root.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
     prefix.push(std::path::MAIN_SEPARATOR);
     prefix
