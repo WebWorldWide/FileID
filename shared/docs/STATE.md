@@ -1,5 +1,13 @@
 # FileID — State
 
+## 2026-11-05 (after midnight) — Agent work merged: GTK Best Takes, Rust RAW dates and backfill, Mac text size and list costs; an IPC race fixed
+
+- **GTK** (agent): Best Takes review matches DESIGN_V3_PORT and the Mac (filmstrip keyboard ← → Space Z Return, double-click keep, face zoom on the standard spring, compare details with RAW chip/score/reason chips, inline clip play, libadwaita toasts with Undo, moves on to the next open group); manual groups (YOUR GROUPS, MAKE A GROUP BY HAND with clip search and Find related, group editor with Ctrl+S and Score takes, take cards with Met/Missed/Unclear/Prefer/Undo, "Group deleted" with Undo), opened from Search & Moments' Best takes button; the Library Selected pane and an open person dialog refresh after a scan. 138 GTK tests, clippy clean; not yet seen on a GTK host.
+- **Shared engine** (agent): ORF/RW2/CR3/RAF get EXIF capture time, camera and GPS from their own containers (Windows/Linux dated them by file time); an EXIF wall time repeated at the fall-back hour reads as the later instant like macOS DateFormatter; Chat re-asks after an actions-only model answer and notes when the model couldn't start; a capture-date backfill like the Mac's (12/12 overwritten dates restored in an isolated run). 1,113 engine tests, e2e 89/89, conformance 29 pass / 1 known.
+- **Mac** (agent): Settings ▸ Text size; cheaper Duplicates, Moments and People lists. **Mac** (me): restructure no longer creates `People/<name>/1970` or `Places/<b>/1970` for undated files and rejects impossible coordinates, matching Rust (found by the audit agent).
+- **IPC race:** the engine's output drainer queued its last write after leaving the actor, so `drainAndClose` could close the wire first and lose the session's final event (graceful shutdown too). Two ChatActionTests failed intermittently from it (reproduced within 25 runs); 40/40 clean after the fix.
+- Checks on the merged branch: 763 Swift tests (serial, as CI), 1,113 Rust engine tests, 138 GTK tests, conformance 29/1 known, egress and docs gates.
+
 ## 2026-11-05 (late night) — ZIP64 zips, scan shortfall notice, 1M-file search measured; four agents on the ports
 
 - Zip listing (both engines) now reads ZIP64 archives too (the 64-bit end record via its locator); tests use `zip -fz` fixtures. The owner approved a DocText digest refresh for zip listing, but it was not needed: the reader is plain Swift/Rust over the central directory, with no subprocess.
