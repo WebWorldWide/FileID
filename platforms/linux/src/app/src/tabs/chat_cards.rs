@@ -417,16 +417,13 @@ impl Runner {
                 self.finish(id, "Opened Search & Moments with this search.".to_owned(), None);
             }
             "exportFiles" => {
+                let ids = action.file_ids.clone().unwrap_or_default();
                 navigate("tools");
-                let count = action.file_ids.as_ref().map_or(0, Vec::len) as u64;
-                self.finish(
-                    id,
-                    format!(
-                        "Opened File Tools. Choose the {} there; nothing is written until you export.",
-                        if count == 1 { "file".to_owned() } else { format!("{} files", crate::shell::grouped(count)) }
-                    ),
-                    None,
-                );
+                if super::chat_handoff::hand_to_tools(ids) {
+                    self.finish(id, "Opened File Tools with Chat's files ticked. Pick a format there; nothing is written until you export.".to_owned(), None);
+                } else {
+                    self.fail(id, "File Tools isn't open in this window. Nothing was exported.");
+                }
             }
             "changeSetting" => self.fail(id, rules::SETTING_UNAVAILABLE),
             "suggestFolderLayout" => {

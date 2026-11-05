@@ -3,6 +3,7 @@
 pub mod chat;
 mod chat_actions;
 mod chat_cards;
+mod chat_handoff;
 pub mod cleanup;
 pub mod deep_analyze;
 pub mod file_tools;
