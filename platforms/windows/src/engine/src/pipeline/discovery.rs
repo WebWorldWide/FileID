@@ -168,6 +168,27 @@ impl FileKind {
     }
 }
 
+/// Cloud placeholder detection. OneDrive / generic Files-On-Demand mark
+/// dehydrated files with these attributes; touching their content forces a
+/// download.
+pub(crate) fn is_online_only(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
+        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
+        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+        metadata.file_attributes()
+            & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
+            != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscoveredFile {
     pub path: PathBuf,
@@ -651,23 +672,7 @@ fn classify_entry(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64());
 
-    // Cloud placeholder detection. OneDrive / generic Files-On-Demand mark
-    // dehydrated files with these attributes; touching their content forces a
-    // download.
-    #[cfg(windows)]
-    let online_only = {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_OFFLINE: u32 = 0x0000_1000;
-        const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x0004_0000;
-        const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
-        metadata.file_attributes()
-            & (FILE_ATTRIBUTE_OFFLINE
-                | FILE_ATTRIBUTE_RECALL_ON_OPEN
-                | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)
-            != 0
-    };
-    #[cfg(not(windows))]
-    let online_only = false;
+    let online_only = is_online_only(&metadata);
 
     let kind = path
         .extension()
