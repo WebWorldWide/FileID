@@ -330,7 +330,7 @@ enum ChatFacts {
         "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show",
         "containing", "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where",
         "who", "me", "my", "i", "do", "does", "have", "has", "s", "mentioning", "mention", "mentions", "named", "called",
-        "titled", "labeled", "labelled", "regarding", "related"
+        "titled", "labeled", "labelled", "regarding", "related", "them", "they", "it", "its", "those", "these", "ones"
     ]
     static let subjectLimit = 200_000
 

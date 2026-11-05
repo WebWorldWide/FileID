@@ -165,7 +165,10 @@ actor ChatService {
         // "how many are from 2018?" names nothing of its own: it narrows the last search.
         let bare = plan.query.isEmpty && plan.kinds.isEmpty && plan.personIDs.isEmpty && plan.eventIDs.isEmpty && plan.excludedPersonIDs.isEmpty
         let lower = Set(text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init))
+        // A duplicates question is about the library unless it points back ("duplicates among those").
+        let pointsBack = !lower.isDisjoint(with: ["those", "these", "them", "they", "ones"])
         if let previous, bare, question.structured, !["overview", "folders", "formats"].contains(question.measure),
+           !question.duplicates || pointsBack,
            lower.isDisjoint(with: ["files", "file", "library", "everything", "all", "total", "overall", "collection"]) {
             return (question, ChatSearchPlan.resolve(question.reduced, previous: previous, knownPeople: people, knownEvents: events, followUp: true))
         }

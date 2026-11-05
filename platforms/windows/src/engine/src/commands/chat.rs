@@ -675,12 +675,15 @@ fn plan_for(
     let bare = plan.query.is_empty() && plan.kinds.is_empty() && plan.person_ids.is_empty() && plan.event_ids.is_empty() && plan.excluded_person_ids.is_empty();
     let library_wide = ["files", "file", "library", "everything", "all", "total", "overall", "collection"];
     let lower = text.to_lowercase();
-    let mut words = lower.split(|c: char| !c.is_alphabetic());
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).collect();
+    // A duplicates question is about the library unless it points back ("duplicates among those").
+    let points_back = words.iter().any(|word| ["those", "these", "them", "they", "ones"].contains(word));
     if previous.is_some()
         && bare
         && question.structured()
         && !["overview", "folders", "formats"].contains(&question.measure.as_str())
-        && !words.any(|word| library_wide.contains(&word))
+        && (!question.duplicates || points_back)
+        && !words.iter().any(|word| library_wide.contains(word))
     {
         return (question.clone(), SearchPlan::resolve_known(&question.reduced, previous, people, events, true));
     }

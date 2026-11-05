@@ -126,13 +126,17 @@ struct ChatComplexQueryTests {
             Case(text: "what's taking up the most space?") { says($0, "surf.mov") },
             Case(text: "how many photos per year?") { p in says(p, "2019") ?? says(p, "2023") },
             Case(text: "Kyle's photos from summer 2023") { every($0, { $0.contains("2023") || $0.contains("beach") }, "wrong") },
-            Case(text: "show me sunset photos taken with Kyle in them") { every($0, { $0.hasSuffix(".ARW") }, "wrong") },
+            Case(text: "show me sunset photos taken with Kyle in them") { p in
+                every(p, { $0.hasSuffix(".ARW") }, "wrong") ?? (p.message.contains("them") ? "kept a pronoun: \(p.message)" : nil)
+            },
             Case(text: "pictures of the sea") { every($0, { $0.contains("IMG_") }, "wrong") },
         ]
         var failures: [String] = []
         let followUps: [(String, String, (ChatService.Prepared) -> String?)] = [
             ("beach photos of Kyle", "only the RAW ones", { every($0, { $0.hasSuffix(".ARW") }, "non-RAW") }),
             ("dog photos", "how many are from 2018?", { p in p.message.contains("dog") && !p.message.contains("1,500") ? nil : "\(p.message)" }),
+            ("beach videos", "how much space do duplicates use?", { p in p.message.hasPrefix("Extra copies of identical files use 4.0 MB") ? nil : "\(p.message)" }),
+            ("beach photos", "any duplicates among those?", { p in p.hits.isEmpty || p.message.contains("matching") ? nil : "\(p.message)" }),
         ]
         for (first, second, check) in followUps {
             let conversation = UUID().uuidString

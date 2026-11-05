@@ -518,8 +518,8 @@ pub(crate) fn answer(conn: &Connection, question: &Question, filter: &Filter) ->
 }
 
 /// Words that only join a subject to the question ("about taxes", "photos showing a dog").
-const SUBJECT_FILLERS: [&str; 49] = [
-    "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show", "containing",
+const SUBJECT_FILLERS: [&str; 56] = [
+    "them", "they", "it", "its", "those", "these", "ones", "about", "of", "the", "a", "an", "and", "with", "in", "on", "at", "to", "for", "from", "showing", "shows", "show", "containing",
     "contains", "contain", "that", "which", "any", "some", "whats", "what", "is", "are", "there", "where", "who", "me", "my", "i", "do",
     "does", "have", "has", "s", "mentioning", "mention", "mentions", "named", "called", "titled", "labeled", "labelled", "regarding",
     "related", "",
