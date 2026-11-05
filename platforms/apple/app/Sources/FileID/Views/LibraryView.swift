@@ -541,7 +541,7 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshBulkState) {
-            BulkRenameSheet(store: store)
+            BulkRenameSheet(engine: engine, store: store)
         }
         .sheet(isPresented: $bulkTagSheetOpen) {
             BulkTagSheet(
@@ -563,20 +563,17 @@ struct LibraryView: View {
 
     private func undoLastBatch() {
         guard let batch = BulkRenameSheet.loadLastBatch(), !batch.isEmpty else { return }
-        let storeRef = store
-        Task.detached(priority: .userInitiated) {
-            let result = storeRef.undoRenames(batch)
-            await MainActor.run {
-                if result.failed == 0 && result.skipped == 0 {
-                    BulkRenameSheet.clearLastBatch()
-                }
-                undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
-                    + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
-                    + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
-                editEpoch += 1   // refresh tiles (renamed files) even mid-scan
-                refreshBulkState()
-                reload()
+        Task {
+            let result = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
+            if result.failed == 0 && result.skipped == 0 {
+                BulkRenameSheet.clearLastBatch()
             }
+            undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
+                + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
+                + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
+            editEpoch += 1   // refresh tiles (renamed files) even mid-scan
+            refreshBulkState()
+            reload()
         }
     }
 
@@ -829,6 +826,7 @@ private struct FilePreviewSheet: View {
     @State private var preview: NSImage?
     @State private var tags: [String] = []
     @State private var people: [String] = []
+    @State private var renaming = false
     @AppStorage("preview.showInfo") private var showInfo = true
     /// Holds key focus so the arrow-key handlers fire; the tag field's
     /// focus is tracked separately to suppress nav while the user types.
@@ -1033,24 +1031,19 @@ private struct FilePreviewSheet: View {
                                 }
                                 Spacer(minLength: 6)
                                 Button("Rename") {
-                                    let oldPath = file.pathText
-                                    if let newURL = store.applyProposedName(file: file),
-                                       newURL.path != oldPath {
-                                        // Record the single-file rename so the
-                                        // Library "Undo last rename" button can revert
-                                        // it. Uses the same UserDefaults slot the
-                                        // bulk-rename sheet writes to.
-                                        let outcome = ReadStore.RenameOutcome(
-                                            fileID: file.id,
-                                            oldPath: oldPath,
-                                            newPath: newURL.path
-                                        )
-                                        BulkRenameSheet.saveLastBatch([outcome])
-                                        onEdit()
+                                    renaming = true
+                                    Task {
+                                        let result = await CatalogWrites.applyProposedNames([file], engine: engine, store: store)
+                                        // Same journal slot as the bulk-rename sheet, so
+                                        // Library's "Undo last rename" can revert it.
+                                        BulkRenameSheet.saveLastBatch(result.renamed)
+                                        if !result.renamed.isEmpty { onEdit() }
+                                        renaming = false
+                                        dismiss()
                                     }
-                                    dismiss()
                                 }
                                 .buttonStyle(.dsSecondary)
+                                .disabled(renaming)
                                 .help("Renames the file to the suggested name. Undo last rename at the top of Library puts the old name back.")
                             }
                             .padding(10)

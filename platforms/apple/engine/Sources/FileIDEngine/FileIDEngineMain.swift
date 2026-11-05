@@ -1153,7 +1153,8 @@ struct FileIDEngineMain {
                 continue
             }
             let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(trimmed)
-            guard !FileManager.default.fileExists(atPath: newURL.path) else {
+            guard newURL.path != oldURL.path, !FileManager.default.fileExists(atPath: newURL.path)
+                    || isCaseOnlyRename(from: oldURL, to: newURL) else {
                 messages.append(item(rename.fileID, ok: false, "Destination already exists."))
                 continue
             }
@@ -1163,10 +1164,15 @@ struct FileIDEngineMain {
                 let intent = PathMoveJournal.begin(fileID: rename.fileID, from: state.path, to: newURL.path, fileRef: Discovery.inode(of: oldURL))
                 defer { PathMoveJournal.finish(intent) }
                 try FileManager.default.moveItem(at: oldURL, to: newURL)
+                let oldExtension = oldURL.pathExtension
                 try await database.pool.write { db in
                     try PathMoveJournal.updatePath(db, fileID: rename.fileID, from: state.path, to: newURL.path)
                     guard db.changesCount == 1 else {
                         throw CocoaError(.fileWriteUnknown)
+                    }
+                    if let proposed = try String.fetchOne(db, sql: "SELECT vlm_proposed_name FROM files WHERE id = ?", arguments: [rename.fileID]),
+                       appliesProposedName(proposed, newName: trimmed, originalExtension: oldExtension) {
+                        try db.execute(sql: "UPDATE files SET vlm_proposed_name = NULL WHERE id = ?", arguments: [rename.fileID])
                     }
                 }
                 states[rename.fileID] = BulkFileState(
@@ -1177,6 +1183,29 @@ struct FileIDEngineMain {
             }
         }
         return BulkActionResult(action: "renameFiles", succeeded: messages.filter(\.ok).count, failed: messages.filter { !$0.ok }.count, messages: messages)
+    }
+
+    /// On a case-insensitive volume the destination of `Beach.jpg → beach.jpg`
+    /// "exists" because it is the file itself. Requiring the same inode and a
+    /// case-only difference keeps a second hard link from passing as the same slot.
+    static func isCaseOnlyRename(from oldURL: URL, to newURL: URL) -> Bool {
+        oldURL.lastPathComponent != newURL.lastPathComponent
+            && oldURL.lastPathComponent.caseInsensitiveCompare(newURL.lastPathComponent) == .orderedSame
+            && Discovery.inode(of: oldURL).map { $0 == Discovery.inode(of: newURL) } == true
+    }
+
+    /// True when `newName` is the suggested name taken as-is or with the
+    /// `_2`…`_99` bump the app adds when that name is taken.
+    static func appliesProposedName(_ proposed: String, newName: String, originalExtension ext: String) -> Bool {
+        let proposed = proposed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !proposed.isEmpty else { return false }
+        let suffix = ext.isEmpty ? "" : "." + ext
+        guard newName.hasSuffix(suffix) else { return false }
+        let stem = String(newName.dropLast(suffix.count))
+        if stem == proposed { return true }
+        guard stem.hasPrefix(proposed + "_") else { return false }
+        let bump = stem.dropFirst(proposed.count + 1)
+        return bump.allSatisfy { $0.isASCII && $0.isNumber } && Int(bump).map { (2...99).contains($0) } == true
     }
 
     static func orderedUniqueFileIDs(_ fileIDs: [Int64]) -> [Int64] {

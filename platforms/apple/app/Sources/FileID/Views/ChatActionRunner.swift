@@ -1,5 +1,5 @@
 // Runs the actions Chat proposes, only through paths the pages already use:
-// engine commands, the Cleanup trash path, People's store edits and the
+// engine commands, the Cleanup trash path, People's edits and the
 // suggested-name rename. Anything that changes files or identities waits
 // for the confirmation card.
 import SwiftUI
@@ -288,26 +288,23 @@ final class ChatActionRunner {
             guard let store = handoff.store, let renames = action.renames else { return }
             phases[action.id] = .running("Renaming \(renames.count.formatted()) files")
             let wanted = Dictionary(renames.map { ($0.fileID, $0.newName) }, uniquingKeysWith: { first, _ in first })
-            let result = await Task.detached(priority: .userInitiated) { () -> ReadStore.BulkRenameResult in
+            let rows = await Task.detached(priority: .userInitiated) { () -> [FileRow] in
                 // Only files whose suggestion is still the one the card showed.
-                let rows = store.files(forFileIDs: Array(wanted.keys)).filter { row in
+                store.files(forFileIDs: Array(wanted.keys)).filter { row in
                     guard let proposed = row.vlmProposedName?.trimmingCharacters(in: .whitespacesAndNewlines), let name = wanted[row.id] else { return false }
                     let ext = row.url.pathExtension
                     return (ext.isEmpty ? proposed : "\(proposed).\(ext)") == name
                 }
-                let result = store.applyProposedNamesBulk(rows)
-                BulkRenameSheet.saveLastBatch(result.renamed)
-                return result
             }.value
-            store.notifyChanged()
+            let result = await CatalogWrites.applyProposedNames(rows, engine: engine, store: store)
+            BulkRenameSheet.saveLastBatch(result.renamed)
             let skipped = renames.count - result.renamed.count - result.failed
             phases[action.id] = .done("Renamed \(result.renamed.count.formatted()) files" + (result.failed > 0 ? " · \(result.failed.formatted()) failed" : "") + (skipped > 0 ? " · \(skipped.formatted()) skipped because their suggestion changed" : "") + ".")
             if !result.renamed.isEmpty {
                 let batch = result.renamed
                 offerUndo(action, label: "Undo renames") {
-                    let undone = await Task.detached(priority: .userInitiated) { store.undoRenames(batch) }.value
+                    let undone = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
                     if undone.failed == 0 && undone.skipped == 0 { BulkRenameSheet.clearLastBatch() }
-                    store.notifyChanged()
                     return "Put back \(undone.undone.formatted()) names."
                 }
             }
@@ -315,18 +312,27 @@ final class ChatActionRunner {
             guard let store = handoff.store, let id = action.personID, let name = action.name else { return }
             guard let before = store.persons(includeUnknown: true).first(where: { $0.id == id }) else { phases[action.id] = .failed("That person is no longer in People."); return }
             let parts = name.split(separator: " ").map(String.init)
-            store.updatePerson(id: id, title: nil, firstName: parts.first, middleName: nil,
-                               lastName: parts.count > 1 ? parts.dropFirst().joined(separator: " ") : nil, suffix: nil, isUnknown: false)
+            guard await CatalogWrites.renamePerson(engine, store: store, id: id, title: nil, firstName: parts.first, middleName: nil,
+                                                   lastName: parts.count > 1 ? parts.dropFirst().joined(separator: " ") : nil, suffix: nil) else {
+                phases[action.id] = .failed("The name wasn't saved. Try again in People.")
+                return
+            }
             phases[action.id] = .done("Named this person \(name).")
             offerUndo(action, label: "Undo") {
-                store.updatePerson(id: id, title: before.title, firstName: before.firstName, middleName: before.middleName,
-                                   lastName: before.lastName, suffix: before.suffix, isUnknown: before.isUnknown)
+                if before.isUnknown {
+                    await CatalogWrites.markUnknown(engine, store: store, ids: [id])
+                } else {
+                    let structured = [before.title, before.firstName, before.middleName, before.lastName, before.suffix]
+                    await CatalogWrites.renamePerson(engine, store: store, id: id, title: before.title,
+                                                     firstName: structured.allSatisfy { $0 == nil } ? before.name : before.firstName,
+                                                     middleName: before.middleName, lastName: before.lastName, suffix: before.suffix)
+                }
                 return "Name put back."
             }
         case "mergePeople":
             guard let store = handoff.store, let target = action.personID, let sources = action.personIDs else { return }
             phases[action.id] = .running("Merging")
-            let moved = await Task.detached(priority: .userInitiated) { store.mergePersons(target: target, sources: sources) }.value
+            let moved = await CatalogWrites.merge(engine, store: store, target: target, sources: sources)
             phases[action.id] = moved == nil ? .failed("The merge didn't go through. Nothing changed.") : .done("Merged · \((moved ?? 0).formatted()) faces moved.")
         default:
             phases[action.id] = .failed("This action isn't available.")

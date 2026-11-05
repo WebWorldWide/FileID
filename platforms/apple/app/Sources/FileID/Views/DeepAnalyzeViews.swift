@@ -309,7 +309,7 @@ struct DeepAnalyzeView: View {
             refreshStatusCounts()   // pending is keyed by active model
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshPendingRenameCount) {
-            BulkRenameSheet(store: store)
+            BulkRenameSheet(engine: engine, store: store)
         }
     }
 
@@ -464,17 +464,11 @@ struct DeepAnalyzeView: View {
         Task { @MainActor in
             var summary: [String] = []
             if scope == .all {
-                let renamed: [ReadStore.RenameOutcome] = await Task.detached(priority: .userInitiated) {
-                    let pending = store.filesWithProposedNames()
-                    guard !pending.isEmpty else { return [] }
-                    let result = store.applyProposedNamesBulk(pending)
-                    // Journal THIS batch so Library's "Undo last rename" reverts it,
-                    // not some older batch — matching every other rename call site
-                    // (BulkRenameSheet, per-file rename). saveLastBatch is
-                    // nonisolated, so it's safe to call from this detached task.
-                    BulkRenameSheet.saveLastBatch(result.renamed)
-                    return result.renamed
-                }.value
+                let pending = await Task.detached(priority: .userInitiated) { store.filesWithProposedNames() }.value
+                let renamed = await CatalogWrites.applyProposedNames(pending, engine: engine, store: store).renamed
+                // Journal THIS batch so Library's "Undo last rename" reverts it,
+                // not some older batch, matching every other rename call site.
+                BulkRenameSheet.saveLastBatch(renamed)
                 if !renamed.isEmpty { summary.append("\(renamed.count) renamed") }
             }
             if scope == .tags || scope == .all {

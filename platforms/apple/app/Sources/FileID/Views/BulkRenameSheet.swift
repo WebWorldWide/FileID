@@ -10,6 +10,7 @@ private struct PersistedRenameBatch: Codable {
 }
 
 struct BulkRenameSheet: View {
+    let engine: EngineClient
     let store: ReadStore
     @Environment(\.dismiss) private var dismiss
 
@@ -157,24 +158,19 @@ struct BulkRenameSheet: View {
         guard !toRename.isEmpty else { return }
         inFlight = true
         status = nil
-        let storeRef = store
-        Task.detached(priority: .userInitiated) {
-            let result = storeRef.applyProposedNamesBulk(toRename)
+        Task {
+            let result = await CatalogWrites.applyProposedNames(toRename, engine: engine, store: store)
             // Persist the batch to UserDefaults so the user can undo.
             BulkRenameSheet.saveLastBatch(result.renamed)
-            // Run the up-to-1000-row SELECT * off-main (we're already in a
-            // detached task); only the assignment hops to the main actor.
-            let refreshed = storeRef.filesWithProposedNames()
-            await MainActor.run {
-                inFlight = false
-                files = refreshed
-                selectedIDs = Set(refreshed.map(\.id))
-                if result.failed == 0 {
-                    status = "Renamed \(result.renamed.count) file\(result.renamed.count == 1 ? "" : "s")"
-                } else {
-                    status = "Renamed \(result.renamed.count) · \(result.failed) couldn't be renamed"
-                        + (result.firstError.map { " — \($0)" } ?? "")
-                }
+            let refreshed = await Task.detached(priority: .userInitiated) { [store] in store.filesWithProposedNames() }.value
+            inFlight = false
+            files = refreshed
+            selectedIDs = Set(refreshed.map(\.id))
+            if result.failed == 0 {
+                status = "Renamed \(result.renamed.count) file\(result.renamed.count == 1 ? "" : "s")"
+            } else {
+                status = "Renamed \(result.renamed.count) · \(result.failed) couldn't be renamed"
+                    + (result.firstError.map { " — \($0)" } ?? "")
             }
         }
     }

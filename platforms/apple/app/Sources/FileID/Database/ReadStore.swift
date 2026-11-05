@@ -42,21 +42,10 @@ public final class ReadStore: @unchecked Sendable {
     public private(set) var hasCaptions = false
     public private(set) var lastError: String?
 
-    // `lastError` is an @Observable property SwiftUI reads on the
-    // MainActor, but it's written from off-main detached tasks (bulk rename /
-    // merge / undo). A bare off-main write of an Optional<String> racing a
-    // MainActor read is undefined behavior under Swift 6. Route every write
-    // through `reportError`: it updates a lock-backed shadow synchronously (so
-    // the rare synchronous read-after-write paths still see the value) and
-    // publishes the observable property on the main actor.
-    @ObservationIgnored private let errorLock = NSLock()
-    @ObservationIgnored private var _lastErrorShadow: String?
+    // `lastError` is read by SwiftUI on the main actor but reported from
+    // off-main reads, so every write hops to the main actor.
     private func reportError(_ message: String?) {
-        errorLock.withLock { _lastErrorShadow = message }
         Task { @MainActor in self.lastError = message }
-    }
-    private func lastErrorSnapshot() -> String? {
-        errorLock.withLock { _lastErrorShadow }
     }
 
     public init(dbURL: URL = ReadStore.defaultDBURL) {
@@ -103,12 +92,8 @@ public final class ReadStore: @unchecked Sendable {
     }
 
     public func notifyChanged() {
-        // `version` is an @Observable property SwiftUI reads on the
-        // MainActor; notifyChanged() is reached OFF main from the bulk-rename /
-        // merge / undo detached tasks, so a bare `version &+= 1` is an off-main
-        // write racing a MainActor read (torn RMW / lost update). Serialize the
-        // increment on the main actor. refreshCounters() is already internally
-        // thread-safe (countersLock + Task.detached → MainActor.run publish).
+        // Callers include detached tasks; `version` is read by SwiftUI on the
+        // main actor, so the increment is serialized there.
         Task { @MainActor in self.version &+= 1 }
         refreshCounters()
     }
@@ -119,58 +104,6 @@ public final class ReadStore: @unchecked Sendable {
     /// closing never frees the connection out from under a reader.
     public func close() {
         queue = nil
-    }
-
-    /// Brief writable connection for Cleanup row deletes. WAL allows this
-    /// from a separate process without blocking the engine writer.
-    public func deleteFiles(ids: [Int64]) -> Int {
-        guard !ids.isEmpty else { return 0 }
-        do {
-            let queue = try writeQueue()
-            let deleted = try queue.write { db -> Int in
-                var total = 0
-                var affectedPersons = Set<Int64>()
-                for chunk in stride(from: 0, to: ids.count, by: 500) {
-                    let slice = ids[chunk..<min(chunk + 500, ids.count)]
-                    let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
-                    // Capture persons whose faces are about to be cascade-
-                    // deleted so we can fix their counts/representative below.
-                    let pids = try Int64.fetchAll(db, sql: """
-                        SELECT DISTINCT person_id FROM face_prints
-                        WHERE person_id IS NOT NULL AND file_id IN (\(placeholders))
-                        """, arguments: StatementArguments(slice))
-                    affectedPersons.formUnion(pids)
-                    let stmt = "DELETE FROM files WHERE id IN (\(placeholders))"
-                    try db.execute(sql: stmt, arguments: StatementArguments(slice))
-                    total += db.changesCount
-                }
-                // Reconcile persons: ON DELETE CASCADE removed their face rows
-                // but leaves persons.file_count stale and representative_face_id
-                // dangling at a now-deleted face.
-                for pid in affectedPersons {
-                    try db.execute(sql: """
-                        UPDATE persons SET file_count =
-                            (SELECT COUNT(DISTINCT file_id) FROM face_prints WHERE person_id = ?)
-                        WHERE id = ?
-                        """, arguments: [pid, pid])
-                    try db.execute(sql: """
-                        UPDATE persons SET representative_face_id =
-                            (SELECT id FROM face_prints WHERE person_id = ? ORDER BY id LIMIT 1)
-                        WHERE id = ?
-                          AND (representative_face_id IS NULL
-                               OR representative_face_id NOT IN
-                                  (SELECT id FROM face_prints WHERE person_id = ?))
-                        """, arguments: [pid, pid, pid])
-                }
-                return total
-            }
-            SpotlightIndexer.deindex(ids: ids)
-            self.notifyChanged()
-            return deleted
-        } catch {
-            reportError("Prune failed: \(error)")
-            return 0
-        }
     }
 
     private struct CounterSnapshot {
@@ -991,120 +924,31 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? (0, 0)
     }
 
-    public func updatePerson(id: Int64, title: String?, firstName: String?,
-                             middleName: String?, lastName: String?,
-                             suffix: String?, isUnknown: Bool) {
-        do {
-            let queue = try writeQueue()
-            try queue.write { db in
-                try db.execute(sql: """
-                    UPDATE persons
-                    SET title = ?, first_name = ?, middle_name = ?,
-                        last_name = ?, suffix = ?, is_unknown = ?
-                    WHERE id = ?
-                    """, arguments: [
-                        nilIfBlank(title), nilIfBlank(firstName),
-                        nilIfBlank(middleName), nilIfBlank(lastName),
-                        nilIfBlank(suffix), isUnknown ? 1 : 0, id
-                    ])
-            }
-            self.notifyChanged()
-        } catch {
-            reportError("Person update failed: \(error)")
+    public func personFileCount(id: Int64) -> Int? {
+        guard let q = queue else { return nil }
+        return try? q.read { db in
+            try Int.fetchOne(db, sql: "SELECT file_count FROM persons WHERE id = ?", arguments: [id])
         }
     }
 
-    /// Bulk mark-as-unknown for the People multi-select action. ONE write
-    /// connection + ONE transaction for the whole selection (chunked IN),
-    /// mirroring the Windows engine's single markPersonsAsUnknown command. The
-    /// previous per-id updatePerson loop opened N connections + ran N transactions
-    /// on the main thread and beach-balled the UI for crowd-sized selections.
-    /// Touches only is_unknown (the old loop re-wrote name columns from possibly-
-    /// stale in-memory rows — this is strictly safer).
-    public func markUnknownBatch(ids: [Int64]) -> Int {
-        guard !ids.isEmpty else { return 0 }
-        do {
-            let queue = try writeQueue()
-            let updated = try queue.write { db -> Int in
-                var total = 0
-                for chunk in stride(from: 0, to: ids.count, by: 500) {
-                    let slice = ids[chunk..<min(chunk + 500, ids.count)]
-                    let placeholders = slice.map { _ in "?" }.joined(separator: ", ")
-                    try db.execute(
-                        sql: "UPDATE persons SET is_unknown = 1 WHERE id IN (\(placeholders))",
-                        arguments: StatementArguments(slice))
-                    total += db.changesCount
-                }
-                return total
+    /// The faces of `personID` on `fileIDs`: what "Move to another person"
+    /// hands the engine, one face at a time. Every face of that person on a
+    /// chosen photo moves, so a photo never stays half in each group.
+    public func faceIDs(personID: Int64, fileIDs: [Int64]) -> [Int64] {
+        guard let q = queue, !fileIDs.isEmpty else { return [] }
+        return (try? q.read { db -> [Int64] in
+            var ids: [Int64] = []
+            for start in stride(from: 0, to: fileIDs.count, by: 500) {
+                let chunk = fileIDs[start..<min(start + 500, fileIDs.count)]
+                let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                var args: [DatabaseValueConvertible] = [personID]
+                args.append(contentsOf: chunk.map { Int($0) })
+                ids += try Int64.fetchAll(db, sql: """
+                    SELECT id FROM face_prints WHERE person_id = ? AND file_id IN (\(placeholders)) ORDER BY id
+                    """, arguments: StatementArguments(args))
             }
-            self.notifyChanged()
-            return updated
-        } catch {
-            reportError("Mark-unknown batch failed: \(error)")
-            return 0
-        }
-    }
-
-    private func nilIfBlank(_ s: String?) -> String? {
-        guard let s, !s.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
-        return s.trimmingCharacters(in: .whitespaces)
-    }
-
-    /// Move every face_print belonging to `source` person AND any of
-    /// `fileIDs` to belong to `target` person instead. Used by the
-    /// People-tab "Move to another person" multi-select action: when
-    /// the clusterer wrongly assigned a photo of Adam to Jack's
-    /// cluster, the user picks Adam in Jack's sheet and reassigns
-    /// just those photos.
-    ///
-    /// File-level granularity (not face-print-level): if a file has
-    /// multiple faces matched to `source`, all of them move. The
-    /// common case is one face per file per person; the edge case is
-    /// already a clusterer mistake the user is correcting.
-    public func movePersonFaces(fromPersonID source: Int64,
-                                  toPersonID target: Int64,
-                                  fileIDs: [Int64]) -> Int {
-        guard !fileIDs.isEmpty, source != target else { return 0 }
-        do {
-            let queue = try writeQueue()
-            let moved = try queue.write { db -> Int in
-                let placeholders = fileIDs.map { _ in "?" }.joined(separator: ",")
-                var args: [DatabaseValueConvertible] = [target, source]
-                args.append(contentsOf: fileIDs.map { Int($0) })
-                try db.execute(
-                    sql: """
-                        UPDATE face_prints SET person_id = ?
-                        WHERE person_id = ? AND file_id IN (\(placeholders))
-                        """,
-                    arguments: StatementArguments(args)
-                )
-                let changes = db.changesCount
-                // Recount file_count for both source and target.
-                try db.execute(sql: """
-                    UPDATE persons SET file_count = (
-                        SELECT COUNT(DISTINCT file_id) FROM face_prints
-                        WHERE person_id = persons.id
-                    ) WHERE id IN (?, ?)
-                    """, arguments: [source, target])
-                // The source's representative_face_id may now point at a face that
-                // moved to the target; repoint it at a face the source still owns
-                // (or NULL if none remain) so its card stops showing a foreign face.
-                try db.execute(sql: """
-                    UPDATE persons
-                    SET representative_face_id =
-                        (SELECT id FROM face_prints WHERE person_id = ? ORDER BY id LIMIT 1)
-                    WHERE id = ?
-                      AND representative_face_id NOT IN
-                          (SELECT id FROM face_prints WHERE person_id = ?)
-                    """, arguments: [source, source, source])
-                return changes
-            }
-            self.notifyChanged()
-            return moved
-        } catch {
-            reportError("Move person faces failed: \(error)")
-            return 0
-        }
+            return ids
+        }) ?? []
     }
 
     public func files(forPersonID personID: Int64, limit: Int = 200) -> [FileRow] {
@@ -1132,75 +976,11 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? 0
     }
 
-    /// Reassign every face_print on `sources` to `target`, delete the
-    /// source rows, recompute target's file_count. Returns the new
-    /// file_count or nil on failure.
-    public func mergePersons(target: Int64, sources: [Int64]) -> Int? {
-        let validSources = sources.filter { $0 != target }
-        guard !validSources.isEmpty else { return nil }
-        do {
-            let queue = try writeQueue()
-            let newCount: Int = try queue.write { db in
-                // Name preservation: the People drag-merge passes the DROP TARGET
-                // as `target` regardless of names, so dragging a NAMED card onto an
-                // UNNAMED one would delete the typed name (persons row deleted, no undo).
-                // If `target` has no typed name but exactly one entity in the merge set
-                // does, that named one becomes the survivor instead. Every other caller
-                // already passes the named cluster as `target`, so this is a no-op for
-                // them. (People drag-merge name loss)
-                let allIDs = [target] + validSources
-                let idPlaceholders = allIDs.map { _ in "?" }.joined(separator: ",")
-                let named: Set<Int64> = Set(try Int64.fetchAll(db, sql:
-                    "SELECT id FROM persons WHERE id IN (\(idPlaceholders)) AND is_unknown = 0 AND \(Self.personHasNameSQL())",
-                    arguments: StatementArguments(allIDs.map { Int($0) })))
-                let survivor: Int64
-                if named.contains(target) {
-                    survivor = target
-                } else {
-                    let namedSources = validSources.filter { named.contains($0) }
-                    survivor = namedSources.count == 1 ? namedSources[0] : target
-                }
-                let losers = allIDs.filter { $0 != survivor }
-                let placeholders = losers.map { _ in "?" }.joined(separator: ",")
-                // Reassign every face_print from the loser persons to the survivor,
-                // then delete the losers.
-                var args: [DatabaseValueConvertible] = [survivor]
-                args.append(contentsOf: losers.map { Int($0) })
-                try db.execute(
-                    sql: "UPDATE face_prints SET person_id = ? WHERE person_id IN (\(placeholders))",
-                    arguments: StatementArguments(args)
-                )
-                try db.execute(
-                    sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
-                    arguments: StatementArguments(losers.map { Int($0) })
-                )
-                try db.execute(sql: """
-                    UPDATE persons SET file_count = (
-                        SELECT COUNT(DISTINCT file_id)
-                        FROM face_prints
-                        WHERE person_id = ?
-                    )
-                    WHERE id = ?
-                    """, arguments: [survivor, survivor])
-                let n = try Int.fetchOne(db, sql:
-                    "SELECT file_count FROM persons WHERE id = ?",
-                    arguments: [survivor]) ?? 0
-                return n
-            }
-            self.notifyChanged()
-            return newCount
-        } catch {
-            reportError("Merge failed: \(error)")
-            return nil
-        }
-    }
-
-    /// Apply many (target, source) merges in a single transaction.
-    /// Resolves merge chains via union-find: if A→B and B→C, A's faces
-    /// land on C. Returns the number of source clusters actually merged
-    /// (chained-away duplicates count once).
-    public func mergePersonsBatch(_ pairs: [(target: Int64, source: Int64)]) -> Int {
-        guard !pairs.isEmpty else { return 0 }
+    /// Resolves suggested-merge pairs into one survivor per group via
+    /// union-find, so A→B and B→C both land on one card. Returns each survivor
+    /// with the people it absorbs, for the engine to merge one by one.
+    public func mergeBatchPlan(_ pairs: [(target: Int64, source: Int64)]) -> [(target: Int64, sources: [Int64])] {
+        guard !pairs.isEmpty else { return [] }
 
         // name-state + size for every touched cluster, so the union
         // survivor respects name priority ACROSS CHAINS. Per-pair preferredTarget
@@ -1282,52 +1062,7 @@ public final class ReadStore: @unchecked Sendable {
                 byTarget[root, default: []].append(id)
             }
         }
-        guard !byTarget.isEmpty else { return 0 }
-
-        var totalSources = 0
-        do {
-            let q = try writeQueue()
-            try q.write { db in
-                for (target, sources) in byTarget {
-                    for chunk in stride(from: 0, to: sources.count, by: 500).map({
-                        Array(sources[$0..<min($0 + 500, sources.count)])
-                    }) {
-                        let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
-                        var args: [DatabaseValueConvertible] = [target]
-                        args.append(contentsOf: chunk.map { Int($0) })
-                        try db.execute(
-                            sql: "UPDATE face_prints SET person_id = ? WHERE person_id IN (\(placeholders))",
-                            arguments: StatementArguments(args)
-                        )
-                        try db.execute(
-                            sql: "DELETE FROM persons WHERE id IN (\(placeholders))",
-                            arguments: StatementArguments(chunk.map { Int($0) })
-                        )
-                        totalSources += chunk.count
-                    }
-                }
-                // Recompute file_count for every surviving target in one shot.
-                let targetIDs = Array(byTarget.keys)
-                for chunk in stride(from: 0, to: targetIDs.count, by: 500).map({
-                    Array(targetIDs[$0..<min($0 + 500, targetIDs.count)])
-                }) {
-                    let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
-                    try db.execute(sql: """
-                        UPDATE persons SET file_count = (
-                            SELECT COUNT(DISTINCT file_id)
-                            FROM face_prints
-                            WHERE face_prints.person_id = persons.id
-                        )
-                        WHERE id IN (\(placeholders))
-                        """, arguments: StatementArguments(chunk.map { Int($0) }))
-                }
-            }
-            self.notifyChanged()
-            return totalSources
-        } catch {
-            reportError("Batch merge failed: \(error)")
-            return 0
-        }
+        return byTarget.map { (target: $0.key, sources: $0.value.sorted()) }.sorted { $0.target < $1.target }
     }
 
     // MARK: - Helpers
@@ -1508,9 +1243,7 @@ public final class ReadStore: @unchecked Sendable {
         }) ?? 0
     }
 
-    /// Apply renames to many files. Returns per-file results; the
-    /// caller persists `oldByID` to UserDefaults so the last batch can
-    /// be undone.
+    /// One landed rename, persisted so the last batch can be undone.
     public struct RenameOutcome: Sendable, Codable {
         public let fileID: Int64
         public let oldPath: String
@@ -1537,134 +1270,6 @@ public final class ReadStore: @unchecked Sendable {
         public let firstError: String?
     }
 
-    public func applyProposedNamesBulk(_ files: [FileRow]) -> BulkRenameResult {
-        guard !files.isEmpty else {
-            return BulkRenameResult(renamed: [], failed: 0, firstError: nil)
-        }
-        // One connection for the whole batch — opening a fresh
-        // DatabaseQueue per file made a 100-file rename open 100
-        // connections.
-        let queue: DatabaseQueue
-        do {
-            queue = try writeQueue()
-        } catch {
-            reportError("DB open for rename failed: \(error)")
-            return BulkRenameResult(renamed: [], failed: files.count,
-                                    firstError: lastErrorSnapshot())
-        }
-        var renamed: [RenameOutcome] = []
-        var failed = 0
-        var firstError: String?
-        for f in files {
-            let oldPath = f.pathText
-            if let newURL = applyProposedName(file: f, on: queue) {
-                if newURL.path != oldPath {
-                    renamed.append(RenameOutcome(fileID: f.id,
-                                                  oldPath: oldPath,
-                                                  newPath: newURL.path))
-                }
-            } else {
-                failed += 1
-                if firstError == nil { firstError = lastErrorSnapshot() }
-            }
-        }
-        // One observation invalidation + counter refresh for the whole
-        // batch (the per-file notifyChanged was removed from applyProposedName).
-        if !renamed.isEmpty { self.notifyChanged() }
-        return BulkRenameResult(renamed: renamed, failed: failed, firstError: firstError)
-    }
-
-    /// Reverse a previously-applied rename batch. Walks each entry
-    /// backwards: `mv newPath oldPath`. Skips entries whose newPath no
-    /// longer exists (user already moved them again somewhere) or no
-    /// longer matches the recorded size/mtime — these are reported as
-    /// `skipped`.
-    public func undoRenames(_ outcomes: [RenameOutcome]) -> (undone: Int, skipped: Int, failed: Int) {
-        var undone = 0
-        var skipped = 0
-        var failed = 0
-        let fm = FileManager.default
-        let queue: DatabaseQueue
-        do {
-            queue = try writeQueue()
-        } catch {
-            reportError("DB open for undo failed: \(error)")
-            return (0, 0, outcomes.count)
-        }
-        for r in outcomes.reversed() {
-            let newURL = URL(fileURLWithPath: r.newPath)
-            let oldURL = URL(fileURLWithPath: r.oldPath)
-            guard fm.fileExists(atPath: newURL.path) else {
-                skipped += 1; continue
-            }
-            if let size = r.fileSize, let date = r.modifiedAt {
-                let attrs = try? fm.attributesOfItem(atPath: newURL.path)
-                guard let curSize = attrs?[.size] as? Int64,
-                      let curDate = attrs?[.modificationDate] as? Date,
-                      curSize == size,
-                      abs(curDate.timeIntervalSince(date)) < 1
-                else {
-                    // A different file occupies newPath now — renaming
-                    // it would clobber an unrelated file's name and
-                    // repoint the DB row at the wrong bytes.
-                    skipped += 1; continue
-                }
-            }
-            if fm.fileExists(atPath: oldURL.path) {
-                // The old path is now occupied — bail rather than clobber.
-                skipped += 1; continue
-            }
-            do {
-                try ReadOnlyLocations.requireSourceMutation(newURL)
-                try ReadOnlyLocations.requireSourceMutation(oldURL)
-                try fm.moveItem(at: newURL, to: oldURL)
-                // Only count as undone once the DB agrees. The DB restore used
-                // to be a `try?`-swallow, leaving the row pointing at a
-                // now-nonexistent path on failure. If it fails, roll the file
-                // back so disk and DB stay consistent and report it as failed.
-                do {
-                    try queue.write { db in
-                        try db.execute(
-                            sql: "UPDATE files SET path_text = ?, path_hash = ?, path_search = ? WHERE id = ?",
-                            arguments: [oldURL.path,
-                                        StablePathHash.hash(oldURL.path),
-                                        oldURL.path.precomposedStringWithCanonicalMapping,
-                                        r.fileID]
-                        )
-                    }
-                    undone += 1
-                } catch {
-                    try? fm.moveItem(at: oldURL, to: newURL)
-                    failed += 1
-                }
-            } catch {
-                failed += 1
-            }
-        }
-        self.notifyChanged()
-        return (undone, skipped, failed)
-    }
-
-    /// Rename the file on disk to its proposed VLM name and update the
-    /// DB row. Returns the new path or nil on failure.
-    public func applyProposedName(file: FileRow) -> URL? {
-        do {
-            // The private overload no longer fires notifyChanged per call;
-            // fire it once here for the single-file path.
-            let result = applyProposedName(file: file, on: try writeQueue())
-            if result != nil { self.notifyChanged() }
-            return result
-        } catch {
-            reportError("DB open for rename failed: \(error)")
-            return nil
-        }
-    }
-
-    // Every app write connection sets a busy timeout. The engine is the
-    // single writer; a People edit / Cleanup delete / rename that lands
-    // during a brief engine WAL write would otherwise hit SQLITE_BUSY and
-    // throw — silently no-opping the edit, or stranding a trashed file as
-    // a ghost DB row. The timeout makes the contended write retry instead.
     /// Concurrent read-only connections over the engine's WAL database: the
     /// grid, search, tags, people and counters no longer queue behind one
     /// another. Each reader gets a 32 MB page cache and memory-mapped I/O.
@@ -1690,84 +1295,5 @@ public final class ReadStore: @unchecked Sendable {
             try db.execute(sql: "PRAGMA temp_store = MEMORY")
         }
         return config
-    }
-
-    private func writeQueue() throws -> DatabaseQueue {
-        try ReadOnlyLocations.requireWritable(dbURL)
-        var config = Configuration()
-        config.busyMode = .timeout(5)
-        return try DatabaseQueue(path: dbURL.path, configuration: config)
-    }
-
-    /// True when both URLs resolve to the same on-disk file. Uses the file
-    /// resource identifier (inode), not a string compare, so a case-only rename
-    /// on a case-insensitive volume is recognized as the file's own slot while
-    /// two genuinely distinct files on a case-sensitive volume are not. Only
-    /// consulted when fileExists(target) is already true (oldURL always exists as
-    /// the move source), so resourceValues won't be missing.
-    private func sameFileOnDisk(_ a: URL, _ b: URL) -> Bool {
-        if a == b { return true }
-        guard
-            let ia = (try? a.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier,
-            let ib = (try? b.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier
-        else { return false }
-        return ia.isEqual(ib)
-    }
-
-    private func applyProposedName(file: FileRow, on queue: DatabaseQueue) -> URL? {
-        guard let proposed = file.vlmProposedName, !proposed.isEmpty else { return nil }
-        let oldURL = file.url
-        let dir = oldURL.deletingLastPathComponent()
-        let ext = oldURL.pathExtension
-        let baseName = ext.isEmpty ? proposed : "\(proposed).\(ext)"
-        var target = dir.appendingPathComponent(baseName)
-        var bump = 2
-        // Identity (inode) check, NOT `target != oldURL` — on a
-        // case-insensitive volume a case-only rename (the engine sanitizer always
-        // lowercases) makes fileExists(target) true while the case-sensitive
-        // `target != oldURL` is also true, so the loop wrongly bumped the file's
-        // own slot to `_2`. A genuine two-distinct-files collision on a
-        // case-sensitive volume still bumps (different inode). The line-1370 guard
-        // below stays a case-sensitive compare so the case-only rename proceeds.
-        while FileManager.default.fileExists(atPath: target.path) && !sameFileOnDisk(target, oldURL) {
-            let bumped = ext.isEmpty ? "\(proposed)_\(bump)" : "\(proposed)_\(bump).\(ext)"
-            target = dir.appendingPathComponent(bumped)
-            bump += 1
-            if bump > 99 { return nil }
-        }
-        guard target != oldURL else { return oldURL }
-        do {
-            try ReadOnlyLocations.requireSourceMutation(oldURL)
-            try ReadOnlyLocations.requireSourceMutation(target)
-            try FileManager.default.moveItem(at: oldURL, to: target)
-        } catch {
-            reportError("Rename failed: \(error.localizedDescription)")
-            return nil
-        }
-        do {
-            try queue.write { db in
-                try db.execute(
-                    sql: """
-                        UPDATE files
-                        SET path_text = ?, path_hash = ?, path_search = ?, vlm_proposed_name = NULL
-                        WHERE id = ?
-                        """,
-                    arguments: [target.path,
-                                StablePathHash.hash(target.path),
-                                target.path.precomposedStringWithCanonicalMapping,
-                                file.id]
-                )
-            }
-            // notifyChanged() is fired ONCE by the caller (per batch in
-            // applyProposedNamesBulk, or in the single-file public wrapper) — not
-            // per file, which flooded the MainActor with N invalidations.
-            return target
-        } catch {
-            // DB update failed after the on-disk move — roll the file back so
-            // disk and DB stay consistent and the rename remains undoable.
-            reportError("DB update after rename failed: \(error)")
-            try? FileManager.default.moveItem(at: target, to: oldURL)
-            return nil
-        }
     }
 }
