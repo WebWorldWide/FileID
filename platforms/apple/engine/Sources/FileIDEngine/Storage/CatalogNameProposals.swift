@@ -60,7 +60,7 @@ enum CatalogNameProposals {
             return folder
         }
 
-        func outcome(_ evidence: S.Evidence) -> S.Outcome {
+        func nameOutcome(_ evidence: S.Evidence) -> S.Outcome {
             var evidence = evidence
             evidence.personWords = personWords
             return S.propose(evidence, options)
@@ -80,7 +80,7 @@ enum CatalogNameProposals {
         }
 
         mutating func single(_ id: Int64, _ file: Loaded) {
-            let outcome = outcome(file.evidence)
+            let outcome = nameOutcome(file.evidence)
             var text = "", reason = outcome.reason
             if let stem = outcome.stem {
                 let own = S.key(S.lower(file.name))
@@ -113,7 +113,7 @@ enum CatalogNameProposals {
             var outcomes: [S.Outcome?] = []
             for (c, row) in known {
                 let loaded = row == id ? file : try load(db, id: row)
-                outcomes.append(c.member.role != .sidecar ? loaded.map { outcome($0.evidence) } : nil)
+                outcomes.append(c.member.role != .sidecar ? loaded.map { nameOutcome($0.evidence) } : nil)
             }
             var best: (index: Int, rank: Int)?
             for (index, outcome) in outcomes.enumerated() {
