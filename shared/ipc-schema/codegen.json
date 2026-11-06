@@ -115,6 +115,9 @@
         "fields": {
           "maxDimension": {
             "type": "u32"
+          },
+          "rotationDegrees": {
+            "type": "u32"
           }
         }
       },

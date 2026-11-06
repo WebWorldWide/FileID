@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.18.0",
+  "version": "1.19.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1841,8 +1841,14 @@
           "enum": [
             "photo",
             "chapters",
-            "video"
-          ]
+            "video",
+            "trim",
+            "remux",
+            "audio",
+            "proxy",
+            "rotate"
+          ],
+          "description": "trim, remux, audio, proxy and rotate are the common-media recipes (schema 1.19.0). trim keeps trimStartSeconds..trimEndSeconds as MP4 or MOV. remux moves H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. audio writes the single audio track as AAC in M4A. proxy writes a small H.264/AAC MP4 linked to its source with the catalog role proxy. rotate changes the display orientation by rotationDegrees without re-encoding. Every output is reopened and checked for streams, duration, audio/video sync and orientation before publication. An engine that cannot perform a recipe faithfully must refuse it before creating any output, never substitute a different operation."
         },
         "format": {
           "type": "string",
@@ -1852,13 +1858,36 @@
             "tiff",
             "json",
             "vtt",
-            "mp4"
+            "mp4",
+            "mov",
+            "m4a"
           ]
         },
         "maxDimension": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 8192
+          "maximum": 8192,
+          "description": "Longest output side in pixels. proxy accepts 640 or 960. trim, remux, audio and rotate do not resize and ignore this value."
+        },
+        "trimStartSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "For trim only (schema 1.19.0). Start of the kept interval in source seconds."
+        },
+        "trimEndSeconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "For trim only (schema 1.19.0). End of the kept interval in source seconds; at least 0.1 seconds after trimStartSeconds and no later than the source end."
+        },
+        "trimMode": {
+          "type": "string",
+          "enum": ["keyframe", "exact"],
+          "description": "For trim only (schema 1.19.0); required. keyframe copies streams without re-encoding, so the output may begin at the keyframe at or before trimStartSeconds. exact re-encodes to H.264/AAC MP4 for a frame-accurate cut and refuses HDR sources."
+        },
+        "rotationDegrees": {
+          "type": "integer",
+          "enum": [90, 180, 270],
+          "description": "For rotate only (schema 1.19.0); required. Clockwise rotation added to the displayed picture. Streams are copied; only the orientation matrix changes."
         },
         "allowUpscale": {
           "type": "boolean",
