@@ -320,6 +320,31 @@ async fn resident_owner_closed_owner_refuses_new_load() {
     finish(&o, &f).await;
 }
 #[tokio::test]
+async fn resident_owner_reports_a_queued_job_so_a_batch_can_hand_over() {
+    let f = fixture();
+    let o = owner(&f, Duration::from_secs(120));
+    let held = acquire(&o, &f, true, flag()).await.unwrap();
+    assert!(!o.has_waiters());
+    let (other, owner) = (f.clone(), o.clone());
+    let waiting = tokio::spawn(async move { acquire(&owner, &other, true, flag()).await.map(|lease| lease.reusable_idle()) });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !o.has_waiters() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(held);
+    let reused = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap().unwrap();
+    assert!(reused, "the queued job gets the warm model");
+    assert!(!o.has_waiters());
+    assert_eq!(f.loads.load(Ordering::Relaxed), 1, "handing over does not reload the model");
+    let again = acquire(&o, &f, true, flag()).await.unwrap();
+    again.finish(true).await.unwrap();
+    finish(&o, &f).await;
+}
+
+#[tokio::test]
 async fn resident_owner_waiting_checkout_cancel_preserves_current_job() {
     let f = fixture();
     let o = owner(&f, Duration::from_secs(120));

@@ -65,6 +65,7 @@ pub enum EngineState {
     MergeSuggestions(fileid_engine::ipc::MergeSuggestions),
     ModelDownloadProgress(ModelDownloadProgress),
     ModelCatalog(fileid_engine::ipc::ModelCatalog),
+    RootsList(fileid_engine::ipc::RootsList),
     BenchmarkProgress(fileid_engine::ipc::BenchmarkProgress),
     BenchmarkResult(fileid_engine::ipc::BenchmarkResult),
     Error { kind: String, message: String, model_kind: Option<String> },
@@ -775,6 +776,7 @@ fn map_engine_payload(payload: EventPayload) -> Option<RawEvent> {
         EventPayload::MergeSuggestions(result) => EngineState::MergeSuggestions(result.inner),
         EventPayload::ModelDownloadProgress(progress) => EngineState::ModelDownloadProgress(progress.inner),
         EventPayload::ModelCatalog(catalog) => EngineState::ModelCatalog(catalog.inner),
+        EventPayload::RootsList(list) => EngineState::RootsList(list.inner),
         EventPayload::BenchmarkProgress(progress) => EngineState::BenchmarkProgress(progress.inner),
         EventPayload::BenchmarkResult(result) => EngineState::BenchmarkResult(result.inner),
         EventPayload::Error(error) => match error.inner.kind.as_str() {
@@ -1424,6 +1426,16 @@ mod tests {
         assert!(matches!(&events[2], RawEvent::State(EngineState::ChatResponse(r))
             if r.request_id == "chat-3" && r.conversation_id == "conversation"));
         assert!(matches!(events[3], RawEvent::State(EngineState::Exited)));
+    }
+
+    #[test]
+    fn roots_list_reaches_subscribers_with_its_request_id() {
+        let list = IpcEvent::now(EventPayload::RootsList(Wrap::new(fileid_engine::ipc::RootsList {
+            request_id: "locations-4".into(),
+            roots: vec![],
+        })));
+        let events = drain(serde_json::to_string(&list).unwrap());
+        assert!(matches!(&events[0], RawEvent::State(EngineState::RootsList(r)) if r.request_id == "locations-4"));
     }
 
     #[test]
