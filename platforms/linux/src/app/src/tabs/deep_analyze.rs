@@ -333,6 +333,8 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .child(&content)
         .css_classes(["fileid-tab"])
         .build();
+    let overlay = adw::ToastOverlay::new();
+    overlay.set_child(Some(&scroller));
 
     let ui = Rc::new(DeepUi {
         engine,
@@ -395,6 +397,15 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
             sync_run_state(&ui);
         });
     }
+    let naming_card = {
+        let weak = Rc::downgrade(&ui);
+        super::naming::build(ui.engine.clone(), overlay.clone(), move || {
+            weak.upgrade()
+                .map(|ui| ui.proposed.borrow().iter().map(|row| row.id).collect())
+                .unwrap_or_default()
+        })
+    };
+    content.insert_child_after(&naming_card, Some(&ui.smart_card));
     render_picker(&ui);
     request_catalog(&ui);
     wire_actions(&ui, &folder_btn);
@@ -420,7 +431,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         scroller.connect_map(move |_| refresh(&ui));
     }
 
-    scroller.upcast()
+    overlay.upcast()
 }
 
 // ─── Shared UI state ─────────────────────────────────────────────────────────

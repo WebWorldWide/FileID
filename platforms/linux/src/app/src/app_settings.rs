@@ -138,6 +138,64 @@ pub fn remember_welcome_sheet_seen() {
     set_entries(&[("welcomeSheetSeen", Value::Bool(true))]);
 }
 
+/// Describe Files ▸ Name style, stored under the Windows `naming*` keys
+/// (macOS `naming.*`). Defaults: short, 40 characters, people and event on,
+/// date off.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamingSettings {
+    pub style: String,
+    pub max_length: u32,
+    pub include_people: bool,
+    pub include_event: bool,
+    pub include_date: bool,
+}
+
+impl Default for NamingSettings {
+    fn default() -> Self {
+        Self {
+            style: "short".to_owned(),
+            max_length: 40,
+            include_people: true,
+            include_event: true,
+            include_date: false,
+        }
+    }
+}
+
+fn naming_from_map(map: &Map<String, Value>) -> NamingSettings {
+    let defaults = NamingSettings::default();
+    let flag = |key: &str, default: bool| map.get(key).and_then(Value::as_bool).unwrap_or(default);
+    NamingSettings {
+        style: map
+            .get("namingStyle")
+            .and_then(Value::as_str)
+            .filter(|style| matches!(*style, "short" | "descriptive" | "dateFirst"))
+            .unwrap_or(&defaults.style)
+            .to_owned(),
+        max_length: map
+            .get("namingMaxLength")
+            .and_then(Value::as_i64)
+            .map_or(defaults.max_length, |length| length.clamp(4, 120) as u32),
+        include_people: flag("namingIncludePeople", defaults.include_people),
+        include_event: flag("namingIncludeEvent", defaults.include_event),
+        include_date: flag("namingIncludeDate", defaults.include_date),
+    }
+}
+
+pub fn naming() -> NamingSettings {
+    settings_path().map_or_else(NamingSettings::default, |path| naming_from_map(&load_map(&path)))
+}
+
+pub fn remember_naming(naming: &NamingSettings) {
+    set_entries(&[
+        ("namingStyle", Value::String(naming.style.clone())),
+        ("namingMaxLength", Value::from(naming.max_length)),
+        ("namingIncludePeople", Value::Bool(naming.include_people)),
+        ("namingIncludeEvent", Value::Bool(naming.include_event)),
+        ("namingIncludeDate", Value::Bool(naming.include_date)),
+    ]);
+}
+
 /// Absolute folder paths to skip when running Deep Analyze over the whole
 /// library (mirrors Windows `AppSettings.DeepAnalyzeExcludedFolders`).
 /// Separate from the scan exclusion list — a folder can be fine to
@@ -239,6 +297,29 @@ mod tests {
         let many: Vec<String> = (0..400).map(|i| format!("/x/{i}")).collect();
         let result = sanitize_deep_analyze_excluded_folders(&many);
         assert_eq!(result.len(), 256);
+    }
+
+    #[test]
+    fn naming_settings_default_and_sanitize_like_windows() {
+        assert_eq!(naming_from_map(&Map::new()), NamingSettings::default());
+        let Value::Object(map) = serde_json::json!({
+            "namingStyle": "dateFirst", "namingMaxLength": 64, "namingIncludePeople": false,
+            "namingIncludeEvent": false, "namingIncludeDate": true
+        }) else { unreachable!() };
+        assert_eq!(
+            naming_from_map(&map),
+            NamingSettings {
+                style: "dateFirst".into(),
+                max_length: 64,
+                include_people: false,
+                include_event: false,
+                include_date: true
+            }
+        );
+        let Value::Object(bad) = serde_json::json!({"namingStyle": "loud", "namingMaxLength": 900})
+        else { unreachable!() };
+        let sanitized = naming_from_map(&bad);
+        assert_eq!((sanitized.style.as_str(), sanitized.max_length), ("short", 120));
     }
 
     #[test]

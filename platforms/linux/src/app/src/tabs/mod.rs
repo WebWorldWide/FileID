@@ -12,6 +12,7 @@ mod library_pane;
 mod library_selection;
 mod locations;
 mod model_catalog;
+mod naming;
 mod offline_roots;
 pub mod moments;
 mod moments_dates;

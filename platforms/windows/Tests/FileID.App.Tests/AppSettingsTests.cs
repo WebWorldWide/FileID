@@ -38,6 +38,21 @@ public class AppSettingsTests
         Assert.Equal(5, s.SchemaVersion);
     }
 
+    [Fact]
+    public void NamingStyle_HasMacDefaultsAndSurvivesSettingsJson()
+    {
+        var s = new AppSettings();
+        Assert.Equal("short", s.NamingStyle);
+        Assert.Equal(40, s.NamingMaxLength);
+        Assert.True(s.NamingIncludePeople);
+        Assert.True(s.NamingIncludeEvent);
+        Assert.False(s.NamingIncludeDate);
+        var json = JsonSerializer.Serialize(new AppSettings { NamingStyle = "dateFirst", NamingMaxLength = 64, NamingIncludeDate = true }, s_options);
+        Assert.Contains("\"namingStyle\": \"dateFirst\"", json);
+        var reloaded = JsonSerializer.Deserialize<AppSettings>(json, s_options)!;
+        Assert.Equal(("dateFirst", 64, true), (reloaded.NamingStyle, reloaded.NamingMaxLength, reloaded.NamingIncludeDate));
+    }
+
     [Theory]
     [InlineData("qwen3_vl_4b")]
     [InlineData("qwen3_vl_8b")]
