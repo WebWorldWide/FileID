@@ -724,6 +724,7 @@ impl ToolsUi {
             limit: 500,
             offset: 0,
             channel: QueryChannel::Tools,
+            scope: None,
         });
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {

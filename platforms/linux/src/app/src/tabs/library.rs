@@ -389,9 +389,10 @@ fn load_more(ctx: &Rc<ReloadCtx>) {
         kind: ctx.kind_filter.borrow().clone(),
         limit: QUERY_LIMIT,
         offset,
+        scope: super::library_scope::current_param(),
         ..QuerySpec::default()
     };
-    let rx = super::library_scope::query_files(&ctx.engine, spec);
+    let rx = ctx.engine.borrow().query_files(spec);
     let ctx = ctx.clone();
     glib::MainContext::default().spawn_local(async move {
         let result = rx.recv().await;
@@ -456,12 +457,13 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         kind: ctx.kind_filter.borrow().clone(),
         limit,
         offset: 0,
+        scope: super::library_scope::current_param(),
         ..QuerySpec::default()
     };
     ctx.has_more.set(false);
     let searched = spec.search.trim().to_string();
     let filtered = !searched.is_empty() || spec.kind.is_some();
-    let rx = super::library_scope::query_files(&ctx.engine, spec);
+    let rx = ctx.engine.borrow().query_files(spec);
     let ctx = ctx.clone();
     glib::MainContext::default().spawn_local(async move {
         let result = rx.recv().await;
@@ -1121,6 +1123,7 @@ fn open_preview(
         limit: QUERY_MAX_ROWS,
         offset: 0,
         channel: QueryChannel::Preview,
+        scope: super::library_scope::current_param(),
     });
     glib::MainContext::default().spawn_local(clone!(
         #[strong]

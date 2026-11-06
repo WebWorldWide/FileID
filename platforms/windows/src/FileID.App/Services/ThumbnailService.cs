@@ -138,6 +138,7 @@ internal sealed class ThumbnailService : IDisposable
     private readonly HashSet<string> _requestedVideo = new();
     private readonly object _videoLock = new();
     private const int VideoThumbTimeoutMs = 20_000;
+    private readonly int _videoPixelSize;
     private volatile bool _disposed;
 
     public ThumbnailService()
@@ -145,6 +146,9 @@ internal sealed class ThumbnailService : IDisposable
         // capture the UI dispatcher at ctor time. Service is
         // expected to be constructed on the UI thread.
         _uiDispatcher = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        _videoPixelSize = VideoPixelSize(_uiDispatcher?.HasThreadAccess == true
+            ? FileID.App.HostWindow?.Content?.XamlRoot?.RasterizationScale ?? 1
+            : 1);
         // Bigger queue: a fast scroll on a 256-px tile grid generates
         // 50+ requests/sec. The previous 64-slot cap dropped older
         // requests within ~1 second of fast scrolling. 256 absorbs
@@ -273,7 +277,8 @@ internal sealed class ThumbnailService : IDisposable
             if (firstRequest)
             {
                 if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] VIDEO_ENGINE_REQUEST file={PathRedactor.Redact(req.Path)}");
-                _ = EngineClient.Instance.GenerateVideoThumbnailAsync(req.Path, req.ModifiedAt);
+                _ = EngineClient.Instance.SendCommandAsync(
+                    new GenerateVideoThumbnailCommand(req.Path, req.ModifiedAt, _videoPixelSize));
             }
             else
             {
@@ -386,7 +391,7 @@ internal sealed class ThumbnailService : IDisposable
 
             _cache.Set(key, bmp, new MemoryCacheEntryOptions
             {
-                Size = DecodedBytesPerEntry,
+                Size = (long)_videoPixelSize * _videoPixelSize * 4,
                 SlidingExpiration = TimeSpan.FromMinutes(15),
             });
             if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] BITMAP_SET file={PathRedactor.Redact(evt.Path)} src=engine-video");
@@ -421,7 +426,9 @@ internal sealed class ThumbnailService : IDisposable
     /// <summary>Decode bytes into a BitmapImage on the CURRENT (UI) thread.
     /// Caller MUST already be on the dispatcher (the engine-event handler
     /// enqueues this). Mirrors ThumbnailDiskCache's eager InMemoryRandomAccessStream
-    /// + SetSourceAsync decode. Returns null on any decode failure.</summary>
+    /// + SetSourceAsync decode, at the keyframe's own size: the engine already
+    /// sized its long side to <see cref="VideoPixelSize"/>. Returns null on any
+    /// decode failure.</summary>
     private static async Task<BitmapImage?> DecodeOnThisThreadAsync(byte[] bytes, CancellationToken ct)
     {
         Windows.Storage.Streams.InMemoryRandomAccessStream? stream = null;
@@ -436,7 +443,7 @@ internal sealed class ThumbnailService : IDisposable
                 writer.DetachStream();
             }
             stream.Seek(0);
-            var bmp = new BitmapImage { DecodePixelWidth = (int)ThumbnailRequestPx };
+            var bmp = new BitmapImage();
             await bmp.SetSourceAsync(stream).AsTask(ct);
             if (DebugLog.TraceEnabled) DebugLog.Trace($"[THUMB] DECODE_OK bytes={bytes.Length} src=engine-video");
             return bmp;
@@ -460,6 +467,16 @@ internal sealed class ThumbnailService : IDisposable
     /// worker-thread drain, poisoned later `SetSourceAsync` calls.
     /// </summary>
     private const uint ThumbnailRequestPx = 192;
+
+    /// <summary>Long side asked of the engine's video keyframe (schema 1.20
+    /// <c>maxPixelSize</c>): the tile size times the display scale, capped at
+    /// 2048, as on the Mac. The scale is read once on the UI thread at
+    /// construction, never from the worker drain.</summary>
+    internal static int VideoPixelSize(double scale)
+    {
+        var factor = double.IsFinite(scale) && scale > 0 ? scale : 1;
+        return (int)Math.Clamp(Math.Ceiling(ThumbnailRequestPx * factor), 64, 2048);
+    }
 
     /// <summary>extensions where we have a WIC-backed fallback if
     /// the shell provider chain returns nothing. Matches what Explorer's
