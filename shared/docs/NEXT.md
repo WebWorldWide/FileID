@@ -175,7 +175,7 @@ Baseline lines: shared Rust engine 84k (30k tests), WinUI app 38k, Swift engine 
 3. **People** (M1): durable refresh backlog, incremental assignment against trusted exemplars, merge/split/ignore review queues, held-out precision/recall.
 4. **Smart names** (M1): saved styles, length budget, confirmed-person/event tokens, companion-aware (RAW+JPEG, Live Photo, sidecar) apply/Undo, blinded preference comparison.
 5. **Best takes** (M4): automatic related-attempt grouping from durable library-wide jobs, goal-conditioned outcome evidence from timeline intervals, native GTK/WinUI review.
-6. **Toolbox** (M5): trim, remux, proxies, audio extraction, repair diagnosis; RAW/HDR only with color management.
+6. **Toolbox** (M5): trim, remux, audio, proxy and rotate are built on branch `agent/tools` (IPC 1.19; Mac via AVFoundation, Rust validation and FFmpeg arguments behind a trait). Parked, not merged: the new `ToolRecipe` fields break two test literals inside the digest-locked `commands/video_export.rs`, and the Rust engine needs a reviewed launcher call from that file, so it waits for the owner to approve that digest refresh. Then: the Mac/WinUI/GTK controls, a rotated-frame direction check, and real runs against the vetted LGPL FFmpeg. Repair diagnosis and RAW/HDR stay open.
 7. **Stabilization, enhancement, tracked reframing** (M6).
 
 ## Release gates (unchanged; details in `SHIP.md`)
