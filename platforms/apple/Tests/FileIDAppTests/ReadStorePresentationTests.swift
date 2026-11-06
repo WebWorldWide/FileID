@@ -271,11 +271,11 @@ struct ReadStorePresentationTests {
             try? FileManager.default.removeItem(at: fixture.root)
         }
 
-        let candidates = ClusterSuggestions.findCandidates(
+        let candidates = try PersonMergeSuggestions.find(
             dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
         )
-        #expect(!candidates.contains { ($0.personA, $0.personB) == (1, 2) })
-        #expect(candidates.contains { ($0.personA, $0.personB) == (1, 3) })
+        #expect(!candidates.contains { Set([$0.sourcePersonID, $0.destinationPersonID]) == [1, 2] })
+        #expect(candidates.contains { ($0.sourcePersonID, $0.destinationPersonID) == (3, 1) })
     }
 
     @Test("merge suggestions honor a persisted different-people verdict")
@@ -306,7 +306,7 @@ struct ReadStorePresentationTests {
             try? FileManager.default.removeItem(at: fixture.root)
         }
 
-        let candidates = ClusterSuggestions.findCandidates(
+        let candidates = try PersonMergeSuggestions.find(
             dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
         )
         #expect(candidates.isEmpty)
@@ -337,9 +337,44 @@ struct ReadStorePresentationTests {
             try? FileManager.default.removeItem(at: fixture.root)
         }
 
-        let candidates = ClusterSuggestions.findCandidates(
+        let candidates = try PersonMergeSuggestions.find(
             dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
         )
-        #expect(candidates.count == ClusterSuggestions.resultLimit)
+        #expect(candidates.count == PersonMergeSuggestions.resultLimit)
+    }
+
+    @Test("merge suggestions rank corroborated fragments first and point small into large")
+    func mergeSuggestionsRankLikeTheSharedEngine() throws {
+        let blob = { (values: [Float]) in values.withUnsafeBytes { Data($0) } }
+        var faces: [(id: Int, person: Int, file: Int, vector: [Float])] = []
+        for k in 0..<13 { faces.append((100 + k, 1, 100 + k, [1, 0, Float(k) * 0.01])) }
+        faces.append((200, 2, 200, [0.8, 0.6]))
+        faces.append((201, 2, 201, [0.8, 0.6, 0.01]))
+        faces.append((300, 3, 300, [0, 0, 0, 0, 0, 1]))
+        faces.append((400, 4, 400, [0, 0, 0, 0, 0, 0.95, 0.31225]))
+        faces.append((500, 5, 500, [0.9, 0, 0, 0, 0, 0, 0, 0.43589]))
+        let fixture = try makeStore { db in
+            try db.execute(sql: "ALTER TABLE face_prints ADD COLUMN face_quality REAL")
+            try db.execute(sql: "INSERT INTO persons (id, representative_face_id) VALUES (1, 100), (2, 200), (3, 300), (4, 400), (5, 500)")
+            for face in faces {
+                try db.execute(
+                    sql: "INSERT INTO files (id, path_text, size_bytes, modified_at, content_hash) VALUES (?, '/fixture.jpg', 1, 1, ?)",
+                    arguments: [face.file, Data("photo-\(face.file)".utf8)])
+                try db.execute(
+                    sql: "INSERT INTO face_prints (id, person_id, file_id, arcface_embedding, face_quality) VALUES (?, ?, ?, ?, 0.9)",
+                    arguments: [face.id, face.person, face.file, blob(face.vector)])
+            }
+        }
+        defer {
+            fixture.store.close()
+            try? FileManager.default.removeItem(at: fixture.root)
+        }
+
+        let pairs = try PersonMergeSuggestions.find(
+            dbPath: fixture.root.appending(component: "fileid.sqlite").path, selectedModel: "fixture-sface"
+        )
+        #expect(pairs.map { [$0.sourcePersonID, $0.destinationPersonID] } == [[2, 1], [5, 1], [4, 3], [5, 2]])
+        #expect(pairs.first.map { ($0.sourceMemberCount, $0.destinationMemberCount) } ?? (0, 0) == (2, 13))
+        #expect(pairs.first.map { ($0.sourceAnchorFaceID, $0.destinationAnchorFaceID) } ?? (0, 0) == (200, 100))
     }
 }
