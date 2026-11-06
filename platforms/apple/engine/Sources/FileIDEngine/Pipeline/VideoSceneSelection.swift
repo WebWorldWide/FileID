@@ -29,8 +29,10 @@ enum VideoSceneSelection {
     static let poolInterval = 0.5
     /// A frame starts a new scene when it and the next frame are both less similar
     /// than this to the running mean of the current scene, so camera motion and a
-    /// single blurred frame do not split a shot.
-    static let cutCosine: Float = 0.80
+    /// single blurred frame do not split a shot. 0.85 rather than 0.80: edited clips
+    /// that keep one subject and grade cut between shots at 0.80-0.85 (labelled Adlon
+    /// set, shared/scripts/eval/timeline_eval.py).
+    static let cutCosine: Float = 0.85
     /// A slow pan or walk that drifts this far from the scene's first frame also cuts.
     static let driftCosine: Float = 0.70
     static let confirmFrames = 2
