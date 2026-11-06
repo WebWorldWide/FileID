@@ -1025,14 +1025,42 @@ struct FileIDEngineMain {
         case .wipeLibrary:
             guard let database else { await sink.emit(.libraryWiped(LibraryWiped(ok: false, message: "Database unavailable."))); return }
             await sink.emit(.libraryWiped(await wipeLibrary(database: database)))
-        case .findMergeSuggestions,
-             .embedTextQuery,
-             .embedImageQuery,
-             .generateVideoThumbnail:
-            await sink.emit(.error(EngineError(
-                kind: "not_implemented_yet",
-                message: "This IPC command is not implemented by the macOS engine yet."
-            )))
+        case .findMergeSuggestions:
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot find merge suggestions."
+                )))
+                await sink.emit(.error(EngineError(
+                    kind: "find_merge_suggestions_failed",
+                    message: "Merge suggestions are unavailable because the library database could not be opened."
+                )))
+                return
+            }
+            Task.detached(priority: .userInitiated) {
+                await sink.emit(await QueryCommands.mergeSuggestions(database: database))
+            }
+        case .embedTextQuery(let query, let queryID):
+            Task.detached(priority: .userInitiated) {
+                await sink.emit(QueryCommands.textEmbedding(query: query, queryID: queryID))
+            }
+        case .embedImageQuery(let fileID, let queryID):
+            guard let database else {
+                await sink.emit(.error(EngineError(
+                    kind: "db_unavailable",
+                    message: "Database failed to open at engine startup; cannot embed the file query."
+                )))
+                return
+            }
+            Task.detached(priority: .userInitiated) {
+                await sink.emit(await QueryCommands.imageEmbedding(database: database, fileID: fileID, queryID: queryID))
+            }
+        case .generateVideoThumbnail(let path, let modifiedAt):
+            Task.detached(priority: .utility) {
+                if let event = await QueryCommands.videoThumbnail(path: path, modifiedAt: modifiedAt) {
+                    await sink.emit(event)
+                }
+            }
         case .verifyCudaPack:
             await sink.emit(.error(EngineError(
                 kind: "not_applicable_on_platform",

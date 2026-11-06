@@ -1,0 +1,304 @@
+[
+  {
+    "name": "names-styles-budget-and-confirmed-tokens",
+    "description": "proposeNames builds the same names in both engines from stored catalog evidence only: short, descriptive and date-first styles, a character budget, a person token only for a user-named person with a current compatible face or a user observation (Alex's incompatible face, an automatic observation, an unknown-flagged Mira, an excluded Zoe and 'Person 4' stay out), an event token only from a user-edited event, and the _2/_3 bump for a name already in the folder or claimed earlier in the batch. Nothing on disk or in the catalog changes.",
+    "tree": [
+      {
+        "path": "names/IMG_0001.jpg",
+        "content": "a",
+        "mtime": 1000,
+        "row": {
+          "id": 1,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Sam - Baseball Hit",
+          "vlm_description": "Sam swings a baseball bat and hits the ball over the fence at the park. Mira cheers."
+        }
+      },
+      {
+        "path": "names/IMG_0002.jpg",
+        "content": "b",
+        "mtime": 1000,
+        "row": {
+          "id": 2,
+          "kind": "image",
+          "created_at": 1688472000,
+          "vlm_proposed_name": "Alex - Baseball Hit"
+        }
+      },
+      {
+        "path": "names/IMG_0003.jpg",
+        "content": "c",
+        "mtime": 1000,
+        "row": {
+          "id": 3,
+          "kind": "image",
+          "vlm_proposed_name": "baseball hit"
+        }
+      },
+      {
+        "path": "names/IMG_0004.jpg",
+        "content": "d",
+        "mtime": 1000,
+        "row": {
+          "id": 4,
+          "kind": "image",
+          "vlm_proposed_name": "kai-birthday-gift"
+        }
+      },
+      {
+        "path": "names/IMG_0005.jpg",
+        "content": "e",
+        "mtime": 1000,
+        "row": {
+          "id": 5,
+          "kind": "image"
+        }
+      },
+      {
+        "path": "names/baseball-hit.jpg",
+        "content": "taken",
+        "mtime": 1000
+      }
+    ],
+    "sql": [
+      "INSERT INTO persons(id,first_name,created_at) VALUES(1,'Sam',0),(2,'Alex',0),(5,'Kai',0),(6,'Zoe',0)",
+      "INSERT INTO persons(id,name,created_at) VALUES(3,'Person 4',0)",
+      "INSERT INTO persons(id,first_name,is_unknown,created_at) VALUES(4,'Mira',1,0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision,excluded) VALUES(1,1,1,X'00','[0,0,1,1]',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','fixture-model','fixture-align','1:4652007308841189376',0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision,excluded) VALUES(2,1,2,X'00','[0,0,1,1]',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','fixture-model','fixture-align','1:4652007308841189376',0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision,excluded) VALUES(3,2,2,X'00','[0,0,1,1]',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','old-model','fixture-align','stale',0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision,excluded) VALUES(4,1,3,X'00','[0,0,1,1]',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','fixture-model','fixture-align','1:4652007308841189376',0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision,excluded) VALUES(5,1,4,X'00','[0,0,1,1]',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','fixture-model','fixture-align','1:4652007308841189376',0)",
+      "INSERT INTO face_prints(id,file_id,person_id,print_data,bbox,arcface_embedding,embedding_model,processing_version,source_revision,excluded) VALUES(6,1,6,X'00','[0,0,1,1]',X'0000803f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000','fixture-model','fixture-align','1:4652007308841189376',1)",
+      "UPDATE persons SET representative_face_id=CASE id WHEN 1 THEN 1 WHEN 2 THEN 3 WHEN 3 THEN 4 WHEN 4 THEN 5 WHEN 6 THEN 6 END WHERE id IN (1,2,3,4,6)",
+      "INSERT INTO catalog_observations(id,file_id,person_id,source_revision,model_version,confidence,user_edited,stale) VALUES('obs-kai',4,5,'1:4652007308841189376','user',1,1,0),('obs-alex',2,2,'1:4652007308841189376','auto',0.9,0,0)",
+      "INSERT INTO catalog_events(id,title,goal,user_edited) VALUES('party','Birthday Party','',1),('soccer','Soccer Game','',0)",
+      "INSERT INTO catalog_event_files(event_id,file_id) VALUES('party',4),('party',5),('soccer',4),('soccer',1)"
+    ],
+    "steps": [
+      {
+        "label": "short with people and event",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            99
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40,
+            "includePeople": true,
+            "includeEvent": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": [
+            {
+              "fileID": 1,
+              "path": "{path:names/IMG_0001.jpg}",
+              "kind": "proposedName",
+              "text": "sam-baseball-hit.jpg",
+              "evidenceID": "proposedName"
+            },
+            {
+              "fileID": 2,
+              "path": "{path:names/IMG_0002.jpg}",
+              "kind": "proposedName",
+              "text": "baseball-hit_2.jpg",
+              "evidenceID": "proposedName"
+            },
+            {
+              "fileID": 3,
+              "path": "{path:names/IMG_0003.jpg}",
+              "kind": "proposedName",
+              "text": "baseball-hit_3.jpg",
+              "evidenceID": "proposedName"
+            },
+            {
+              "fileID": 4,
+              "path": "{path:names/IMG_0004.jpg}",
+              "kind": "proposedName",
+              "text": "kai-birthday-party-gift.jpg",
+              "evidenceID": "proposedName"
+            },
+            {
+              "fileID": 5,
+              "path": "{path:names/IMG_0005.jpg}",
+              "kind": "proposedName",
+              "text": "birthday-party.jpg",
+              "evidenceID": "event"
+            }
+          ]
+        }
+      },
+      {
+        "label": "descriptive",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            1,
+            2
+          ],
+          "naming": {
+            "style": "descriptive",
+            "maxLength": 60,
+            "includePeople": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": [
+            {
+              "fileID": 1,
+              "path": "{path:names/IMG_0001.jpg}",
+              "kind": "proposedName",
+              "text": "sam-swings-baseball-bat-hits-ball-fence.jpg",
+              "evidenceID": "description"
+            },
+            {
+              "fileID": 2,
+              "path": "{path:names/IMG_0002.jpg}",
+              "kind": "proposedName",
+              "text": "baseball-hit_2.jpg",
+              "evidenceID": "proposedName"
+            }
+          ]
+        }
+      },
+      {
+        "label": "date first without people",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            1,
+            4
+          ],
+          "naming": {
+            "style": "dateFirst",
+            "maxLength": 40
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": [
+            {
+              "fileID": 1,
+              "path": "{path:names/IMG_0001.jpg}",
+              "kind": "proposedName",
+              "text": "2023-07-04 baseball-hit.jpg",
+              "evidenceID": "proposedName"
+            },
+            {
+              "fileID": 4,
+              "path": "{path:names/IMG_0004.jpg}",
+              "kind": "proposedName",
+              "text": "birthday-gift.jpg",
+              "evidenceID": "proposedName"
+            }
+          ]
+        }
+      },
+      {
+        "label": "budget shorter than the subject",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            1,
+            4,
+            5
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 6,
+            "includePeople": true
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": [
+            {
+              "fileID": 1,
+              "path": "{path:names/IMG_0001.jpg}",
+              "kind": "proposedName",
+              "text": "",
+              "evidenceID": "budget"
+            },
+            {
+              "fileID": 4,
+              "path": "{path:names/IMG_0004.jpg}",
+              "kind": "proposedName",
+              "text": "",
+              "evidenceID": "budget"
+            },
+            {
+              "fileID": 5,
+              "path": "{path:names/IMG_0005.jpg}",
+              "kind": "proposedName",
+              "text": "",
+              "evidenceID": "noEvidence"
+            }
+          ]
+        }
+      },
+      {
+        "label": "invalid budget",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            1
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 2
+          }
+        },
+        "expect": {
+          "status": "error"
+        }
+      },
+      {
+        "label": "catalog unchanged",
+        "db": "SELECT id,vlm_proposed_name FROM files WHERE id<=4 ORDER BY id",
+        "expect": [
+          [
+            1,
+            "Sam - Baseball Hit"
+          ],
+          [
+            2,
+            "Alex - Baseball Hit"
+          ],
+          [
+            3,
+            "baseball hit"
+          ],
+          [
+            4,
+            "kai-birthday-gift"
+          ]
+        ]
+      },
+      {
+        "label": "files unchanged",
+        "fs": {
+          "exists": [
+            "names/IMG_0001.jpg",
+            "names/IMG_0002.jpg",
+            "names/IMG_0003.jpg",
+            "names/IMG_0004.jpg",
+            "names/baseball-hit.jpg"
+          ],
+          "absent": [
+            "names/sam-baseball-hit.jpg"
+          ]
+        }
+      }
+    ]
+  }
+]

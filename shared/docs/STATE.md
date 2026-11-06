@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-05 (night, later) — Mac engine serves its last four stubbed commands
+
+- **Smart names** (agent, both engines, IPC 1.19): new catalog action `proposeNames` with a `CatalogNaming` style (short `sam-baseball-hit`, descriptive, date-first `2023-07-04 sam-baseball-hit`), a 4–120 character budget and optional people/event/date tokens. Names come only from stored evidence (a reviewed chapter, the stored AI name or description, tags, a user event); no model call and nothing is renamed. A person appears only when a user-named person is confirmed on the file by a current compatible face or a user observation, and every other People name is removed from the wording; words are never cut to fit; taken names get `_2`…`_99`. 23 shared cases and conformance `names-styles-budget-and-confirmed-tokens` pass on both engines, byte for byte.
+- Combined checks on `integrate/batch-5`: Rust 1,136, Swift 789 (serial), GTK 174, C# 62, conformance Rust 36 / Swift 42.
+- **Mac engine** (agent): `findMergeSuggestions`, `embedTextQuery`, `embedImageQuery` and `generateVideoThumbnail` now answer like the shared Rust engine instead of `not_implemented_yet`. Merge ranking (`PersonMergeSuggestions`) and the CLIP text encoder moved into FileIDShared, so the app and engine share one implementation; FileIDShared now links GRDB and ONNX Runtime, which both binaries already used (DECISIONS). People merge suggestions on the Mac now rank like Windows/Linux (corroborated fragments first, the smaller person as the source, face counts shown) and no longer return nothing above 200,000 faces. Video thumbnails come from the engine's 25% keyframe extractor (192 px JPEG). 5 shared conformance cases (`queries.json`): Swift 41 pass, Rust 35 pass, one known divergence each. Swift 785 tests (serial).
+
 ## 2026-11-05 (late night) — Rust goal ranking for Best Takes; Describe hands the model to Chat; GTK Locations over IPC; CI memory fix
 
 - **Owner approved the `deep_analyze.rs` and `engine_client.rs` digest refreshes.** Only `engine_client.rs` changed; the two Rust items below fit in unlocked files.

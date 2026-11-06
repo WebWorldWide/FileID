@@ -644,6 +644,15 @@ pub struct CatalogRequest {
     pub timeline_mode: Option<String>,
     #[serde(rename = "requestID")]
     pub request_id: String,
+    /// proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming
+    /// style, from stored catalog evidence only, with no model call and no file change. It replies
+    /// with one hit per known file in request order: kind proposedName, path the current path, text
+    /// the proposed file name with the original extension (empty when the original name stays) and
+    /// evidenceID the reason: chapter, proposedName, description, tags or event when text is set;
+    /// unchanged, budget, reserved, collision or noEvidence when it is empty. A person token
+    /// appears only for a user-named person confirmed on the file by a current compatible face or a
+    /// user observation; an event token only from one user-edited event. Names taken in the folder
+    /// or earlier in the batch get the _2 to _99 bump. Apply with renameFiles.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
@@ -683,6 +692,8 @@ pub struct CatalogRequest {
     pub take_feedback: Option<CatalogTakeFeedback>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub take_decision: Option<CatalogTakeDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub naming: Option<CatalogNaming>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -734,6 +745,29 @@ pub struct CatalogTakeDecision {
     pub decision: String,
     #[serde(rename = "fileIDs")]
     pub file_ids: Vec<i64>,
+}
+
+/// Saved smart-name style for proposeNames. The app stores it; the engine keeps no naming state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CatalogNaming {
+    /// short: subject-action, up to three evidence words (sam-baseball-hit). descriptive: up to
+    /// six. dateFirst: short with the capture date first (2023-07-04 sam-baseball-hit).
+    pub style: String,
+    /// Name budget in Unicode scalars, extension and _N bump excluded. Optional tokens and trailing
+    /// words are dropped to fit; words are never cut. When the first subject word does not fit, the
+    /// original name stays (reason budget).
+    pub max_length: u32,
+    /// Add up to two confirmed people's first names. Omitted means false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_people: bool,
+    /// Add the title of the one user-edited event holding the file. Omitted means false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_event: bool,
+    /// short/descriptive: append the capture date (-2023-07-04). Ignored by dateFirst, which always
+    /// leads with it. Omitted means false. Files without a capture date get no date.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_date: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

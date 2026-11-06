@@ -9,7 +9,6 @@
 // zero-padded, truncated to 77 — or the text embedding lands in a different
 // space than the ViT-B/32 image embeddings and search breaks.
 import Foundation
-import FileIDShared
 import OnnxRuntimeBindings
 
 public final class CLIPTextEncoder: @unchecked Sendable {
@@ -28,8 +27,13 @@ public final class CLIPTextEncoder: @unchecked Sendable {
     private var inputName: String?
 
     private static let contextLen = 77
+    private let log: @Sendable (String) -> Void
 
-    private init() {}
+    /// The engine passes its own logger: NSLog writes to stderr, which is the
+    /// engine's IPC event stream.
+    public init(log: @escaping @Sendable (String) -> Void = { NSLog("%@", $0) }) {
+        self.log = log
+    }
 
     public var isReady: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -44,7 +48,9 @@ public final class CLIPTextEncoder: @unchecked Sendable {
 
     /// Standard install location — beside the other AI models.
     public static var defaultDirectory: URL {
-        AppSupportPath.models.appendingPathComponent("clip_text", isDirectory: true)
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("FileID/Models/clip_text", isDirectory: true)
     }
 
     public static var defaultModelURL: URL {
@@ -69,16 +75,16 @@ public final class CLIPTextEncoder: @unchecked Sendable {
         guard CLIPEmbeddingSpace.verifyArtifact(at: Self.defaultModelURL, id: "clip_vitb32_text"),
               CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("vocab.json"), id: "clip_bpe_vocab"),
               CLIPEmbeddingSpace.verifyArtifact(at: dir.appendingPathComponent("merges.txt"), id: "clip_bpe_merges") else {
-            NSLog("FileID CLIP text: artifact verification failed; semantic search unavailable")
+            log("FileID CLIP text: artifact verification failed; semantic search unavailable")
             return false
         }
         guard CLIPTokenizer.shared.loadVocabulary(modelDirectory: dir) else {
-            NSLog("FileID CLIP text: vocab.json or merges.txt not found in %@", redactPathForLog(dir.path))
+            log("FileID CLIP text: vocab.json or merges.txt not found in \(redactPathForLog(dir.path))")
             return false
         }
         let modelURL = Self.defaultModelURL
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            NSLog("FileID CLIP text: clip_text.onnx not found at %@", redactPathForLog(modelURL.path))
+            log("FileID CLIP text: clip_text.onnx not found at \(redactPathForLog(modelURL.path))")
             return false
         }
         do {
@@ -94,10 +100,10 @@ public final class CLIPTextEncoder: @unchecked Sendable {
             self.session = session
             self.inputName = inputName
             lock.unlock()
-            NSLog("FileID CLIP text: loaded ViT-B/32 ONNX from %@", redactPathForLog(modelURL.path))
+            log("FileID CLIP text: loaded ViT-B/32 ONNX from \(redactPathForLog(modelURL.path))")
             return true
         } catch {
-            NSLog("FileID CLIP text load failed: %@", "\(error)")
+            log("FileID CLIP text load failed: \(error)")
             return false
         }
     }
@@ -153,7 +159,7 @@ public final class CLIPTextEncoder: @unchecked Sendable {
             for i in 0..<count { vec[i] *= invN }
             return vec
         } catch {
-            NSLog("FileID CLIP text inference failed: %@", "\(error)")
+            log("FileID CLIP text inference failed: \(error)")
             return nil
         }
     }

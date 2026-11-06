@@ -16,4 +16,5 @@ pub use path_safety::rename_no_replace;
 pub(crate) mod zip;
 
 pub mod smart_name;
+pub(crate) mod smart_name_style;
 pub(crate) mod model_memory;

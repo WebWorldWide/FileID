@@ -19,6 +19,7 @@ pub(crate) mod wipe;
 pub mod catalog;
 pub(crate) mod catalog_search;
 pub(crate) mod catalog_retrieval;
+pub(crate) mod catalog_names;
 
 pub mod catalog_takes;
 pub mod catalog_take_auto;

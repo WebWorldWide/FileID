@@ -5,7 +5,7 @@ usage: FILEID_E2E_DIR=<scratch dir containing lib/> FILEID_ENGINE=<engine binary
 The library must be a scratch copy: this moves, renames, tags and hides files (and restores them).
 Expected layout: lib/Game (photos with people, including one exact duplicate), lib/Clips (1-2 short videos), lib/Docs (txt/docx/pdf), lib/Skip.
 """
-import hashlib, json, os, plistlib, shutil, sqlite3, subprocess, sys, time, traceback, uuid
+import base64, hashlib, json, os, plistlib, shutil, sqlite3, subprocess, sys, time, traceback, uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drive import Engine, kind  # noqa: E402
@@ -296,10 +296,9 @@ def _():
     e.send("generateVideoThumbnail", {"path": path})
     r = e.wait(lambda p: kind(p) in ("thumbnailGenerated", "error"), 120)
     v = inner(r, kind(r))
-    # macOS renders video thumbnails in the app (IPCProtocol.generateVideoThumbnail); the engine must
-    # still answer with the structured pointer instead of staying silent.
-    step("generateVideoThumbnail answers with the macOS in-app pointer",
-         kind(r) == "error" and v.get("kind") == "not_implemented_yet", json.dumps(v)[:200])
+    jpeg = base64.b64decode(v.get("bytes") or "") if kind(r) == "thumbnailGenerated" else b""
+    step("generateVideoThumbnail returns a JPEG for the video",
+         v.get("path") == path and jpeg[:2] == b"\xff\xd8", json.dumps(v)[:200])
 
 
 # ---------------------------------------------------------------- people
