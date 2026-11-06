@@ -447,6 +447,7 @@ struct SegmentedBar<T: Hashable>: View {
     @Binding var selection: T
     let options: [(T, String)]
     var height: CGFloat = Theme.Metrics.hitTarget
+    var disabled: Set<T> = []
     @Namespace private var pill
     @Environment(\.fixedTextSize) private var fixed
     var body: some View {
@@ -465,6 +466,8 @@ struct SegmentedBar<T: Hashable>: View {
                         }
                 }
                 .buttonStyle(DSBareButtonStyle(radius: Theme.Radius.xs))
+                .disabled(disabled.contains(option.0))
+                .opacity(disabled.contains(option.0) ? 0.4 : 1)
                 .accessibilityAddTraits(on ? .isSelected : [])
             }
         }

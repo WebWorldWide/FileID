@@ -1,6 +1,98 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import FileIDShared
+
+/// The Video sub-picker's choices and the recipe each one sends. Kept apart
+/// from the view so the request-building rules are testable.
+struct MediaToolChoice: Equatable {
+    static let tools: [(id: String, label: String)] = [
+        ("export", "Export"), ("trim", "Trim"), ("remux", "Remux"), ("audio", "Audio"), ("proxy", "Proxy"), ("rotate", "Rotate"),
+    ]
+    static let rotations: [(Int, String)] = [(90, "90° right"), (180, "180°"), (270, "90° left")]
+
+    var tool = "export"
+    var trimStart = 0.0
+    var trimEnd = 0.0
+    var trimMode = "keyframe"
+    var container = "mp4"
+    var proxySide = 640
+    var rotation = 90
+
+    var isExport: Bool { tool == "export" }
+
+    /// Export is the existing video recipe; the others appear only when the engine reports them available.
+    static func available(_ capabilities: [ToolCapability]) -> [(String, String)] {
+        tools.filter { tool in tool.id == "export" || capabilities.contains { $0.id == tool.id && $0.available } }
+            .map { ($0.id, $0.label) }
+    }
+
+    static func container(ofPath path: String) -> String? {
+        switch URL(fileURLWithPath: path).pathExtension.lowercased() {
+        case "mp4", "m4v": "mp4"
+        case "mov": "mov"
+        default: nil
+        }
+    }
+
+    var formatOptions: [(String, String)] {
+        switch tool {
+        case "audio": [("m4a", "M4A · AAC")]
+        case "proxy": [("mp4", "MP4 · H.264")]
+        default: [("mp4", "MP4"), ("mov", "MOV")]
+        }
+    }
+
+    /// Remuxing into the container a file already has only copies it, and an exact trim is MP4 only.
+    func disabledContainers(sources: [String]) -> Set<String> {
+        switch tool {
+        case "remux": Set(sources.compactMap(Self.container(ofPath:)))
+        case "trim" where trimMode == "exact": ["mov"]
+        default: []
+        }
+    }
+
+    var format: String {
+        switch tool {
+        case "audio": "m4a"
+        case "proxy": "mp4"
+        case "trim" where trimMode == "exact": "mp4"
+        default: container
+        }
+    }
+
+    mutating func adopt(tool next: String, sources: [String]) {
+        tool = next
+        if ["trim", "rotate"].contains(next), let first = sources.first.flatMap(Self.container(ofPath:)) { container = first }
+        settleContainer(sources: sources)
+    }
+
+    mutating func settleContainer(sources: [String]) {
+        let disabled = disabledContainers(sources: sources)
+        guard disabled.contains(container), let allowed = ["mp4", "mov"].first(where: { !disabled.contains($0) }) else { return }
+        container = allowed
+    }
+
+    /// Nil for Export, which keeps the video export recipe. Fields a recipe
+    /// does not take stay nil; the engine refuses them otherwise.
+    var recipe: ToolRecipe? {
+        switch tool {
+        case "trim": ToolRecipe(kind: "trim", format: format, maxDimension: 1920, trimStartSeconds: trimStart, trimEndSeconds: trimEnd, trimMode: trimMode)
+        case "remux", "audio": ToolRecipe(kind: tool, format: format, maxDimension: 1920)
+        case "proxy": ToolRecipe(kind: "proxy", format: "mp4", maxDimension: proxySide)
+        case "rotate": ToolRecipe(kind: "rotate", format: format, maxDimension: 1920, rotationDegrees: rotation)
+        default: nil
+        }
+    }
+
+    var label: String { Self.tools.first { $0.id == tool }?.label ?? tool }
+
+    /// Displayed turn for the preview; 90° left turns back rather than three quarters forward.
+    var previewAngle: Double {
+        guard tool == "rotate" else { return 0 }
+        return rotation == 270 ? -90 : Double(rotation)
+    }
+}
 
 @MainActor
 @Observable
@@ -33,6 +125,20 @@ final class ToolsSession {
     var executed = false
     var capabilities: [ToolCapability] = []
     var pendingEngineGeneration = 0
+    var media = MediaToolChoice()
+
+    var selectedPaths: [String] { hits.filter { selection.contains($0.fileID) }.map(\.path) }
+
+    var recipe: ToolRecipe {
+        if kind == "video", let recipe = media.recipe { return recipe }
+        return ToolRecipe(kind: kind, format: format, maxDimension: maxDimension,
+                          allowUpscale: ["photo", "video"].contains(kind) ? allowUpscale : nil,
+                          videoAspectRatio: kind == "video" ? videoAspectRatio : nil,
+                          videoFraming: kind == "video" && videoAspectRatio != "source" ? videoFraming : nil,
+                          videoStabilization: kind == "video" ? videoStabilization : nil)
+    }
+
+    var exportsVideo: Bool { kind == "video" && media.isExport }
 
     /// A request sent to an engine that has since exited never gets a reply;
     /// without this every control stays disabled for the rest of the session.
@@ -53,6 +159,8 @@ struct ToolsWorkbench: View {
     @Bindable var session: ToolsSession
     var inline = false
     @State private var previewImage: NSImage?
+    @State private var player: AVPlayer?
+    @State private var clock = PlayheadClock()
 
     private var busy: Bool { !session.pending.isEmpty }
     private var selectedHits: [CatalogHit] { session.hits.filter { session.selection.contains($0.fileID) } }
@@ -108,6 +216,10 @@ struct ToolsWorkbench: View {
         .onChange(of: session.videoAspectRatio) { _, _ in invalidate() }
         .onChange(of: session.videoFraming) { _, _ in invalidate() }
         .onChange(of: session.videoStabilization) { _, _ in invalidate() }
+        .onChange(of: session.media) { _, _ in session.media.settleContainer(sources: session.selectedPaths); invalidate() }
+        .onChange(of: session.selection) { _, _ in session.media.settleContainer(sources: session.selectedPaths) }
+        .task(id: trimSource) { await loadTrimPlayer() }
+        .onDisappear { player?.pause() }
         .onChange(of: engine.engineResetSignal) { _, new in session.abandonPendingIfEngineRestarted(generation: new) }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }
@@ -177,11 +289,21 @@ struct ToolsWorkbench: View {
         Panel {
             PanelHeader("02 · Output")
             VStack(alignment: .leading, spacing: 12) {
+                if session.kind == "video" {
+                    optionRow("Tool") {
+                        SegmentedBar(selection: Binding(get: { session.media.tool }, set: { session.media.adopt(tool: $0, sources: session.selectedPaths) }),
+                                     options: MediaToolChoice.available(session.capabilities))
+                    }
+                }
                 optionRow("Format") {
                     if session.kind == "photo" {
                         SegmentedBar(selection: $session.format, options: [("png", "PNG"), ("jpeg", "JPEG"), ("tiff", "TIFF")])
-                    } else if session.kind == "video" {
+                    } else if session.exportsVideo {
                         SegmentedBar(selection: $session.format, options: [("mp4", "MP4 · H.264")])
+                    } else if session.kind == "video" {
+                        SegmentedBar(selection: Binding(get: { session.media.format }, set: { if ["mp4", "mov"].contains($0) { session.media.container = $0 } }),
+                                     options: session.media.formatOptions,
+                                     disabled: session.media.disabledContainers(sources: session.selectedPaths))
                     } else {
                         SegmentedBar(selection: $session.format, options: [("vtt", "WebVTT"), ("json", "JSON")])
                     }
@@ -192,7 +314,10 @@ struct ToolsWorkbench: View {
                         MetaText("px, up to 8192", size: 12)
                     }
                 }
-                if session.kind == "video" {
+                if session.kind == "video" && !session.media.isExport {
+                    mediaRows
+                }
+                if session.exportsVideo {
                     optionRow("Resolution") {
                         SegmentedBar(selection: $session.maxDimension, options: [(1280, "720p"), (1920, "1080p"), (3840, "4K")])
                     }
@@ -215,7 +340,7 @@ struct ToolsWorkbench: View {
                         note("Corrects estimated shake with up to 12% zoom to cover the edges. Clips up to ten minutes and 60 fps. Review the result.")
                     }
                 }
-                if ["photo", "video"].contains(session.kind) {
+                if session.kind == "photo" || session.exportsVideo {
                     optionRow("") {
                         Toggle("Enlarge smaller media to this size", isOn: $session.allowUpscale).toggleStyle(DSToggleStyle())
                             .font(Theme.Font.body(13)).foregroundStyle(Theme.text1)
@@ -237,6 +362,65 @@ struct ToolsWorkbench: View {
                     .disabled(busy)
                     .accessibilityLabel("Choose output folder")
             }
+        }
+    }
+
+    @ViewBuilder private var mediaRows: some View {
+        switch session.media.tool {
+        case "trim":
+            trimRow("Start", value: $session.media.trimStart)
+            trimRow("End", value: $session.media.trimEnd)
+            optionRow("Cut") {
+                SegmentedBar(selection: $session.media.trimMode, options: [("keyframe", "Keyframe"), ("exact", "Exact")])
+            }
+            note(session.media.trimMode == "exact"
+                 ? "Re-encodes to an H.264 MP4 so the cut lands on the exact frame. HDR videos are refused."
+                 : "Copies the video without re-encoding. The new file may start a little early, at the keyframe before your start time.")
+        case "remux":
+            note("Moves the video and sound into the other container without re-encoding. The container a file already has is greyed out.")
+        case "audio":
+            note("Saves the soundtrack as AAC in an M4A file. Videos without sound are refused.")
+        case "proxy":
+            optionRow("Size") {
+                SegmentedBar(selection: $session.media.proxySide, options: [(640, "640 px"), (960, "960 px")])
+            }
+            note("A small H.264 copy for quick previews, linked to its original. Smaller videos aren't enlarged.")
+        default:
+            optionRow("Turn") {
+                SegmentedBar(selection: $session.media.rotation, options: MediaToolChoice.rotations)
+            }
+            note("Changes which way up the picture is shown, without re-encoding it.")
+        }
+    }
+
+    private func trimRow(_ label: String, value: Binding<Double>) -> some View {
+        optionRow(label) {
+            DSNumberField(placeholder: "\(label) in seconds", value: value, format: .number.precision(.fractionLength(0...2)), width: 90)
+                .accessibilityLabel("\(label) time in seconds")
+            MetaText("s", size: 12)
+            Button("Set from playhead") { value.wrappedValue = (clock.seconds * 100).rounded() / 100 }
+                .buttonStyle(.dsGhost)
+                .disabled(player == nil)
+                .help(player == nil ? "Tick a video that can play here first" : "Use the player's current time")
+        }
+    }
+
+    private var trimSource: String? {
+        session.kind == "video" && session.media.tool == "trim" ? selectedHits.first?.path : nil
+    }
+
+    private func loadTrimPlayer() async {
+        player?.pause()
+        player = nil
+        clock.attach(nil)
+        guard let path = trimSource, let asset = await MediaPlayback.playableAsset(URL(fileURLWithPath: path)), !Task.isCancelled else { return }
+        let seconds = (try? await asset.load(.duration))?.seconds ?? 0
+        guard !Task.isCancelled, trimSource == path else { return }
+        let next = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        player = next
+        clock.attach(next)
+        if seconds.isFinite, seconds > 0, session.media.trimEnd <= session.media.trimStart {
+            session.media.trimEnd = (seconds * 100).rounded(.down) / 100
         }
     }
 
@@ -265,6 +449,11 @@ struct ToolsWorkbench: View {
             if let size = previewImage?.size, size.height > 0 { return size.width / size.height }
             return 4 / 3
         }
+        if !session.media.isExport {
+            let size = previewImage?.size ?? CGSize(width: 16, height: 9)
+            let ratio = size.height > 0 ? size.width / size.height : 16 / 9
+            return session.media.previewAngle.truncatingRemainder(dividingBy: 180) == 0 ? ratio : 1 / ratio
+        }
         switch session.videoAspectRatio {
         case "9:16": return 9 / 16
         case "1:1": return 1
@@ -291,8 +480,10 @@ struct ToolsWorkbench: View {
                                 Image(systemName: "list.bullet.rectangle").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
                                 MetaText(session.format == "vtt" ? "WebVTT chapter track" : "Chapter list as JSON")
                             }
+                        } else if trimSource != nil, let player {
+                            NativeVideoPlayer(player: player).accessibilityLabel("Video player")
                         } else if let previewImage {
-                            Image(nsImage: previewImage).resizable().aspectRatio(contentMode: session.kind == "video" && session.videoFraming == "auto" ? .fill : .fit)
+                            turnedPreview(previewImage)
                         } else {
                             Image(systemName: session.kind == "video" ? "film" : "photo").font(.system(size: 28, weight: .light)).foregroundStyle(Theme.text3)
                         }
@@ -311,7 +502,7 @@ struct ToolsWorkbench: View {
                         Text(summaryLine).font(Theme.Font.body(13, .medium)).foregroundStyle(Theme.text1)
                         Text(plainKindDetail)
                             .font(Theme.Font.body(12)).foregroundStyle(Theme.text3).fixedSize(horizontal: false, vertical: true)
-                            .help(session.capabilities.first(where: { $0.id == session.kind })?.detail ?? "")
+                            .help(session.capabilities.first(where: { $0.id == (session.kind == "video" && !session.media.isExport ? session.media.tool : session.kind) })?.detail ?? "")
                     }
 
                     if !session.outputs.isEmpty {
@@ -336,7 +527,7 @@ struct ToolsWorkbench: View {
                     Button("Preview") {
                         send(ToolRequest(requestID: UUID().uuidString, action: "preview",
                                          fileIDs: session.selection.sorted(), destination: session.destination,
-                                         recipe: ToolRecipe(kind: session.kind, format: session.format, maxDimension: session.maxDimension, allowUpscale: ["photo", "video"].contains(session.kind) ? session.allowUpscale : nil, videoAspectRatio: session.kind == "video" ? session.videoAspectRatio : nil, videoFraming: session.kind == "video" && session.videoAspectRatio != "source" ? session.videoFraming : nil, videoStabilization: session.kind == "video" ? session.videoStabilization : nil),
+                                         recipe: session.recipe,
                                          destinationBookmark: session.destinationBookmark))
                     }
                     .buttonStyle(DSSecondaryButtonStyle(height: Theme.Metrics.controlLarge))
@@ -372,7 +563,7 @@ struct ToolsWorkbench: View {
                         .buttonStyle(.dsGhost)
                         .disabled(busy)
                         .padding(.leading, -6)
-                    if session.kind == "video" {
+                    if session.exportsVideo {
                         MetaText("Check reframed videos before sharing them.", size: 11.5)
                     }
                 }
@@ -381,9 +572,34 @@ struct ToolsWorkbench: View {
         }
     }
 
+    private func turnedPreview(_ image: NSImage) -> some View {
+        let angle = session.media.previewAngle
+        let quarter = angle.truncatingRemainder(dividingBy: 180) != 0
+        return GeometryReader { geo in
+            Image(nsImage: image).resizable()
+                .aspectRatio(contentMode: session.exportsVideo && session.videoFraming == "auto" ? .fill : .fit)
+                .frame(width: quarter ? geo.size.height : geo.size.width, height: quarter ? geo.size.width : geo.size.height)
+                .rotationEffect(.degrees(angle))
+                .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .animation(Theme.reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: angle)
+    }
+
     private var summaryLine: String {
         let count = session.selection.count
         guard count > 0 else { return "No files selected" }
+        if session.kind == "video" && !session.media.isExport {
+            var parts = ["\(count) file\(count == 1 ? "" : "s")", session.media.label, session.media.format.uppercased()]
+            switch session.media.tool {
+            case "trim":
+                parts.append(String(format: "%.2f–%.2f s", session.media.trimStart, session.media.trimEnd))
+                parts.append(session.media.trimMode == "exact" ? "Exact" : "Keyframe")
+            case "proxy": parts.append("\(session.media.proxySide) px")
+            case "rotate": parts.append(MediaToolChoice.rotations.first { $0.0 == session.media.rotation }?.1 ?? "")
+            default: break
+            }
+            return parts.joined(separator: " · ")
+        }
         var parts = ["\(count) file\(count == 1 ? "" : "s")", session.format.uppercased()]
         if session.kind == "photo" { parts.append("≤ \(session.maxDimension) px") }
         if session.kind == "video" {
@@ -432,6 +648,15 @@ struct ToolsWorkbench: View {
     }
 
     private var plainKindDetail: String {
+        if session.kind == "video" && !session.media.isExport {
+            switch session.media.tool {
+            case "trim": return "Keeps the part between the start and end times as a new file. Your original video stays as it is."
+            case "remux": return "Puts the same video and sound in a different container. Your original video stays as it is."
+            case "audio": return "Saves the soundtrack as a new audio file. Your original video stays as it is."
+            case "proxy": return "Makes a small preview copy linked to the original. Your original video stays as it is."
+            default: return "Saves a copy that plays the other way up. Your original video stays as it is."
+            }
+        }
         switch session.kind {
         case "video": return "Makes a new MP4 at the size and shape you choose. Your original video stays as it is."
         case "chapters": return "Saves a video's chapters as a file other apps can read."
@@ -454,7 +679,11 @@ struct ToolsWorkbench: View {
         guard !session.pending.isEmpty, let response = engine.toolResponses[session.pending] else { return }
         let action = session.pendingAction; session.pending = ""; session.pendingAction = ""
         session.message = response.message
-        if action == "capabilities" { session.capabilities = response.capabilities; return }
+        if action == "capabilities" {
+            session.capabilities = response.capabilities
+            if !MediaToolChoice.available(response.capabilities).contains(where: { $0.0 == session.media.tool }) { session.media.tool = "export" }
+            return
+        }
         if action == "history", response.status == "ok" { session.operationID = response.operationID; session.executed = response.operationID != nil }
         if action == "preview", response.status == "ok" { session.operationID = response.operationID; session.executed = false }
         if action == "execute" { session.executed = true }
@@ -490,7 +719,8 @@ private struct ToolOutputRow: View {
                 GrainProgressBar(progress: tone.2, tone: tone.1, height: 4)
             }
             if !output.message.isEmpty {
-                Text(output.message).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3).lineLimit(2).textSelection(.enabled)
+                Text(output.message).font(Theme.Font.body(11.5)).foregroundStyle(Theme.text3)
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
         }
         .padding(.vertical, 8)

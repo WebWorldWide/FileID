@@ -395,6 +395,12 @@ impl Segmented {
         self.handlers.borrow_mut().push(Rc::new(handler));
     }
 
+    pub fn set_enabled(&self, index: usize, enabled: bool) {
+        if let Some(button) = self.buttons.get(index) {
+            button.set_sensitive(enabled);
+        }
+    }
+
     /// Changes the selection; `notify` runs the change handlers.
     pub fn select(&self, index: usize, notify: bool) {
         if index >= self.buttons.len() || index == self.selected.get() {

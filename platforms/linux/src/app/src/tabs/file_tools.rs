@@ -12,7 +12,8 @@ use gtk::glib;
 use super::workbench_state::*;
 use super::workbenches::{Engine, LINUX_TOOL_UNDO_SAFETY_ACCEPTED, TOOL_UNDO_UNAVAILABLE_REASON};
 use crate::engine_client::{
-    read_file_row, texture_from_decoded, EngineState, FileRow, QueryChannel, QuerySpec, ThumbReply,
+    read_file_row, texture_from_decoded, DecodedImage, EngineState, FileRow, QueryChannel, QuerySpec,
+    ThumbReply,
 };
 use crate::shell::status::Tone;
 use crate::spring::{animate_with, Spring};
@@ -30,6 +31,56 @@ const FRAMES: [(&str, Option<&str>, f64); 5] = [
 ];
 const RESOLUTIONS: [(&str, u32); 2] = [("720p", 1280), ("1080p", 1920)];
 const MAX_FILES: usize = 100;
+pub(super) const VIDEO_TOOLS: [(&str, &str); 6] = [
+    ("export", "Export"),
+    ("trim", "Trim"),
+    ("remux", "Remux"),
+    ("audio", "Audio"),
+    ("proxy", "Proxy"),
+    ("rotate", "Rotate"),
+];
+const CONTAINERS: [(&str, &str); 2] = [("MP4", "mp4"), ("MOV", "mov")];
+const PROXY_SIDES: [(&str, u32); 2] = [("640 px", 640), ("960 px", 960)];
+const ROTATIONS: [(&str, u32); 3] = [("90° right", 90), ("180°", 180), ("90° left", 270)];
+
+/// Export, plus each common-media tool the engine reports available.
+pub(super) fn available_video_tools(capabilities: &[ToolCapability]) -> Vec<(&'static str, &'static str)> {
+    VIDEO_TOOLS
+        .iter()
+        .copied()
+        .filter(|(id, _)| *id == "export" || capabilities.iter().any(|c| c.id == *id && c.available))
+        .collect()
+}
+
+pub(super) fn source_container(path: &str) -> Option<usize> {
+    let extension = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" | "m4v" => Some(0),
+        "mov" => Some(1),
+        _ => None,
+    }
+}
+
+/// `rgba` turned `quarter_turns` × 90° clockwise.
+pub(super) fn turn_rgba(rgba: &[u8], width: usize, height: usize, quarter_turns: u32) -> (Vec<u8>, usize, usize) {
+    let turns = quarter_turns % 4;
+    let (out_width, out_height) = if turns % 2 == 1 { (height, width) } else { (width, height) };
+    let mut out = vec![0; rgba.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let (nx, ny) = match turns {
+                1 => (height - 1 - y, x),
+                2 => (width - 1 - x, height - 1 - y),
+                3 => (y, width - 1 - x),
+                _ => (x, y),
+            };
+            let from = (y * width + x) * 4;
+            let to = (ny * out_width + nx) * 4;
+            out[to..to + 4].copy_from_slice(&rgba[from..from + 4]);
+        }
+    }
+    (out, out_width, out_height)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RecipeChoice {
@@ -39,10 +90,101 @@ pub(super) struct RecipeChoice {
     pub resolution: usize,
     pub frame: usize,
     pub enlarge: bool,
+    pub tool: &'static str,
+    pub trim_start: f64,
+    pub trim_end: f64,
+    pub trim_exact: bool,
+    pub container: usize,
+    pub proxy: usize,
+    pub rotation: usize,
 }
 
 impl RecipeChoice {
+    fn media_tool(&self) -> Option<&'static str> {
+        (KINDS[self.kind.min(2)] == "video" && self.tool != "export").then_some(self.tool)
+    }
+
+    fn media_format(&self) -> &'static str {
+        match self.tool {
+            "audio" => "m4a",
+            "proxy" => "mp4",
+            "trim" if self.trim_exact => "mp4",
+            _ => CONTAINERS[self.container.min(1)].1,
+        }
+    }
+
+    /// Container indices to grey out: the one a remux source already has,
+    /// and MOV for an exact trim (MP4 only).
+    pub fn disabled_containers(&self, sources: &[&str]) -> Vec<usize> {
+        let mut disabled: Vec<usize> = match self.tool {
+            "remux" => sources.iter().filter_map(|path| source_container(path)).collect(),
+            "trim" if self.trim_exact => vec![1],
+            _ => vec![],
+        };
+        disabled.sort_unstable();
+        disabled.dedup();
+        disabled
+    }
+
+    pub fn settle_container(&mut self, sources: &[&str]) {
+        let disabled = self.disabled_containers(sources);
+        if disabled.contains(&self.container)
+            && let Some(allowed) = (0..CONTAINERS.len()).find(|index| !disabled.contains(index))
+        {
+            self.container = allowed;
+        }
+    }
+
+    pub fn adopt_tool(&mut self, tool: &'static str, sources: &[&str]) {
+        self.tool = tool;
+        if matches!(tool, "trim" | "rotate")
+            && let Some(container) = sources.first().and_then(|path| source_container(path))
+        {
+            self.container = container;
+        }
+        self.settle_container(sources);
+    }
+
+    /// Clockwise quarter turns the preview shows.
+    pub fn preview_turns(&self) -> u32 {
+        if self.media_tool() == Some("rotate") {
+            ROTATIONS[self.rotation.min(2)].1 / 90
+        } else {
+            0
+        }
+    }
+
+    fn media_recipe(&self, tool: &str) -> ToolRecipe {
+        let mut recipe = ToolRecipe {
+            kind: tool.into(),
+            format: self.media_format().into(),
+            max_dimension: 1920,
+            allow_upscale: None,
+            video_aspect_ratio: None,
+            video_framing: None,
+            video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
+        };
+        match tool {
+            "trim" => {
+                recipe.trim_start_seconds = Some(self.trim_start);
+                recipe.trim_end_seconds = Some(self.trim_end);
+                recipe.trim_mode = Some(if self.trim_exact { "exact" } else { "keyframe" }.into());
+            }
+            "proxy" => recipe.max_dimension = PROXY_SIDES[self.proxy.min(1)].1,
+            "rotate" => recipe.rotation_degrees = Some(ROTATIONS[self.rotation.min(2)].1),
+            _ => {}
+        }
+        recipe
+    }
+
     pub fn recipe(&self) -> ToolRecipe {
+        if let Some(tool) = self.media_tool() {
+            return self.media_recipe(tool);
+        }
         let kind = KINDS[self.kind.min(2)];
         let (format, max_dimension) = match kind {
             "photo" => (PHOTO_FORMATS[self.format.min(2)].1, self.longest_side),
@@ -61,12 +203,30 @@ impl RecipeChoice {
             },
             video_framing: None,
             video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
         }
     }
 
     pub fn summary(&self, files: usize) -> String {
         let recipe = self.recipe();
         let files = format!("{files} file{}", if files == 1 { "" } else { "s" });
+        if let Some(tool) = self.media_tool() {
+            let label = VIDEO_TOOLS.iter().find(|(id, _)| *id == tool).map_or(tool, |(_, label)| label);
+            let mut parts = vec![files, label.to_owned(), recipe.format.to_uppercase()];
+            match tool {
+                "trim" => {
+                    parts.push(format!("{:.2}–{:.2} s", self.trim_start, self.trim_end));
+                    parts.push(if self.trim_exact { "Exact" } else { "Keyframe" }.to_owned());
+                }
+                "proxy" => parts.push(PROXY_SIDES[self.proxy.min(1)].0.to_owned()),
+                "rotate" => parts.push(ROTATIONS[self.rotation.min(2)].0.to_owned()),
+                _ => {}
+            }
+            return parts.join(" · ");
+        }
         match recipe.kind.as_str() {
             "photo" => format!(
                 "{files} · {} · ≤ {} px",
@@ -83,6 +243,10 @@ impl RecipeChoice {
     }
 
     pub fn frame_ratio(&self, photo_aspect: Option<f64>) -> f64 {
+        if self.media_tool().is_some() {
+            let ratio = photo_aspect.filter(|a| a.is_finite() && *a > 0.0).unwrap_or(16.0 / 9.0);
+            return if self.preview_turns() % 2 == 1 { 1.0 / ratio } else { ratio };
+        }
         match KINDS[self.kind.min(2)] {
             "photo" => photo_aspect
                 .filter(|a| a.is_finite() && *a > 0.0)
@@ -141,6 +305,24 @@ pub(super) struct ToolsUi {
     lookup: Cell<u64>,
     loading: Cell<bool>,
     handoff: RefCell<Option<Rc<dyn Fn(Vec<i64>)>>>,
+    tool_row: gtk::Box,
+    tool_slot: gtk::Box,
+    tool_picker: RefCell<Option<Rc<v3::Segmented>>>,
+    media_format: Rc<v3::Segmented>,
+    media_rows: gtk::Box,
+    trim_rows: gtk::Box,
+    trim_start: gtk::SpinButton,
+    trim_end: gtk::SpinButton,
+    trim_cut: Rc<v3::Segmented>,
+    proxy_row: gtk::Box,
+    proxy_size: Rc<v3::Segmented>,
+    rotate_row: gtk::Box,
+    rotation: Rc<v3::Segmented>,
+    media_note: gtk::Label,
+    preview_stack: gtk::Stack,
+    video: gtk::Video,
+    thumbnail: RefCell<Option<DecodedImage>>,
+    player_path: RefCell<Option<String>>,
 }
 
 /// The export kind that fits every handed file, if one does.
@@ -210,9 +392,7 @@ impl ToolsUi {
             if let Some(kind) = kind_for(&kinds).filter(|kind| *kind != ui.choice.borrow().kind) {
                 ui.kind.select(kind, false);
                 ui.choice.borrow_mut().kind = kind;
-                ui.format_stack.set_visible_child_name(KINDS[kind]);
-                ui.photo_rows.set_visible(kind == 0);
-                ui.video_rows.set_visible(kind == 1);
+                ui.sync_rows();
                 ui.animate_frame();
             }
             ui.selected.replace(rows.iter().map(|row| row.id).collect());
@@ -255,7 +435,13 @@ impl ToolsUi {
         }));
         let exporting = busy && self.running.borrow().is_some();
         self.undo.set_visible(!exporting);
-        self.cancel.set_visible(exporting && recipe.kind == "video");
+        self.cancel.set_visible(exporting && (recipe.kind == "video" || self.choice.borrow().media_tool().is_some()));
+        let sources = self.selected_paths();
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let disabled = self.choice.borrow().disabled_containers(&sources);
+        for index in 0..CONTAINERS.len() {
+            self.media_format.set_enabled(index, !disabled.contains(&index));
+        }
         self.busy.set_visible(busy);
         let detail = s
             .capabilities
@@ -364,13 +550,150 @@ impl ToolsUi {
 
     fn set_kind(self: &Rc<Self>, kind: usize) {
         self.choice.borrow_mut().kind = kind;
-        self.format_stack.set_visible_child_name(KINDS[kind]);
-        self.photo_rows.set_visible(kind == 0);
-        self.video_rows.set_visible(kind == 1);
+        self.sync_rows();
         self.selected.borrow_mut().clear();
+        self.sync_player();
         self.find_files();
         self.animate_frame();
         self.changed();
+    }
+
+    fn selected_paths(&self) -> Vec<String> {
+        let rows = self.rows.borrow();
+        self.selected
+            .borrow()
+            .iter()
+            .filter_map(|id| rows.iter().find(|(file, _)| file.id == *id).map(|(file, _)| file.path.clone()))
+            .collect()
+    }
+
+    /// Shows the rows for the chosen kind and video tool.
+    fn sync_rows(&self) {
+        let choice = self.choice.borrow().clone();
+        let kind = KINDS[choice.kind.min(2)];
+        let media = choice.media_tool();
+        self.tool_row.set_visible(kind == "video");
+        self.photo_rows.set_visible(kind == "photo");
+        self.video_rows.set_visible(kind == "video" && media.is_none());
+        self.media_rows.set_visible(media.is_some());
+        self.trim_rows.set_visible(media == Some("trim"));
+        self.proxy_row.set_visible(media == Some("proxy"));
+        self.rotate_row.set_visible(media == Some("rotate"));
+        self.media_note.set_text(media_note(&choice));
+        self.format_stack.set_visible_child_name(match media {
+            Some("audio") => "audio",
+            Some("proxy") => "video",
+            Some(_) => "container",
+            None => kind,
+        });
+        self.media_format.select(choice.container.min(1), false);
+        self.trim_cut.select(usize::from(choice.trim_exact), false);
+    }
+
+    /// Rebuilds the tool picker from the engine's capabilities; unavailable tools are hidden.
+    fn rebuild_tools(self: &Rc<Self>) {
+        let tools = available_video_tools(&self.state.borrow().capabilities);
+        let current = self.choice.borrow().tool;
+        let selected = tools.iter().position(|(id, _)| *id == current).unwrap_or(0);
+        if tools[selected].0 != current {
+            self.choice.borrow_mut().tool = "export";
+        }
+        v3::clear(&self.tool_slot);
+        let labels: Vec<&str> = tools.iter().map(|(_, label)| *label).collect();
+        let picker = v3::Segmented::new(&labels, selected);
+        picker.root.set_halign(gtk::Align::Start);
+        let ids: Vec<&'static str> = tools.iter().map(|(id, _)| *id).collect();
+        let weak = Rc::downgrade(self);
+        picker.connect_changed(move |index| {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_tool(ids[index]);
+            }
+        });
+        self.tool_slot.append(&picker.root);
+        self.tool_picker.replace(Some(picker));
+        self.sync_rows();
+        self.sync_player();
+        self.show_thumbnail();
+        self.animate_frame();
+    }
+
+    fn set_tool(self: &Rc<Self>, tool: &'static str) {
+        let sources = self.selected_paths();
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        self.choice.borrow_mut().adopt_tool(tool, &sources);
+        self.sync_rows();
+        self.sync_player();
+        self.show_thumbnail();
+        self.animate_frame();
+        self.changed();
+    }
+
+    /// Trim plays the first ticked video so its start and end can come from the playhead.
+    fn sync_player(self: &Rc<Self>) {
+        let first = self.selected.borrow().first().copied();
+        let path = (self.choice.borrow().media_tool() == Some("trim"))
+            .then(|| {
+                self.rows
+                    .borrow()
+                    .iter()
+                    .find(|(file, _)| Some(file.id) == first && file.kind == "video")
+                    .map(|(file, _)| file.path.clone())
+            })
+            .flatten();
+        if *self.player_path.borrow() == path {
+            return;
+        }
+        if let Some(stream) = self.video.media_stream() {
+            stream.pause();
+        }
+        self.video.set_media_stream(None::<&gtk::MediaStream>);
+        self.player_path.replace(path.clone());
+        let Some(path) = path else {
+            self.preview_stack.set_visible_child_name("picture");
+            return;
+        };
+        let media = gtk::MediaFile::for_filename(&path);
+        let weak = Rc::downgrade(self);
+        media.connect_prepared_notify(move |stream| {
+            let Some(ui) = weak.upgrade() else { return };
+            if !stream.is_prepared() {
+                return;
+            }
+            let duration = stream.duration() as f64 / 1_000_000.0;
+            let (start, end) = {
+                let choice = ui.choice.borrow();
+                (choice.trim_start, choice.trim_end)
+            };
+            if duration > 0.0 && end <= start {
+                ui.trim_end.set_value((duration * 100.0).floor() / 100.0);
+            }
+        });
+        self.video.set_media_stream(Some(&media));
+        self.preview_stack.set_visible_child_name("video");
+    }
+
+    fn playhead(&self) -> Option<f64> {
+        self.video
+            .media_stream()
+            .filter(|stream| stream.is_prepared())
+            .map(|stream| stream.timestamp() as f64 / 1_000_000.0)
+    }
+
+    /// The last thumbnail, turned as the rotate tool would show it.
+    fn show_thumbnail(&self) {
+        let Some(decoded) = self.thumbnail.borrow().clone() else {
+            self.picture.set_paintable(None::<&gtk::gdk::Texture>);
+            return;
+        };
+        let turns = self.choice.borrow().preview_turns();
+        let decoded = if turns == 0 {
+            decoded
+        } else {
+            let (rgba, width, height) =
+                turn_rgba(&decoded.rgba, decoded.width as usize, decoded.height as usize, turns);
+            DecodedImage { width: width as u32, height: height as u32, rgba }
+        };
+        self.picture.set_paintable(Some(&texture_from_decoded(decoded)));
     }
 
     fn animate_frame(&self) {
@@ -497,7 +820,9 @@ impl ToolsUi {
                 .find(|(file, _)| file.id == id)
                 .map(|(file, _)| file.clone())
         });
+        self.sync_player();
         let Some(row) = row else {
+            self.thumbnail.replace(None);
             self.picture.set_paintable(None::<&gtk::gdk::Texture>);
             return;
         };
@@ -511,12 +836,12 @@ impl ToolsUi {
                 return;
             };
             let Some(ui) = weak.upgrade() else { return };
-            if decoded.height > 0 && row.kind == "image" {
+            if decoded.height > 0 {
                 ui.photo_aspect
                     .set(Some(f64::from(decoded.width) / f64::from(decoded.height)));
             }
-            ui.picture
-                .set_paintable(Some(&texture_from_decoded(decoded)));
+            ui.thumbnail.replace(Some(decoded));
+            ui.show_thumbnail();
             ui.animate_frame();
         });
     }
@@ -631,6 +956,13 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     format_stack.add_named(&photo_format.root, Some("photo"));
     format_stack.add_named(&v3::label("MP4 · H.264", &["v3-body"]), Some("video"));
     format_stack.add_named(&chapter_format.root, Some("chapters"));
+    let media_format = v3::Segmented::new(&CONTAINERS.map(|(label, _)| label), 0);
+    format_stack.add_named(&media_format.root, Some("container"));
+    format_stack.add_named(&v3::label("M4A · AAC", &["v3-body"]), Some("audio"));
+    let tool_slot = v3::hbox(0);
+    let tool_row = output_row("Tool", &tool_slot);
+    tool_row.set_visible(false);
+    output_body.append(&tool_row);
     output_body.append(&output_row("Format", &format_stack));
     let photo_rows = v3::vbox(10);
     let longest_side = v3::number_field(1.0, 8192.0, 1.0, 0);
@@ -685,6 +1017,38 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     stabilize_row.set_tooltip_text(Some("Not available in the Linux engine yet"));
     video_rows.append(&stabilize_row);
     output_body.append(&video_rows);
+    let media_rows = v3::vbox(10);
+    media_rows.set_visible(false);
+    let trim_rows = v3::vbox(10);
+    let trim_start = v3::number_field(0.0, 21_600.0, 0.1, 2);
+    let trim_end = v3::number_field(0.0, 21_600.0, 0.1, 2);
+    let start_here = v3::ghost("Set from playhead");
+    let end_here = v3::ghost("Set from playhead");
+    for (label, field, button) in [("Start", &trim_start, &start_here), ("End", &trim_end, &end_here)] {
+        field.update_property(&[gtk::accessible::Property::Label(&format!("{label} time in seconds"))]);
+        button.set_tooltip_text(Some("Use the player's current time"));
+        let row = v3::hbox(8);
+        row.append(field);
+        row.append(&v3::meta("s"));
+        row.append(button);
+        trim_rows.append(&output_row(label, &row));
+    }
+    let trim_cut = v3::Segmented::new(&["Keyframe", "Exact"], 0);
+    trim_cut.root.set_halign(gtk::Align::Start);
+    trim_rows.append(&output_row("Cut", &trim_cut.root));
+    media_rows.append(&trim_rows);
+    let proxy_size = v3::Segmented::new(&PROXY_SIDES.map(|(label, _)| label), 0);
+    proxy_size.root.set_halign(gtk::Align::Start);
+    let proxy_row = output_row("Size", &proxy_size.root);
+    media_rows.append(&proxy_row);
+    let rotation = v3::Segmented::new(&ROTATIONS.map(|(label, _)| label), 0);
+    rotation.root.set_halign(gtk::Align::Start);
+    let rotate_row = output_row("Turn", &rotation.root);
+    media_rows.append(&rotate_row);
+    let media_note = v3::wrapped("", &["v3-meta"]);
+    media_note.set_margin_start(104);
+    media_rows.append(&media_note);
+    output_body.append(&media_rows);
     output_panel.body.append(&output_body);
     let output_footer = output_panel.show_footer();
     output_footer.append(&v3::section("Save to"));
@@ -723,10 +1087,19 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     let picture = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Contain)
         .build();
+    let video = gtk::Video::builder()
+        .autoplay(false)
+        .css_classes(["v3-black"])
+        .build();
+    let preview_stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
+    preview_stack.add_named(&picture, Some("picture"));
+    preview_stack.add_named(&video, Some("video"));
     let frame = gtk::AspectFrame::builder()
         .ratio(4.0 / 3.0)
         .obey_child(false)
-        .child(&picture)
+        .child(&preview_stack)
         .css_classes(["v3-preview-frame"])
         .build();
     let frame_clamp = gtk::Box::builder().height_request(220).build();
@@ -789,6 +1162,13 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
             resolution: 1,
             frame: 0,
             enlarge: false,
+            tool: "export",
+            trim_start: 0.0,
+            trim_end: 0.0,
+            trim_exact: false,
+            container: 0,
+            proxy: 0,
+            rotation: 0,
         }),
         kind,
         photo_format,
@@ -820,6 +1200,24 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
         lookup: Cell::new(0),
         loading: Cell::new(false),
         handoff: RefCell::new(None),
+        tool_row,
+        tool_slot,
+        tool_picker: RefCell::new(None),
+        media_format,
+        media_rows,
+        trim_rows,
+        trim_start,
+        trim_end,
+        trim_cut,
+        proxy_row,
+        proxy_size,
+        rotate_row,
+        rotation,
+        media_note,
+        preview_stack,
+        video,
+        thumbnail: RefCell::new(None),
+        player_path: RefCell::new(None),
     });
     let weak = Rc::downgrade(&ui);
     let receiver: Rc<dyn Fn(Vec<i64>)> = Rc::new(move |ids| {
@@ -830,6 +1228,8 @@ pub(super) fn build_tools(engine: Engine) -> (gtk::Widget, Rc<ToolsUi>) {
     super::chat_handoff::receive_in_tools(&receiver);
     ui.handoff.replace(Some(receiver));
     wire(&ui, &find, &select_all, &select_none, &choose, &last, &root);
+    wire_media(&ui, &start_here, &end_here);
+    ui.rebuild_tools();
     ui.update();
     (root.upcast(), ui)
 }
@@ -1021,6 +1421,93 @@ fn wire(
     });
 }
 
+fn wire_media(ui: &Rc<ToolsUi>, start_here: &gtk::Button, end_here: &gtk::Button) {
+    for (field, start) in [(&ui.trim_start, true), (&ui.trim_end, false)] {
+        let weak = Rc::downgrade(ui);
+        field.connect_value_changed(move |field| {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut choice = ui.choice.borrow_mut();
+                if start {
+                    choice.trim_start = field.value();
+                } else {
+                    choice.trim_end = field.value();
+                }
+            }
+            ui.changed();
+        });
+    }
+    for (button, start) in [(start_here, true), (end_here, false)] {
+        let weak = Rc::downgrade(ui);
+        button.connect_clicked(move |_| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(seconds) = ui.playhead() else {
+                ui.status.set_label("Tick a video that can play here first.");
+                return;
+            };
+            let seconds = (seconds * 100.0).round() / 100.0;
+            if start {
+                ui.trim_start.set_value(seconds);
+            } else {
+                ui.trim_end.set_value(seconds);
+            }
+        });
+    }
+    let weak = Rc::downgrade(ui);
+    ui.media_format.connect_changed(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.choice.borrow_mut().container = index;
+        ui.changed();
+    });
+    let weak = Rc::downgrade(ui);
+    ui.trim_cut.connect_changed(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        let sources = ui.selected_paths();
+        let sources: Vec<&str> = sources.iter().map(String::as_str).collect();
+        {
+            let mut choice = ui.choice.borrow_mut();
+            choice.trim_exact = index == 1;
+            choice.settle_container(&sources);
+        }
+        ui.sync_rows();
+        ui.changed();
+    });
+    let weak = Rc::downgrade(ui);
+    ui.proxy_size.connect_changed(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.choice.borrow_mut().proxy = index;
+        ui.changed();
+    });
+    let weak = Rc::downgrade(ui);
+    ui.rotation.connect_changed(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.choice.borrow_mut().rotation = index;
+        ui.show_thumbnail();
+        ui.animate_frame();
+        ui.changed();
+    });
+}
+
+fn media_note(choice: &RecipeChoice) -> &'static str {
+    match choice.media_tool() {
+        Some("trim") if choice.trim_exact => {
+            "Re-encodes to an H.264 MP4 so the cut lands on the exact frame. HDR videos are refused."
+        }
+        Some("trim") => {
+            "Copies the video without re-encoding. The new file may start a little early, at the keyframe before your start time."
+        }
+        Some("remux") => {
+            "Moves the video and sound into the other container without re-encoding. The container a file already has is greyed out."
+        }
+        Some("audio") => "Saves the soundtrack as AAC in an M4A file. Videos without sound are refused.",
+        Some("proxy") => {
+            "A small H.264 copy for quick previews, linked to its original. Smaller videos aren't enlarged."
+        }
+        Some(_) => "Changes which way up the picture is shown, without re-encoding it.",
+        None => "",
+    }
+}
+
 fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
     let action = {
         let mut state = u.state.borrow_mut();
@@ -1062,6 +1549,9 @@ fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
             s.history = None;
         }
     }
+    if action == "capabilities" && r.status == "ok" {
+        u.rebuild_tools();
+    }
     let replace_receipts =
         !matches!(action, "capabilities" | "cancel") && (r.status == "ok" || !r.outputs.is_empty());
     if replace_receipts {
@@ -1076,6 +1566,11 @@ fn handle_response(u: &Rc<ToolsUi>, r: ToolResponse) {
 
 fn plain_kind_detail(kind: &str) -> &'static str {
     match kind {
+        "trim" => "Keeps the part between the start and end times as a new file. Your original video stays as it is.",
+        "remux" => "Puts the same video and sound in a different container. Your original video stays as it is.",
+        "audio" => "Saves the soundtrack as a new audio file. Your original video stays as it is.",
+        "proxy" => "Makes a small preview copy linked to the original. Your original video stays as it is.",
+        "rotate" => "Saves a copy that plays the other way up. Your original video stays as it is.",
         "video" => "Makes a new MP4 at the size and shape you choose. Your original video stays as it is.",
         "chapters" => "Saves a video's chapters as a file other apps can read.",
         _ => "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is.",
@@ -1107,7 +1602,104 @@ mod tests {
             resolution: 1,
             frame: 0,
             enlarge: true,
+            tool: "export",
+            trim_start: 0.0,
+            trim_end: 0.0,
+            trim_exact: false,
+            container: 0,
+            proxy: 0,
+            rotation: 0,
         }
+    }
+
+    fn capability(id: &str, available: bool) -> ToolCapability {
+        ToolCapability {
+            id: id.into(),
+            available,
+            input_formats: vec![],
+            output_formats: vec![],
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn tool_picker_hides_unavailable_tools() {
+        let ids = |caps: &[ToolCapability]| available_video_tools(caps).into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(ids(&[]), ["export"]);
+        let all: Vec<_> = ["trim", "remux", "audio", "proxy", "rotate"].map(|id| capability(id, true)).into();
+        assert_eq!(ids(&all), ["export", "trim", "remux", "audio", "proxy", "rotate"]);
+        assert_eq!(
+            ids(&[capability("trim", false), capability("rotate", true), capability("photo", true)]),
+            ["export", "rotate"]
+        );
+    }
+
+    #[test]
+    fn video_tools_send_only_the_fields_their_recipe_takes() {
+        let mut video = RecipeChoice { frame: 2, ..choice(1) };
+        video.trim_start = 1.0;
+        video.rotation = 2;
+        let export = video.recipe();
+        assert_eq!((export.kind.as_str(), export.video_aspect_ratio.as_deref()), ("video", Some("9:16")));
+        assert!(export.trim_start_seconds.is_none() && export.trim_mode.is_none() && export.rotation_degrees.is_none());
+
+        video.adopt_tool("trim", &["/v/clip.mov"]);
+        video.trim_start = 1.25;
+        video.trim_end = 4.5;
+        let trim = video.recipe();
+        assert_eq!((trim.kind.as_str(), trim.format.as_str(), trim.max_dimension), ("trim", "mov", 1920));
+        assert_eq!((trim.trim_start_seconds, trim.trim_end_seconds, trim.trim_mode.as_deref()), (Some(1.25), Some(4.5), Some("keyframe")));
+        assert!(trim.video_aspect_ratio.is_none() && trim.allow_upscale.is_none() && trim.rotation_degrees.is_none());
+        video.trim_exact = true;
+        assert_eq!(video.recipe().format, "mp4");
+        assert_eq!(video.disabled_containers(&["/v/clip.mov"]), [1]);
+
+        video.adopt_tool("audio", &[]);
+        let audio = video.recipe();
+        assert_eq!((audio.kind.as_str(), audio.format.as_str()), ("audio", "m4a"));
+        assert!(audio.trim_start_seconds.is_none() && audio.trim_mode.is_none());
+
+        video.adopt_tool("proxy", &[]);
+        video.proxy = 1;
+        let proxy = video.recipe();
+        assert_eq!((proxy.kind.as_str(), proxy.format.as_str(), proxy.max_dimension), ("proxy", "mp4", 960));
+
+        video.adopt_tool("rotate", &["/v/clip.mp4"]);
+        for (index, degrees, turns) in [(0, 90, 1), (1, 180, 2), (2, 270, 3)] {
+            video.rotation = index;
+            let rotate = video.recipe();
+            assert_eq!((rotate.kind.as_str(), rotate.format.as_str(), rotate.rotation_degrees), ("rotate", "mp4", Some(degrees)));
+            assert_eq!(video.preview_turns(), turns);
+        }
+        assert_eq!(video.summary(1), "1 file · Rotate · MP4 · 90° left");
+        video.rotation = 0;
+        assert_eq!(video.frame_ratio(Some(16.0 / 9.0)), 9.0 / 16.0);
+        assert_eq!(RecipeChoice { kind: 0, ..video.clone() }.recipe().kind, "photo");
+    }
+
+    #[test]
+    fn remux_greys_out_the_container_the_sources_already_have() {
+        let mut video = RecipeChoice { container: 1, ..choice(1) };
+        video.adopt_tool("remux", &["/v/clip.MOV"]);
+        assert_eq!(video.disabled_containers(&["/v/clip.MOV"]), [1]);
+        assert_eq!(video.recipe().format, "mp4");
+        video.settle_container(&["/v/phone.m4v"]);
+        assert_eq!(video.recipe().format, "mov");
+        assert_eq!(video.disabled_containers(&["/v/a.mp4", "/v/b.mov"]), [0, 1]);
+        assert_eq!(source_container("/v/notes.txt"), None);
+    }
+
+    #[test]
+    fn rotated_previews_turn_clockwise() {
+        // 2x1 image: red then green. A quarter turn clockwise puts red on top.
+        let rgba = [255, 0, 0, 255, 0, 255, 0, 255];
+        let (turned, width, height) = turn_rgba(&rgba, 2, 1, 1);
+        assert_eq!((width, height), (1, 2));
+        assert_eq!(turned, [255, 0, 0, 255, 0, 255, 0, 255]);
+        let (turned, _, _) = turn_rgba(&rgba, 2, 1, 3);
+        assert_eq!(turned, [0, 255, 0, 255, 255, 0, 0, 255]);
+        let (turned, width, height) = turn_rgba(&rgba, 2, 1, 2);
+        assert_eq!((width, height, turned), (2, 1, vec![0, 255, 0, 255, 255, 0, 0, 255]));
     }
 
     #[test]

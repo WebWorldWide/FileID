@@ -266,9 +266,35 @@ pub struct ToolRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolRecipe {
+    /// trim, remux, audio, proxy and rotate are the common-media recipes (schema 1.20.0). trim
+    /// keeps trimStartSeconds..trimEndSeconds as MP4 or MOV. remux moves H.264/HEVC video and AAC
+    /// audio between MP4 and MOV without re-encoding. audio writes the single audio track as AAC in
+    /// M4A. proxy writes a small H.264/AAC MP4 linked to its source with the catalog role proxy.
+    /// rotate changes the display orientation by rotationDegrees without re-encoding. Every output
+    /// is reopened and checked for streams, duration, audio/video sync and orientation before
+    /// publication. An engine that cannot perform a recipe faithfully must refuse it before
+    /// creating any output, never substitute a different operation.
     pub kind: String,
     pub format: String,
+    /// Longest output side in pixels. proxy accepts 640 or 960. trim, remux, audio and rotate do
+    /// not resize and ignore this value.
     pub max_dimension: u32,
+    /// For trim only (schema 1.20.0). Start of the kept interval in source seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_start_seconds: Option<f64>,
+    /// For trim only (schema 1.20.0). End of the kept interval in source seconds; at least 0.1
+    /// seconds after trimStartSeconds and no later than the source end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_end_seconds: Option<f64>,
+    /// For trim only (schema 1.20.0); required. keyframe copies streams without re-encoding, so the
+    /// output may begin at the keyframe at or before trimStartSeconds. exact re-encodes to
+    /// H.264/AAC MP4 for a frame-accurate cut and refuses HDR sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim_mode: Option<String>,
+    /// For rotate only (schema 1.20.0); required. Clockwise rotation added to the displayed
+    /// picture. Streams are copied; only the orientation matrix changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_degrees: Option<u32>,
     /// For photo or video conversion. True permits conventional enlargement to the requested
     /// maximum dimension. This increases pixels without recovering detail; it is not AI
     /// super-resolution.

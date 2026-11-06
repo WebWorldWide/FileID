@@ -2,6 +2,7 @@ use crate::ipc::sink::Sink;
 use crate::ipc::{
     CatalogChapter, EventPayload, IpcEvent, ToolCapability, ToolOutput, ToolRecipe, ToolRequest, ToolResponse, Wrap,
 };
+use super::media_recipes;
 use crate::util::{path_safety::stable_path_hash, read_only};
 use anyhow::{bail, Context, Result};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
@@ -132,9 +133,39 @@ fn capabilities() -> Vec<ToolCapability> {
     ToolCapability{id:"chapters".into(),available:true,input_formats:vec!["catalog chapters".into()],output_formats:vec!["json".into(),"vtt".into()],detail:"Export current chapter markers. WebVTT is a chapter cue list, not speech subtitles.".into()},
     ToolCapability{id:"video".into(),available:super::video_export::available(),input_formats:vec!["mp4".into(),"mov".into(),"m4v".into()],output_formats:vec!["mp4".into()],detail:"Vetted local FFmpeg/OpenH264 runtime exports 1280 or 1920 pixel H.264/AAC MP4. Source, 9:16, 16:9, 1:1 and 4:5 frames fit the entire image with padding. SDR only; one video and at most one audio stream. Originals are preserved.".into()},
     ToolCapability{id:"videoEnhancement".into(),available:false,input_formats:vec![],output_formats:vec![],detail:"Stabilization, AI upscaling, and tracked reframing are not installed yet.".into()}]
+        .into_iter()
+        .chain(media_capabilities())
+        .collect()
+}
+fn media_capabilities() -> Vec<ToolCapability> {
+    let available = media_recipes::runtime().is_some();
+    let inputs = || vec!["mp4".to_owned(), "mov".to_owned(), "m4v".to_owned()];
+    [
+        ("trim", vec!["mp4", "mov"], "Keep a start-to-end interval. Keyframe mode copies H.264/HEVC video and AAC audio without re-encoding and may start at the preceding keyframe; exact mode re-encodes to H.264/AAC MP4 and refuses HDR."),
+        ("remux", vec!["mp4", "mov"], "Move H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. Other codecs are refused rather than converted."),
+        ("audio", vec!["m4a"], "Write the single audio track as AAC in an M4A file. Files without audio are refused."),
+        ("proxy", vec!["mp4"], "Make a 640 or 960 pixel H.264/AAC preview copy linked to its source. Smaller sources are not enlarged. SDR only."),
+        ("rotate", vec!["mp4", "mov"], "Turn the displayed picture 90, 180 or 270 degrees clockwise by changing its orientation metadata. H.264/HEVC video and AAC audio are copied without re-encoding."),
+    ]
+    .into_iter()
+    .map(|(id, outputs, detail)| ToolCapability {
+        id: id.into(),
+        available,
+        input_formats: inputs(),
+        output_formats: outputs.into_iter().map(str::to_owned).collect(),
+        detail: if available { detail.into() } else { media_recipes::UNAVAILABLE.into() },
+    })
+    .collect()
 }
 fn supports(recipe: &ToolRecipe) -> bool {
+    if media_recipes::is_media(&recipe.kind) {
+        return media_recipes::validate(recipe).is_ok() && media_recipes::runtime().is_some();
+    }
     (1..=8192).contains(&recipe.max_dimension)
+        && recipe.trim_start_seconds.is_none()
+        && recipe.trim_end_seconds.is_none()
+        && recipe.trim_mode.is_none()
+        && recipe.rotation_degrees.is_none()
         && (recipe.allow_upscale != Some(true) || recipe.kind == "photo")
         && (recipe.video_aspect_ratio.is_none() || recipe.kind == "video")
         && recipe.video_framing.is_none()
@@ -263,6 +294,12 @@ fn run_action(
         "preview" => {
             let ids = request.file_ids.as_ref().context("Choose files")?;
             let recipe = request.recipe.as_ref().context("Choose a recipe")?;
+            let media = if media_recipes::is_media(&recipe.kind) {
+                media_recipes::validate(recipe)?;
+                Some(media_recipes::runtime().context(media_recipes::UNAVAILABLE)?)
+            } else {
+                None
+            };
             if ids.is_empty()
                 || ids.len() > 100
                 || ids.iter().collect::<HashSet<_>>().len() != ids.len()
@@ -298,6 +335,10 @@ fn run_action(
                 if recipe.kind == "video" {
                     super::video_export::probe(source_path)?;
                 }
+                let note = match &media {
+                    Some(runtime) => media_recipes::preview(runtime.as_ref(), recipe, source_path)?.to_owned(),
+                    None => String::new(),
+                };
                 let stem = source_path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -305,10 +346,12 @@ fn run_action(
                     .chars()
                     .take(50)
                     .collect::<String>();
-                let label = if recipe.kind == "chapters" {
-                    "Chapters"
+                let label = if media.is_some() {
+                    media_recipes::label(recipe).trim_start_matches(" - ").to_owned()
+                } else if recipe.kind == "chapters" {
+                    "Chapters".to_owned()
                 } else {
-                    "Export"
+                    "Export".to_owned()
                 };
                 let frame = if recipe.kind == "video" {
                     recipe
@@ -346,7 +389,7 @@ fn run_action(
                         source_path: source,
                         output_path: output.to_string_lossy().into_owned(),
                         state: "pending".into(),
-                        message: String::new(),
+                        message: note,
                     },
                     source_hash,
                     chapters,
@@ -369,13 +412,19 @@ fn run_action(
         "execute" => {
             let id = request.operation_id.as_deref().context("Preview an export first")?;
             let (mut plan, previous, state) = db.with(|conn| load(conn, id))?;
+            let media = if media_recipes::is_media(&plan.recipe.kind) {
+                media_recipes::validate(&plan.recipe)?;
+                Some(media_recipes::runtime().context(media_recipes::UNAVAILABLE)?)
+            } else {
+                None
+            };
             if !supports(&plan.recipe) {
                 bail!("This export recipe is unavailable on this platform")
             }
             if state != "preview" || !previous.is_empty() {
                 bail!("This plan was already executed. Preview a fresh plan")
             }
-            let cancelled = (plan.recipe.kind == "video").then(|| Arc::new(AtomicBool::new(false)));
+            let cancelled = (plan.recipe.kind == "video" || media.is_some()).then(|| Arc::new(AtomicBool::new(false)));
             let _active = cancelled
                 .as_ref()
                 .map(|flag| ActiveExport::register(id, flag.clone()))
@@ -401,6 +450,9 @@ fn run_action(
                 }
                 if plan.recipe.kind == "video" {
                     super::video_export::probe(Path::new(&item.output.source_path))?;
+                }
+                if let Some(runtime) = &media {
+                    media_recipes::preview(runtime.as_ref(), &plan.recipe, Path::new(&item.output.source_path))?;
                 }
                 if output.exists() {
                     bail!("An output name is occupied. Preview again")
@@ -442,7 +494,16 @@ fn run_action(
                     })?;
                     let mut file = OpenOptions::new().write(true).create_new(true).open(&stage)?;
                     let prepared = (|| -> Result<()> {
-                        if plan.recipe.kind == "photo" {
+                        let mut media_source = None;
+                        if let Some(runtime) = &media {
+                            media_source = Some(media_recipes::export(
+                                runtime.as_ref(),
+                                &plan.recipe,
+                                source,
+                                &file,
+                                cancelled.as_deref().context("Missing media cancellation state")?,
+                            )?);
+                        } else if plan.recipe.kind == "photo" {
                             export_photo(source, &mut file, &plan.recipe)?;
                         } else if plan.recipe.kind == "video" {
                             let before = super::video_export::probe(source)?;
@@ -473,6 +534,9 @@ fn run_action(
                             let after = super::video_export::probe_stage(&stage)?;
                             super::video_export::verify(&before, &after, &plan.recipe)?;
                         }
+                        if let (Some(runtime), Some(before)) = (&media, &media_source) {
+                            media_recipes::verify_stage(runtime.as_ref(), &plan.recipe, before, &stage)?;
+                        }
                         if hash(source)? != item.source_hash {
                             bail!("A source changed during export; its output was not published")
                         }
@@ -499,7 +563,11 @@ fn run_action(
                         fs::hard_link(&stage, output)?;
                         let last = receipts.last_mut().context("Missing export receipt")?;
                         last.output.state = "completed".into();
-                        last.output.message = "Original preserved.".into();
+                        last.output.message = if media.is_some() {
+                            format!("Original preserved. {}", media_recipes::summary(&plan.recipe))
+                        } else {
+                            "Original preserved.".into()
+                        };
                         let metadata = output.metadata()?;
                         let modified = metadata
                             .modified()?
@@ -508,15 +576,17 @@ fn run_action(
                         let kind = match plan.recipe.kind.as_str() {
                             "photo" => "image",
                             "video" => "video",
+                            other if media_recipes::is_media(other) => media_recipes::output_kind(&plan.recipe),
                             _ => "doc",
                         };
+                        let role = if media.is_some() { media_recipes::role(&plan.recipe) } else { "export" };
                         let recipe_json = serde_json::to_string(&plan.recipe)?;
                         db.with(|conn| {
                             let tx = conn.transaction()?;
                             require_unchanged(&tx, id, &item)?;
                             tx.execute("INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?1,?2,?3,0,?4,?5,?6)",params![item.output.output_path,stable_path_hash(&item.output.output_path),metadata.len(),modified,kind,output.extension().and_then(|s|s.to_str()).unwrap_or_default()])?;
                             let derived = tx.last_insert_rowid();
-                            tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,'export',?3)",params![item.output.file_id,derived,recipe_json])?;
+                            tx.execute("INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?1,?2,?3,?4)",params![item.output.file_id,derived,role,recipe_json])?;
                             if let Some(last) = receipts.last_mut() {
                                 last.derived_id = Some(derived);
                             }
@@ -811,6 +881,10 @@ mod tests {
                     video_aspect_ratio: None,
                     video_framing: None,
                     video_stabilization: None,
+                    trim_start_seconds: None,
+                    trim_end_seconds: None,
+                    trim_mode: None,
+                    rotation_degrees: None,
                 }),
                 operation_id: None,
                 destination_bookmark: None,
@@ -967,6 +1041,10 @@ mod tests {
                 video_aspect_ratio: None,
                 video_framing: None,
                 video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
             }));
         }
         let framed: ToolRecipe =
@@ -1067,6 +1145,10 @@ mod tests {
             video_aspect_ratio: Some("16:9".into()),
             video_framing: None,
             video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
         });
         let preview = execute(&mut fixture.conn, &request).unwrap();
         assert!(preview.outputs[0].output_path.contains("16x9 Fit"));
@@ -1121,6 +1203,10 @@ mod tests {
             video_aspect_ratio: Some("16:9".into()),
             video_framing: None,
             video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
         });
         let preview = execute(&mut fixture.conn, &request).unwrap();
         let id = preview.operation_id.clone().unwrap();
@@ -1184,6 +1270,10 @@ mod tests {
             video_aspect_ratio: Some("16:9".into()),
             video_framing: None,
             video_stabilization: None,
+            trim_start_seconds: None,
+            trim_end_seconds: None,
+            trim_mode: None,
+            rotation_degrees: None,
         });
         let preview = execute(&mut fixture.conn, &request).unwrap();
         let id = preview.operation_id.clone().unwrap();
@@ -1279,6 +1369,10 @@ mod tests {
                 video_aspect_ratio: None,
                 video_framing: None,
                 video_stabilization: None,
+                trim_start_seconds: None,
+                trim_end_seconds: None,
+                trim_mode: None,
+                rotation_degrees: None,
             },
             items: vec![item],
             stage_paths: Some(vec![
@@ -1658,6 +1752,181 @@ mod tests {
         assert!(text.contains("Gift &lt;opening&gt; → Grandma"));
         let decoded: Vec<CatalogChapter> = serde_json::from_slice(&export_chapters(&[c], "json").unwrap()).unwrap();
         assert_eq!(decoded[0].source_revision, "fixture");
+    }
+
+    use media_recipes::{MediaProbe, MediaRuntime};
+
+    struct FakeMedia {
+        source_path: std::path::PathBuf,
+        source: MediaProbe,
+        output: MediaProbe,
+        args: Mutex<Vec<Vec<String>>>,
+    }
+    impl MediaRuntime for FakeMedia {
+        fn probe(&self, path: &Path) -> Result<MediaProbe> {
+            Ok(if path == self.source_path { self.source.clone() } else { self.output.clone() })
+        }
+        fn run(&self, args: &[String], mut stage: &File, cancelled: &AtomicBool) -> Result<()> {
+            if cancelled.load(Ordering::Acquire) {
+                bail!("Export cancelled before publication")
+            }
+            self.args.lock().push(args.to_vec());
+            stage.write_all(b"generated media")?;
+            Ok(())
+        }
+    }
+    struct InstalledMedia;
+    impl InstalledMedia {
+        fn new(fake: Arc<FakeMedia>) -> Self {
+            media_recipes::TEST_RUNTIME.with(|slot| *slot.borrow_mut() = Some(fake));
+            Self
+        }
+    }
+    impl Drop for InstalledMedia {
+        fn drop(&mut self) {
+            media_recipes::TEST_RUNTIME.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    fn clip_probe() -> MediaProbe {
+        MediaProbe {
+            duration: 3.0, video_count: 1, audio_count: 1, other_count: 0, width: 96.0, height: 54.0, rotation: 0,
+            video_codec: Some("h264".into()), audio_codec: Some("aac".into()), video_start: Some(0.0),
+            audio_start: Some(0.0), audio_duration: Some(3.0), hdr: false,
+        }
+    }
+
+    fn media_fixture() -> Fixture {
+        let fixture = Fixture::new();
+        let clip = fixture.root.join("Clip.mov");
+        fs::write(&clip, b"source clip bytes").unwrap();
+        fixture
+            .conn
+            .execute("UPDATE files SET path_text=?1,kind='video',extension='mov' WHERE id=1", [clip.to_str().unwrap()])
+            .unwrap();
+        fixture
+    }
+
+    fn media_request(fixture: &Fixture, recipe: ToolRecipe) -> ToolRequest {
+        ToolRequest { recipe: Some(recipe), ..fixture.request("png") }
+    }
+
+    fn media_recipe(kind: &str, format: &str) -> ToolRecipe {
+        ToolRecipe {
+            kind: kind.into(), format: format.into(), max_dimension: 1920, allow_upscale: None, video_aspect_ratio: None,
+            video_framing: None, video_stabilization: None, trim_start_seconds: None, trim_end_seconds: None, trim_mode: None,
+            rotation_degrees: None,
+        }
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn media_recipes_refuse_before_any_output_without_the_vetted_runtime() {
+        if super::super::video_export::available() {
+            eprintln!("the vetted FFmpeg runtime is installed; the unavailable path cannot be exercised");
+            return;
+        }
+        let mut fixture = media_fixture();
+        let invalid = ToolRecipe { rotation_degrees: Some(45), ..media_recipe("rotate", "mov") };
+        let request = media_request(&fixture, invalid);
+        let error = execute(&mut fixture.conn, &request).unwrap_err();
+        assert_eq!(error.to_string(), media_recipes::message::ROTATION);
+        let request = media_request(&fixture, media_recipe("remux", "mp4"));
+        let error = execute(&mut fixture.conn, &request).unwrap_err();
+        assert_eq!(error.to_string(), media_recipes::UNAVAILABLE);
+        let capabilities = execute(&mut fixture.conn, &action(None, "capabilities")).unwrap().capabilities;
+        let media = capabilities.iter().filter(|c| media_recipes::is_media(&c.id)).collect::<Vec<_>>();
+        assert_eq!(media.len(), 5);
+        assert!(media.iter().all(|c| !c.available && c.detail == media_recipes::UNAVAILABLE));
+        assert_eq!(count(&fixture.conn, "SELECT COUNT(*) FROM catalog_operations"), 0);
+
+        let clip = fixture.root.join("Clip.mov");
+        fixture.conn.execute("UPDATE files SET path_text=?1,kind='image',extension='png' WHERE id=1", [fixture.source.to_str().unwrap()]).unwrap();
+        let request = fixture.request("png");
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let id = preview.operation_id.clone().unwrap();
+        fixture.conn.execute("UPDATE catalog_operations SET plan_json=json_set(plan_json,'$.recipe.kind','remux','$.recipe.format','mp4') WHERE id=?1", [&id]).unwrap();
+        let error = execute(&mut fixture.conn, &action(Some(id.clone()), "execute")).unwrap_err();
+        assert_eq!(error.to_string(), media_recipes::UNAVAILABLE);
+        assert_eq!(load(&fixture.conn, &id).unwrap().2, "preview");
+        assert!(!Path::new(&preview.outputs[0].output_path).exists());
+        assert_eq!(fs::read(clip).unwrap(), b"source clip bytes");
+    }
+
+    #[test]
+    fn media_recipes_publish_verified_outputs_with_lineage_and_undo() {
+        let source = clip_probe();
+        let trimmed = MediaProbe { duration: 1.5, audio_duration: Some(1.5), ..source.clone() };
+        let audio_only = MediaProbe { video_count: 0, video_codec: None, video_start: None, ..source.clone() };
+        let proxy = MediaProbe { width: 64.0, height: 36.0, ..source.clone() };
+        let rotated = MediaProbe { rotation: 90, width: 54.0, height: 96.0, ..source.clone() };
+        let cases = [
+            (media_recipe("remux", "mp4"), source.clone(), "Clip - Remux.mp4", "video", "conversion", "-c copy"),
+            (
+                ToolRecipe { trim_start_seconds: Some(1.0), trim_end_seconds: Some(2.5), trim_mode: Some("keyframe".into()), ..media_recipe("trim", "mov") },
+                trimmed,
+                "Clip - Trim.mov",
+                "video",
+                "conversion",
+                "-ss 1.000 -t 1.500",
+            ),
+            (media_recipe("audio", "m4a"), audio_only, "Clip - Audio.m4a", "audio", "conversion", "-f ipod"),
+            (ToolRecipe { max_dimension: 640, ..media_recipe("proxy", "mp4") }, proxy, "Clip - Proxy.mp4", "video", "proxy", "libopenh264"),
+            (ToolRecipe { rotation_degrees: Some(90), ..media_recipe("rotate", "mov") }, rotated, "Clip - Rotated 90.mov", "video", "conversion", "-display_rotation:v:0 -90"),
+        ];
+        for (recipe, output, name, kind, role, flag) in cases {
+            let mut fixture = media_fixture();
+            let clip = fixture.root.join("Clip.mov");
+            let fake = Arc::new(FakeMedia { source_path: clip.clone(), source: source.clone(), output, args: Mutex::new(vec![]) });
+            let _installed = InstalledMedia::new(fake.clone());
+            let request = media_request(&fixture, recipe.clone());
+            let preview = execute(&mut fixture.conn, &request).unwrap();
+            assert_eq!(preview.outputs[0].message, media_recipes::summary(&recipe));
+            let planned = std::path::PathBuf::from(&preview.outputs[0].output_path);
+            assert_eq!(planned.file_name().unwrap().to_str().unwrap(), name);
+            assert!(!planned.exists());
+            let exported = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+            assert_eq!(exported.status, "ok", "{name}: {}", exported.message);
+            assert!(exported.outputs[0].message.contains(media_recipes::summary(&recipe)));
+            assert_eq!(fs::read(&planned).unwrap(), b"generated media");
+            assert!(fake.args.lock()[0].join(" ").contains(flag), "{name}: {:?}", fake.args.lock());
+            let catalogued: (String, String) = fixture.conn.query_row(
+                "SELECT f.kind, a.role FROM catalog_assets a JOIN files f ON f.id=a.derived_id WHERE a.original_id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ).unwrap();
+            assert_eq!(catalogued, (kind.to_owned(), role.to_owned()));
+            assert_eq!(fs::read(&clip).unwrap(), b"source clip bytes");
+            let undone = execute(&mut fixture.conn, &action(preview.operation_id, "undo")).unwrap();
+            assert_eq!(undone.outputs[0].state, "undone");
+            assert!(!planned.exists());
+            assert_eq!(count(&fixture.conn, "SELECT COUNT(*) FROM catalog_assets"), 0);
+        }
+    }
+
+    #[test]
+    fn media_verification_failure_never_publishes() {
+        let mut fixture = media_fixture();
+        let clip = fixture.root.join("Clip.mov");
+        let source = clip_probe();
+        let reencoded = MediaProbe { video_codec: Some("mpeg4".into()), ..source.clone() };
+        let fake = Arc::new(FakeMedia { source_path: clip.clone(), source, output: reencoded, args: Mutex::new(vec![]) });
+        let _installed = InstalledMedia::new(fake);
+        let request = media_request(&fixture, media_recipe("remux", "mp4"));
+        let preview = execute(&mut fixture.conn, &request).unwrap();
+        let output = std::path::PathBuf::from(&preview.outputs[0].output_path);
+        let failed = execute(&mut fixture.conn, &action(preview.operation_id.clone(), "execute")).unwrap();
+        assert_eq!(failed.status, "error");
+        assert_eq!(failed.message, "Output validation rejected re-encoded streams.");
+        assert!(!output.exists());
+        assert_eq!(load(&fixture.conn, preview.operation_id.as_deref().unwrap()).unwrap().2, "failed");
+        assert_eq!(count(&fixture.conn, "SELECT COUNT(*) FROM catalog_assets"), 0);
+        let leftovers = fs::read_dir(&fixture.root).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".FileIDExport-")).count();
+        assert_eq!(leftovers, 0);
+        assert_eq!(fs::read(&clip).unwrap(), b"source clip bytes");
     }
 }
 

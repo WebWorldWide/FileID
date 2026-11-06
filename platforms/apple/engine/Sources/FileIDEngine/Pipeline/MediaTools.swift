@@ -85,11 +85,18 @@ public actor MediaTools {
         [ToolCapability(id: "photo", available: true, inputFormats: ["png", "jpeg", "tiff", "heic"], outputFormats: ["png", "jpeg", "tiff"], detail: "Single-image conversion and bounded resize. Enlarge smaller photos with conventional interpolation when selected. Orientation is applied; location and camera metadata are stripped. Output is 8-bit SDR; this is not AI enhancement. JPEG transparency is flattened onto white."),
          ToolCapability(id: "chapters", available: true, inputFormats: ["catalog chapters"], outputFormats: ["json", "vtt"], detail: "Export non-stale chapter markers. WebVTT is a chapter cue list, not a speech transcript."),
          ToolCapability(id: "video", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Native H.264/AAC SDR export at 1280, 1920 or 3840 pixels. Optional conventional enlargement renders smaller sources at the selected resolution without recovering detail. Optional 9:16, 16:9, 1:1 or 4:5 frames fit the entire picture, or follow detected people with smooth cropping and full-picture fallback. Follow-people mode samples twice per second and supports clips up to ten minutes. Optional stabilization corrects estimated translation and rotation at up to 60 fps, with up to 12% edge-covering zoom and reported uncorrected samples. One video and at most one audio track; HDR, alpha channels, subtitles and auxiliary tracks are rejected. Camera/location container metadata is stripped. Original files are preserved."),
-         ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Neural super-resolution is unavailable. Conventional enlargement is available through video export.")]
+         ToolCapability(id: "videoEnhancement", available: false, inputFormats: [], outputFormats: [], detail: "Neural super-resolution is unavailable. Conventional enlargement is available through video export."),
+         ToolCapability(id: "trim", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4", "mov"], detail: "Keep a start-to-end interval. Keyframe mode copies H.264/HEVC video and AAC audio without re-encoding; exact mode re-encodes to H.264/AAC MP4 for a frame-accurate cut and refuses HDR. Outputs are reopened to check streams, duration and audio/video sync. Originals are preserved."),
+         ToolCapability(id: "remux", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4", "mov"], detail: "Move H.264/HEVC video and AAC audio between MP4 and MOV without re-encoding. Other codecs are refused rather than converted. Camera/location metadata is stripped; timed metadata and timecode tracks are not carried over."),
+         ToolCapability(id: "audio", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["m4a"], detail: "Write the single audio track as AAC in an M4A file. Files without audio are refused."),
+         ToolCapability(id: "proxy", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4"], detail: "Make a 640 or 960 pixel H.264/AAC preview copy linked to its source. Smaller sources are not enlarged. SDR only."),
+         ToolCapability(id: "rotate", available: true, inputFormats: ["mp4", "mov", "m4v"], outputFormats: ["mp4", "mov"], detail: "Turn the displayed picture 90, 180 or 270 degrees clockwise by changing its orientation matrix. H.264/HEVC video and AAC audio are copied without re-encoding.")]
     }
 
     static func supports(_ recipe: ToolRecipe) -> Bool {
-        (1...8192).contains(recipe.maxDimension) &&
+        if CommonMediaTools.kinds.contains(recipe.kind) { return (try? CommonMediaTools.validate(recipe)) != nil }
+        return (1...8192).contains(recipe.maxDimension) &&
+        recipe.trimStartSeconds == nil && recipe.trimEndSeconds == nil && recipe.trimMode == nil && recipe.rotationDegrees == nil &&
         (recipe.allowUpscale != true || ["photo", "video"].contains(recipe.kind)) &&
         (recipe.videoAspectRatio == nil || recipe.kind == "video") &&
         (recipe.videoFraming == nil || recipe.kind == "video") &&
@@ -126,6 +133,7 @@ public actor MediaTools {
     }
 
     private func preview(_ request: ToolRequest, database: Database) async throws -> ToolResponse {
+        if let recipe = request.recipe, CommonMediaTools.kinds.contains(recipe.kind) { try CommonMediaTools.validate(recipe) }
         guard let ids = request.fileIDs, !ids.isEmpty, ids.count <= 100, Set(ids).count == ids.count,
               let destination = request.destination, destination.hasPrefix("/"),
               let recipe = request.recipe, Self.supports(recipe) else { throw Failure(text: "Choose files, an output folder, and a supported recipe.") }
@@ -145,11 +153,13 @@ public actor MediaTools {
             if recipe.kind == "photo" { try Self.validateImage(sourceURL) }
             var framingSummary = ""
             if recipe.kind == "video" { framingSummary = try await VideoConversionWorker.request(source: sourceURL, recipe: recipe).toolSummary }
+            if CommonMediaTools.kinds.contains(recipe.kind) { framingSummary = try await CommonMediaTools.preview(source: sourceURL, recipe: recipe) }
             let sourceHash = try Self.hash(sourceURL)
             let framingLabel = recipe.videoFraming == "auto" ? "People" : "Fit"
             let stabilizationLabel = recipe.videoStabilization == true ? " - Stabilized" : ""
             let frame = recipe.videoAspectRatio.flatMap { $0 == "source" ? nil : " - \($0.replacingOccurrences(of: ":", with: "x")) \(framingLabel)" } ?? ""
-            let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + (recipe.kind == "chapters" ? " - Chapters" : " - Export\(frame)\(stabilizationLabel)")
+            let label = CommonMediaTools.kinds.contains(recipe.kind) ? CommonMediaTools.label(recipe) : (recipe.kind == "chapters" ? " - Chapters" : " - Export\(frame)\(stabilizationLabel)")
+            let stem = String(sourceURL.deletingPathExtension().lastPathComponent.prefix(50)) + label
             let ext = recipe.format == "jpeg" ? "jpg" : recipe.format
             var index = 1
             var output: URL
@@ -213,6 +223,9 @@ public actor MediaTools {
                 else if plan.recipe.kind == "video" {
                     framingSummary = try await VideoConversionWorker.request(source: source, output: stage, recipe: plan.recipe).toolSummary
                 }
+                else if CommonMediaTools.kinds.contains(plan.recipe.kind) {
+                    framingSummary = try await CommonMediaTools.export(source: source, output: stage, recipe: plan.recipe)
+                }
                 else { try Self.exportChapters(item.chapters, format: plan.recipe.format).write(to: stage, options: .withoutOverwriting) }
                 try Task.checkCancellation()
                 guard try Self.hash(source) == item.sourceHash else { throw Failure(text: "A source changed during export. No output was published for that file.") }
@@ -229,11 +242,12 @@ public actor MediaTools {
                 let modified = (try destination.resourceValues(forKeys: [.contentModificationDateKey])).contentModificationDate?.timeIntervalSince1970
                 let recipeJSON = String(decoding: try JSONEncoder().encode(plan.recipe), as: UTF8.self)
                 let published = receipts
-                let outputKind = plan.recipe.kind == "photo" ? "image" : (plan.recipe.kind == "video" ? "video" : "doc")
+                let outputKind = plan.recipe.kind == "photo" ? "image" : (plan.recipe.kind == "video" ? "video" : (CommonMediaTools.kinds.contains(plan.recipe.kind) ? CommonMediaTools.outputKind(plan.recipe) : "doc"))
+                let role = CommonMediaTools.kinds.contains(plan.recipe.kind) ? CommonMediaTools.role(plan.recipe) : "export"
                 let derived: Int64 = try await database.pool.write { db in
                     try db.execute(sql: "INSERT INTO files(path_text,path_hash,size_bytes,scanned_at,modified_at,kind,extension) VALUES(?,?,?,0,?,?,?)", arguments: [destination.path, StablePathHash.hash(destination.path), outputSize, modified, outputKind, destination.pathExtension])
                     let derived = db.lastInsertedRowID
-                    try db.execute(sql: "INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?,?,'export',?)", arguments: [item.output.fileID, derived, recipeJSON])
+                    try db.execute(sql: "INSERT INTO catalog_assets(original_id,derived_id,role,recipe_json) VALUES(?,?,?,?)", arguments: [item.output.fileID, derived, role, recipeJSON])
                     var recorded = published
                     recorded[recorded.count - 1].derivedID = derived
                     let inverse = String(decoding: try JSONEncoder().encode(recorded), as: UTF8.self)

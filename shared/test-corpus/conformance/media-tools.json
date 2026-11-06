@@ -1,0 +1,41 @@
+[
+  {
+    "name": "media-tools-recipe-validation-and-refusals",
+    "description": "Trim, remux, audio, proxy and rotate recipes are validated identically on both engines before any file is opened, and every refusal leaves no plan and no output. The Mac engine runs these recipes with AVFoundation; the shared Rust engine runs them through the vetted LGPL FFmpeg runtime and, where that runtime is not installed (as in conformance runs), reports them unavailable and refuses valid recipes with that reason.",
+    "tree": [
+      {"path": "Clip.mp4", "content": "not decoded: recipes are refused before the source is read", "row": {"id": 1, "kind": "video"}},
+      {"path": "Notes.txt", "content": "not media", "row": {"id": 2, "kind": "doc"}}
+    ],
+    "steps": [
+      {"label": "capabilities", "tool": {"action": "capabilities"}, "expect": {"status": "ok", "capabilities": [
+        {"id": "photo"}, {"id": "chapters"}, {"id": "video"}, {"id": "videoEnhancement"},
+        {"id": "trim", "available": {"$engine": {"swift": true, "rust": false}}, "inputFormats": ["mp4", "mov", "m4v"], "outputFormats": ["mp4", "mov"]},
+        {"id": "remux", "available": {"$engine": {"swift": true, "rust": false}}, "inputFormats": ["mp4", "mov", "m4v"], "outputFormats": ["mp4", "mov"]},
+        {"id": "audio", "available": {"$engine": {"swift": true, "rust": false}}, "inputFormats": ["mp4", "mov", "m4v"], "outputFormats": ["m4a"]},
+        {"id": "proxy", "available": {"$engine": {"swift": true, "rust": false}}, "inputFormats": ["mp4", "mov", "m4v"], "outputFormats": ["mp4"]},
+        {"id": "rotate", "available": {"$engine": {"swift": true, "rust": false}}, "inputFormats": ["mp4", "mov", "m4v"], "outputFormats": ["mp4", "mov"]}
+      ]}},
+      {"label": "video-only fields", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "trim", "format": "mp4", "maxDimension": 1920, "videoAspectRatio": "9:16", "trimStartSeconds": 0, "trimEndSeconds": 1, "trimMode": "keyframe"}}, "expect": {"status": "error", "message": "Upscaling, framing and stabilization apply only to video export."}},
+      {"label": "trim fields on remux", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "remux", "format": "mp4", "maxDimension": 1920, "trimStartSeconds": 0}}, "expect": {"status": "error", "message": "Trim times and mode apply only to trim recipes."}},
+      {"label": "rotation on audio", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "audio", "format": "m4a", "maxDimension": 1920, "rotationDegrees": 90}}, "expect": {"status": "error", "message": "Rotation applies only to rotate recipes."}},
+      {"label": "trim format", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "trim", "format": "m4a", "maxDimension": 1920, "trimStartSeconds": 0, "trimEndSeconds": 1, "trimMode": "keyframe"}}, "expect": {"status": "error", "message": "Trim outputs must be MP4 or MOV."}},
+      {"label": "trim mode required", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "trim", "format": "mp4", "maxDimension": 1920, "trimStartSeconds": 0, "trimEndSeconds": 1}}, "expect": {"status": "error", "message": "Choose keyframe or exact trimming."}},
+      {"label": "exact trim is MP4", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "trim", "format": "mov", "maxDimension": 1920, "trimStartSeconds": 0, "trimEndSeconds": 1, "trimMode": "exact"}}, "expect": {"status": "error", "message": "Exact trims re-encode to H.264/AAC MP4; choose MP4."}},
+      {"label": "trim end missing", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "trim", "format": "mp4", "maxDimension": 1920, "trimStartSeconds": 1, "trimMode": "keyframe"}}, "expect": {"status": "error", "message": "Choose a trim start and end time."}},
+      {"label": "trim too short", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "trim", "format": "mp4", "maxDimension": 1920, "trimStartSeconds": 2, "trimEndSeconds": 2.05, "trimMode": "exact"}}, "expect": {"status": "error", "message": "The trim end must be at least 0.1 seconds after its start."}},
+      {"label": "remux format", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "remux", "format": "m4a", "maxDimension": 1920}}, "expect": {"status": "error", "message": "Remux outputs must be MP4 or MOV."}},
+      {"label": "audio format", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "audio", "format": "mp4", "maxDimension": 1920}}, "expect": {"status": "error", "message": "Audio extraction writes AAC in an M4A file."}},
+      {"label": "proxy size", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "proxy", "format": "mp4", "maxDimension": 1280}}, "expect": {"status": "error", "message": "Proxies are 640 or 960 pixel H.264 MP4 files."}},
+      {"label": "rotation angle", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "rotate", "format": "mp4", "maxDimension": 1920, "rotationDegrees": 45}}, "expect": {"status": "error", "message": "Choose a 90, 180 or 270 degree clockwise rotation."}},
+      {"label": "rotate format", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "rotate", "format": "m4a", "maxDimension": 1920, "rotationDegrees": 90}}, "expect": {"status": "error", "message": "Rotated outputs must be MP4 or MOV."}},
+      {"label": "media fields on photo", "tool": {"action": "preview", "fileIDs": [1], "destination": "{root}", "recipe": {"kind": "photo", "format": "png", "maxDimension": 64, "trimMode": "exact"}}, "expect": {"status": "error"}},
+      {"label": "valid recipe, non-media source", "tool": {"action": "preview", "fileIDs": [2], "destination": "{root}", "recipe": {"kind": "remux", "format": "mov", "maxDimension": 1920}}, "expect": {"status": "error", "message": {"$engine": {
+        "swift": "Media tools accept MP4, MOV or M4V inputs.",
+        "rust": "Trim, remux, audio, proxy and rotate need the vetted FFmpeg runtime (LGPL, OpenH264, no network), which is not installed with this engine. Nothing was created."
+      }}}},
+      {"label": "nothing written", "fs": {"absent": ["Clip - Trim.mp4", "Clip - Trim.mov", "Clip - Remux.mov", "Clip - Audio.m4a", "Clip - Proxy.mp4", "Clip - Rotated 90.mp4", "Notes - Remux.mov"], "sha256": {"Clip.mp4": "{sha256:Clip.mp4}"}}},
+      {"label": "no plans", "db": "SELECT COUNT(*) FROM catalog_operations", "expect": [[0]]},
+      {"label": "no derivatives", "db": "SELECT COUNT(*) FROM catalog_assets", "expect": [[0]]}
+    ]
+  }
+]

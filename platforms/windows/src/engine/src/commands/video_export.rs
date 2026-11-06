@@ -64,11 +64,14 @@ fn runtime() -> Result<Runtime> {
         ensure!(executable.is_file() && !executable.is_symlink(), "The vetted FFmpeg runtime is unavailable");
         let output = capture(executable, &["-version"], PROBE_TIMEOUT, 32 * 1024)?;
         let text = String::from_utf8(output).context("Invalid FFmpeg build information")?;
-        ensure!(text.contains("version 9.0.2") && text.contains("--enable-libopenh264") && text.contains("--disable-network") &&
-            !text.contains("--enable-gpl") && !text.contains("--enable-nonfree"),
-            "The FFmpeg runtime is not the approved LGPL/OpenH264 configuration");
+        ensure!(approved_build(&text), "The FFmpeg runtime is not the approved LGPL/OpenH264 configuration");
     }
     Ok(Runtime { ffmpeg, ffprobe })
+}
+
+fn approved_build(version: &str) -> bool {
+    version.contains("version 9.0.2") && version.contains("--enable-libopenh264") && version.contains("--disable-network") &&
+        !version.contains("--enable-gpl") && !version.contains("--enable-nonfree")
 }
 
 pub(super) fn available() -> bool {
@@ -298,6 +301,41 @@ pub(super) fn export(source: &Path, stage: &File, recipe: &ToolRecipe, before: &
     Ok(())
 }
 
+const MEDIA_PROBE_LIMIT: usize = 256 * 1024;
+
+/// Runs the vetted FFmpeg with arguments built by `media_recipes`. Its one
+/// output goes to stdout, which is the stage file; the input must be read
+/// through the file-only protocol whitelist.
+pub(super) fn run_to_stage(args: &[String], stage: &File, cancelled: &AtomicBool) -> Result<()> {
+    let input = args.iter().position(|arg| arg == "-i").context("Unsupported media worker arguments")?;
+    ensure!(args.iter().filter(|arg| *arg == "-i").count() == 1
+        && args[..input].windows(2).any(|pair| pair[0] == "-protocol_whitelist" && pair[1] == "file")
+        && args.last().is_some_and(|arg| arg == "pipe:1"),
+        "Unsupported media worker arguments");
+    ensure!(!cancelled.load(Ordering::Acquire), "Export cancelled before publication");
+    let runtime = runtime()?;
+    let mut child = command(&runtime.ffmpeg)?;
+    let (mut child, _lifetime) = spawn(child.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stage.try_clone()?))
+        .stderr(Stdio::null()))?;
+    wait(&mut child, EXPORT_TIMEOUT, Some(cancelled))?;
+    stage.sync_all()?;
+    Ok(())
+}
+
+/// Raw ffprobe streams and format JSON for a source or stage, read with the
+/// file-only MOV demuxer and no external references.
+pub(super) fn probe_json(path: &Path) -> Result<Vec<u8>> {
+    let runtime = runtime()?;
+    capture(&runtime.ffprobe, &[
+        "-v", "error", "-protocol_whitelist", "file", "-f", "mov",
+        "-enable_drefs", "0", "-use_absolute_path", "0",
+        "-show_streams", "-show_format", "-of", "json", "-i",
+        path.to_str().context("Invalid media path")?,
+    ], PROBE_TIMEOUT, MEDIA_PROBE_LIMIT)
+}
+
 pub(super) fn verify(source: &Probe, output: &Probe, recipe: &ToolRecipe) -> Result<()> {
     let (width, height) = dimensions(recipe, source)?;
     ensure!(output.video_codec == "h264" && output.width == width && output.height == height && output.audio_count == source.audio_count,
@@ -520,12 +558,49 @@ mod tests {
         let source = Probe { duration: 2.0, width: 640, height: 360, video_start: 0.0,
             audio_start: None, audio_duration: None, audio_count: 0, video_codec: "h264".into(), audio_codec: None };
         let mut recipe = ToolRecipe { kind: "video".into(), format: "mp4".into(), max_dimension: 1280,
-            allow_upscale: None, video_aspect_ratio: None, video_framing: None, video_stabilization: None };
+            allow_upscale: None, video_aspect_ratio: None, video_framing: None, video_stabilization: None,
+            trim_start_seconds: None, trim_end_seconds: None, trim_mode: None, rotation_degrees: None };
         assert_eq!(dimensions(&recipe, &source).unwrap(), (1280, 720));
         recipe.video_aspect_ratio = Some("9:16".into());
         assert_eq!(dimensions(&recipe, &source).unwrap(), (720, 1280));
         recipe.video_aspect_ratio = Some("1:1".into());
         assert_eq!(dimensions(&recipe, &source).unwrap(), (1280, 1280));
+    }
+
+    #[test]
+    fn only_the_lgpl_network_free_openh264_build_is_approved() {
+        let vetted = "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers\nconfiguration: --disable-network --enable-libopenh264 --disable-autodetect";
+        assert!(approved_build(vetted));
+        let homebrew = "ffmpeg version 9.0.2 Copyright (c) 2000-2026 the FFmpeg developers\nconfiguration: --prefix=/opt/homebrew/Cellar/ffmpeg/9.0.2_1 --enable-shared --enable-version3 --enable-gpl --enable-libx264";
+        assert!(!approved_build(homebrew));
+        assert!(!approved_build(&format!("{vetted} --enable-gpl")));
+        assert!(!approved_build(&format!("{vetted} --enable-nonfree")));
+        assert!(!approved_build(&vetted.replace("--disable-network ", "")));
+        assert!(!approved_build(&vetted.replace("9.0.2", "9.0.1")));
+    }
+
+    #[test]
+    fn stage_runs_refuse_arguments_without_a_file_only_input_and_stdout_output() {
+        let stage = tempfile_stage();
+        let cancelled = AtomicBool::new(false);
+        let args = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect::<Vec<_>>();
+        for bad in [
+            args(&["-i", "/clip.mov", "-c", "copy", "-f", "mp4", "pipe:1"]),
+            args(&["-protocol_whitelist", "file", "-i", "/clip.mov", "-c", "copy", "/elsewhere.mp4"]),
+            args(&["-protocol_whitelist", "file", "-i", "/clip.mov", "-i", "/other.mov", "-f", "mp4", "pipe:1"]),
+            args(&["-i", "/clip.mov", "-protocol_whitelist", "file", "-f", "mp4", "pipe:1"]),
+        ] {
+            let error = run_to_stage(&bad, &stage.1, &cancelled).unwrap_err();
+            assert_eq!(error.to_string(), "Unsupported media worker arguments", "{bad:?}");
+        }
+        assert_eq!(std::fs::metadata(&stage.0).unwrap().len(), 0);
+        let _ = std::fs::remove_file(&stage.0);
+    }
+
+    fn tempfile_stage() -> (PathBuf, File) {
+        let path = std::env::temp_dir().join(format!("fileid-stage-{}.part", uuid::Uuid::new_v4()));
+        let file = File::create(&path).unwrap();
+        (path, file)
     }
 
     #[test]
@@ -631,7 +706,8 @@ mod tests {
         let stage_path = directory.join("export.part");
         let stage = File::create(&stage_path).unwrap();
         let recipe = ToolRecipe { kind: "video".into(), format: "mp4".into(), max_dimension: 1280,
-            allow_upscale: None, video_aspect_ratio: Some("16:9".into()), video_framing: None, video_stabilization: None };
+            allow_upscale: None, video_aspect_ratio: Some("16:9".into()), video_framing: None, video_stabilization: None,
+            trim_start_seconds: None, trim_end_seconds: None, trim_mode: None, rotation_degrees: None };
         export(&source, &stage, &recipe, &before, &AtomicBool::new(false)).unwrap();
         let after = probe_stage(&stage_path).unwrap();
         verify(&before, &after, &recipe).unwrap();
