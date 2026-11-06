@@ -346,7 +346,12 @@ struct CommonMediaToolsTests {
             return true
         }
         try #require(drawn)
-        return (width, height, stride(from: 0, to: rgba.count, by: 4).map { UInt8((Int(rgba[$0]) + Int(rgba[$0 + 1]) + Int(rgba[$0 + 2])) / 3) })
+        var luma = [UInt8](repeating: 0, count: width * height)
+        for pixel in 0..<(width * height) {
+            let sum = Int(rgba[pixel * 4]) + Int(rgba[pixel * 4 + 1]) + Int(rgba[pixel * 4 + 2])
+            luma[pixel] = UInt8(sum / 3)
+        }
+        return (width, height, luma)
     }
 
     @Test func rotatingNinetyRightMovesTheTopLeftMarkerToTheTopRight() async throws {

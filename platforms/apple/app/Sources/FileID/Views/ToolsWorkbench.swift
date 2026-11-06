@@ -169,6 +169,18 @@ struct ToolsWorkbench: View {
             && !busy && (1...8192).contains(session.maxDimension)
     }
 
+    private func kindChanged(to kind: String) {
+        let format: String
+        switch kind {
+        case "photo": format = "png"
+        case "video": format = "mp4"
+        default: format = "json"
+        }
+        session.format = format
+        session.maxDimension = kind == "video" ? 1920 : 4096
+        invalidate()
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if !inline {
@@ -202,27 +214,43 @@ struct ToolsWorkbench: View {
         .onAppear {
             consume(); consumeSearch()
             session.abandonPendingIfEngineRestarted(generation: engine.engineResetSignal)
-            if session.pending.isEmpty && session.capabilities.isEmpty { send(ToolRequest(requestID: UUID().uuidString, action: "capabilities")) }
+            if session.pending.isEmpty && session.capabilities.isEmpty {
+                let request = ToolRequest(requestID: UUID().uuidString, action: "capabilities")
+                send(request)
+            }
         }
         .task(id: selectedHits.first?.path) {
             previewImage = nil
             guard let path = selectedHits.first?.path else { return }
             previewImage = await ThumbnailService.shared.thumbnail(for: URL(fileURLWithPath: path), size: 640)
         }
-        .onChange(of: session.kind) { _, new in session.format = new == "photo" ? "png" : (new == "video" ? "mp4" : "json"); session.maxDimension = new == "video" ? 1920 : 4096; invalidate() }
-        .onChange(of: session.format) { _, _ in invalidate() }
-        .onChange(of: session.maxDimension) { _, _ in invalidate() }
-        .onChange(of: session.allowUpscale) { _, _ in invalidate() }
-        .onChange(of: session.videoAspectRatio) { _, _ in invalidate() }
-        .onChange(of: session.videoFraming) { _, _ in invalidate() }
-        .onChange(of: session.videoStabilization) { _, _ in invalidate() }
-        .onChange(of: session.media) { _, _ in session.media.settleContainer(sources: session.selectedPaths); invalidate() }
-        .onChange(of: session.selection) { _, _ in session.media.settleContainer(sources: session.selectedPaths) }
+        .modifier(RecipeHooks(view: self))
         .task(id: trimSource) { await loadTrimPlayer() }
         .onDisappear { player?.pause() }
         .onChange(of: engine.engineResetSignal) { _, new in session.abandonPendingIfEngineRestarted(generation: new) }
         .onChange(of: engine.toolResponses) { _, _ in consume() }
         .onChange(of: engine.catalogResponses) { _, _ in consumeSearch() }
+    }
+
+    /// Recipe-setting hooks, split from `body` so the type checker does not time
+    /// out on one long modifier chain.
+    private struct RecipeHooks: ViewModifier {
+        let view: ToolsWorkbench
+        func body(content: Content) -> some View {
+            content
+                .onChange(of: view.session.kind) { _, new in view.kindChanged(to: new) }
+                .onChange(of: view.session.format) { _, _ in view.invalidate() }
+                .onChange(of: view.session.maxDimension) { _, _ in view.invalidate() }
+                .onChange(of: view.session.allowUpscale) { _, _ in view.invalidate() }
+                .onChange(of: view.session.videoAspectRatio) { _, _ in view.invalidate() }
+                .onChange(of: view.session.videoFraming) { _, _ in view.invalidate() }
+                .onChange(of: view.session.videoStabilization) { _, _ in view.invalidate() }
+                .onChange(of: view.session.media) { _, _ in
+                    view.session.media.settleContainer(sources: view.session.selectedPaths)
+                    view.invalidate()
+                }
+                .onChange(of: view.session.selection) { _, _ in view.session.media.settleContainer(sources: view.session.selectedPaths) }
+        }
     }
 
     // MARK: - 01 Recipe
