@@ -98,6 +98,7 @@ scrolledwindow, scrolledwindow > viewport, viewport,
 flowbox, flowboxchild, gridview, gridview > child, list {
     background-color: transparent;
 }
+gridview.fileid-tab > child:selected { background-color: alpha(@fileid_gold, 0.12); border-radius: 8px; box-shadow: inset 0 0 0 1px alpha(@fileid_gold, 0.45); }
 window { background-color: @fileid_base; }
 .dim-label { color: alpha(#FFFFFF, 0.55); }
 

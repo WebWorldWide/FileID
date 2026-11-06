@@ -13,7 +13,7 @@
 // scan, then does a final reload on completion.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,7 @@ use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
 use super::library_pane::SelectedPane;
+use super::library_selection::{self as picking, PaneView};
 use super::util::{fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
@@ -44,9 +45,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let debounce_gen = Rc::new(Cell::new(0u64));
 
     let model = gio::ListStore::new::<BoxedAnyObject>();
-    let selection = gtk::SingleSelection::new(Some(model.clone()));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
+    let selection = gtk::MultiSelection::new(Some(model.clone()));
 
     // ── Grid factory ─────────────────────────────────────────────────────────
     let factory = gtk::SignalListItemFactory::new();
@@ -94,8 +93,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
-    // Single click selects and fills the Selected pane; double-click/Enter
-    // opens the preview; Esc clears the selection.
+    // Click selects one file and fills the Selected pane, Ctrl+click toggles,
+    // Shift+click and Shift+arrows extend; double-click/Enter opens the
+    // preview; Esc clears the selection.
     let restoring = Rc::new(Cell::new(false));
     let pane = {
         let on_preview: Rc<dyn Fn()> = Rc::new(clone!(
@@ -110,10 +110,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             #[weak]
             grid,
             move || {
-                let pos = selection.selected();
-                if pos == gtk::INVALID_LIST_POSITION {
+                let [(pos, _)] = selected_rows(&selection)[..] else {
                     return;
-                }
+                };
                 let query = (search_text.borrow().clone(), kind_filter.borrow().clone());
                 open_preview(&engine, &grid, snapshot_rows(&selection), pos as usize, query);
             }
@@ -121,29 +120,20 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let on_close: Rc<dyn Fn()> = Rc::new(clone!(
             #[strong]
             selection,
-            move || selection.set_selected(gtk::INVALID_LIST_POSITION)
+            move || {
+                selection.unselect_all();
+            }
         ));
         SelectedPane::new(engine.clone(), on_preview, on_close)
     };
-    selection.connect_selected_notify(clone!(
+    selection.connect_selection_changed(clone!(
         #[strong]
         pane,
         #[strong]
         restoring,
-        move |selection| {
-            super::chat_handoff::set_files(
-                selection
-                    .selected_item()
-                    .and_downcast::<BoxedAnyObject>()
-                    .map(|object| vec![object.borrow::<FileRow>().id])
-                    .unwrap_or_default(),
-            );
-            if restoring.get() {
-                return;
-            }
-            match selection.selected_item().and_downcast::<BoxedAnyObject>() {
-                Some(object) => pane.show(object.borrow::<FileRow>().clone()),
-                None => pane.hide(),
+        move |selection, _, _| {
+            if !restoring.get() {
+                show_selection(selection, &pane, false);
             }
         }
     ));
@@ -152,8 +142,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         #[strong]
         selection,
         move |_, key, _, _| {
-            if key == gtk::gdk::Key::Escape && selection.selected() != gtk::INVALID_LIST_POSITION {
-                selection.set_selected(gtk::INVALID_LIST_POSITION);
+            if key == gtk::gdk::Key::Escape && selection.selection().size() > 0 {
+                selection.unselect_all();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -380,7 +370,7 @@ struct ReloadCtx {
     loading_more: Rc<Cell<bool>>,
     total: Rc<Cell<i64>>,
     last_query: RefCell<Option<(String, Option<String>)>>,
-    selection: gtk::SingleSelection,
+    selection: gtk::MultiSelection,
     pane: Rc<SelectedPane>,
     restoring: Rc<Cell<bool>>,
 }
@@ -434,18 +424,18 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         };
         // One items-changed signal for the whole page instead of one per row.
         let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
-        // Keep the selection (and the pane) on the same file across a refresh.
-        let selected_id = ctx.pane.current_id();
+        // Keep the same files selected (and the pane on them) across a refresh.
+        let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
         ctx.restoring.set(true);
         ctx.model.splice(0, ctx.model.n_items(), &items);
-        let position = selected_id.and_then(|id| rows.iter().position(|row| row.id == id));
-        ctx.selection
-            .set_selected(position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32));
-        ctx.restoring.set(false);
-        match position {
-            Some(position) => ctx.pane.refresh(rows[position].clone(), false),
-            None => ctx.pane.hide(),
+        let positions = picking::restore(&selected, rows.iter().map(|row| row.id));
+        let chosen = gtk::Bitset::new_empty();
+        for position in &positions {
+            chosen.add(*position);
         }
+        ctx.selection.set_selection(&chosen, &gtk::Bitset::new_range(0, ctx.model.n_items()));
+        ctx.restoring.set(false);
+        show_selection(&ctx.selection, &ctx.pane, true);
         ctx.total.set(total);
         ctx.has_more.set(total > rows.len() as i64);
         if total > rows.len() as i64 {
@@ -1063,6 +1053,36 @@ fn open_preview(
             b.set_opacity(v);
         }
     });
+}
+
+/// Every selected tile with its row, in grid order.
+fn selected_rows(selection: &gtk::MultiSelection) -> Vec<(u32, FileRow)> {
+    let set = selection.selection();
+    (0..set.size())
+        .filter_map(|nth| u32::try_from(nth).ok())
+        .map(|nth| set.nth(nth))
+        .filter_map(|position| row_at(selection, position).map(|row| (position, row)))
+        .collect()
+}
+
+/// Shares the selection with Chat and fills the Selected pane. `reloaded`
+/// redraws a single file in place instead of re-reading its picture.
+fn show_selection(selection: &gtk::MultiSelection, pane: &SelectedPane, reloaded: bool) {
+    let rows = selected_rows(selection);
+    super::chat_handoff::set_files(rows.iter().map(|(_, row)| row.id).collect());
+    let sizes: Vec<(u32, i64)> = rows.iter().map(|(position, row)| (*position, row.size_bytes)).collect();
+    match picking::view(&sizes) {
+        PaneView::Hidden => pane.hide(),
+        PaneView::One(_) => {
+            let row = rows[0].1.clone();
+            if reloaded && pane.current_id() == Some(row.id) {
+                pane.refresh(row, false);
+            } else {
+                pane.show(row);
+            }
+        }
+        PaneView::Many { count, bytes } => pane.show_many(count, bytes),
+    }
 }
 
 /// Resolve the `FileRow` at `pos` in the (selection) model.
