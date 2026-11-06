@@ -24,9 +24,9 @@ const MAX_FILES: usize = 200_000;
 static CURRENT: Mutex<std::sync::Weak<CatalogIndex>> = Mutex::new(std::sync::Weak::new());
 const MAX_GRAPH_BYTES: u64 = 512 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct Revision {
+pub(crate) struct Revision {
     instance: String,
-    generation: i64,
+    pub(crate) generation: i64,
     nonce: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -621,9 +621,15 @@ fn check(cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 fn revision(conn: &Connection) -> Result<Revision> {
+    vector_revision(conn, "clip")
+}
+fn can_advance(conn: &Connection, old: &Revision, latest: &Revision) -> Result<bool> {
+    vector_can_advance(conn, "clip", old, latest)
+}
+pub(crate) fn vector_revision(conn: &Connection, namespace: &str) -> Result<Revision> {
     Ok(conn.query_row(
-        "SELECT instance_id,generation,nonce FROM catalog_vector_state WHERE namespace='clip'",
-        [],
+        "SELECT instance_id,generation,nonce FROM catalog_vector_state WHERE namespace=?1",
+        [namespace],
         |row| {
             Ok(Revision {
                 instance: row.get(0)?,
@@ -633,7 +639,8 @@ fn revision(conn: &Connection) -> Result<Revision> {
         },
     )?)
 }
-fn can_advance(conn: &Connection, old: &Revision, latest: &Revision) -> Result<bool> {
+/// Whether the change log still holds every step from `old` to `latest`.
+pub(crate) fn vector_can_advance(conn: &Connection, namespace: &str, old: &Revision, latest: &Revision) -> Result<bool> {
     if old.instance != latest.instance || old.generation > latest.generation || old.generation < 0 {
         return Ok(false);
     }
@@ -644,15 +651,15 @@ fn can_advance(conn: &Connection, old: &Revision, latest: &Revision) -> Result<b
         Some(old.instance.clone())
     } else {
         conn.query_row(
-            "SELECT nonce FROM catalog_vector_changes WHERE namespace='clip' AND generation=?1",
-            [old.generation],
+            "SELECT nonce FROM catalog_vector_changes WHERE namespace=?1 AND generation=?2",
+            params![namespace, old.generation],
             |row| row.get::<_, String>(0),
         )
         .optional()?
     };
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM catalog_vector_changes WHERE namespace='clip' AND generation>?1 AND generation<=?2",
-        params![old.generation, latest.generation],
+        "SELECT COUNT(*) FROM catalog_vector_changes WHERE namespace=?1 AND generation>?2 AND generation<=?3",
+        params![namespace, old.generation, latest.generation],
         |row| row.get(0),
     )?;
     Ok(checkpoint.as_deref() == Some(old.nonce.as_str()) && count == latest.generation - old.generation)

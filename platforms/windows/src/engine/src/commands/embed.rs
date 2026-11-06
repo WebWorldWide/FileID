@@ -85,10 +85,9 @@ pub(crate) async fn handle_embed_image_query(
     }
 }
 
-/// Tokenize + embed a free-text query through CLIP-text. The model is
-/// process-static (lives in a `OnceLock<Mutex<Option<ClipText>>>`) so
-/// back-to-back queries reuse the loaded ORT session — avoids the
-/// 100–300 ms create cost on every keystroke.
+/// Tokenize + embed a free-text query through CLIP-text. The model stays
+/// loaded between queries (avoids the 100–300 ms create cost on every
+/// keystroke) and is parked after `models::idle::PARK_AFTER` of no use.
 pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQueryPayload) {
     let query = payload.query.clone();
     let query_id = payload.query_id.clone();
@@ -163,51 +162,84 @@ pub(crate) async fn handle_embed_text_query(sink: Sink, payload: ipc::EmbedTextQ
     }
 }
 
+pub(crate) static CLIP_TEXT: crate::models::idle::IdleSlot<crate::models::clip_text::ClipText> =
+    crate::models::idle::IdleSlot::new("CLIP text", crate::models::idle::PARK_AFTER);
+
 /// CLIP text embedding of `query` on the calling thread, reusing the
-/// process-wide session. Used by search and Chat.
+/// process-wide session while it is loaded. Used by search and Chat.
 pub(crate) fn embed_text_blocking(query: &str) -> anyhow::Result<Vec<f32>> {
-        if crate::coordinator::process_gpu_device_removed() {
-        anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
-    }
-    use std::sync::OnceLock;
-    static TEXT_MODEL: OnceLock<
-        parking_lot::Mutex<Option<crate::models::clip_text::ClipText>>,
-    > = OnceLock::new();
-    let cell = TEXT_MODEL.get_or_init(|| parking_lot::Mutex::new(None));
-    let mut guard = cell.lock();
-    if guard.is_none() {
-        let weights = crate::models::clip_text::default_weights_path()?;
-        let dir = weights
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("text weights have no parent dir"))?;
-        let vocab_path = dir.join("vocab.json");
-        let merges_path = dir.join("merges.txt");
-        let vocab = std::fs::read_to_string(&vocab_path).map_err(|e| {
-            anyhow::anyhow!("vocab.json missing at {}: {}", vocab_path.display(), e)
-        })?;
-        let merges = std::fs::read_to_string(&merges_path).map_err(|e| {
-            anyhow::anyhow!("merges.txt missing at {}: {}", merges_path.display(), e)
-        })?;
-        let tokenizer = crate::models::ClipTokenizer::new(&vocab, &merges)?;
-        // EP crash-safety: this is the one GPU-EP session bind that happens
-        // OUTSIDE the scan's load_default arm window — the CLIP-text encoder
-        // loads lazily on the first search query. Without arming here, a hard
-        // native crash while binding a freshly-installed CUDA/OpenVINO pack on
-        // the search path leaves no `.ep_attempt` breadcrumb, so the engine
-        // crash-loops on every search instead of reverting to DirectML. Mirror
-        // scan.rs: arm the override-aware EP, bind, then disarm (a Rust error
-        // still disarms below; only a hard crash leaves the breadcrumb).
-        let armed_ep = crate::models::runtime::armed_provider();
-        crate::models::ep_guard::arm(armed_ep.as_str());
-        let loaded = crate::models::clip_text::ClipText::load(weights, tokenizer);
-        crate::models::ep_guard::disarm(armed_ep.as_str());
-        *guard = Some(loaded?);
-    }
-    let Some(model) = guard.as_mut() else {
-        anyhow::bail!("CLIP text model initialization completed without a model");
-    };
     if crate::coordinator::process_gpu_device_removed() {
         anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
     }
-    model.embed(query)
+    CLIP_TEXT.with(load_clip_text, |model| {
+        if crate::coordinator::process_gpu_device_removed() {
+            anyhow::bail!(crate::models::runtime::GPU_DEVICE_REMOVED_MARKER);
+        }
+        model.embed(query)
+    })?
+}
+
+fn load_clip_text() -> anyhow::Result<crate::models::clip_text::ClipText> {
+    let weights = crate::models::clip_text::default_weights_path()?;
+    let dir = weights
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("text weights have no parent dir"))?;
+    let vocab_path = dir.join("vocab.json");
+    let merges_path = dir.join("merges.txt");
+    let vocab = std::fs::read_to_string(&vocab_path).map_err(|e| {
+        anyhow::anyhow!("vocab.json missing at {}: {}", vocab_path.display(), e)
+    })?;
+    let merges = std::fs::read_to_string(&merges_path).map_err(|e| {
+        anyhow::anyhow!("merges.txt missing at {}: {}", merges_path.display(), e)
+    })?;
+    let tokenizer = crate::models::ClipTokenizer::new(&vocab, &merges)?;
+    // EP crash-safety: this is the one GPU-EP session bind that happens
+    // OUTSIDE the scan's load_default arm window — the CLIP-text encoder
+    // loads lazily on the first search query (and again after it was parked).
+    // Without arming here, a hard native crash while binding a freshly-installed
+    // CUDA/OpenVINO pack on the search path leaves no `.ep_attempt` breadcrumb,
+    // so the engine crash-loops on every search instead of reverting to
+    // DirectML. Mirror scan.rs: arm the override-aware EP, bind, then disarm (a
+    // Rust error still disarms below; only a hard crash leaves the breadcrumb).
+    let armed_ep = crate::models::runtime::armed_provider();
+    crate::models::ep_guard::arm(armed_ep.as_str());
+    let loaded = crate::models::clip_text::ClipText::load(weights, tokenizer);
+    crate::models::ep_guard::disarm(armed_ep.as_str());
+    loaded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::idle::{Park, PARK_AFTER};
+
+    fn resident_mb() -> f64 {
+        let Ok(mut system) = sysinfo::System::new() else { return 0.0 };
+        let pid = sysinfo::Pid::from_u32(std::process::id());
+        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        system.process(pid).map_or(0.0, |process| process.memory() as f64 / 1_048_576.0)
+    }
+
+    #[test]
+    #[ignore = "needs installed CLIP text weights and ONNX Runtime: FILEID_MODELS_DIR=... ORT_DYLIB_PATH=... cargo test --lib clip_text_parks -- --ignored --nocapture"]
+    fn clip_text_parks_and_frees_memory() {
+        let pause = std::env::var_os("FILEID_PARK_PAUSE").is_some();
+        let phase = |label: &str| {
+            println!("PHASE {label} pid={} rss={:.0} MB", std::process::id(), resident_mb());
+            if pause {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+        };
+        phase("before");
+        let first = embed_text_blocking("a dog on a beach").unwrap();
+        for cycle in 0..3 {
+            assert!(CLIP_TEXT.is_loaded());
+            phase(&format!("loaded-{cycle}"));
+            assert!(!CLIP_TEXT.park_idle(std::time::Instant::now()));
+            assert!(CLIP_TEXT.park_idle(std::time::Instant::now() + PARK_AFTER));
+            assert!(!CLIP_TEXT.is_loaded());
+            phase(&format!("parked-{cycle}"));
+            assert_eq!(first, embed_text_blocking("a dog on a beach").unwrap(), "a reloaded model answers the same");
+        }
+    }
 }
