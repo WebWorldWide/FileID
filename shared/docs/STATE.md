@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-06 — renameFiles carries uncatalogued sidecars and rolls back a failed group
+
+- **Both engines** (agent; owner-approved `commands/bulk.rs` digest refresh): `renameFiles` moves an uncatalogued `<stem>.xmp`/`.aae` or `<name>.xmp` to `<new stem><its old suffix>` with a no-replace rename, only when every same-stem RAW, JPEG/HEIC and MOV in the folder is in the batch (a lone JPEG never takes its RAW's XMP). Best effort: an occupied target or an error leaves the sidecar and adds a note. Undo brings it back. `proposeNames` no longer holds a group for an unscanned `.xmp`/`.aae`.
+- Companion groups are re-derived inside `renameFiles` (same folder and stem, no schema change): a member that fails validation refuses the whole group, and a member whose move fails puts the already-moved members back and reports the whole group failed. Swift now checks for an existing destination at move time, like Rust; both engines report results in request order.
+- Verified: Rust 1,140 lib tests and clippy; Swift 807 (serial); conformance Rust 39 / Swift 45 with the new `files-rename-sidecars-follow-their-group` and `files-rename-group-rolls-back`; gates. Not yet seen in the apps.
+
 ## 2026-11-06 — Smart names keep companions together (RAW+JPEG, Live Photo, sidecars)
 
 - **Both engines and all three apps** (agent): `proposeNames` returns companions in one folder as one group — a RAW with its JPEG/HEIC, a Live Photo with its MOV, and `.xmp`/`.aae` sidecars — with one shared new stem (each member keeps its extension) and `evidenceID` `"<reason>|group:<leader>"` (no schema change). The group takes a `_N` bump that is free for every member, or keeps all its names when none is (`collision`), so a pair is never half-renamed; a companion on disk but not yet scanned holds the group (`unscannedCompanion`). The apps show followers indented under the leader with a "+ ARW, XMP" chip; ticking any member ticks the group, editing the leader rewrites the followers, and all members go in one `renameFiles` batch so the existing Undo restores them together.
