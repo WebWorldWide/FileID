@@ -36,7 +36,7 @@ Locations (schema first): `v29` `library_roots`; IPC list/add/remove/rescan root
 
 Search and Moments: from/to capture-time filters (Mac UI 2026-11-05; both engines now fill a dated search from every matching file, not only the hundred best); automatic event grouping (needs owner thresholds); chapters rank above frame captions in both engines (2026-11-05); populated-panel and playback checks on Mac and Windows.
 
-Performance (needs a quiet Mac / the Windows GPU PC; `analyzeSequence` already runs the greedy loop with JSON early stop, and moments/goals use the frame pool): A/B `FILEID_VLM_PROMPT_LOOKUP` and the per-file `MLX.GPU.clearCache()`; measure BGE text model parking on a machine with BGE installed; the CLIP HNSW graph cache is not parked; Windows streaming + early stop and `cache_prompt` check; charge VRAM in the Rust scheduler from measured numbers.
+Performance (needs a quiet Mac / the Windows GPU PC; `analyzeSequence` already runs the greedy loop with JSON early stop, and moments/goals use the frame pool): measure BGE text model parking on a machine with BGE installed; the CLIP HNSW graph cache is not parked; Windows streaming + early stop and `cache_prompt` check; charge VRAM in the Rust scheduler from measured numbers.
 
 Parity (Best Takes pages and Moments lanes done 2026-11-05): fold or document the Windows Models page; audit Windows springs.
 
