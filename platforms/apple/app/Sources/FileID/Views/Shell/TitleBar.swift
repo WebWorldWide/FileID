@@ -9,6 +9,7 @@ struct TitleBar: View {
     let store: ReadStore
     @Binding var activeTab: MainWindow.Tab
     @Binding var pickedURL: URL?
+    @Binding var scopeRootID: Int
     @Binding var sidebarVisible: Bool
     @Binding var chatPresented: Bool
     var pickFolder: () -> Void
@@ -65,10 +66,12 @@ struct TitleBar: View {
                 HStack(spacing: 10) {
                     Text("FileID").font(Theme.ChromeFont.display(18)).foregroundStyle(Theme.text1)
                     VHairline(color: Color.white.opacity(0.18)).frame(height: 14)
-                    Text(pickedURL?.lastPathComponent ?? "Choose a folder").font(Theme.ChromeFont.body(13.5, .semibold))
-                        .foregroundStyle(pickedURL == nil ? Theme.text3 : Theme.text1).lineLimit(1)
+                    Text(switcherTitle).font(Theme.ChromeFont.body(13.5, .semibold))
+                        .foregroundStyle(switcherTitle == "Choose a folder" ? Theme.text3 : Theme.text1).lineLimit(1)
                         .truncationMode(.middle)
                         .frame(maxWidth: 180, alignment: .leading)
+                        .contentTransition(.opacity)
+                        .animation(Theme.spring, value: switcherTitle)
                     Text("▾").font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3)
                 }
                 .padding(.horizontal, 10)
@@ -78,7 +81,9 @@ struct TitleBar: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Choose, rescan or close the folder FileID is working on")
+            .help("Choose which location to show, or add, rescan or close a folder")
+            .accessibilityLabel("Location: \(switcherTitle)")
+            .accessibilityHint("Chooses which location Library, Search & Moments and Chat show")
             .popover(isPresented: $folderOpen, arrowEdge: .bottom) { folderPopover.chromeTextSize() }
             .onChange(of: folderOpen) { _, open in if open { engine.refreshLibraryRoots() } }
         }
@@ -94,9 +99,63 @@ struct TitleBar: View {
         return "\(root.fileCount.formatted()) files"
     }
 
+    private var switcherTitle: String {
+        LibraryScope.title(store.scope, roots: engine.libraryRoots, folderName: pickedURL?.lastPathComponent)
+    }
+
+    private func choose(_ rootID: Int64?) {
+        folderOpen = false
+        scopeRootID = Int(rootID ?? 0)
+    }
+
+    /// "All locations" and one row per scanned location; picking one scopes Library,
+    /// Search & Moments and Chat to it.
+    @ViewBuilder
+    private var scopeSection: some View {
+        let roots = engine.libraryRoots
+        let current = store.scope?.root.id
+        if !roots.isEmpty {
+            SectionLabel("Show").padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 6)
+            VStack(spacing: 2) {
+                RailRow(selected: current == nil, height: 36, action: { choose(nil) }) {
+                    scopeCheck(current == nil)
+                    Text("All locations").font(Theme.ChromeFont.body(13.5, .semibold)).foregroundStyle(Theme.text1)
+                    Spacer(minLength: 8)
+                    MetaText(roots.count == 1 ? "1 location" : "\(roots.count) locations", color: Theme.text2)
+                }
+                .accessibilityLabel("All locations, \(roots.count == 1 ? "1 location" : "\(roots.count) locations")")
+                .accessibilityHint("Shows every location in Library, Search & Moments and Chat")
+                ForEach(roots, id: \.id) { root in
+                    RailRow(selected: current == root.id, height: 44, action: { choose(root.id) }) {
+                        scopeCheck(current == root.id)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(root.display).font(Theme.ChromeFont.body(13.5, .semibold)).foregroundStyle(Theme.text1).lineLimit(1)
+                            Text(root.path).font(Theme.ChromeFont.mono(11)).foregroundStyle(Theme.text3).lineLimit(1).truncationMode(.head)
+                        }
+                        Spacer(minLength: 8)
+                        if !root.online { StatusPill(text: "OFFLINE", color: Theme.warning) }
+                        MetaText(LibraryScope.fileCountText(root.fileCount), color: Theme.text2)
+                    }
+                    .help(root.path)
+                    .accessibilityLabel(LibraryScope.spokenLabel(root))
+                    .accessibilityHint("Shows only this location in Library, Search & Moments and Chat")
+                }
+            }
+            .padding(.bottom, 8)
+            .animation(Theme.spring, value: current)
+        }
+    }
+
+    private func scopeCheck(_ selected: Bool) -> some View {
+        Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.gold)
+            .opacity(selected ? 1 : 0).frame(width: 14).accessibilityHidden(true)
+    }
+
     private var folderPopover: some View {
         VStack(alignment: .leading, spacing: 0) {
+            scopeSection
             SectionLabel("Folders").padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
+                .overlay(alignment: .top) { if !engine.libraryRoots.isEmpty { Hairline(color: Theme.hairlineStrong) } }
             if let url = pickedURL {
                 HStack(alignment: .top, spacing: 10) {
                     Text("■").font(.system(size: 12)).foregroundStyle(Theme.gold).frame(width: 14)

@@ -26,6 +26,22 @@ struct LibraryRootsTests {
         #expect(!roots[0].online)
     }
 
+    @Test func aNestedLocationCountsItsOwnFilesAndItsParentDoesNot() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            try db.execute(sql: "INSERT INTO library_roots(path,display,kind,added_at) VALUES('/Volumes/__absent__/Camera','Camera','external',1),('/Volumes/__absent__/Camera/Synced','Synced','external',2)")
+            for (id, path, size) in [(1, "/Volumes/__absent__/Camera/a.jpg", 100), (2, "/Volumes/__absent__/Camera/Synced/b.jpg", 200),
+                                     (3, "/Volumes/__absent__/Camera/Synced/x/c.jpg", 400), (4, "/Volumes/__absent__/Camera/Synced2/d.jpg", 800)] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,?,0,'image','jpg')", arguments: [id, path, id, size])
+            }
+        }
+        let roots = try await database.pool.read { try LibraryRoots.list($0) }
+        #expect(roots[0].fileCount == 2 && roots[0].totalBytes == 900)
+        #expect(roots[1].fileCount == 2 && roots[1].totalBytes == 600)
+    }
+
     @Test func aMissingOrEmptyFolderIsOfflineAndAPopulatedOneOnline() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -41,6 +57,36 @@ struct LibraryRootsTests {
         #expect(LibraryRoots.subtreeBounds("/Volumes/X/").high == "/Volumes/X0")
         let windows = LibraryRoots.subtreeBounds(#"D:\Photos\"#)
         #expect(windows.exact == #"D:\Photos"# && windows.low == #"D:\Photos\"# && windows.high == #"D:\Photos]"#)
+    }
+
+    @Test func aScopeKeepsItsOwnFilesAndLeavesLookalikesAndDeeperLocationsOut() {
+        let scope = LibraryRoots.Scope(root: "/m/Camera/", others: ["/m/Camera2", "/m/Camera/Synced/", "/elsewhere"])
+        for inside in ["/m/Camera", "/m/Camera/a.jpg", "/m/Camera/2020/b.jpg", "/m/Camera/Synced2/c.jpg"] { #expect(scope.contains(inside), "\(inside)") }
+        for outside in ["/m/Camera2/a.jpg", "/m/Cameras/a.jpg", "/m/Camera/Synced", "/m/Camera/Synced/d.jpg", "/m/Cam", "/elsewhere/e.jpg"] {
+            #expect(!scope.contains(outside), "\(outside)")
+        }
+        #expect(LibraryRoots.Scope(root: "/", others: ["/m/Camera2"]).contains("/elsewhere/e.jpg"))
+        #expect(!LibraryRoots.Scope(root: "/", others: ["/m/Camera2"]).contains("/m/Camera2/a.jpg"))
+    }
+
+    @Test func scopedSearchKeepsOneLocationAndUnknownLocationsAreErrors() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            try db.execute(sql: "INSERT INTO library_roots(id,path,display,kind,added_at) VALUES(1,'/m/Camera','Camera','external',1),(2,'/m/Camera/Synced','Synced','external',2)")
+            for (id, path) in [(1, "/m/Camera/a.jpg"), (2, "/m/Camera/Synced/b.jpg")] + (100..<230).map({ ($0, "/m/Cameras/\($0).jpg") }) {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(?,?,?,10,0,'image','jpg','a dog')", arguments: [id, path, id])
+            }
+        }
+        func ids(_ root: Int64?) async throws -> [Int64] {
+            try await CatalogSearch.handle(CatalogRequest(requestID: "r", action: "search", query: "dog", rootID: root), database: database).hits.map(\.fileID)
+        }
+        #expect(try await ids(nil).count == 100)
+        #expect(try await ids(1) == [1])
+        #expect(try await ids(2) == [2])
+        let unknown = await CatalogStore.handle(CatalogRequest(requestID: "r", action: "search", query: "dog", rootID: 9), database: database)
+        #expect(unknown.status == "error" && unknown.hits.isEmpty)
     }
 
     @Test func rootsListRoundTripsThroughTheWireFormat() throws {

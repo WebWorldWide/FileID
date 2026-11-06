@@ -100,7 +100,11 @@ public sealed partial class LibraryView
             {
                 var list = await EngineClient.Instance.ListRootsAsync(ct).ConfigureAwait(false);
                 var roots = OfflineRoots.From(list.Roots);
-                ui.TryEnqueue(() => DebugLog.SafeRun("LibraryView.ApplyOfflineRoots", () => ApplyOfflineRoots(roots)));
+                ui.TryEnqueue(() => DebugLog.SafeRun("LibraryView.ApplyOfflineRoots", () =>
+                {
+                    AppViewModel.Instance.ApplyRoots(list.Roots);
+                    ApplyOfflineRoots(roots);
+                }));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
             catch (Exception ex)

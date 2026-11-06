@@ -238,6 +238,59 @@ internal sealed class AppViewModel : INotifyPropertyChanged
         }
     }
 
+    private IReadOnlyList<LibraryRoot> _libraryRoots = Array.Empty<LibraryRoot>();
+
+    /// <summary>The scanned locations from the last listRoots reply.</summary>
+    public IReadOnlyList<LibraryRoot> LibraryRoots => _libraryRoots;
+
+    private LibraryScope? _scope;
+
+    /// <summary>The location Library, Search &amp; Moments and Chat show; null for "All locations".</summary>
+    public LibraryScope? Scope => _scope;
+
+    /// <summary>Picks a location, or "All locations" for null, and remembers it.</summary>
+    public void ChooseScope(long? rootId)
+    {
+        _settings.LibraryScopeRootId = rootId;
+        _settings.Save();
+        ApplyScope();
+    }
+
+    /// <summary>Takes a fresh listRoots reply: keeps the stored choice while its location exists.</summary>
+    public void ApplyRoots(IReadOnlyList<LibraryRoot> roots)
+    {
+        _libraryRoots = roots;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LibraryRoots)));
+        var kept = LibraryScope.Reconciled(_settings.LibraryScopeRootId, roots);
+        if (kept != _settings.LibraryScopeRootId)
+        {
+            _settings.LibraryScopeRootId = kept;
+            _settings.Save();
+        }
+        ApplyScope();
+    }
+
+    public async Task RefreshRootsAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var list = await EngineClient.Instance.ListRootsAsync(ct);
+            ApplyRoots(list.Roots);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            DebugLog.Warn("Location list refresh failed: " + ex.Message);
+        }
+    }
+
+    private void ApplyScope()
+    {
+        var next = LibraryScope.For(_settings.LibraryScopeRootId, _libraryRoots);
+        var same = next?.Root.Id == _scope?.Root.Id && next?.Param == _scope?.Param;
+        _scope = next;
+        if (!same) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Scope)));
+    }
+
     /// <summary>Toggles the sidebar visible/hidden state. Invoked by Ctrl+Shift+S.</summary>
     public void ToggleSidebar() => SidebarVisible = !SidebarVisible;
 

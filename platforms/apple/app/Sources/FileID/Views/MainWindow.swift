@@ -12,6 +12,7 @@ struct MainWindow: View {
     @State private var atmospherePaused = false
     @AppStorage("activeTabRawValue") private var activeTabRaw: String = Tab.library.rawValue
     @AppStorage("sidebarVisible") private var sidebarVisible: Bool = true
+    @AppStorage(LibraryScope.storageKey) private var scopeRootID: Int = 0
     @AppStorage(TextSize.storageKey) private var textSizeRaw: String = TextSize.standard.rawValue
     @State private var pickedURL: URL?
     @State private var isDragHovering = false
@@ -113,13 +114,29 @@ struct MainWindow: View {
         engine.deepAnalyzeInFlight || engine.faceClusteringInFlight || engine.catalogJobs.contains { $0.state == "running" }
     }
 
+    private var engineReady: Bool {
+        if case .ready = engine.state { return true }
+        return false
+    }
+
+    /// Keeps the stored location choice while the list loads, drops it once its location is
+    /// gone, and hands the scope to the Library, Search & Moments and Chat.
+    private func applyScope(_ roots: [LibraryRoot]) {
+        let stored = scopeRootID > 0 ? Int64(scopeRootID) : nil
+        let kept = LibraryScope.reconciled(stored, roots: roots)
+        if kept != stored { scopeRootID = Int(kept ?? 0) }
+        let scope = LibraryScope(rootID: kept, roots: roots)
+        store.setScope(scope)
+        ChatHandoff.shared.rootID = scope?.root.id
+    }
+
     var body: some View {
         ZStack {
             LavaLampBackground(paused: atmospherePaused, aiActive: aiActive)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TitleBar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL,
+                TitleBar(engine: engine, store: store, activeTab: activeTabBinding, pickedURL: $pickedURL, scopeRootID: $scopeRootID,
                          sidebarVisible: $sidebarVisible, chatPresented: $chatPresented, pickFolder: pickFolder)
                     .chromeTextSize()
                     .background(TrafficLightAligner(barHeight: Theme.Metrics.titleBar))
@@ -176,6 +193,9 @@ struct MainWindow: View {
                 ChatHandoff.shared.libraryRoot = newValue
             }
             .onChange(of: activeTabRaw) { _, _ in ChatHandoff.shared.activeTab = activeTab }
+            .onChange(of: engine.libraryRoots, initial: true) { _, roots in applyScope(roots) }
+            .onChange(of: scopeRootID) { _, _ in applyScope(engine.libraryRoots) }
+            .onChange(of: engineReady, initial: true) { _, ready in if ready { engine.refreshLibraryRoots() } }
             .onChange(of: textSizeRaw, initial: true) { _, raw in ContentTextScale.shared.size = TextSize(stored: raw) }
             // Guide the user through the workflow as each stage finishes.
             .task(id: engine.lastFaceClustering?.personCount ?? -1) {

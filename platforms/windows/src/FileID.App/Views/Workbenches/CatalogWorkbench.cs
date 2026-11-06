@@ -57,6 +57,8 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     private readonly Dictionary<Grid, (Image Image, string Path)> _pendingThumbs = new();
     private ThumbnailService? _thumbs;
     private IReadOnlyList<CatalogHit> _lastHits = Array.Empty<CatalogHit>();
+    private long? _searchedScope;
+    private bool _scopeSearchPending;
     private IReadOnlyList<CatalogChapter> _chapterList = Array.Empty<CatalogChapter>();
     private CatalogHit? _selectedHit;
     private TimelineTracks _tracks = TimelineTracks.Empty;
@@ -263,9 +265,32 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         if (!string.IsNullOrWhiteSpace(query)) Run(ct => SearchAsync("keyword", ct));
     }
 
+    private void OnAppScopeChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+        => DebugLog.SafeRun("CatalogWorkbench.OnAppScopeChanged", () =>
+        {
+            if (e.PropertyName != nameof(AppViewModel.Scope)) return;
+            DebugLog.Debug($"[ENGINE-SUB:CatalogWorkbench] {e.PropertyName}");
+            DispatcherQueue.TryEnqueue(SearchInChosenLocation);
+        });
+
+    private void SearchInChosenLocation()
+    {
+        switch (MomentsScopePolicy.OnScopeChanged(_searchedScope, AppViewModel.Instance.Scope?.Root.Id, _query.Text, Busy))
+        {
+            case MomentsScopePolicy.Step.Search:
+                Run(SearchAsync);
+                break;
+            case MomentsScopePolicy.Step.AfterCurrent:
+                _scopeSearchPending = true;
+                break;
+        }
+    }
+
     protected override void OnOpened()
     {
         AppViewModel.Instance.MomentsQueryRequested += OnMomentsQueryRequested;
+        AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged;
+        AppViewModel.Instance.PropertyChanged += OnAppScopeChanged;
         UseMomentsQuery();
         _thumbs ??= new ThumbnailService();
         _poll.Start();
@@ -276,6 +301,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
     protected override void OnClosed()
     {
         AppViewModel.Instance.MomentsQueryRequested -= OnMomentsQueryRequested;
+        AppViewModel.Instance.PropertyChanged -= OnAppScopeChanged;
         _poll.Stop();
         _playhead.Stop();
         _thumbs?.Dispose();
@@ -288,6 +314,11 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         _pause.IsEnabled = CatalogJobActions.CanPause(job?.State);
         _cancel.IsEnabled = CatalogJobActions.CanCancel(job?.State);
         _resume.IsEnabled = CatalogJobActions.CanResume(job?.Kind, job?.State);
+        if (MomentsScopePolicy.RunPending(_scopeSearchPending, _query.Text, Busy))
+        {
+            _scopeSearchPending = false;
+            if (_searchedScope != AppViewModel.Instance.Scope?.Root.Id) Run(SearchAsync);
+        }
     }
     private long RequireFile() => _fileID ?? throw new InvalidOperationException("Pick a result first.");
     private void ResetEditor() { _editingID = null; _title.Text = ""; _summary.Text = ""; _start.Value = 0; _end.Value = 0; }
@@ -499,7 +530,9 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
         CatalogResponse result;
         try
         {
-            result = await Engine.CatalogSearchAsync(_query.Text, mode, dates.From, dates.To, ct);
+            var scope = AppViewModel.Instance.Scope?.Root.Id;
+            await UI(() => _searchedScope = scope, ct);
+            result = await Engine.CatalogSearchAsync(_query.Text, mode, dates.From, dates.To, scope, ct);
         }
         finally
         {

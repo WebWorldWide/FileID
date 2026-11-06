@@ -15,7 +15,8 @@ enum CatalogSearch {
     }
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
-        guard request.capturedFrom != nil || request.capturedTo != nil else { return try await run(request, database: database) }
+        let root = request.rootID == nil ? nil : try await database.pool.read { db in try LibraryRoots.Scope.load(db, id: request.rootID) }
+        guard request.capturedFrom != nil || request.capturedTo != nil else { return try await run(request, root: root, database: database) }
         let from = request.capturedFrom ?? 0
         let to = request.capturedTo ?? Double.greatestFiniteMagnitude
         guard from.isFinite, from >= 0, to >= from, request.capturedTo.map({ $0.isFinite }) ?? true else { throw RequestError.invalid }
@@ -23,7 +24,7 @@ enum CatalogSearch {
         guard (1...100).contains(limit) else { throw RequestError.invalid }
         var wide = request
         wide.limit = 100
-        var response = try await run(wide, database: database)
+        var response = try await run(wide, root: root, database: database)
         let ids = String(decoding: try JSONEncoder().encode(Set(response.hits.map(\.fileID)).sorted()), as: UTF8.self)
         let inside = response.hits.isEmpty ? [] : try await database.pool.read { db in
             Set(try Int64.fetchAll(db, sql: "SELECT id FROM files WHERE id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?", arguments: [ids, from, to]))
@@ -40,8 +41,9 @@ enum CatalogSearch {
                 return try Row.fetchAll(db, sql: """
                     SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files
                     WHERE failed=0 AND id IN (SELECT value FROM json_each(?)) AND COALESCE(created_at,modified_at) BETWEEN ? AND ?
+                      AND \(LibraryRoots.scopeSQL("path_text"))
                     ORDER BY COALESCE(created_at,modified_at) DESC,id DESC LIMIT ?
-                    """, arguments: [wanted, from, to, limit + seen.count]).compactMap { row in
+                    """, arguments: [wanted, from, to, root?.param, limit + seen.count]).compactMap { row in
                     let id: Int64 = row["id"]
                     return seen.contains(id) ? nil : CatalogHit(fileID: id, path: row["path_text"], kind: row["kind"], text: row["description"])
                 }
@@ -51,7 +53,7 @@ enum CatalogSearch {
         return response
     }
 
-    private static func run(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
+    private static func run(_ request: CatalogRequest, root: LibraryRoots.Scope?, database: Database) async throws -> CatalogResponse {
         let mode = request.searchMode ?? "keyword"
         let limit = request.limit ?? 100
         let scope = request.resultScope ?? "all"
@@ -60,7 +62,7 @@ enum CatalogSearch {
         guard ["keyword", "semantic", "hybrid"].contains(mode), (1...100).contains(limit), query.count <= 2000 else { throw RequestError.invalid }
         if mode == "keyword" {
             guard !query.isEmpty, request.queryVector == nil, request.embeddingModel == nil else { throw RequestError.invalid }
-            let hits = try await database.pool.read { db in select(try CatalogStore.search(db, query: query), limit: limit, filesOnly: scope == "files") }
+            let hits = try await database.pool.read { db in select(try CatalogStore.search(db, query: query, root: root), limit: limit, filesOnly: scope == "files") }
             return CatalogResponse(requestID: request.requestID, status: "ok", hits: hits)
         }
         guard mode != "hybrid" || !query.isEmpty else { throw RequestError.invalid }
@@ -82,23 +84,23 @@ enum CatalogSearch {
         guard await index.currentRevision() != nil else {
             if await index.failed { return CatalogResponse(requestID: request.requestID, status: "error", message: "The visual search index could not be prepared. Keyword search remains available.") }
             await index.prepare()
-            let hits = mode == "hybrid" ? try await database.pool.read { db in select(try CatalogStore.search(db, query: query), limit: limit, filesOnly: scope == "files") } : []
+            let hits = mode == "hybrid" ? try await database.pool.read { db in select(try CatalogStore.search(db, query: query, root: root), limit: limit, filesOnly: scope == "files") } : []
             return CatalogResponse(requestID: request.requestID, status: "indexing", message: "Preparing the local visual search index.", hits: hits)
         }
-        let candidates = try await index.refreshedMatches(vector, limit: min(1000, limit * 4 + 1))
+        let candidates = try await index.refreshedMatches(vector, limit: root == nil ? min(1000, limit * 4 + 1) : 1000)
         let candidateIDs = String(decoding: try JSONEncoder().encode(candidates.map(\.fileID)), as: UTF8.self)
         let hits = try await database.pool.read { db -> [CatalogHit] in
             let rows = try Row.fetchAll(db, sql: "SELECT f.id,f.path_text,f.kind,COALESCE(f.vlm_description,'') AS description,e.embedding FROM files f JOIN clip_embeddings e ON e.file_id=f.id WHERE f.failed=0 AND e.model=? AND f.id IN (SELECT value FROM json_each(?))", arguments: [CLIPEmbeddingSpace.modelID, candidateIDs])
             let byID = Dictionary(uniqueKeysWithValues: rows.map { (($0["id"] as Int64), $0) })
             let visual = candidates.compactMap { match -> CatalogHit? in
-                guard match.fileID != request.fileID, let row = byID[match.fileID] else { return nil }
+                guard match.fileID != request.fileID, let row = byID[match.fileID], root?.contains(row["path_text"]) ?? true else { return nil }
                 let blob: Data = row["embedding"]
                 let fingerprint = SHA256.hash(data: blob).map { String(format: "%02x", $0) }.joined()
                 guard fingerprint == match.fingerprint else { return nil }
                 return CatalogHit(fileID: match.fileID, path: row["path_text"], kind: row["kind"], text: row["description"])
             }
             if mode == "semantic" { return Array(visual.prefix(limit)) }
-            return merge(keyword: try CatalogStore.search(db, query: query), visual: visual, limit: limit, filesOnly: scope == "files")
+            return merge(keyword: try CatalogStore.search(db, query: query, root: root), visual: visual, limit: limit, filesOnly: scope == "files")
         }
         return CatalogResponse(requestID: request.requestID, status: "ok", message: mode == "hybrid" ? "Keyword, catalog evidence, and visual similarity results." : "Visual similarity results.", hits: hits)
     }

@@ -232,6 +232,13 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     shell.navigate(initial);
     shell.refresh();
     shell.count_files();
+    let weak = Rc::downgrade(&shell);
+    crate::tabs::library_scope::subscribe(Rc::new(move || {
+        if let Some(shell) = weak.upgrade() {
+            shell.refresh();
+        }
+    }));
+    crate::tabs::library_scope::refresh();
 
     ACTIVE_WINDOW.with_borrow_mut(|active| {
         *active = Some(ActiveWindow {
@@ -343,6 +350,7 @@ impl Shell {
                 self.title_bar.set_chat_state(open, self.current.get() == "chat");
             }
             Action::DismissNote => self.set_note(None),
+            Action::ChooseScope(root_id) => crate::tabs::library_scope::choose(root_id),
         }
         self.refresh();
     }

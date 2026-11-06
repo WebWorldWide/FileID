@@ -49,6 +49,10 @@ internal sealed class AppSettings
     /// <summary>Restructure view mode: false = cards, true = tree-diff.</summary>
     public bool RestructureTreeMode { get; set; } = false;
 
+    /// <summary>The library location (listRoots id) Library, Search &amp; Moments and Chat are scoped
+    /// to; null for "All locations".</summary>
+    public long? LibraryScopeRootId { get; set; }
+
     /// <summary>Library kind filter (image / video / pdf / document / audio / all).</summary>
     public string LibraryKindFilter { get; set; } = "all";
 
@@ -184,6 +188,7 @@ internal sealed class AppSettings
     /// be injected). Add new validations here as fields are added.</summary>
     private static void Sanitize(AppSettings s)
     {
+        if (s.LibraryScopeRootId is <= 0) s.LibraryScopeRootId = null;
         if (s.GpuExecutionProviderOverride is { } v
             && !AllowedEpOverrides.Contains(v))
         {

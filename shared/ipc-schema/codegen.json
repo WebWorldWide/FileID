@@ -219,6 +219,7 @@
           "limit",
           "capturedFrom",
           "capturedTo",
+          "rootID",
           "event",
           "eventID",
           "takeFeedback",

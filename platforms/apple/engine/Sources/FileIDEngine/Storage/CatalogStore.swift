@@ -98,7 +98,7 @@ public enum CatalogStore {
     /// matched against the v27 tag vocabulary, then files come from the tag
     /// index (Rust `tag_hits`).
     static func tagHits(
-        _ db: GRDB.Database, words query: String, filter: String?, peopleFilter: String?, eventFilter: String?
+        _ db: GRDB.Database, words query: String, filter: String?, peopleFilter: String?, eventFilter: String?, root: String? = nil
     ) throws -> [CatalogHit] {
         let words = Array(Set(query.lowercased()
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
@@ -116,14 +116,14 @@ public enum CatalogStore {
               AND (? IS NULL OR f.id IN (
                 SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
               ))
-              AND t.source IN ('auto','user','vlm')
+              AND t.source IN ('auto','user','vlm') AND \(LibraryRoots.scopeSQL("f.path_text"))
             """
         var scores: [Int64: Int] = [:]
         for word in words {
             let forms = wordForms(word)
             let likes = forms.map { _ in "(' ' || REPLACE(LOWER(tag),'_',' ')) LIKE ?" }.joined(separator: " OR ")
             let sql = base + " AND t.tag IN (SELECT tag FROM catalog_tag_vocab WHERE \(likes))"
-            let arguments: [DatabaseValueConvertible?] = [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter] + forms.map { "% \($0)%" }
+            let arguments: [DatabaseValueConvertible?] = [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter, root] + forms.map { "% \($0)%" }
             for id in try Int64.fetchAll(db, sql: sql, arguments: StatementArguments(arguments)) {
                 scores[id, default: 0] += 1
             }
@@ -160,7 +160,8 @@ public enum CatalogStore {
         kinds: [String] = [],
         personIDs: [Int64] = [],
         eventIDs: [String] = [],
-        timeSeconds: Double? = nil
+        timeSeconds: Double? = nil,
+        root: LibraryRoots.Scope? = nil
     ) throws -> [CatalogHit] {
         guard kinds.allSatisfy({ ["image", "video", "pdf", "doc", "audio", "other", "model"].contains($0) }) else { throw InvalidRequest() }
         guard personIDs.allSatisfy({ $0 > 0 }) else { throw InvalidRequest() }
@@ -170,6 +171,7 @@ public enum CatalogStore {
         let filter = kinds.isEmpty ? nil : String(decoding: try JSONEncoder().encode(kinds), as: UTF8.self)
         let peopleFilter = personIDs.isEmpty ? nil : String(decoding: try JSONEncoder().encode(Array(Set(personIDs)).sorted()), as: UTF8.self)
         let eventFilter = eventIDs.isEmpty ? nil : String(decoding: try JSONEncoder().encode(Array(Set(eventIDs)).sorted()), as: UTF8.self)
+        let root = root?.param
         let meaningful = query.split(whereSeparator: \.isWhitespace)
             .filter { $0.contains(where: { $0.isLetter || $0.isNumber }) }
             .joined(separator: " ")
@@ -178,7 +180,7 @@ public enum CatalogStore {
             guard filter != nil || peopleFilter != nil || eventFilter != nil || timeSeconds != nil else { return [] }
             var hits: [CatalogHit]
             if let timeSeconds {
-                hits = try temporalEvidenceHits(db, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds)
+                hits = try temporalEvidenceHits(db, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds, root: root)
             } else {
                 hits = try Row.fetchAll(db, sql: """
                     SELECT id,path_text,kind,COALESCE(vlm_description,'') AS description FROM files f
@@ -191,12 +193,13 @@ public enum CatalogStore {
                       AND (? IS NULL OR f.id IN (
                         SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
                       ))
+                      AND \(LibraryRoots.scopeSQL("f.path_text"))
                     ORDER BY id DESC LIMIT 100
-                    """, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter]).map { row in
+                    """, arguments: [filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter, root]).map { row in
                     CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"])
                 }
             }
-            hits.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds))
+            hits.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds, root: root))
             return hits
         }
 
@@ -215,16 +218,17 @@ public enum CatalogStore {
                   AND (? IS NULL OR f.id IN (
                     SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
                   ))
+                  AND \(LibraryRoots.scopeSQL("f.path_text"))
                 ORDER BY bm25(catalog_file_fts) LIMIT 100
-                """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter])
+                """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter, root])
             for row in files {
                 results.append(CatalogHit(fileID: row["id"], path: row["path_text"], kind: row["kind"], text: row["description"]))
             }
             let seen = Set(results.map(\.fileID))
-            results.append(contentsOf: try tagHits(db, words: meaningful, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter)
+            results.append(contentsOf: try tagHits(db, words: meaningful, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, root: root)
                 .filter { !seen.contains($0.fileID) })
-            results.append(contentsOf: try textEvidenceHits(db, table: "doc_fts", kind: "documentText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
-            results.append(contentsOf: try textEvidenceHits(db, table: "ocr_fts", kind: "ocrText", kindSQL: Self.ocrHitKindSQL, match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter))
+            results.append(contentsOf: try textEvidenceHits(db, table: "doc_fts", kind: "documentText", match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, root: root))
+            results.append(contentsOf: try textEvidenceHits(db, table: "ocr_fts", kind: "ocrText", kindSQL: Self.ocrHitKindSQL, match: match, filter: filter, peopleFilter: peopleFilter, eventFilter: eventFilter, root: root))
         }
 
         let evidence = try Row.fetchAll(db, sql: """
@@ -249,12 +253,13 @@ public enum CatalogStore {
                 OR (p.start_seconds IS NOT NULL AND ABS(p.start_seconds - ?) <= 15)
               ))
               AND (c.stale=0 OR p.stale=0)
+              AND \(LibraryRoots.scopeSQL("f.path_text"))
             ORDER BY CASE WHEN e.kind='chapter' THEN 0 WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 2 ELSE 1 END,
                      bm25(catalog_evidence_fts) LIMIT 100
             """, arguments: [
                 match, filter, filter, peopleFilter, peopleFilter, peopleFilter,
                 eventFilter, eventFilter,
-                timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds
+                timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, root
             ])
         for row in evidence {
             let chapterTime: Double? = row["chapter_time"]
@@ -263,7 +268,7 @@ public enum CatalogStore {
                 evidenceID: row["evidence_id"], startSeconds: chapterTime ?? row["passage_time"], page: row["page"]
             ))
         }
-        results.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds))
+        results.append(contentsOf: try personObservationHits(db, peopleFilter: peopleFilter, eventFilter: eventFilter, timeSeconds: timeSeconds, root: root))
         return results
     }
 
@@ -279,7 +284,8 @@ public enum CatalogStore {
         match: String,
         filter: String?,
         peopleFilter: String?,
-        eventFilter: String?
+        eventFilter: String?,
+        root: String?
     ) throws -> [CatalogHit] {
         let rows = try Row.fetchAll(db, sql: """
             SELECT f.id,f.path_text,snippet(\(table),0,'','','…',16) AS excerpt,\(kindSQL ?? "'\(kind)'") AS hit_kind
@@ -293,8 +299,9 @@ public enum CatalogStore {
               AND (? IS NULL OR f.id IN (
                 SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
               ))
+              AND \(LibraryRoots.scopeSQL("f.path_text"))
             ORDER BY bm25(\(table)) LIMIT 100
-            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter])
+            """, arguments: [match, filter, filter, peopleFilter, peopleFilter, peopleFilter, eventFilter, eventFilter, root])
         return rows.map { row in
             let fileID: Int64 = row["id"]
             let hitKind: String = row["hit_kind"]
@@ -308,7 +315,8 @@ public enum CatalogStore {
         filter: String?,
         peopleFilter: String?,
         eventFilter: String?,
-        timeSeconds: Double
+        timeSeconds: Double,
+        root: String?
     ) throws -> [CatalogHit] {
         let rows = try Row.fetchAll(db, sql: """
             SELECT e.evidence_id,
@@ -331,11 +339,12 @@ public enum CatalogStore {
                 OR (e.kind='passage' AND p.stale=0 AND p.start_seconds IS NOT NULL
                     AND ((p.start_seconds <= ? AND COALESCE(p.end_seconds,p.start_seconds) >= ?) OR ABS(p.start_seconds - ?) <= 15))
               )
+              AND \(LibraryRoots.scopeSQL("f.path_text"))
             ORDER BY COALESCE(c.start_seconds,p.start_seconds),e.evidence_id LIMIT 100
             """, arguments: [
                 filter, filter, eventFilter, eventFilter,
                 peopleFilter, peopleFilter, timeSeconds, timeSeconds, timeSeconds,
-                timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds
+                timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, timeSeconds, root
             ])
         return rows.map { row in
             let chapterTime: Double? = row["chapter_time"]
@@ -350,7 +359,8 @@ public enum CatalogStore {
         _ db: GRDB.Database,
         peopleFilter: String?,
         eventFilter: String? = nil,
-        timeSeconds: Double? = nil
+        timeSeconds: Double? = nil,
+        root: String? = nil
     ) throws -> [CatalogHit] {
         guard peopleFilter != nil || timeSeconds != nil else { return [] }
         return try Row.fetchAll(db, sql: """
@@ -364,9 +374,10 @@ public enum CatalogStore {
               AND (? IS NULL OR f.id IN (
                 SELECT file_id FROM catalog_event_files WHERE event_id IN (SELECT value FROM json_each(?))
               ))
+              AND \(LibraryRoots.scopeSQL("f.path_text"))
             ORDER BY f.id,o.start_seconds,o.id LIMIT 100
             """, arguments: [
-                peopleFilter, peopleFilter, timeSeconds, timeSeconds, timeSeconds, timeSeconds, eventFilter, eventFilter
+                peopleFilter, peopleFilter, timeSeconds, timeSeconds, timeSeconds, timeSeconds, eventFilter, eventFilter, root
             ]).map { row in
             let structuredName = ["first_name", "middle_name", "last_name", "suffix"]
                 .compactMap { (row[$0] as String?)?.trimmingCharacters(in: .whitespacesAndNewlines) }

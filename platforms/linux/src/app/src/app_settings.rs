@@ -107,6 +107,26 @@ pub fn forget_folder() {
     save_map(&path, &map);
 }
 
+/// The library location (listRoots id) Library, Search & Moments and Chat are
+/// scoped to; `None` for "All locations" (Windows `libraryScopeRootId`).
+pub fn library_scope_root_id() -> Option<i64> {
+    let path = settings_path()?;
+    load_map(&path)
+        .get("libraryScopeRootId")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+}
+
+pub fn remember_library_scope_root_id(id: Option<i64>) {
+    let Some(path) = settings_path() else { return };
+    let mut map = load_map(&path);
+    match id {
+        Some(id) => map.insert("libraryScopeRootId".into(), Value::from(id)),
+        None => map.remove("libraryScopeRootId"),
+    };
+    save_map(&path, &map);
+}
+
 /// Sidebar visibility across launches (Windows `sidebarVisible`).
 pub fn sidebar_visible() -> bool {
     let Some(path) = settings_path() else {

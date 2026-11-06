@@ -1,7 +1,9 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <!--
     SidebarFolderHeader: the title-bar folder switcher popover (Prototype v3).
-    Hosted in TitleBar.FolderFlyout. Current folder with path and file count,
+    Hosted in TitleBar.FolderFlyout. "Show" lists All locations and every scanned
+    location (count, OFFLINE pill); picking one scopes Library, Search & Moments
+    and Chat. Then the current folder with path and file count,
     Choose folder (Ctrl+O), Rescan, Close folder and Start over (destructive,
     confirmed). Layout matches the macOS TitleBar folderPopover.
 -->
@@ -14,10 +16,26 @@
     mc:Ignorable="d">
 
     <StackPanel Width="360">
-        <TextBlock Text="FOLDERS"
-                   Style="{StaticResource ShellSectionLabelStyle}"
-                   Margin="12,10,12,8"
-                   AutomationProperties.HeadingLevel="Level2" />
+        <StackPanel x:Name="ScopeSection" Visibility="Collapsed">
+            <TextBlock Text="SHOW"
+                       Style="{StaticResource ShellSectionLabelStyle}"
+                       Margin="12,10,12,6"
+                       AutomationProperties.HeadingLevel="Level2" />
+            <StackPanel x:Name="ScopeList"
+                        Spacing="2"
+                        Margin="6,0,6,8"
+                        XYFocusKeyboardNavigation="Enabled"
+                        AutomationProperties.Name="Locations" />
+        </StackPanel>
+
+        <Border x:Name="FoldersHeader"
+                BorderBrush="{ThemeResource HairlineStrongBrush}"
+                BorderThickness="0">
+            <TextBlock Text="FOLDERS"
+                       Style="{StaticResource ShellSectionLabelStyle}"
+                       Margin="12,10,12,8"
+                       AutomationProperties.HeadingLevel="Level2" />
+        </Border>
 
         <Grid x:Name="FolderDisplayPanel"
               Visibility="Collapsed"
