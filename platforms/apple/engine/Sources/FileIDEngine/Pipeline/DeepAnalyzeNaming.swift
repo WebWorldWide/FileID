@@ -310,10 +310,7 @@ enum DeepAnalyzeNaming {
     /// Request Speech authorization once; true only when fully authorized (a CLI engine
     /// with no TCC grant resolves to denied → the metadata fallback).
     private static func requestSpeechAuthorization() async -> Bool {
-        if SFSpeechRecognizer.authorizationStatus() == .authorized { return true }
-        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-            SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0 == .authorized) }
-        }
+        await SpeechPermission.authorized()
     }
 
     // MARK: - Sound-event classification (Apple SoundAnalysis — the macOS analogue of YAMNet)

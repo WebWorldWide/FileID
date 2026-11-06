@@ -91,7 +91,7 @@ Keep quick library scanning separate from deep analysis. Reuse decoded frames, e
 
 ### M0 — establish baselines and recovery guarantees
 
-Build rights-clear internal-drive fixtures plus an evaluation manifest covering people, event intervals/outcomes, takes, names, and conversion properties. Split by recording session and identity where appropriate so adjacent frames/takes cannot leak across training/calibration and test sets. Include failures, uncertain examples, unsupported formats, and absent events. Do not use or mount Adlon example data.
+Build rights-clear internal-drive fixtures plus an evaluation manifest covering people, event intervals/outcomes, takes, names, and conversion properties. Split by recording session and identity where appropriate so adjacent frames/takes cannot leak across training/calibration and test sets. Include failures, uncertain examples, unsupported formats, and absent events. Adlon may be read (never written) to build these sets, on the owner's instruction of 2026-11-06: copies and labels stay in `~/Library/Developer/FileIDEval`, outside the repo; identities are anonymous ids; only scripts and aggregate numbers are committed (see `shared/scripts/eval/README.md`).
 
 Measure model-backed scan throughput, face extraction and assignment timings, cold/warm People loading, timeline recall, naming preference, export speed/disk usage, and foreground responsiveness on identified hardware. Report distributions and coverage, not just averages or synthetic writer rates. Mark benchmark targets as proposed until measured.
 
