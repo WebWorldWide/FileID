@@ -1,5 +1,10 @@
 # FileID — State
 
+## 2026-11-06 — "All locations" scope (Library, Search & Moments, Chat)
+
+- **Both engines and all three apps** (agent, IPC 1.20): the title-bar folder switcher has a SHOW section — All locations, then each `listRoots` location with its file count and OFFLINE pill. Picking one scopes Library (listing, paging, counts), Search & Moments (a location change re-runs the current search on Mac and WinUI) and Chat; the title bar shows the location's name and the choice persists per app. Optional `rootID` on `CatalogRequest` and `ChatContext`; a file belongs to its most specific location (`/Camera` never matches `/Camera2`), applied before the 100-candidate cut, the capture window and the subject fill; an unknown id is an error. `listRoots` counts files and bytes by the same rule, so every count (switcher, Locations card) equals what its scope shows. Layout in DESIGN_V3_PORT.md "Location scope".
+- Not yet: the GTK Library's scoped page read is a copy of `engine_client.rs`'s query (digest-locked); GTK Search & Moments doesn't re-run a search when the location changes.
+
 ## 2026-11-06 — Common-media File Tools finished: Rust runs the vetted FFmpeg; Video sub-picker in all three apps
 
 - **Owner approved the `commands/video_export.rs` digest refresh.** It gains `run_to_stage` and `probe_json` on the existing launcher helpers (vetted-build check, parent-death signal, Windows job and timeouts unchanged; any argument list without one `-i`, a file-only protocol whitelist and `pipe:1` is refused). The Rust engine runs trim, remux, audio, proxy and rotate through the vetted LGPL/OpenH264 FFmpeg and reports them available only when that runtime is found; Homebrew's GPL build stays refused (unit-tested). A stand-in run showed keyframe trims carry audio back to the keyframe too; verification now allows it for keyframe trims only.
