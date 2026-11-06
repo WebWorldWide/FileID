@@ -566,6 +566,7 @@ button.v3-icon:hover { background-color: alpha(#FFFFFF, 0.045); }
 .v3-pill.tone-ai { border-color: alpha(@fileid_lavender, 0.6); }
 .v3-pill.tone-done { border-color: alpha(@fileid_pink, 0.6); }
 .v3-pill.tone-warning { border-color: alpha(@fileid_warning, 0.6); }
+.tile-offline { background-color: alpha(#000000, 0.55); }
 .v3-pill.tone-danger { border-color: alpha(@fileid_danger, 0.6); }
 entry.v3-field { min-height: 30px; padding: 0 8px; background-color: alpha(#000000, 0.3); border: 1px solid alpha(#FFFFFF, 0.14); border-radius: 6px; font-size: 13.5px; }
 entry.v3-field.h28 { min-height: 28px; }
