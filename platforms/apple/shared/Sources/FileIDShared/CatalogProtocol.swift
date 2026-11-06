@@ -250,6 +250,26 @@ public struct CatalogTakeDecision: Codable, Sendable, Equatable {
     }
 }
 
+public struct CatalogNaming: Codable, Sendable, Equatable {
+    public var style: String
+    public var maxLength: Int
+    public var includePeople: Bool
+    public var includeEvent: Bool
+    public var includeDate: Bool
+    public init(style: String, maxLength: Int, includePeople: Bool = false, includeEvent: Bool = false, includeDate: Bool = false) {
+        self.style = style; self.maxLength = maxLength
+        self.includePeople = includePeople; self.includeEvent = includeEvent; self.includeDate = includeDate
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        style = try c.decode(String.self, forKey: .style)
+        maxLength = try c.decode(Int.self, forKey: .maxLength)
+        includePeople = try c.decodeIfPresent(Bool.self, forKey: .includePeople) ?? false
+        includeEvent = try c.decodeIfPresent(Bool.self, forKey: .includeEvent) ?? false
+        includeDate = try c.decodeIfPresent(Bool.self, forKey: .includeDate) ?? false
+    }
+}
+
 public struct CatalogRequest: Codable, Sendable, Equatable {
     public var requestID: String
     public var action: String
@@ -271,7 +291,8 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
     public var eventID: String?
     public var takeFeedback: CatalogTakeFeedback?
     public var takeDecision: CatalogTakeDecision?
-    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil) {
+    public var naming: CatalogNaming?
+    public init(requestID: String, action: String, query: String? = nil, fileID: Int64? = nil, chapter: CatalogChapter? = nil, chapterID: String? = nil, jobID: String? = nil, fileIDs: [Int64]? = nil, searchMode: String? = nil, queryVector: [Float]? = nil, embeddingModel: String? = nil, limit: Int? = nil, capturedFrom: Double? = nil, capturedTo: Double? = nil, resultScope: String? = nil, timelineMode: String? = nil, event: CatalogEvent? = nil, eventID: String? = nil, takeFeedback: CatalogTakeFeedback? = nil, takeDecision: CatalogTakeDecision? = nil, naming: CatalogNaming? = nil) {
         self.requestID = requestID
         self.action = action
         self.query = query
@@ -292,6 +313,7 @@ public struct CatalogRequest: Codable, Sendable, Equatable {
         self.eventID = eventID
         self.takeFeedback = takeFeedback
         self.takeDecision = takeDecision
+        self.naming = naming
     }
 }
 

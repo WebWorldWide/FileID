@@ -98,6 +98,7 @@ pub fn catalog_request(action: &str) -> CatalogRequest {
         event_id: None,
         take_feedback: None,
         take_decision: None,
+        naming: None,
     }
 }
 

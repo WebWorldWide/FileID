@@ -219,7 +219,8 @@
           "event",
           "eventID",
           "takeFeedback",
-          "takeDecision"
+          "takeDecision",
+          "naming"
         ],
         "fields": {
           "queryVector": {
@@ -685,6 +686,27 @@
           "Eq"
         ],
         "deny_unknown_fields": true
+      },
+      "CatalogNaming": {
+        "derive": [
+          "PartialEq",
+          "Eq"
+        ],
+        "deny_unknown_fields": true,
+        "fields": {
+          "maxLength": {
+            "type": "u32"
+          },
+          "includePeople": {
+            "mode": "skip_false"
+          },
+          "includeEvent": {
+            "mode": "skip_false"
+          },
+          "includeDate": {
+            "mode": "skip_false"
+          }
+        }
       }
     }
   },

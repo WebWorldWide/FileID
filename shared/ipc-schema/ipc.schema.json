@@ -3,7 +3,7 @@
   "$id": "https://fileid.local/ipc.schema.json",
   "title": "FileID IPC protocol",
   "description": "Newline-delimited JSON protocol between the FileID app and FileIDEngine. App→engine sends IPCCommand; engine→app emits IPCEvent. Wire form for the discriminated union is Swift Codable's externally-tagged shape: {\"<variantName>\": <payload>}. Empty payloads are encoded as an empty object: {\"<variantName>\": {}}. Dates are ISO8601 strings. Binary blobs are base64. JSON object key order is platform-dependent and NOT significant; consumers must parse key-order-independently and must not byte-compare serialized messages across platforms.\n\nHand-maintained DTO mirrors: Swift IPCProtocol.swift and CatalogProtocol.swift; Rust ipc/mod.rs and ipc/catalog.rs; C# CommandPayload.cs, EventPayload.cs, and CatalogProtocol.cs. Schema conformance tests enforce wire compatibility; code generation is not implemented.",
-  "version": "1.18.0",
+  "version": "1.19.0",
 
   "$defs": {
     "IPCCommand": {
@@ -1539,8 +1539,10 @@
             "autoTakeGroups",
             "scoreTakes",
             "rankTakesWithGoal",
-            "decideTakeGroup"
-          ]
+            "decideTakeGroup",
+            "proposeNames"
+          ],
+          "description": "proposeNames (schema 1.19.0) previews smart names for fileIDs (1 to 1,000) in the naming style, from stored catalog evidence only, with no model call and no file change. It replies with one hit per known file in request order: kind proposedName, path the current path, text the proposed file name with the original extension (empty when the original name stays) and evidenceID the reason: chapter, proposedName, description, tags or event when text is set; unchanged, budget, reserved, collision or noEvidence when it is empty. A person token appears only for a user-named person confirmed on the file by a current compatible face or a user observation; an event token only from one user-edited event. Names taken in the folder or earlier in the batch get the _2 to _99 bump. Apply with renameFiles."
         },
         "query": {
           "type": "string",
@@ -1576,7 +1578,30 @@
             "moments"
           ],
           "description": "Optional enqueueTimeline depth. Omitted means sampled. Moments requests overlapping frame-sequence analysis; unavailable workers must reject it explicitly. Neither mode proves absence of unobserved events."
-        }
+        },
+        "naming": {"$ref": "#/$defs/CatalogNaming"}
+      }
+    },
+    "CatalogNaming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["style", "maxLength"],
+      "description": "Saved smart-name style for proposeNames. The app stores it; the engine keeps no naming state.",
+      "properties": {
+        "style": {
+          "type": "string",
+          "enum": ["short", "descriptive", "dateFirst"],
+          "description": "short: subject-action, up to three evidence words (sam-baseball-hit). descriptive: up to six. dateFirst: short with the capture date first (2023-07-04 sam-baseball-hit)."
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 120,
+          "description": "Name budget in Unicode scalars, extension and _N bump excluded. Optional tokens and trailing words are dropped to fit; words are never cut. When the first subject word does not fit, the original name stays (reason budget)."
+        },
+        "includePeople": {"type": "boolean", "description": "Add up to two confirmed people's first names. Omitted means false."},
+        "includeEvent": {"type": "boolean", "description": "Add the title of the one user-edited event holding the file. Omitted means false."},
+        "includeDate": {"type": "boolean", "description": "short/descriptive: append the capture date (-2023-07-04). Ignored by dateFirst, which always leads with it. Omitted means false. Files without a capture date get no date."}
       }
     },
     "CatalogResponse": {

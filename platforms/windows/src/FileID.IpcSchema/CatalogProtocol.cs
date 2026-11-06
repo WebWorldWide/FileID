@@ -116,6 +116,13 @@ public sealed record CatalogTakeGoalRanking(
 
 public sealed record CatalogTakeDecision(string GroupKey, string Decision, IReadOnlyList<long> FileIDs);
 
+public sealed record CatalogNaming(
+    string Style,
+    int MaxLength,
+    bool IncludePeople = false,
+    bool IncludeEvent = false,
+    bool IncludeDate = false);
+
 public sealed record CatalogRequest(
     string RequestID,
     string Action,
@@ -136,7 +143,8 @@ public sealed record CatalogRequest(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeFeedback? TakeFeedback = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogTakeDecision? TakeDecision = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedFrom = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedTo = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] double? CapturedTo = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CatalogNaming? Naming = null);
 
 public sealed record CatalogResponse(
     string RequestID,
