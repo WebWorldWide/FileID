@@ -96,9 +96,10 @@ pub enum CommandPayload {
     MarkPersonsDifferent(MarkPersonsDifferentPayload),
     #[serde(rename = "embedImageQuery")]
     EmbedImageQuery(EmbedImageQueryPayload),
-    /// Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration
-    /// keyframe, resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and
-    /// replies with a thumbnailGenerated event.
+    /// Generate a JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe,
+    /// resizes it so the long side is maxPixelSize (192 when omitted; aspect-preserved, never
+    /// upscaled past the source), JPEG- + base64-encodes it, and replies with a thumbnailGenerated
+    /// event.
     #[serde(rename = "generateVideoThumbnail")]
     GenerateVideoThumbnail(GenerateVideoThumbnailPayload),
     #[serde(rename = "restoreFromTrash")]
@@ -208,9 +209,10 @@ pub enum EventPayload {
     /// failure so the app can fall back to its own wipe path.
     #[serde(rename = "libraryWiped")]
     LibraryWiped(Wrap<LibraryWiped>),
-    /// Reply to generateVideoThumbnail. `bytes` is a base64-encoded 192px JPEG (aspect-preserved,
-    /// long side = 192) — a base64 string, NOT a number array. `modifiedAt` is echoed from the
-    /// request so the app can write the bytes under its (path, modifiedAt) cache key.
+    /// Reply to generateVideoThumbnail. `bytes` is a base64-encoded JPEG (aspect-preserved, long
+    /// side = the requested maxPixelSize, 192 by default) — a base64 string, NOT a number array.
+    /// `modifiedAt` is echoed from the request so the app can write the bytes under its (path,
+    /// modifiedAt) cache key.
     #[serde(rename = "thumbnailGenerated")]
     ThumbnailGenerated(Wrap<ThumbnailGenerated>),
     #[serde(rename = "catalogResponse")]
@@ -596,9 +598,9 @@ pub struct EmbedImageQueryPayload {
     pub query_id: String,
 }
 
-/// Generate a 192px JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe,
-/// resizes (long side = 192, aspect-preserved), JPEG- + base64-encodes it, and replies with a
-/// thumbnailGenerated event.
+/// Generate a JPEG thumbnail for a video on demand. Engine extracts a 25%-duration keyframe,
+/// resizes it so the long side is maxPixelSize (192 when omitted; aspect-preserved, never upscaled
+/// past the source), JPEG- + base64-encodes it, and replies with a thumbnailGenerated event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateVideoThumbnailPayload {
@@ -608,6 +610,10 @@ pub struct GenerateVideoThumbnailPayload {
     /// (path, modifiedAt) thumbnail cache. Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_at: Option<f64>,
+    /// Long side of the thumbnail in pixels (schema 1.20.0). Engines clamp it to 64-2048; omitted
+    /// or null means 192. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pixel_size: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

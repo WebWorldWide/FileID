@@ -85,10 +85,12 @@ public final class EngineClient {
         await queryReplies.textEmbedding { send(.embedTextQuery(query: query, queryID: $0)) }
     }
 
-    /// JPEG bytes, or nil when the engine is down or can't decode the video.
-    public func generateVideoThumbnail(path: String, modifiedAt: Double?) async -> Data? {
-        await queryReplies.videoThumbnail(path: path, modifiedAt: modifiedAt) {
-            send(.generateVideoThumbnail(path: path, modifiedAt: modifiedAt))
+    /// JPEG bytes with a `maxPixelSize` long side (clamped to 64–2048, never
+    /// upscaled), or nil when the engine is down or can't decode the video.
+    public func generateVideoThumbnail(path: String, modifiedAt: Double?, maxPixelSize: Int = 192) async -> Data? {
+        let size = min(max(maxPixelSize, 64), 2048)
+        return await queryReplies.videoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: size) {
+            send(.generateVideoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: size))
         }
     }
 

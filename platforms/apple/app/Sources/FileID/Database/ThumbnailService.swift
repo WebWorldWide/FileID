@@ -29,8 +29,9 @@ private let thumbDecodeGate = ThumbnailGate(limit: 6)
 private let engineVideoGate = ThumbnailGate(limit: 4)
 
 /// Asks something outside the app process (the engine) for a video frame:
-/// path and modified time in, JPEG bytes out, nil when it can't answer.
-public typealias VideoThumbnailSource = @MainActor @Sendable (String, Double?) async -> Data?
+/// path, modified time and long side in pixels in, JPEG bytes out, nil when
+/// it can't answer.
+public typealias VideoThumbnailSource = @MainActor @Sendable (String, Double?, Int) async -> Data?
 
 @MainActor
 public final class ThumbnailService {
@@ -78,6 +79,11 @@ public final class ThumbnailService {
             return image
         }
         return nil
+    }
+
+    /// The bucket's pixel size on this display, within what the engine renders.
+    nonisolated static func enginePixelSize(size: CGFloat, scale: CGFloat) -> Int {
+        min(max(Int((size * scale).rounded()), 64), 2048)
     }
 
     nonisolated static func isVideo(_ url: URL) -> Bool {
@@ -188,7 +194,7 @@ public final class ThumbnailService {
     ) async -> Data? {
         if let videoSource {
             await engineVideoGate.acquire()
-            let engineData = await videoSource(url.path, modifiedAt)
+            let engineData = await videoSource(url.path, modifiedAt, enginePixelSize(size: size, scale: scale))
             await engineVideoGate.release()
             if let engineData { return engineData }
         }

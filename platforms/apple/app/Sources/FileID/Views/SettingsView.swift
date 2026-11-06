@@ -493,7 +493,6 @@ extension ModelInstallCard {
             approxBytes: CLIPModelInstaller.approxDownloadBytes,
             removeTitle: "Remove the Search by description model?",
             fallback: "Search goes back to matching names and tags until you download it again.",
-            onRemoved: { CLIPTextEncoder.shared.unload() },
             localZip: { installer.installFromLocalZip($0) })
     }
 

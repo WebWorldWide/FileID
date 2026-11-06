@@ -34,8 +34,8 @@ struct FileIDApp: App {
                 .ignoresSafeArea()
                 .onAppear {
                     let engine = engine
-                    ThumbnailService.shared.videoSource = { path, modifiedAt in
-                        await engine.generateVideoThumbnail(path: path, modifiedAt: modifiedAt)
+                    ThumbnailService.shared.videoSource = { path, modifiedAt, maxPixelSize in
+                        await engine.generateVideoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: maxPixelSize)
                     }
                     startEngineIfNeeded()
                     // The engine embeds search text, so the app only needs the

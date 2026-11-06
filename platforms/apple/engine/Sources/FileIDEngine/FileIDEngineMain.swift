@@ -1055,9 +1055,9 @@ struct FileIDEngineMain {
             Task.detached(priority: .userInitiated) {
                 await sink.emit(await QueryCommands.imageEmbedding(database: database, fileID: fileID, queryID: queryID))
             }
-        case .generateVideoThumbnail(let path, let modifiedAt):
+        case .generateVideoThumbnail(let path, let modifiedAt, let maxPixelSize):
             Task.detached(priority: .utility) {
-                if let event = await QueryCommands.videoThumbnail(path: path, modifiedAt: modifiedAt) {
+                if let event = await QueryCommands.videoThumbnail(path: path, modifiedAt: modifiedAt, maxPixelSize: maxPixelSize) {
                     await sink.emit(event)
                 }
             }

@@ -1,5 +1,6 @@
 //! On-demand video thumbnail handler. Extracts a 25%-duration keyframe via
-//! Media Foundation, resizes it to a 192px (long-side, aspect-preserved) JPEG,
+//! Media Foundation, resizes it to a JPEG whose long side is the requested size
+//! (192px by default, aspect-preserved, never upscaled),
 //! base64-encodes it, and replies with a `thumbnailGenerated` event. On ANY
 //! failure the engine emits nothing — the app keeps its placeholder — and logs
 //! a redacted warning.
@@ -11,8 +12,11 @@ use base64::Engine as _;
 
 use crate::ipc::{sink::Sink, EventPayload, GenerateVideoThumbnailPayload, IpcEvent, ThumbnailGenerated, Wrap};
 
-/// Long side (in px) of the generated thumbnail. Matches the app's cache spec.
+/// Long side (in px) when the request names none. Requests are clamped to
+/// `MIN_LONG_SIDE..=MAX_LONG_SIDE`.
 const THUMB_LONG_SIDE: u32 = 192;
+const MIN_LONG_SIDE: u32 = 64;
+const MAX_LONG_SIDE: u32 = 2048;
 
 /// Cap on concurrent Media Foundation extracts. Each one holds a full-res
 /// decoded frame (up to ~192 MB at MAX_VIDEO_PIXELS) plus a D3D video-decode
@@ -28,9 +32,9 @@ fn extract_semaphore() -> &'static tokio::sync::Semaphore {
 }
 
 pub(crate) async fn handle_generate_video_thumbnail(sink: Sink, payload: GenerateVideoThumbnailPayload) {
-    let GenerateVideoThumbnailPayload { path, modified_at } = payload;
+    let GenerateVideoThumbnailPayload { path, modified_at, max_pixel_size } = payload;
 
-    match build_thumbnail_b64(&path).await {
+    match build_thumbnail_b64(&path, requested_long_side(max_pixel_size)).await {
         Ok(bytes) => {
             sink.send(IpcEvent::now(EventPayload::ThumbnailGenerated(Wrap::new(
                 ThumbnailGenerated { path, modified_at, bytes },
@@ -47,9 +51,13 @@ pub(crate) async fn handle_generate_video_thumbnail(sink: Sink, payload: Generat
     }
 }
 
-/// Decode a video keyframe → resize to 192px long-side JPEG → base64. Runs the
+fn requested_long_side(max_pixel_size: Option<i64>) -> u32 {
+    max_pixel_size.map_or(THUMB_LONG_SIDE, |size| size.clamp(MIN_LONG_SIDE as i64, MAX_LONG_SIDE as i64) as u32)
+}
+
+/// Decode a video keyframe → resize to a `long_side` JPEG → base64. Runs the
 /// blocking keyframe extract on a `spawn_blocking` thread; never panics.
-async fn build_thumbnail_b64(path: &str) -> anyhow::Result<String> {
+async fn build_thumbnail_b64(path: &str, long_side: u32) -> anyhow::Result<String> {
     let _permit = extract_semaphore().acquire().await?;
     let p = std::path::PathBuf::from(path);
     let frame = tokio::task::spawn_blocking(move || crate::shell::video::keyframe_25pct(&p)).await??;
@@ -58,7 +66,7 @@ async fn build_thumbnail_b64(path: &str) -> anyhow::Result<String> {
     let src = image::RgbImage::from_raw(width, height, rgb)
         .ok_or_else(|| anyhow::anyhow!("video frame buffer mismatch"))?;
 
-    let (dst_w, dst_h) = fit_long_side(width, height, THUMB_LONG_SIDE);
+    let (dst_w, dst_h) = fit_long_side(width, height, long_side);
     let resized = image::imageops::resize(&src, dst_w, dst_h, image::imageops::FilterType::Triangle);
 
     let mut buf: Vec<u8> = Vec::new();
@@ -74,6 +82,7 @@ fn fit_long_side(w: u32, h: u32, target: u32) -> (u32, u32) {
     if w == 0 || h == 0 {
         return (1, 1);
     }
+    let target = target.min(w.max(h));
     if w >= h {
         let scale = target as f64 / w as f64;
         (target.max(1), ((h as f64 * scale).round() as u32).max(1))
@@ -85,7 +94,22 @@ fn fit_long_side(w: u32, h: u32, target: u32) -> (u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::fit_long_side;
+    use super::{fit_long_side, requested_long_side};
+
+    #[test]
+    fn requested_size_defaults_and_clamps() {
+        assert_eq!(requested_long_side(None), 192);
+        assert_eq!(requested_long_side(Some(1024)), 1024);
+        assert_eq!(requested_long_side(Some(8)), 64);
+        assert_eq!(requested_long_side(Some(-5)), 64);
+        assert_eq!(requested_long_side(Some(100_000)), 2048);
+    }
+
+    #[test]
+    fn larger_requests_are_honoured_but_never_upscale() {
+        assert_eq!(fit_long_side(1920, 1080, 1024), (1024, 576));
+        assert_eq!(fit_long_side(320, 180, 1024), (320, 180));
+    }
 
     #[test]
     fn landscape_fits_long_side_to_width() {
