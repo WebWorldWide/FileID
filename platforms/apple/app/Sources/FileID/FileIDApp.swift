@@ -33,15 +33,17 @@ struct FileIDApp: App {
                 // traffic-light overlay.
                 .ignoresSafeArea()
                 .onAppear {
-                    startEngineIfNeeded()
-                    // Search falls back to keyword matching if CLIP
-                    // isn't installed yet.
-                    Task.detached {
-                        if CLIPTextEncoder.shared.load() {
-                            await CLIPModelInstaller.shared.markTextEncoderReady()
-                        }
+                    let engine = engine
+                    ThumbnailService.shared.videoSource = { path, modifiedAt in
+                        await engine.generateVideoThumbnail(path: path, modifiedAt: modifiedAt)
                     }
+                    startEngineIfNeeded()
+                    // The engine embeds search text, so the app only needs the
+                    // model on disk; search stays on keywords until it is.
                     CLIPModelInstaller.shared.refreshStatus()
+                    if case .installed = CLIPModelInstaller.shared.status {
+                        CLIPModelInstaller.shared.markTextEncoderReady()
+                    }
                     ModelInstaller.ramPlus.refreshStatus()
                     ModelInstaller.face.refreshStatus()
                     if !welcomeSheetSeen { showWelcome = true }

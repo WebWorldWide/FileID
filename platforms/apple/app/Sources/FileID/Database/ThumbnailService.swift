@@ -1,5 +1,6 @@
 // Lazy thumbnail service for the Library grid, backed by Apple's
-// QuickLookThumbnailing (handles images, videos, PDFs, docs).
+// QuickLookThumbnailing (handles images, videos, PDFs, docs). Video frames
+// come from the engine when it answers; Quick Look is the fallback.
 //
 // Cache + inflight-task bookkeeping live on MainActor; the actual QL
 // request runs nonisolated because QL's completion block fires on its
@@ -23,10 +24,19 @@ import FileIDShared
 /// File-scope global so the nonisolated `generate` can reach it without
 /// crossing the @MainActor service's isolation.
 private let thumbDecodeGate = ThumbnailGate(limit: 6)
+/// The engine decodes two videos at a time; a short queue beside it keeps the
+/// reply timeout from counting time spent waiting behind other videos.
+private let engineVideoGate = ThumbnailGate(limit: 4)
+
+/// Asks something outside the app process (the engine) for a video frame:
+/// path and modified time in, JPEG bytes out, nil when it can't answer.
+public typealias VideoThumbnailSource = @MainActor @Sendable (String, Double?) async -> Data?
 
 @MainActor
 public final class ThumbnailService {
     public static let shared = ThumbnailService()
+
+    public var videoSource: VideoThumbnailSource?
 
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
@@ -53,8 +63,9 @@ public final class ThumbnailService {
         // Capture the screen scale on MainActor BEFORE entering the detached
         // task; NSScreen.main also requires MainActor isolation.
         let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let videoSource = Self.isVideo(url) ? videoSource : nil
         let task = Task<Data?, Never> {
-            await ThumbnailService.generate(url: url, size: size, scale: scale)
+            await ThumbnailService.generate(url: url, size: size, scale: scale, videoSource: videoSource)
         }
         inflight[key as String] = task
         let data = await task.value
@@ -67,6 +78,10 @@ public final class ThumbnailService {
             return image
         }
         return nil
+    }
+
+    nonisolated static func isVideo(_ url: URL) -> Bool {
+        FileTypes.videos.contains(url.pathExtension.lowercased())
     }
 
     /// Requests round up to a few shared sizes so views reuse one cache entry.
@@ -141,22 +156,53 @@ public final class ThumbnailService {
     }
 
     /// Off-main thumbnail production: on-disk cache first (fast, local),
-    /// else a concurrency-gated QL decode of the original whose result is
-    /// written back to disk. `generateBestRepresentation` (single-callback)
-    /// — the plural `generateRepresentations(for:)` calls back per
-    /// representation type and double-resumes the continuation.
-    nonisolated private static func generate(url: URL, size: CGFloat, scale: CGFloat) async -> Data? {
+    /// else a concurrency-gated decode of the original whose result is
+    /// written back to disk.
+    nonisolated private static func generate(url: URL, size: CGFloat, scale: CGFloat,
+                                             videoSource: VideoThumbnailSource?) async -> Data? {
         // File identity for invalidation — a stat is cheap next to a remote
         // decode, and lets an edited / replaced file miss its stale thumb.
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970
+        let mtime = modified ?? 0
         let bytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
         let diskURL = ThumbnailDiskCache.url(path: url.path, mtime: mtime,
                                              bytes: bytes, size: size, scale: scale)
         if let cachedData = ThumbnailDiskCache.load(diskURL) { return cachedData }
 
+        let jpegData = await render(url: url, size: size, scale: scale, modifiedAt: modified,
+                                    videoSource: videoSource, quickLook: quickLookJPEG)
+        if let jpegData {
+            if (try? ReadOnlyLocations.requireWritable(diskURL)) != nil {
+                try? jpegData.write(to: diskURL, options: .atomic)
+            }
+        }
+        return jpegData
+    }
+
+    /// The engine's frame when it answers for a video, else Quick Look.
+    nonisolated static func render(
+        url: URL, size: CGFloat, scale: CGFloat, modifiedAt: Double?,
+        videoSource: VideoThumbnailSource?,
+        quickLook: @Sendable (URL, CGFloat, CGFloat) async -> Data?
+    ) async -> Data? {
+        if let videoSource {
+            await engineVideoGate.acquire()
+            let engineData = await videoSource(url.path, modifiedAt)
+            await engineVideoGate.release()
+            if let engineData { return engineData }
+        }
         await thumbDecodeGate.acquire()
-        let jpegData: Data? = await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+        let jpegData = await quickLook(url, size, scale)
+        await thumbDecodeGate.release()
+        return jpegData
+    }
+
+    /// `generateBestRepresentation` (single-callback) — the plural
+    /// `generateRepresentations(for:)` calls back per representation type
+    /// and double-resumes the continuation.
+    nonisolated static func quickLookJPEG(url: URL, size: CGFloat, scale: CGFloat) async -> Data? {
+        await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             let req = QLThumbnailGenerator.Request(
                 fileAt: url,
                 size: CGSize(width: size, height: size),
@@ -176,13 +222,6 @@ public final class ThumbnailService {
                 cont.resume(returning: jpeg)
             }
         }
-        await thumbDecodeGate.release()
-        if let jpegData {
-            if (try? ReadOnlyLocations.requireWritable(diskURL)) != nil {
-                try? jpegData.write(to: diskURL, options: .atomic)
-            }
-        }
-        return jpegData
     }
 }
 

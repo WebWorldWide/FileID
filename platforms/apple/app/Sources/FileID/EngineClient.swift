@@ -73,6 +73,25 @@ public final class EngineClient {
         catalogWaiters.removeValue(forKey: id)?.resume(returning: response)
     }
 
+    private let queryReplies = EngineQueryReplies()
+
+    /// Nil when the engine is down, fails, restarts or doesn't answer in time.
+    public func findMergeSuggestions() async -> [MergeSuggestionPair]? {
+        await queryReplies.mergeSuggestions { send(.findMergeSuggestions) }
+    }
+
+    /// Nil when the engine has no CLIP text encoder or can't answer.
+    public func embedTextQuery(_ query: String) async -> [Float]? {
+        await queryReplies.textEmbedding { send(.embedTextQuery(query: query, queryID: $0)) }
+    }
+
+    /// JPEG bytes, or nil when the engine is down or can't decode the video.
+    public func generateVideoThumbnail(path: String, modifiedAt: Double?) async -> Data? {
+        await queryReplies.videoThumbnail(path: path, modifiedAt: modifiedAt) {
+            send(.generateVideoThumbnail(path: path, modifiedAt: modifiedAt))
+        }
+    }
+
     func applyCatalogJobsSnapshot(_ jobs: [CatalogJob]) { catalogJobs = jobs }
     public private(set) var lastBatch: BatchSummary?
     public private(set) var lastFaceClustering: FaceClusteringResult?
@@ -655,6 +674,7 @@ public final class EngineClient {
                 }
             }
         case .error(let e):
+            queryReplies.deliver(e)
             // Engine startup capability warning: not a real error, just a
             // signal that Deep Analyze can't run on this build.
             if e.kind == "deep_analyze_unavailable" {
@@ -809,12 +829,15 @@ public final class EngineClient {
             } else {
                 benchmarkMessage = (result.modelKind, result.message ?? "The benchmark didn't finish.")
             }
+        case .clipTextEmbedding(let reply):
+            queryReplies.deliver(reply)
+        case .mergeSuggestions(let reply):
+            queryReplies.deliver(reply)
+        case .thumbnailGenerated(let reply):
+            queryReplies.deliver(reply)
         case .healthCheckResult,
-             .clipTextEmbedding,
-             .mergeSuggestions,
              .hardwareReprobed,
-             .libraryWiped,
-             .thumbnailGenerated:
+             .libraryWiped:
             break
         }
     }
@@ -833,6 +856,7 @@ public final class EngineClient {
         deepAnalyzeStarting = nil
         deepAnalyzeProgress = nil
         faceClusteringInFlight = false
+        queryReplies.abandonAll()
         // A dead engine emits no terminal event, so release both App-Nap
         // tokens here — this is the crash/exit leg that keeps the begin/end
         // pairs balanced. Both helpers no-op when their token isn't held.
