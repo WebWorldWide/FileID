@@ -4,6 +4,9 @@ using FileID.Services;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.Media.Core;
+using Windows.Media.Playback;
+using Windows.Storage;
 
 namespace FileID.Views.Workbenches;
 
@@ -30,6 +33,23 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     private string? _destinationPath;
     private bool _cancelAvailable;
     private int _capabilitiesGeneration;
+    private IReadOnlyList<ToolCapability> _capabilities = Array.Empty<ToolCapability>();
+    private readonly MediaToolChoice _media = new();
+    private readonly ComboBox _tool = new() { MinWidth = 160 };
+    private readonly ComboBox _container = new() { MinWidth = 120 };
+    private readonly TextBlock _fixedFormat = Meta("");
+    private readonly NumberBox _trimStart = new() { Minimum = 0, Maximum = 21600, SmallChange = 0.1, Width = 120 };
+    private readonly NumberBox _trimEnd = new() { Minimum = 0, Maximum = 21600, SmallChange = 0.1, Width = 120 };
+    private readonly ComboBox _trimMode = new() { MinWidth = 140 };
+    private readonly ComboBox _proxySide = new() { MinWidth = 120 };
+    private readonly ComboBox _rotation = new() { MinWidth = 140 };
+    private readonly TextBlock _mediaNote = Meta("");
+    private readonly MediaPlayerElement _playerView = new() { Height = 200, AreTransportControlsEnabled = true, Visibility = Visibility.Collapsed };
+    private readonly List<(FrameworkElement Key, FrameworkElement Value, Func<bool> Visible)> _rows = new();
+    private MediaPlayer? _player;
+    private string? _playerPath;
+    private int _playerRevision;
+    private bool _syncingMedia;
 
     public ToolsWorkbench(IntPtr hwnd) : base("File Tools")
     {
@@ -48,15 +68,37 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         var output = new Grid { ColumnSpacing = 12, RowSpacing = 10 };
         output.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(92) });
         output.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        AddOutputRow(output, 0, "Format", _format);
+        foreach (var container in MediaToolChoice.Containers) _container.Items.Add(new ComboBoxItem { Content = container.ToUpperInvariant(), Tag = container });
+        _trimMode.ItemsSource = new[] { "Keyframe", "Exact" };
+        _trimMode.SelectedIndex = 0;
+        _proxySide.ItemsSource = MediaToolChoice.ProxySides.Select(side => $"{side} px").ToArray();
+        _proxySide.SelectedIndex = 0;
+        _rotation.ItemsSource = MediaToolChoice.Rotations.Select(rotation => rotation.Label).ToArray();
+        _rotation.SelectedIndex = 0;
+        _trimStart.NumberFormatter = TrimFormatter();
+        _trimEnd.NumberFormatter = TrimFormatter();
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_trimStart, "Start time in seconds");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_trimEnd, "End time in seconds");
+        var startHere = Ghost(ActionButton("Set from playhead", ct => SetFromPlayheadAsync(_trimStart)));
+        var endHere = Ghost(ActionButton("Set from playhead", ct => SetFromPlayheadAsync(_trimEnd)));
+        ToolTipService.SetToolTip(startHere, "Use the player's current time");
+        ToolTipService.SetToolTip(endHere, "Use the player's current time");
+        var row = 0;
+        AddOutputRow(output, row++, "Tool", _tool, () => Capability?.Id == "video");
+        AddOutputRow(output, row++, "Format", Row(_format, _container, _fixedFormat), () => true);
         _dimension.Header = null;
         _dimension.Width = 120;
-        AddOutputRow(output, 1, "Longest side", Row(_dimension, Meta("px, up to 8192")));
+        AddOutputRow(output, row++, "Longest side", Row(_dimension, Meta("px, up to 8192")), () => !IsMediaTool);
+        AddOutputRow(output, row++, "Start", Row(_trimStart, Meta("s"), startHere), () => MediaTool == "trim");
+        AddOutputRow(output, row++, "End", Row(_trimEnd, Meta("s"), endHere), () => MediaTool == "trim");
+        AddOutputRow(output, row++, "Cut", _trimMode, () => MediaTool == "trim");
+        AddOutputRow(output, row++, "Size", _proxySide, () => MediaTool == "proxy");
+        AddOutputRow(output, row++, "Turn", _rotation, () => MediaTool == "rotate");
         var chooseFolder = Secondary(ActionButton("Choose…", ChooseDestinationAsync));
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chooseFolder, "Choose a folder to save to");
         ToolTipService.SetToolTip(chooseFolder, "Choose a folder to save to");
-        AddOutputRow(output, 2, "Save to", Row(_destination, chooseFolder));
-        Inputs.Children.Add(V3Panel("02 · Output", null, output, _detail));
+        AddOutputRow(output, row, "Save to", Row(_destination, chooseFolder), () => true);
+        Inputs.Children.Add(V3Panel("02 · Output", null, output, _mediaNote, _detail));
 
         _preview = Secondary(ActionButton("Preview", PreviewAsync));
         _execute = Primary(ActionButton("Export…", ExecuteAsync));
@@ -64,6 +106,7 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
 
         var previewPane = new StackPanel { Spacing = 10, Padding = new Thickness(14, 12, 14, 14) };
         previewPane.Children.Add(SectionLabel("03 · Preview"));
+        previewPane.Children.Add(_playerView);
         _outputs.Height = 300;
         previewPane.Children.Add(_outputs);
         previewPane.Children.Add(_executionStatus);
@@ -75,20 +118,152 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         previewPane.Children.Add(Meta("Only tools this PC can run are offered. Photo exports remove location and camera details. Chapter files list chapters, not speech subtitles. Video exports don't stabilize, upscale or track subjects. Check reframed videos before sharing them. If an export seems stuck, press Show last export before trying again."));
         UseSidePane(new ScrollViewer { Content = previewPane, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }, 380, paneOnLeft: false);
         _cancel = ControlButton("Cancel current export", CancelAsync);
-        _files.SelectionChanged += (_, _) => Invalidate();
+        _files.SelectionChanged += (_, _) => { _media.SettleContainer(SelectedPaths); SyncMediaControls(); Invalidate(); };
         _kind.SelectionChanged += (_, _) =>
         {
             _format.ItemsSource = Capability?.OutputFormats;
             _format.SelectedIndex = Capability?.OutputFormats.Count > 0 ? 0 : -1;
-            _detail.Text = PlainDetail(Capability);
-            ToolTipService.SetToolTip(_detail, Capability?.Detail);
+            SyncMediaControls();
             Invalidate();
         };
+        _tool.SelectionChanged += (_, _) =>
+        {
+            if (_syncingMedia || _tool.SelectedItem is not ToolItem item) return;
+            _media.Adopt(item.Id, SelectedPaths);
+            SyncMediaControls();
+            Invalidate();
+        };
+        _container.SelectionChanged += (_, _) =>
+        {
+            if (_syncingMedia || _container.SelectedItem is not ComboBoxItem { Tag: string container }) return;
+            _media.Container = container;
+            Invalidate();
+        };
+        _trimMode.SelectionChanged += (_, _) =>
+        {
+            if (_syncingMedia) return;
+            _media.TrimExact = _trimMode.SelectedIndex == 1;
+            _media.SettleContainer(SelectedPaths);
+            SyncMediaControls();
+            Invalidate();
+        };
+        _trimStart.ValueChanged += (_, _) => { if (!_syncingMedia && double.IsFinite(_trimStart.Value)) { _media.TrimStart = _trimStart.Value; Invalidate(); } };
+        _trimEnd.ValueChanged += (_, _) => { if (!_syncingMedia && double.IsFinite(_trimEnd.Value)) { _media.TrimEnd = _trimEnd.Value; Invalidate(); } };
+        _proxySide.SelectionChanged += (_, _) => { if (!_syncingMedia && _proxySide.SelectedIndex >= 0) { _media.ProxySide = MediaToolChoice.ProxySides[_proxySide.SelectedIndex]; Invalidate(); } };
+        _rotation.SelectionChanged += (_, _) => { if (!_syncingMedia && _rotation.SelectedIndex >= 0) { _media.Rotation = MediaToolChoice.Rotations[_rotation.SelectedIndex].Degrees; Invalidate(); } };
         _format.SelectionChanged += (_, _) => Invalidate();
         _dimension.ValueChanged += (_, _) => Invalidate();
+        SyncMediaControls();
         UpdateControls();
     }
-    private static void AddOutputRow(Grid grid, int row, string label, FrameworkElement value)
+
+    private static Windows.Globalization.NumberFormatting.DecimalFormatter TrimFormatter() => new()
+    {
+        FractionDigits = 2,
+        IntegerDigits = 1,
+        IsGrouped = false,
+        NumberRounder = new Windows.Globalization.NumberFormatting.IncrementNumberRounder { Increment = 0.01 },
+    };
+
+    private string? MediaTool => Capability?.Id == "video" && !_media.IsExport ? _media.Tool : null;
+    private bool IsMediaTool => MediaTool is not null;
+    private IReadOnlyList<string> SelectedPaths => _files.SelectedItems.OfType<HitItem>().Select(item => item.Hit.Path).ToArray();
+    private ToolCapability? RecipeCapability => MediaTool is { } tool ? _capabilities.FirstOrDefault(capability => capability.Id == tool) : Capability;
+
+    /// <summary>Shows the rows for the chosen kind and video tool and greys out containers the recipe cannot take.</summary>
+    private void SyncMediaControls()
+    {
+        _syncingMedia = true;
+        try
+        {
+            foreach (var (key, value, visible) in _rows)
+            {
+                var visibility = visible() ? Visibility.Visible : Visibility.Collapsed;
+                key.Visibility = visibility;
+                value.Visibility = visibility;
+            }
+            var tool = MediaTool;
+            _format.Visibility = tool is null ? Visibility.Visible : Visibility.Collapsed;
+            _container.Visibility = tool is "trim" or "remux" or "rotate" ? Visibility.Visible : Visibility.Collapsed;
+            _fixedFormat.Visibility = tool is "audio" or "proxy" ? Visibility.Visible : Visibility.Collapsed;
+            _fixedFormat.Text = tool == "audio" ? "M4A · AAC" : "MP4 · H.264";
+            var disabled = _media.DisabledContainers(SelectedPaths);
+            foreach (var item in _container.Items.OfType<ComboBoxItem>())
+            {
+                item.IsEnabled = item.Tag is string container && !disabled.Contains(container);
+                if (item.Tag as string == _media.Container) _container.SelectedItem = item;
+            }
+            _trimMode.SelectedIndex = _media.TrimExact ? 1 : 0;
+            _mediaNote.Text = MediaNote(tool, _media.TrimExact);
+            _mediaNote.Visibility = tool is null ? Visibility.Collapsed : Visibility.Visible;
+            var capability = RecipeCapability;
+            _detail.Text = PlainDetail(capability);
+            ToolTipService.SetToolTip(_detail, capability?.Detail);
+        }
+        finally
+        {
+            _syncingMedia = false;
+        }
+        SyncPlayer();
+    }
+
+    private static string MediaNote(string? tool, bool exact) => tool switch
+    {
+        "trim" when exact => "Re-encodes to an H.264 MP4 so the cut lands on the exact frame. HDR videos are refused.",
+        "trim" => "Copies the video without re-encoding. The new file may start a little early, at the keyframe before your start time.",
+        "remux" => "Moves the video and sound into the other container without re-encoding. The container a file already has is greyed out.",
+        "audio" => "Saves the soundtrack as AAC in an M4A file. Videos without sound are refused.",
+        "proxy" => "A small H.264 copy for quick previews, linked to its original. Smaller videos aren't enlarged.",
+        "rotate" => "Changes which way up the picture is shown, without re-encoding it.",
+        _ => "",
+    };
+
+    /// <summary>Trim plays the first ticked file so its start and end can come from the playhead.</summary>
+    private void SyncPlayer()
+    {
+        var path = MediaTool == "trim" && SelectedPaths is { Count: > 0 } paths ? paths[0] : null;
+        if (path == _playerPath) return;
+        _playerPath = path;
+        var revision = ++_playerRevision;
+        var previous = _player;
+        _player = null;
+        _playerView.SetMediaPlayer(null);
+        previous?.Dispose();
+        _playerView.Visibility = Visibility.Collapsed;
+        if (path is null || !File.Exists(path)) return;
+        Run(async ct =>
+        {
+            var file = await StorageFile.GetFileFromPathAsync(path);
+            await UI(() =>
+            {
+                if (revision != _playerRevision) return;
+                var player = new MediaPlayer { AutoPlay = false };
+                player.MediaOpened += (_, _) => DebugLog.SafeRun("ToolsWorkbench.MediaOpened", () => DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (revision != _playerRevision) return;
+                    var seconds = player.PlaybackSession.NaturalDuration.TotalSeconds;
+                    if (seconds > 0 && _media.TrimEnd <= _media.TrimStart) _trimEnd.Value = Math.Floor(seconds * 100) / 100;
+                }));
+                player.MediaFailed += (_, _) => DebugLog.SafeRun("ToolsWorkbench.MediaFailed", () => DispatcherQueue.TryEnqueue(() =>
+                {
+                    if (revision == _playerRevision) Status.Text = "Windows cannot play this video here. Type the start and end times instead.";
+                }));
+                _player = player;
+                _playerView.SetMediaPlayer(player);
+                _playerView.Visibility = Visibility.Visible;
+                player.Source = MediaSource.CreateFromStorageFile(file);
+            }, ct);
+        });
+    }
+
+    private Task SetFromPlayheadAsync(NumberBox field)
+    {
+        if (_player is not { } player) throw new InvalidOperationException("Tick a video that can play here first.");
+        field.Value = Math.Round(player.PlaybackSession.Position.TotalSeconds * 100) / 100;
+        return Task.CompletedTask;
+    }
+
+    private void AddOutputRow(Grid grid, int row, string label, FrameworkElement value, Func<bool> visible)
     {
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var key = Meta(label);
@@ -101,6 +276,7 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         Grid.SetColumn(value, 1);
         grid.Children.Add(key);
         grid.Children.Add(value);
+        _rows.Add((key, value, visible));
     }
 
     private static string PlainDetail(ToolCapability? capability) => capability switch
@@ -110,6 +286,11 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         { Id: "video" } => "Makes a new MP4 at the size and shape you choose. Your original video stays as it is.",
         { Id: "chapters" } => "Saves a video's chapters as a file other apps can read.",
         { Id: "photo" } => "Makes a new copy at the format and size you choose. Location and camera details are removed, and your original stays as it is.",
+        { Id: "trim" } => "Keeps the part between the start and end times as a new file. Your original video stays as it is.",
+        { Id: "remux" } => "Puts the same video and sound in a different container. Your original video stays as it is.",
+        { Id: "audio" } => "Saves the soundtrack as a new audio file. Your original video stays as it is.",
+        { Id: "proxy" } => "Makes a small preview copy linked to the original. Your original video stays as it is.",
+        { Id: "rotate" } => "Saves a copy that plays the other way up. Your original video stays as it is.",
         _ => capability.Detail,
     };
 
@@ -134,7 +315,11 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
             if (_execution.NeedsRecovery) await SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "history"), ct);
         });
     }
-    protected override void OnClosed() => Engine.PropertyChanged -= OnEngineChanged;
+    protected override void OnClosed()
+    {
+        Engine.PropertyChanged -= OnEngineChanged;
+        _player?.Pause();
+    }
 
     private void OnToolFilesRequested(object? sender, EventArgs e)
         => DebugLog.SafeRun("ToolsWorkbench.OnToolFilesRequested", () => DispatcherQueue.TryEnqueue(UseToolFiles));
@@ -179,9 +364,10 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     {
         get
         {
+            if (_files.SelectedItems.Count is < 1 or > 100 || _destinationPath is null) return false;
+            if (IsMediaTool) return _media.Recipe() is { } recipe && ToolPreviewState.Supports(RecipeCapability, recipe.Format, recipe.MaxDimension);
             var dimension = _dimension.Value;
-            return _files.SelectedItems.Count is >= 1 and <= 100 && _destinationPath is not null
-                && double.IsFinite(dimension) && dimension == Math.Truncate(dimension) && dimension is >= 1 and <= 8192
+            return double.IsFinite(dimension) && dimension == Math.Truncate(dimension) && dimension is >= 1 and <= 8192
                 && _format.SelectedItem is string format && ToolPreviewState.Supports(Capability, format, (uint)dimension);
         }
     }
@@ -245,11 +431,13 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     private Task PreviewAsync(CancellationToken ct)
     {
         UpdateControls();
-        if (_execution.IsActive || _execution.NeedsRecovery || !CanPreview || Capability is not { } capability || _format.SelectedItem is not string format)
+        if (_execution.IsActive || _execution.NeedsRecovery || !CanPreview || Capability is not { } capability)
             throw new InvalidOperationException("Tick at least one file, choose a folder to save to, and pick a format and size this tool supports.");
+        var recipe = IsMediaTool ? _media.Recipe()
+            : _format.SelectedItem is string format ? new ToolRecipe(capability.Id, format, (uint)_dimension.Value) : null;
+        if (recipe is null) throw new InvalidOperationException("Pick a format this tool supports.");
         var ids = _files.SelectedItems.Cast<HitItem>().Select(item => item.Hit.FileID).Distinct().Order().ToArray();
-        return SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "preview", ids, _destinationPath,
-            new ToolRecipe(capability.Id, format, (uint)_dimension.Value)), ct);
+        return SendAsync(new ToolRequest(Guid.NewGuid().ToString(), "preview", ids, _destinationPath, recipe), ct);
     }
     private async Task ExecuteAsync(CancellationToken ct)
     {
@@ -308,9 +496,17 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
             {
                 _cancelAvailable = response.Status == "ok" && ToolExecutionState.SupportsCancellation(response.Capabilities);
                 _capabilitiesGeneration = generation;
-                var recipes = response.Capabilities.Where(capability => capability.Id != "cancel").Select(capability => new CapabilityItem(capability)).ToArray();
+                _capabilities = response.Capabilities;
+                var recipes = response.Capabilities.Where(capability => capability.Id != "cancel" && !MediaToolChoice.IsMediaTool(capability.Id)).Select(capability => new CapabilityItem(capability)).ToArray();
                 _kind.ItemsSource = recipes;
                 _kind.SelectedIndex = recipes.Length > 0 ? 0 : -1;
+                var tools = MediaToolChoice.Available(response.Capabilities).Select(tool => new ToolItem(tool.Id, tool.Label)).ToArray();
+                if (!tools.Any(tool => tool.Id == _media.Tool)) _media.Adopt("export", SelectedPaths);
+                _syncingMedia = true;
+                _tool.ItemsSource = tools;
+                _tool.SelectedItem = tools.FirstOrDefault(tool => tool.Id == _media.Tool);
+                _syncingMedia = false;
+                SyncMediaControls();
                 Invalidate();
             }
             else
@@ -328,6 +524,11 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
             UpdateControls();
         }, ct);
     }
+    private sealed record ToolItem(string Id, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
     private sealed record CapabilityItem(ToolCapability Capability)
     {
         public override string ToString() => Name + (Capability.Available ? "" : " · not available");
