@@ -33,6 +33,7 @@ struct CatalogWorkbench: View {
     @State private var refreshedTimelineJobs: Set<String> = []
     @State private var timelineMode = "sampled"
     @State private var showingTakes = false
+    @State private var captureWindow = CaptureWindow()
     var inline = false
 
     var body: some View {
@@ -106,6 +107,8 @@ struct CatalogWorkbench: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 DSTextField(placeholder: "Search files and videos", text: $query, icon: "magnifyingglass", onSubmit: search)
+                CaptureDateFilter(window: $captureWindow)
+                    .onChange(of: captureWindow) { _, _ in search() }
                 HStack(spacing: 8) {
                     if pendingAction == "search" {
                         IndeterminateBar().frame(width: 80)
@@ -136,7 +139,7 @@ struct CatalogWorkbench: View {
     }
 
     private var resultsMeta: String {
-        if hits.isEmpty { return query.isEmpty ? "Type and press Return" : "No results" }
+        if hits.isEmpty { return query.isEmpty ? "Type and press Return" : (captureWindow.isActive ? "No results in these dates" : "No results") }
         return "\(hits.count.formatted()) result\(hits.count == 1 ? "" : "s")"
     }
 
@@ -483,7 +486,7 @@ struct CatalogWorkbench: View {
 
     private func search() {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        send(CatalogRequest(requestID: UUID().uuidString, action: "search", query: query))
+        send(captureWindow.searchRequest(id: UUID().uuidString, query: query))
     }
 
     private func send(_ request: CatalogRequest) {
@@ -517,7 +520,11 @@ struct CatalogWorkbench: View {
             resultRows = hits.enumerated().map { MomentResultRow(index: $0.offset, hit: $0.element) }
             hitFileCount = Set(hits.map(\.fileID)).count
             selectedIndex = nil
-            if hits.isEmpty { message = "No matches. Try another word, or describe more files so there is more to search." }
+            if hits.isEmpty {
+                message = captureWindow.isActive
+                    ? "No matches taken in these dates. Try a wider range, or clear the dates."
+                    : "No matches. Try another word, or describe more files so there is more to search."
+            }
         case "jobs":
             engine.applyCatalogJobsSnapshot(response.jobs)
         case "detail", "saveChapter", "undoChapterEdit":

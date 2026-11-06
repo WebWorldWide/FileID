@@ -36,7 +36,7 @@ fn subtree_bounds(root: &str) -> (String, String, String) {
     (trimmed.to_owned(), format!("{trimmed}{separator}"), format!("{trimmed}{next}"))
 }
 
-pub(crate) fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
+pub fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
     let mut statement = conn.prepare("SELECT id,path,display,kind,enabled,last_scan_at,last_status FROM library_roots ORDER BY added_at,id")?;
     let rows = statement
         .query_map([], |row| {

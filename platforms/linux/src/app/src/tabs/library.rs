@@ -13,7 +13,7 @@
 // scan, then does a final reload on completion.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,8 @@ use gtk::glib::clone;
 use gtk::glib::BoxedAnyObject;
 
 use super::library_pane::SelectedPane;
+use super::library_selection::{self as picking, PaneView};
+use super::offline_roots::{self, OfflineRoots};
 use super::util::{fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{
@@ -44,9 +46,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     let debounce_gen = Rc::new(Cell::new(0u64));
 
     let model = gio::ListStore::new::<BoxedAnyObject>();
-    let selection = gtk::SingleSelection::new(Some(model.clone()));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
+    let selection = gtk::MultiSelection::new(Some(model.clone()));
+    let offline = Rc::new(RefCell::new(OfflineRoots::default()));
 
     // ── Grid factory ─────────────────────────────────────────────────────────
     let factory = gtk::SignalListItemFactory::new();
@@ -58,14 +59,17 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     factory.connect_bind(clone!(
         #[strong]
         engine,
+        #[strong]
+        offline,
         move |_, list_item| {
             if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
-                bind_tile(&engine, li);
+                bind_tile(&engine, li, &offline.borrow());
             }
         }
     ));
     factory.connect_unbind(|_, list_item| {
         if let Some(li) = list_item.downcast_ref::<gtk::ListItem>() {
+            BOUND_TILES.with_borrow_mut(|tiles| tiles.remove(&tile_token_key(li)));
             cancel_tile_token(li);
             if let Some(tile) = li.child() {
                 clear_tile(&tile);
@@ -94,8 +98,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
-    // Single click selects and fills the Selected pane; double-click/Enter
-    // opens the preview; Esc clears the selection.
+    // Click selects one file and fills the Selected pane, Ctrl+click toggles,
+    // Shift+click and Shift+arrows extend; double-click/Enter opens the
+    // preview; Esc clears the selection.
     let restoring = Rc::new(Cell::new(false));
     let pane = {
         let on_preview: Rc<dyn Fn()> = Rc::new(clone!(
@@ -110,10 +115,9 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
             #[weak]
             grid,
             move || {
-                let pos = selection.selected();
-                if pos == gtk::INVALID_LIST_POSITION {
+                let [(pos, _)] = selected_rows(&selection)[..] else {
                     return;
-                }
+                };
                 let query = (search_text.borrow().clone(), kind_filter.borrow().clone());
                 open_preview(&engine, &grid, snapshot_rows(&selection), pos as usize, query);
             }
@@ -121,22 +125,20 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         let on_close: Rc<dyn Fn()> = Rc::new(clone!(
             #[strong]
             selection,
-            move || selection.set_selected(gtk::INVALID_LIST_POSITION)
+            move || {
+                selection.unselect_all();
+            }
         ));
-        SelectedPane::new(engine.clone(), on_preview, on_close)
+        SelectedPane::new(engine.clone(), offline.clone(), on_preview, on_close)
     };
-    selection.connect_selected_notify(clone!(
+    selection.connect_selection_changed(clone!(
         #[strong]
         pane,
         #[strong]
         restoring,
-        move |selection| {
-            if restoring.get() {
-                return;
-            }
-            match selection.selected_item().and_downcast::<BoxedAnyObject>() {
-                Some(object) => pane.show(object.borrow::<FileRow>().clone()),
-                None => pane.hide(),
+        move |selection, _, _| {
+            if !restoring.get() {
+                show_selection(selection, &pane, false);
             }
         }
     ));
@@ -145,8 +147,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         #[strong]
         selection,
         move |_, key, _, _| {
-            if key == gtk::gdk::Key::Escape && selection.selected() != gtk::INVALID_LIST_POSITION {
-                selection.set_selected(gtk::INVALID_LIST_POSITION);
+            if key == gtk::gdk::Key::Escape && selection.selection().size() > 0 {
+                selection.unselect_all();
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
@@ -267,6 +269,39 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         }
     ));
 
+    let refresh_offline: Rc<dyn Fn()> = {
+        let generation = Rc::new(Cell::new(0u64));
+        let offline = offline.clone();
+        let pane = Rc::downgrade(&pane);
+        Rc::new(move || {
+            let current = generation.get().wrapping_add(1);
+            generation.set(current);
+            let rx = offline_roots::read();
+            let (generation, offline, pane) = (generation.clone(), offline.clone(), pane.clone());
+            glib::MainContext::default().spawn_local(async move {
+                let Ok(roots) = rx.recv().await else { return };
+                if generation.get() != current || *offline.borrow() == roots {
+                    return;
+                }
+                offline.replace(roots);
+                refresh_offline_badges(&offline.borrow());
+                if let Some(pane) = pane.upgrade() {
+                    pane.apply_offline();
+                }
+            });
+        })
+    };
+    let volumes = gio::VolumeMonitor::get();
+    for signal in ["mount-added", "mount-removed"] {
+        let refresh = Rc::downgrade(&refresh_offline);
+        volumes.connect_local(signal, false, move |_| {
+            if let Some(refresh) = refresh.upgrade() {
+                refresh();
+            }
+            None
+        });
+    }
+
     // Live-scan reloads: throttle on batches, final reload on completion.
     let ev_rx = engine.borrow_mut().subscribe();
     glib::MainContext::default().spawn_local(clone!(
@@ -274,6 +309,8 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
         reload,
         #[strong]
         pane,
+        #[strong]
+        refresh_offline,
         async move {
             let mut last = Instant::now() - Duration::from_secs(10);
             while let Ok(ev) = ev_rx.recv().await {
@@ -287,6 +324,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
                     EngineEvent::ScanComplete(_) => {
                         reload();
                         refresh_pane_details(&pane);
+                        refresh_offline();
                     }
                     _ => {}
                 }
@@ -296,6 +334,7 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
 
     // Initial fill.
     reload();
+    refresh_offline();
 
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -315,7 +354,10 @@ pub fn build(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget {
     // open, and renames/deletes done from other tabs must show on return.
     {
         let reload = reload.clone();
-        root.connect_map(move |_| reload());
+        root.connect_map(move |_| {
+            reload();
+            refresh_offline();
+        });
     }
     root.upcast()
 }
@@ -373,7 +415,7 @@ struct ReloadCtx {
     loading_more: Rc<Cell<bool>>,
     total: Rc<Cell<i64>>,
     last_query: RefCell<Option<(String, Option<String>)>>,
-    selection: gtk::SingleSelection,
+    selection: gtk::MultiSelection,
     pane: Rc<SelectedPane>,
     restoring: Rc<Cell<bool>>,
 }
@@ -427,18 +469,18 @@ fn run_reload(ctx: &Rc<ReloadCtx>) {
         };
         // One items-changed signal for the whole page instead of one per row.
         let items: Vec<BoxedAnyObject> = rows.iter().cloned().map(BoxedAnyObject::new).collect();
-        // Keep the selection (and the pane) on the same file across a refresh.
-        let selected_id = ctx.pane.current_id();
+        // Keep the same files selected (and the pane on them) across a refresh.
+        let selected: HashSet<i64> = selected_rows(&ctx.selection).into_iter().map(|(_, row)| row.id).collect();
         ctx.restoring.set(true);
         ctx.model.splice(0, ctx.model.n_items(), &items);
-        let position = selected_id.and_then(|id| rows.iter().position(|row| row.id == id));
-        ctx.selection
-            .set_selected(position.map_or(gtk::INVALID_LIST_POSITION, |position| position as u32));
-        ctx.restoring.set(false);
-        match position {
-            Some(position) => ctx.pane.refresh(rows[position].clone(), false),
-            None => ctx.pane.hide(),
+        let positions = picking::restore(&selected, rows.iter().map(|row| row.id));
+        let chosen = gtk::Bitset::new_empty();
+        for position in &positions {
+            chosen.add(*position);
         }
+        ctx.selection.set_selection(&chosen, &gtk::Bitset::new_range(0, ctx.model.n_items()));
+        ctx.restoring.set(false);
+        show_selection(&ctx.selection, &ctx.pane, true);
         ctx.total.set(total);
         ctx.has_more.set(total > rows.len() as i64);
         if total > rows.len() as i64 {
@@ -545,6 +587,16 @@ fn build_tile() -> gtk::Box {
         .css_classes(["video-play-badge"])
         .build();
     overlay.add_overlay(&play);
+    let offline = gtk::Label::builder()
+        .label("OFFLINE")
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .margin_start(6)
+        .margin_top(6)
+        .visible(false)
+        .css_classes(["v3-pill", "tone-warning", "tile-offline"])
+        .build();
+    overlay.add_overlay(&offline);
     let name = gtk::Label::builder()
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -560,15 +612,29 @@ fn build_tile() -> gtk::Box {
     vbox
 }
 
-/// Resolve the fixed tile-widget structure built by `build_tile`:
-/// `(picture, play-badge, name, caption)`.
-fn tile_parts(vbox: &gtk::Box) -> Option<(gtk::Picture, gtk::Image, gtk::Label, gtk::Label)> {
+struct TileParts {
+    pic: gtk::Picture,
+    play: gtk::Image,
+    offline: gtk::Label,
+    name: gtk::Label,
+    caption: gtk::Label,
+}
+
+/// Resolve the fixed tile-widget structure built by `build_tile`.
+fn tile_parts(vbox: &gtk::Box) -> Option<TileParts> {
     let overlay = vbox.first_child()?.downcast::<gtk::Overlay>().ok()?;
     let pic = overlay.child()?.downcast::<gtk::Picture>().ok()?;
     let play = pic.next_sibling()?.downcast::<gtk::Image>().ok()?;
+    let offline = play.next_sibling()?.downcast::<gtk::Label>().ok()?;
     let name = overlay.next_sibling()?.downcast::<gtk::Label>().ok()?;
     let caption = name.next_sibling()?.downcast::<gtk::Label>().ok()?;
-    Some((pic, play, name, caption))
+    Some(TileParts {
+        pic,
+        play,
+        offline,
+        name,
+        caption,
+    })
 }
 
 const THUMB_CACHE_CAP: usize = 512;
@@ -621,7 +687,7 @@ fn thumb_cache_put(key: ThumbCacheKey, texture: gtk::gdk::Texture) {
     });
 }
 
-fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
+fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem, offline: &OfflineRoots) {
     let Some(obj) = list_item.item() else { return };
     let Ok(boxed) = obj.downcast::<BoxedAnyObject>() else {
         return;
@@ -634,9 +700,18 @@ fn bind_tile(engine: &Rc<RefCell<EngineClient>>, list_item: &gtk::ListItem) {
     else {
         return;
     };
-    let Some((pic, play, name, caption)) = tile_parts(&vbox) else {
+    let Some(TileParts {
+        pic,
+        play,
+        offline: offline_badge,
+        name,
+        caption,
+    }) = tile_parts(&vbox)
+    else {
         return;
     };
+    BOUND_TILES.with_borrow_mut(|tiles| tiles.insert(tile_token_key(list_item), list_item.downgrade()));
+    offline_badge.set_visible(offline.is_offline(&row.path));
 
     // Filename — the suggested name in gold when present (macOS parity).
     name.remove_css_class("gold-accent");
@@ -688,6 +763,28 @@ struct TileRequest {
 
 thread_local! {
     static TILE_TOKENS: RefCell<HashMap<usize, CancelToken>> = RefCell::new(HashMap::new());
+    static BOUND_TILES: RefCell<HashMap<usize, glib::WeakRef<gtk::ListItem>>> = RefCell::new(HashMap::new());
+}
+
+/// Shows or hides the OFFLINE badge on every bound tile in place, so a drive
+/// coming or going never reloads the grid, its pages or its thumbnails.
+fn refresh_offline_badges(offline: &OfflineRoots) {
+    BOUND_TILES.with_borrow_mut(|tiles| {
+        tiles.retain(|_, weak| {
+            let Some(list_item) = weak.upgrade() else {
+                return false;
+            };
+            let row = list_item
+                .item()
+                .and_downcast::<BoxedAnyObject>()
+                .map(|boxed| boxed.borrow::<FileRow>().path.clone());
+            let parts = list_item.child().and_downcast::<gtk::Box>().and_then(|vbox| tile_parts(&vbox));
+            if let (Some(path), Some(parts)) = (row, parts) {
+                parts.offline.set_visible(offline.is_offline(&path));
+            }
+            true
+        });
+    });
 }
 
 fn tile_token_key(list_item: &gtk::ListItem) -> usize {
@@ -747,9 +844,10 @@ fn clear_tile(tile: &gtk::Widget) {
     let Some(vbox) = tile.downcast_ref::<gtk::Box>() else {
         return;
     };
-    if let Some((pic, play, _, _)) = tile_parts(vbox) {
-        pic.set_paintable(None::<&gtk::gdk::Texture>);
-        play.set_visible(false);
+    if let Some(parts) = tile_parts(vbox) {
+        parts.pic.set_paintable(None::<&gtk::gdk::Texture>);
+        parts.play.set_visible(false);
+        parts.offline.set_visible(false);
     }
 }
 
@@ -1056,6 +1154,36 @@ fn open_preview(
             b.set_opacity(v);
         }
     });
+}
+
+/// Every selected tile with its row, in grid order.
+fn selected_rows(selection: &gtk::MultiSelection) -> Vec<(u32, FileRow)> {
+    let set = selection.selection();
+    (0..set.size())
+        .filter_map(|nth| u32::try_from(nth).ok())
+        .map(|nth| set.nth(nth))
+        .filter_map(|position| row_at(selection, position).map(|row| (position, row)))
+        .collect()
+}
+
+/// Shares the selection with Chat and fills the Selected pane. `reloaded`
+/// redraws a single file in place instead of re-reading its picture.
+fn show_selection(selection: &gtk::MultiSelection, pane: &SelectedPane, reloaded: bool) {
+    let rows = selected_rows(selection);
+    super::chat_handoff::set_files(rows.iter().map(|(_, row)| row.id).collect());
+    let sizes: Vec<(u32, i64)> = rows.iter().map(|(position, row)| (*position, row.size_bytes)).collect();
+    match picking::view(&sizes) {
+        PaneView::Hidden => pane.hide(),
+        PaneView::One(_) => {
+            let row = rows[0].1.clone();
+            if reloaded && pane.current_id() == Some(row.id) {
+                pane.refresh(row, false);
+            } else {
+                pane.show(row);
+            }
+        }
+        PaneView::Many { count, bytes } => pane.show_many(count, bytes),
+    }
 }
 
 /// Resolve the `FileRow` at `pos` in the (selection) model.

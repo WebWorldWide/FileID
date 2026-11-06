@@ -49,6 +49,17 @@ public class AppSettingsTests
         Assert.Equal(kind, reloaded!.SelectedVlmModelKind);
     }
 
+    [Theory]
+    [InlineData("gemma_3_4b_it_gguf_q4_k_m", true)]
+    [InlineData("qwen3_vl_2b_instruct_gguf_q4_k_m", true)]
+    [InlineData("qwen2_5_vl_3b", false)]
+    [InlineData("smolvlm", false)]
+    public void CatalogVisionPicksAreAcceptedButRemovedModelsAreNot(string kind, bool allowed)
+    {
+        Assert.Equal(allowed, AppSettings.IsAllowedVlmKind(kind));
+        Assert.False(AppSettings.IsCuratedVlmKind(kind));
+    }
+
     [Fact]
     public void JsonRoundTrip_PreservesEveryField()
     {

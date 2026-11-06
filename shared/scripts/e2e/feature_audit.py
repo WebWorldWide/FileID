@@ -330,6 +330,21 @@ def _():
     k, res = bulk("markPersonsDifferent", {"sourcePersonID": a, "destinationPersonID": b, "sourceAnchorFaceID": fa,
                                           "destinationAnchorFaceID": q1("select id from face_prints where person_id=? order by id limit 1", b)[0]})
     step("markPersonsDifferent is recorded", k == "bulkActionResult" and res.get("succeeded", 0) >= 1, res)
+    # The Mac app names, hides and merges people only through these commands.
+    k, res = bulk("renamePerson", {"personID": a, "title": "Uncle", "firstName": " Audit ", "middleName": None, "lastName": "Person", "suffix": None})
+    row = q1("select title, first_name, last_name, name, is_unknown from persons where id=?", a)
+    step("renamePerson stores the trimmed name", k == "bulkActionResult" and row == ("Uncle", "Audit", "Person", "Uncle Audit Person", 0), row)
+    k, res = bulk("markPersonsAsUnknown", {"personIDs": [a]})
+    row = q1("select first_name, name, is_unknown from persons where id=?", a)
+    step("markPersonsAsUnknown hides the person and clears the name", k == "bulkActionResult" and row == (None, None, 1), row)
+    k, res = bulk("renamePerson", {"personID": a, "title": None, "firstName": "Audit", "middleName": None, "lastName": None, "suffix": None})
+    step("renamePerson brings an unknown person back", q1("select is_unknown, name from persons where id=?", a) == (0, "Audit"), res)
+    faces_b = q1("select count(*) from face_prints where person_id=?", b)[0]
+    k, res = bulk("mergeClusters", {"sourcePersonID": b, "destinationPersonID": a})
+    step("mergeClusters keeps the destination's name and takes the faces",
+         k == "bulkActionResult" and res.get("succeeded") == 1 and q1("select count(*) from persons where id=?", b)[0] == 0
+         and q1("select name from persons where id=?", a)[0] == "Audit" and faces_b > 0
+         and q1("select count(*) from face_prints where person_id=?", a)[0] >= faces_b, res)
 
 
 # ---------------------------------------------------------------- describe, file tools, model controls
@@ -349,6 +364,38 @@ def _():
     e.send("deepAnalyzeCancel", {})
     r = inner(e.wait(lambda p: kind(p) == "deepAnalyzeComplete", 600), "deepAnalyzeComplete")
     step("cancel stops a Describe batch", r.get("cancelled") is True and r.get("processed", 99) < 40, r)
+
+
+@check("renameFiles")
+def _():
+    fid, path = q1("select id, path_text from files where kind in ('doc','pdf') order by id limit 1")
+    folder, name = os.path.split(path)
+    ext = os.path.splitext(name)[1]
+    k, res = bulk("renameFiles", {"renames": [{"fileID": fid, "newName": "audit-renamed" + ext}]})
+    moved = folder + "/audit-renamed" + ext
+    step("renameFiles moves the file and the row", k == "bulkActionResult" and res.get("succeeded") == 1 and os.path.exists(moved)
+         and not os.path.exists(path) and q1("select path_text from files where id=?", fid)[0] == moved, res)
+    k, res = bulk("renameFiles", {"renames": [{"fileID": fid, "newName": "AUDIT-RENAMED" + ext}]})
+    upper = folder + "/AUDIT-RENAMED" + ext
+    step("renameFiles does a case-only rename", k == "bulkActionResult" and res.get("succeeded") == 1
+         and "AUDIT-RENAMED" + ext in os.listdir(folder) and q1("select path_text from files where id=?", fid)[0] == upper, res)
+    k, res = bulk("renameFiles", {"renames": [{"fileID": fid, "newName": name}]})
+    step("renameFiles puts the name back", k == "bulkActionResult" and res.get("succeeded") == 1 and os.path.exists(path)
+         and q1("select path_text from files where id=?", fid)[0] == path, res)
+    proposed = q1("select id, path_text, vlm_proposed_name from files where vlm_proposed_name is not null and vlm_proposed_name != '' order by id limit 1")
+    step("Describe left a suggested name to apply", proposed)
+    if not proposed:
+        return
+    pid, ppath, pname = proposed
+    pfolder, pfile = os.path.split(ppath)
+    target = pname + os.path.splitext(pfile)[1]
+    if os.path.exists(os.path.join(pfolder, target)):
+        target = pname + "_2" + os.path.splitext(pfile)[1]
+    k, res = bulk("renameFiles", {"renames": [{"fileID": pid, "newName": target}]})
+    cleared = q1("select vlm_proposed_name from files where id=?", pid)[0]
+    k2, res2 = bulk("renameFiles", {"renames": [{"fileID": pid, "newName": pfile}]})
+    step("renaming to the suggested name clears the suggestion", k == "bulkActionResult" and res.get("succeeded") == 1 and cleared is None
+         and res2.get("succeeded") == 1 and os.path.exists(ppath), f"{res} {res2}")
 
 
 @check("file tools video and chapters")

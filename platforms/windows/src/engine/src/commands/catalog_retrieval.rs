@@ -77,7 +77,7 @@ pub(super) fn search(
         let order = if quoted.is_empty() {
             "COALESCE(c.start_seconds,p.start_seconds),e.evidence_id"
         } else {
-            "bm25(catalog_evidence_fts),e.evidence_id"
+            "CASE WHEN e.kind='chapter' THEN 0 WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 2 ELSE 1 END,bm25(catalog_evidence_fts),e.evidence_id"
         };
         // Empty temporal queries require timed observations, not a face elsewhere in the file.
         let temporal_people = if quoted.is_empty() {
@@ -169,7 +169,7 @@ fn tag_hits(
 
 /// The word plus its singular stems, so "dogs" and "beaches" reach the singular
 /// scan tags. Mirrors macOS `CatalogStore.wordForms`.
-fn word_forms(word: &str) -> Vec<String> {
+pub(super) fn word_forms(word: &str) -> Vec<String> {
     if word.chars().count() < 4 {
         return vec![word.to_owned()];
     }
@@ -285,5 +285,14 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(search(&conn, "", &[], &[1], &[], Some(123.0)).unwrap().is_empty());
+    }
+    #[test]
+    fn chapters_rank_first() {
+        let conn = crate::db::test_support::memory_db();
+        conn.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/v/game.mov',1,100,0,'video','mov')", []).unwrap();
+        conn.execute("INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence,stale) VALUES('frame',1,5,5,'goal goal goal kick','r','m',0,0),('verified',1,NULL,NULL,'a goal is scored','r','m',1,0)", []).unwrap();
+        conn.execute("INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('chapter',1,40,60,'Winning goal','late in the game','r','m',1,1,0)", []).unwrap();
+        let evidence: Vec<String> = search(&conn, "goal", &[], &[], &[], None).unwrap().into_iter().filter_map(|hit| hit.evidence_id).collect();
+        assert_eq!(evidence, ["chapter", "verified", "frame"]);
     }
 }

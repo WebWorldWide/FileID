@@ -6,7 +6,9 @@ use crate::ipc::sink::Sink;
 use crate::ipc::{CatalogHit, ChatAction, ChatMessage, ChatRequest, ChatResponse, EventPayload, IpcEvent, Wrap};
 use anyhow::{anyhow, bail, Result};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use crate::catalog_index::Revision;
+use crate::models::idle::{IdleSlot, PARK_AFTER};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,7 +113,7 @@ pub async fn handle(sink: Sink, database: Option<Arc<Mutex<Connection>>>, reques
             return respond(&conn, &request, "completed", message, prepared.hits, prepared.actions);
         }
         
-        execute_with(&mut database.lock(), &request, &live_semantic)
+        execute_with(&mut database.lock(), &request, &no_semantic)
     })
     .await;
     let mut response = match result {
@@ -166,10 +168,14 @@ fn summary_model(requested: Option<&str>) -> Option<String> {
 /// single writer connection, so it runs on a fresh read-only one when the
 /// database has a file path (in-memory test databases fall back to the writer).
 fn prepare_unlocked(database: &Mutex<Connection>, request: &ChatRequest) -> Result<Prepared> {
+    prepare_unlocked_with(database, request, &live_semantic)
+}
+
+fn prepare_unlocked_with(database: &Mutex<Connection>, request: &ChatRequest, semantic: &Semantic) -> Result<Prepared> {
     let path = database.lock().path().filter(|path| !path.is_empty()).map(std::path::PathBuf::from);
     match path {
-        Some(path) => prepare_send(&crate::db::open_read(&path)?, request, &live_semantic),
-        None => prepare_send(&database.lock(), request, &live_semantic),
+        Some(path) => prepare_send(&crate::db::open_read(&path)?, request, semantic),
+        None => prepare_send(&database.lock(), request, semantic),
     }
 }
 
@@ -455,21 +461,17 @@ fn live_semantic(conn: &Connection, request: &ChatRequest, query: &str) -> Vec<V
     lists
 }
 
+static BGE_TEXT: IdleSlot<crate::models::bge_text::BgeText> = IdleSlot::new("BGE text", PARK_AFTER);
+static DOCUMENT_MATRIX: IdleSlot<MatrixCache> = IdleSlot::new("BGE document matrix", PARK_AFTER);
+
 fn bge_hits(conn: &Connection, query: &str) -> Result<Vec<CatalogHit>> {
-    static MODEL: OnceLock<Mutex<Option<crate::models::bge_text::BgeText>>> = OnceLock::new();
     let (Ok(weights), Ok(vocab)) = (crate::models::bge_text::default_weights_path(), crate::models::bge_text::default_vocab_path()) else {
         return Ok(vec![]);
     };
     if !weights.exists() || !vocab.exists() {
         return Ok(vec![]);
     }
-    let mut guard = MODEL.get_or_init(Default::default).lock();
-    if guard.is_none() {
-        *guard = Some(crate::models::bge_text::BgeText::load(weights, vocab)?);
-    }
-    let Some(model) = guard.as_mut() else { return Ok(vec![]) };
-    let wanted = model.embed(&format!("{BGE_QUERY_PREFIX}{query}"))?;
-    drop(guard);
+    let wanted = BGE_TEXT.with(|| crate::models::bge_text::BgeText::load(weights, vocab), |model| model.embed(&format!("{BGE_QUERY_PREFIX}{query}")))??;
     match conn.path().filter(|path| !path.is_empty()) {
         Some(path) => document_hits_cached(conn, Path::new(path), &wanted),
         None => document_hits_scan(conn, &wanted),
@@ -478,12 +480,12 @@ fn bge_hits(conn: &Connection, query: &str) -> Result<Vec<CatalogHit>> {
 
 const BGE_MODEL: &str = "bge_small_en_v1_5";
 const BGE_RESULTS: usize = 20;
-/// Largest library kept resident (~77 MB of 384-d vectors); beyond this every
-/// question streams the table instead.
-const BGE_CACHE_MAX_ROWS: usize = 50_000;
+/// Largest library kept resident (~100 MB of 8-bit codes for 384-d vectors);
+/// beyond this every question streams the table instead.
+const BGE_CACHE_MAX_ROWS: usize = 250_000;
 
-fn bge_score(stored: &[f32], wanted: &[f32]) -> f32 {
-    stored.iter().zip(wanted).map(|(stored, value)| stored * value).sum::<f32>()
+fn exact_score(blob: &[u8], wanted: &[f32]) -> f32 {
+    blob.as_chunks::<4>().0.iter().zip(wanted).map(|(bytes, value)| f32::from_le_bytes(*bytes) * value).sum::<f32>()
 }
 
 fn document_hit(id: i64, path: String, text: String) -> CatalogHit {
@@ -497,7 +499,7 @@ fn document_hits_scan(conn: &Connection, wanted: &[f32]) -> Result<Vec<CatalogHi
     let mut scored: Vec<(f32, CatalogHit)> = statement
         .query_map(params![wanted.len() as i64 * 4, BGE_MODEL], |row| {
             let blob: Vec<u8> = row.get(1)?;
-            let score = blob.as_chunks::<4>().0.iter().zip(wanted).map(|(bytes, value)| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) * value).sum::<f32>();
+            let score = exact_score(&blob, wanted);
             let id: i64 = row.get(0)?;
             Ok((score, document_hit(id, row.get(2)?, row.get(3)?)))
         })?
@@ -508,88 +510,210 @@ fn document_hits_scan(conn: &Connection, wanted: &[f32]) -> Result<Vec<CatalogHi
     Ok(scored.into_iter().take(BGE_RESULTS).map(|(_, hit)| hit).collect())
 }
 
-/// Stored document vectors as one row-major matrix, valid while the database
-/// is unchanged. `watcher` is a long-lived read-only connection whose
-/// `PRAGMA data_version` moves whenever any other connection (the writer, or
-/// another process) commits, so a stale matrix is never served.
+/// Eligible stored document vectors as 8-bit codes with a per-row scale, valid
+/// at one `text` vector revision. The codes only shortlist: every row that
+/// could reach the top results under a proven error bound is rescored from its
+/// stored bytes exactly as the scan scores it, so results match the scan.
 struct DocumentMatrix {
     path: std::path::PathBuf,
-    watcher: Connection,
-    version: i64,
+    revision: Revision,
     dim: usize,
     ids: Vec<i64>,
-    values: Vec<f32>,
+    rows: HashMap<i64, usize>,
+    codes: Vec<i8>,
+    scales: Vec<f32>,
+    residuals: Vec<f32>,
+    norms: Vec<f32>,
 }
 
-fn data_version(watcher: &Connection) -> Result<i64> {
-    Ok(watcher.query_row("PRAGMA data_version", [], |row| row.get(0))?)
+#[derive(Default)]
+struct MatrixCache {
+    matrix: Option<DocumentMatrix>,
+    oversized: Option<(std::path::PathBuf, usize, Revision)>,
 }
 
 impl DocumentMatrix {
     /// `None` when the library is too large to keep resident.
-    fn load(path: &Path, dim: usize) -> Result<Option<Self>> {
-        let watcher = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-        watcher.busy_timeout(std::time::Duration::from_secs(5))?;
-        watcher.execute_batch("PRAGMA query_only = ON; PRAGMA cache_size = -2048; PRAGMA mmap_size = 0;")?;
-        let version = data_version(&watcher)?;
-        let mut ids = Vec::new();
-        let mut values: Vec<f32> = Vec::new();
-        {
-            let mut statement = watcher.prepare("SELECT file_id,embedding FROM text_embeddings WHERE model=?2 AND length(embedding)=?1 ORDER BY file_id")?;
-            let mut rows = statement.query(params![dim as i64 * 4, BGE_MODEL])?;
-            while let Some(row) = rows.next()? {
-                if ids.len() >= BGE_CACHE_MAX_ROWS {
-                    return Ok(None);
-                }
-                let blob = row.get_ref(1)?.as_blob()?;
-                ids.push(row.get(0)?);
-                values.extend(blob.as_chunks::<4>().0.iter().map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])));
+    fn load(conn: &Connection, path: &Path, revision: Revision, dim: usize) -> Result<Option<Self>> {
+        let mut matrix = Self { path: path.to_path_buf(), revision, dim, ids: vec![], rows: HashMap::new(), codes: vec![], scales: vec![], residuals: vec![], norms: vec![] };
+        let mut statement = conn.prepare("SELECT e.file_id,e.embedding FROM text_embeddings e JOIN files f ON f.id=e.file_id WHERE f.failed=0 AND e.model=?2 AND length(e.embedding)=?1")?;
+        let mut rows = statement.query(params![dim as i64 * 4, BGE_MODEL])?;
+        while let Some(row) = rows.next()? {
+            if matrix.ids.len() >= BGE_CACHE_MAX_ROWS {
+                return Ok(None);
+            }
+            matrix.put(row.get(0)?, row.get_ref(1)?.as_blob()?);
+        }
+        Ok(Some(matrix))
+    }
+
+    fn put(&mut self, id: i64, blob: &[u8]) {
+        let vector: Vec<f32> = blob.as_chunks::<4>().0.iter().map(|bytes| f32::from_le_bytes(*bytes)).collect();
+        // A non-finite component makes the exact score non-finite, which the scan drops.
+        if vector.len() != self.dim || !vector.iter().all(|value| value.is_finite()) {
+            self.remove(id);
+            return;
+        }
+        let scale = vector.iter().fold(0.0_f32, |max, value| max.max(value.abs())) / 127.0;
+        let codes: Vec<i8> = vector.iter().map(|value| if scale > 0.0 { (value / scale).round().clamp(-127.0, 127.0) as i8 } else { 0 }).collect();
+        let residual = vector.iter().zip(&codes).map(|(value, code)| (f64::from(*value) - f64::from(scale) * f64::from(*code)).powi(2)).sum::<f64>().sqrt();
+        let norm = vector.iter().map(|value| f64::from(*value).powi(2)).sum::<f64>().sqrt();
+        let row = match self.rows.get(&id) {
+            Some(&row) => row,
+            None => {
+                self.rows.insert(id, self.ids.len());
+                self.ids.push(id);
+                self.codes.resize(self.codes.len() + self.dim, 0);
+                self.scales.push(0.0);
+                self.residuals.push(0.0);
+                self.norms.push(0.0);
+                self.ids.len() - 1
+            }
+        };
+        self.codes[row * self.dim..(row + 1) * self.dim].copy_from_slice(&codes);
+        self.scales[row] = scale;
+        self.residuals[row] = residual as f32;
+        self.norms[row] = norm as f32;
+    }
+
+    fn remove(&mut self, id: i64) {
+        let Some(row) = self.rows.remove(&id) else { return };
+        let last = self.ids.len() - 1;
+        if row != last {
+            self.codes.copy_within(last * self.dim..(last + 1) * self.dim, row * self.dim);
+            self.ids[row] = self.ids[last];
+            self.scales[row] = self.scales[last];
+            self.residuals[row] = self.residuals[last];
+            self.norms[row] = self.norms[last];
+            self.rows.insert(self.ids[row], row);
+        }
+        self.ids.truncate(last);
+        self.codes.truncate(last * self.dim);
+        self.scales.truncate(last);
+        self.residuals.truncate(last);
+        self.norms.truncate(last);
+    }
+
+    /// Applies the logged vector changes up to `latest`; false when a full
+    /// reload is needed instead.
+    fn advance(&mut self, conn: &Connection, latest: &Revision) -> Result<bool> {
+        if !crate::catalog_index::vector_can_advance(conn, "text", &self.revision, latest)? {
+            return Ok(false);
+        }
+        let changed = conn
+            .prepare("SELECT DISTINCT file_id FROM catalog_vector_changes WHERE namespace='text' AND generation>?1 AND generation<=?2 AND file_id IS NOT NULL")?
+            .query_map(params![self.revision.generation, latest.generation], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if changed.len() > self.ids.len() / 4 + 1024 {
+            return Ok(false);
+        }
+        let mut statement = conn.prepare_cached("SELECT e.embedding FROM text_embeddings e JOIN files f ON f.id=e.file_id WHERE e.file_id=?1 AND f.failed=0 AND e.model=?2 AND length(e.embedding)=?3")?;
+        for id in changed {
+            let blob: Option<Vec<u8>> = statement.query_row(params![id, BGE_MODEL, self.dim as i64 * 4], |row| row.get(0)).optional()?;
+            match blob {
+                Some(blob) => self.put(id, &blob),
+                None => self.remove(id),
             }
         }
-        Ok(Some(Self { path: path.to_path_buf(), watcher, version, dim, ids, values }))
+        self.revision = latest.clone();
+        Ok(self.ids.len() <= BGE_CACHE_MAX_ROWS)
     }
 
-    fn is_current(&self, path: &Path, dim: usize) -> bool {
-        self.path == path && self.dim == dim && data_version(&self.watcher).is_ok_and(|version| version == self.version)
+    /// Rows whose exact score may reach the top results or the floor. With
+    /// `e` bounding |exact - approximate| per row, any row whose upper bound
+    /// falls below the BGE_RESULTS-th best lower bound cannot be returned.
+    fn candidates(&self, wanted: &[f32]) -> Vec<usize> {
+        let l1: f32 = wanted.iter().map(|value| value.abs()).sum();
+        let l2: f32 = wanted.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let mut upper = Vec::with_capacity(self.ids.len());
+        let mut lower = Vec::with_capacity(self.ids.len());
+        for (row, codes) in self.codes.chunks_exact(self.dim).enumerate() {
+            let approximate = self.scales[row] * code_dot(codes, wanted);
+            let error = ((0.5 * self.scales[row] * l1).min(self.residuals[row] * l2) + 1e-4 * (1.0 + l2 * self.norms[row])) * 1.001;
+            upper.push(approximate + error);
+            lower.push(approximate - error);
+        }
+        let cut = match lower.len().checked_sub(BGE_RESULTS) {
+            Some(index) => *lower.select_nth_unstable_by(index, f32::total_cmp).1,
+            None => f32::NEG_INFINITY,
+        };
+        let threshold = cut.max(BGE_FLOOR);
+        upper.iter().enumerate().filter(|(_, bound)| **bound >= threshold).map(|(row, _)| row).collect()
     }
+}
 
-    /// File ids at or above the floor, best first, ties by ascending id.
-    fn ranked(&self, wanted: &[f32]) -> Vec<(f32, i64)> {
-        let mut scored: Vec<(f32, i64)> = self
-            .values
-            .chunks_exact(self.dim)
-            .zip(&self.ids)
-            .map(|(stored, id)| (bge_score(stored, wanted), *id))
-            .filter(|(score, _)| score.is_finite() && *score >= BGE_FLOOR)
-            .collect();
+fn code_dot(codes: &[i8], wanted: &[f32]) -> f32 {
+    let (code_chunks, code_rest) = codes.as_chunks::<8>();
+    let (wanted_chunks, wanted_rest) = wanted.as_chunks::<8>();
+    let mut lanes = [0.0_f32; 8];
+    for (codes, wanted) in code_chunks.iter().zip(wanted_chunks) {
+        for ((lane, code), value) in lanes.iter_mut().zip(codes).zip(wanted) {
+            *lane += f32::from(*code) * value;
+        }
+    }
+    lanes.iter().sum::<f32>() + code_rest.iter().zip(wanted_rest).map(|(code, value)| f32::from(*code) * value).sum::<f32>()
+}
+
+impl MatrixCache {
+    /// Best (score, file id) pairs at `latest`, or `None` to fall back to the scan.
+    fn ranked(&mut self, conn: &Connection, path: &Path, latest: &Revision, wanted: &[f32]) -> Result<Option<Vec<(f32, i64)>>> {
+        let dim = wanted.len();
+        let reusable = match self.matrix.as_mut() {
+            Some(matrix) if matrix.path == path && matrix.dim == dim => matrix.revision == *latest || matrix.advance(conn, latest)?,
+            _ => false,
+        };
+        if !reusable {
+            self.matrix = None;
+            let key = (path.to_path_buf(), dim, latest.clone());
+            if self.oversized.as_ref() == Some(&key) {
+                return Ok(None);
+            }
+            match DocumentMatrix::load(conn, path, latest.clone(), dim)? {
+                Some(matrix) => {
+                    self.matrix = Some(matrix);
+                    self.oversized = None;
+                }
+                None => {
+                    self.oversized = Some(key);
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(matrix) = self.matrix.as_ref() else { return Ok(None) };
+        let mut statement = conn.prepare_cached("SELECT embedding FROM text_embeddings WHERE file_id=?1 AND model=?2 AND length(embedding)=?3")?;
+        let mut scored = Vec::new();
+        for row in matrix.candidates(wanted) {
+            let id = matrix.ids[row];
+            let blob: Option<Vec<u8>> = statement.query_row(params![id, BGE_MODEL, dim as i64 * 4], |row| row.get(0)).optional()?;
+            let Some(blob) = blob else { return Ok(None) };
+            let score = exact_score(&blob, wanted);
+            if score.is_finite() && score >= BGE_FLOOR {
+                scored.push((score, id));
+            }
+        }
         scored.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored
+        scored.truncate(BGE_RESULTS);
+        Ok(Some(scored))
     }
 }
 
 fn document_hits_cached(conn: &Connection, path: &Path, wanted: &[f32]) -> Result<Vec<CatalogHit>> {
-    static MATRIX: OnceLock<Mutex<Option<DocumentMatrix>>> = OnceLock::new();
-    let mut guard = MATRIX.get_or_init(Default::default).lock();
-    if !guard.as_ref().is_some_and(|matrix| matrix.is_current(path, wanted.len())) {
-        *guard = None;
-        match DocumentMatrix::load(path, wanted.len())? {
-            Some(matrix) => *guard = Some(matrix),
+    if wanted.is_empty() || !wanted.iter().all(|value| value.is_finite()) {
+        return document_hits_scan(conn, wanted);
+    }
+    let snapshot = conn.is_autocommit().then(|| conn.unchecked_transaction()).transpose()?;
+    let latest = crate::catalog_index::vector_revision(conn, "text")?;
+    let ranked = DOCUMENT_MATRIX.with(|| Ok(MatrixCache::default()), |cache| cache.ranked(conn, path, &latest, wanted))??;
+    let Some(ranked) = ranked else { return document_hits_scan(conn, wanted) };
+    let mut statement = conn.prepare_cached("SELECT f.path_text,COALESCE(substr(d.text,1,200),'') FROM files f LEFT JOIN doc_text d ON d.file_id=f.id WHERE f.id=?1 AND f.failed=0")?;
+    let mut hits = Vec::with_capacity(ranked.len());
+    for (_, id) in ranked {
+        match statement.query_row([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()? {
+            Some((path, text)) => hits.push(document_hit(id, path, text)),
             None => return document_hits_scan(conn, wanted),
         }
     }
-    let ranked = guard.as_ref().map(|matrix| matrix.ranked(wanted)).unwrap_or_default();
-    drop(guard);
-    let mut statement = conn.prepare_cached("SELECT f.path_text,COALESCE(substr(d.text,1,200),'') FROM files f LEFT JOIN doc_text d ON d.file_id=f.id WHERE f.id=?1 AND f.failed=0")?;
-    let mut hits = Vec::with_capacity(BGE_RESULTS);
-    for (_, id) in ranked {
-        let found = statement.query_row([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).ok();
-        if let Some((path, text)) = found {
-            hits.push(document_hit(id, path, text));
-            if hits.len() == BGE_RESULTS {
-                break;
-            }
-        }
-    }
+    drop(snapshot);
     Ok(hits)
 }
 
@@ -670,7 +794,23 @@ fn plan_for(
     events: &super::catalog_retrieval::KnownEvents,
 ) -> (super::chat_intent::Question, SearchPlan) {
     let question = parse_question(text);
-    let plan = SearchPlan::resolve_known(&question.reduced, previous, people, events);
+    let plan = SearchPlan::resolve_known(&question.reduced, previous, people, events, false);
+    // "how many are from 2018?" names nothing of its own: it narrows the last search.
+    let bare = plan.query.is_empty() && plan.kinds.is_empty() && plan.person_ids.is_empty() && plan.event_ids.is_empty() && plan.excluded_person_ids.is_empty();
+    let library_wide = ["files", "file", "library", "everything", "all", "total", "overall", "collection"];
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower.split(|c: char| !c.is_alphabetic()).collect();
+    // A duplicates question is about the library unless it points back ("duplicates among those").
+    let points_back = words.iter().any(|word| ["those", "these", "them", "they", "ones"].contains(word));
+    if previous.is_some()
+        && bare
+        && question.structured()
+        && !["overview", "folders", "formats"].contains(&question.measure.as_str())
+        && (!question.duplicates || points_back)
+        && !words.iter().any(|word| library_wide.contains(word))
+    {
+        return (question.clone(), SearchPlan::resolve_known(&question.reduced, previous, people, events, true));
+    }
     (question, plan)
 }
 
@@ -698,28 +838,41 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
             .fold(None, |previous, text| Some(plan_for(text, previous.as_ref(), &people, &events).1))
     };
     let (question, plan) = plan_for(&text, previous.as_ref(), &people, &events);
-    let structured = Filter {
+    let mut structured = Filter {
         kinds: plan.kinds.clone(),
         person_ids: plan.person_ids.clone(),
         person_names: plan.person_names.clone(),
         date: question.date.clone(),
         folder: question.folder.clone(),
         undescribed: question.undescribed,
-        ids: None,
         extensions: question.formats.clone().unwrap_or_default(),
+        all_people: plan.all_people,
+        excluded_person_ids: plan.excluded_person_ids.clone(),
+        excluded_person_names: plan.excluded_person_names.clone(),
+        min_bytes: question.min_bytes,
+        max_bytes: question.max_bytes,
+        ..Filter::default()
     };
-    if question.structured() && plan.query.is_empty() && plan.event_ids.is_empty() && plan.time_seconds.is_none() {
+    // Counts, sizes, orders and duplicates must see every match, so a subject
+    // becomes the full set of files it describes.
+    let wants_all = question.measure != "list" || question.explicit_order || question.duplicates;
+    if question.structured() && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (plan.query.is_empty() || wants_all) {
+        if !plan.query.is_empty()
+            && let Some(ids) = chat_facts::subject_ids(conn, &plan.query)?
+        {
+            structured.ids = Some(ids);
+            structured.subject = Some(plan.query.clone());
+        }
         let (message, hits) = chat_facts::answer(conn, &question, &structured)?;
         return Ok(Prepared { text, message, hits, actions: vec![], summarize: false });
     }
-    let mut hits = super::catalog_retrieval::search(
-        conn,
-        &plan.query,
-        &plan.kinds,
-        &plan.person_ids,
-        &plan.event_ids,
-        plan.time_seconds,
-    )?;
+    let search = |query: &str| super::catalog_retrieval::search(conn, query, &plan.kinds, &plan.person_ids, &plan.event_ids, plan.time_seconds);
+    let groups = chat_facts::subject_groups(&plan.query);
+    let mut hits = if groups.len() > 1 {
+        fuse(groups.iter().map(|group| search(&group.join(" "))).collect::<Result<Vec<_>>>()?)
+    } else {
+        search(&plan.query)?
+    };
     if !plan.query.is_empty() {
         let extra = semantic(conn, request, &plan.query);
         if !extra.is_empty() {
@@ -731,9 +884,39 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
             hits = fuse(lists);
         }
     }
-    let extra_filter = question.structured().then(|| Filter { kinds: vec![], person_ids: vec![], person_names: vec![], ..structured.clone() });
+    let extra_filter = (question.structured() || plan.all_people || !plan.excluded_person_ids.is_empty()).then(|| Filter {
+        person_ids: if plan.all_people { plan.person_ids.clone() } else { vec![] },
+        date: question.date.clone(),
+        folder: question.folder.clone(),
+        undescribed: question.undescribed,
+        extensions: question.formats.clone().unwrap_or_default(),
+        all_people: plan.all_people,
+        excluded_person_ids: plan.excluded_person_ids.clone(),
+        excluded_person_names: plan.excluded_person_names.clone(),
+        min_bytes: question.min_bytes,
+        max_bytes: question.max_bytes,
+        ..Filter::default()
+    });
     if let Some(filter) = &extra_filter {
         hits = chat_facts::restrict(conn, hits, filter)?;
+    }
+    // Search keeps its best hundred and matches words as written; fill a short
+    // list from every file the subject describes (singulars too) that passes
+    // the same filters.
+    if hits.len() < chat_facts::SHOWN && plan.event_ids.is_empty() && plan.time_seconds.is_none() && (!plan.query.is_empty() || extra_filter.is_some()) {
+        let mut fill = extra_filter.clone().unwrap_or_default();
+        fill.kinds.clone_from(&plan.kinds);
+        fill.person_ids.clone_from(&plan.person_ids);
+        fill.all_people = plan.all_people;
+        let subject = if plan.query.is_empty() { Some(None) } else { chat_facts::subject_ids(conn, &plan.query)?.map(Some) };
+        if let Some(ids) = subject {
+            fill.ids = ids;
+            let seen: std::collections::HashSet<i64> = hits.iter().map(|hit| hit.file_id).collect();
+            let count = chat_facts::totals(conn, &fill)?.0;
+            let more = chat_facts::listed(conn, &fill, &question.order, chat_facts::SHOWN + seen.len(), count)?;
+            let room = chat_facts::SHOWN - hits.len();
+            hits.extend(more.into_iter().filter(|hit| !seen.contains(&hit.file_id)).take(room));
+        }
     }
     let scope = if plan.query.is_empty() {
         "in the library".to_owned()
@@ -749,7 +932,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
     let people = if plan.person_names.is_empty() {
         String::new()
     } else {
-        format!(" (people: {})", plan.person_names.join(", "))
+        format!(" (people: {})", plan.person_names.join(if plan.all_people { " and " } else { ", " }))
     };
     let events = if plan.event_names.is_empty() {
         String::new()
@@ -757,7 +940,7 @@ fn prepare_send(conn: &Connection, request: &ChatRequest, semantic: &Semantic) -
         format!(" (event: {})", plan.event_names.join(", "))
     };
     let time = plan.time_seconds.map(|seconds| format!(" (near {})", time_label(seconds))).unwrap_or_default();
-    let structure = extra_filter.map(|filter| filter.qualifiers()).filter(|text| !text.is_empty()).map(|text| format!(" ({})", text.trim())).unwrap_or_default();
+    let structure = extra_filter.map(|filter| Filter { person_names: vec![], ..filter }.qualifiers()).filter(|text| !text.is_empty()).map(|text| format!(" ({})", text.trim())).unwrap_or_default();
     let qualifiers = format!("{filter}{people}{events}{time}{structure}");
     let explanation = if plan.query.is_empty()
         && plan.kinds.is_empty()
@@ -1118,52 +1301,125 @@ mod tests {
         let _ = std::fs::remove_dir_all(second_path.parent().unwrap());
     }
 
-    #[test]
-    #[ignore = "timing only: cargo test --release bge_cache_timing -- --ignored --nocapture"]
-    fn bge_cache_timing() {
-        let (path, writer) = document_fixture("timing");
-        let rows: i64 = std::env::var("BGE_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(30_000);
-        let dim = 384usize;
-        writer.execute_batch("BEGIN").unwrap();
-        let mut state = 0x9E3779B97F4A7C15_u64;
-        let mut next = move || {
+    fn xorshift(mut state: u64) -> impl FnMut() -> f32 {
+        move || {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
-        };
-        let mut wanted: Vec<f32> = (0..dim).map(|_| next()).collect();
-        let norm = wanted.iter().map(|v| v * v).sum::<f32>().sqrt();
-        for v in &mut wanted {
+        }
+    }
+
+    fn unit(mut vector: Vec<f32>) -> Vec<f32> {
+        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        for v in &mut vector {
             *v /= norm;
         }
-        for id in 1..=rows {
+        vector
+    }
+
+    /// Topic-clustered unit vectors, so many documents sit near the floor and
+    /// near each other: the hard case for the shortlist bound.
+    fn clustered_documents(writer: &Connection, first: i64, last: i64, centers: &[Vec<f32>], seed: u64) {
+        let mut next = xorshift(seed);
+        writer.execute_batch("BEGIN").unwrap();
+        for id in first..=last {
             writer.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?1,?2,?1,10,0,'doc','txt')", params![id, format!("/lib/doc-{id}.txt")]).unwrap();
             writer.execute("INSERT INTO doc_text(file_id,text) VALUES(?1,'passage')", params![id]).unwrap();
-            let mut vector: Vec<f32> = (0..dim).map(|d| if id % 50 == 0 { wanted[d] * 0.9 + next() * 0.05 } else { next() }).collect();
-            let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-            for v in &mut vector {
-                *v /= norm;
-            }
+            let center = &centers[(id as usize * 7919) % centers.len()];
+            let spread = 0.02 + 0.06 * (next() + 0.5);
+            let vector = unit(center.iter().map(|c| c + next() * spread * 2.0).collect());
             let bytes: Vec<u8> = vector.iter().flat_map(|value| value.to_le_bytes()).collect();
             writer.execute("INSERT INTO text_embeddings(file_id,embedding,model) VALUES(?1,?2,?3)", params![id, bytes, BGE_MODEL]).unwrap();
         }
         writer.execute_batch("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn shortlist_matches_the_scan_on_clustered_vectors() {
+        let (path, writer) = document_fixture("shortlist");
+        let mut next = xorshift(0x51);
+        let centers: Vec<Vec<f32>> = (0..12).map(|_| unit((0..384).map(|_| next()).collect())).collect();
+        clustered_documents(&writer, 1, 3000, &centers, 0x77);
         let reader = crate::db::open_read(&path).unwrap();
-        let time = |label: &str, run: &dyn Fn() -> Vec<CatalogHit>| {
-            let mut samples = Vec::new();
-            let mut last = Vec::new();
-            for _ in 0..5 {
-                let started = std::time::Instant::now();
-                last = run();
-                samples.push(started.elapsed().as_secs_f64() * 1000.0);
-            }
-            println!("{label}: rows={rows} first={:.1} ms, rest min={:.1} ms hits={}", samples[0], samples[1..].iter().copied().fold(f64::MAX, f64::min), last.len());
-            last
+        for (index, center) in centers.iter().enumerate() {
+            let wanted = unit(center.iter().map(|c| c + next() * 0.03).collect());
+            let cached = document_hits_cached(&reader, &path, &wanted).unwrap();
+            let scan = document_hits_scan(&reader, &wanted).unwrap();
+            assert_eq!(cached.len(), BGE_RESULTS, "query {index}");
+            assert!(same_hits(&cached, &scan), "query {index}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn semantic_retrieval_never_holds_the_writer_lock() {
+        static CALLED: AtomicBool = AtomicBool::new(false);
+        let (path, writer) = document_fixture("unlocked");
+        writer.execute("INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,vlm_description) VALUES(1,'/lib/dog.jpg',1,10,0,'image','jpg','A dog in a park')", []).unwrap();
+        let database: &'static Mutex<Connection> = Box::leak(Box::new(Mutex::new(writer)));
+        let request = ChatRequest { request_id: "r".into(), conversation_id: "c".into(), action: "send".into(), text: Some("dog".into()), ..Default::default() };
+        let semantic = |conn: &Connection, _: &ChatRequest, _: &str| {
+            assert!(!database.is_locked(), "semantic scoring ran under the writer lock");
+            assert!(conn.is_readonly(rusqlite::MAIN_DB).unwrap());
+            CALLED.store(true, Ordering::SeqCst);
+            vec![]
         };
-        let scan = time("scan  ", &|| document_hits_scan(&reader, &wanted).unwrap());
-        let cached = time("cached", &|| document_hits_cached(&reader, &path, &wanted).unwrap());
-        assert!(same_hits(&scan, &cached));
+        prepare_unlocked_with(database, &request, &semantic).unwrap();
+        assert!(CALLED.load(Ordering::SeqCst));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    #[ignore = "timing only: BGE_ROWS=100000 cargo test --lib bge_cache_timing -- --ignored --nocapture"]
+    fn bge_cache_timing() {
+        let (path, writer) = document_fixture("timing");
+        let rows: i64 = std::env::var("BGE_ROWS").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+        let mut next = xorshift(0x9E3779B97F4A7C15);
+        let centers: Vec<Vec<f32>> = (0..200).map(|_| unit((0..384).map(|_| next()).collect())).collect();
+        clustered_documents(&writer, 1, rows, &centers, 0x1234);
+        let queries: Vec<Vec<f32>> = (0..20).map(|q| unit(centers[q * 7].iter().map(|c| c + next() * 0.04).collect())).collect();
+        let reader = crate::db::open_read(&path).unwrap();
+        let ms = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
+        let mut scan_ms = Vec::new();
+        let mut cached_ms = Vec::new();
+        let mut shortlisted = 0;
+        let mut top = Vec::new();
+        let started = std::time::Instant::now();
+        let first = document_hits_cached(&reader, &path, &queries[0]).unwrap();
+        let load_ms = ms(started);
+        assert!(!first.is_empty());
+        for wanted in &queries {
+            let started = std::time::Instant::now();
+            let scan = document_hits_scan(&reader, wanted).unwrap();
+            scan_ms.push(ms(started));
+            let started = std::time::Instant::now();
+            let cached = document_hits_cached(&reader, &path, wanted).unwrap();
+            cached_ms.push(ms(started));
+            assert!(same_hits(&scan, &cached));
+            assert_eq!(cached.len(), BGE_RESULTS);
+            top.push(format!("{:?}", cached.iter().map(|hit| hit.file_id).collect::<Vec<_>>()));
+            shortlisted += DOCUMENT_MATRIX.with(|| Ok(MatrixCache::default()), |cache| cache.matrix.as_ref().map_or(0, |matrix| matrix.candidates(wanted).len())).unwrap();
+        }
+        if let Ok(out) = std::env::var("BGE_TOP20_OUT") {
+            std::fs::write(out, top.join("\n") + "\n").unwrap();
+        }
+        clustered_documents(&writer, rows + 1, rows + 200, &centers, 0x99);
+        let reader = crate::db::open_read(&path).unwrap();
+        let started = std::time::Instant::now();
+        let patched = document_hits_cached(&reader, &path, &queries[1]).unwrap();
+        let patch_ms = ms(started);
+        assert!(same_hits(&patched, &document_hits_scan(&reader, &queries[1]).unwrap()));
+        let median = |samples: &mut Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        println!(
+            "rows={rows} queries=20 top-20 identical; scan median={:.1} ms; matrix load={load_ms:.1} ms; cached median={:.2} ms; shortlist avg={} rows; +200 rows patch+query={patch_ms:.1} ms",
+            median(&mut scan_ms),
+            median(&mut cached_ms),
+            shortlisted / queries.len(),
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1213,6 +1469,44 @@ mod tests {
                 assert!(result.message.contains("birthday"));
             }
         }
+    }
+
+    #[test]
+    fn complex_questions_see_every_matching_file() {
+        let mut conn = crate::db::test_support::memory_db();
+        conn.execute_batch(
+            "INSERT INTO persons(id,name,first_name,created_at,file_count) VALUES(1,'Kyle','Kyle',0,0),(2,'Maya','Maya',0,0);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<250)
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description)
+             SELECT i,'/lib/Pets/pet_'||i||'.jpg',i,1000,1552219200-i*86400,0,'image','jpg','A dog in the yard' FROM n;
+             INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description) VALUES
+             (301,'/lib/Trips/a.jpg',301,4000,1688472000,0,'image','jpg','Kyle at the beach'),
+             (302,'/lib/Trips/b.jpg',302,5000,1688472000,0,'image','jpg','Kyle at the beach'),
+             (303,'/lib/Trips/c.arw',303,9000,1688472000,0,'image','arw','Sunset over the beach'),
+             (304,'/lib/Trips/surf.mov',304,2500000000,1688472000,0,'video','mov','Surfing at the beach');
+             INSERT INTO tags(file_id,tag,source,score) VALUES(303,'sunset','auto',0.9);
+             INSERT INTO face_prints(file_id,person_id,print_data,bbox) VALUES(301,1,X'00','[0,0,1,1]'),(301,2,X'00','[0,0,1,1]'),(302,1,X'00','[0,0,1,1]'),(303,2,X'00','[0,0,1,1]');",
+        )
+        .unwrap();
+        let mut ask = |conversation: &str, text: &str| {
+            let request = ChatRequest { request_id: uuid::Uuid::new_v4().to_string(), conversation_id: conversation.into(), action: "send".into(), text: Some(text.into()), use_model: Some(false), ..Default::default() };
+            let response = execute(&mut conn, &request).unwrap();
+            (response.message, response.hits.iter().map(|hit| hit.file_id).collect::<Vec<_>>())
+        };
+        assert_eq!(ask("a", "how many dogs are there?").0, "Found 250 files matching “dogs”, using 250.0 KB.");
+        assert_eq!(ask("b", "photos of Kyle and Maya at the beach"), ("Found 1 match for “beach” (photos) (people: Kyle and Maya).".into(), vec![301]));
+        let (message, mut hits) = ask("c", "beach photos without Maya");
+        hits.sort_unstable();
+        assert_eq!((message.as_str(), hits), ("Found 1 match for “beach” (photos) (without Maya).", vec![302]));
+        assert_eq!(ask("d", "show me the 2 largest photos").0, "The 2 largest photos: c.arw (9.0 KB · 2023-07-04), b.jpg (5.0 KB · 2023-07-04).");
+        assert_eq!(ask("e", "files bigger than 1 GB"), ("Found 1 file over 1.0 GB.".into(), vec![304]));
+        let (message, hits) = ask("f", "beach or sunset photos");
+        assert_eq!((message.as_str(), hits.len()), ("Found 3 matches for “beach or sunset” (photos).", 3));
+        assert_eq!(ask("h", "how many photos per year?").0, "Photos by year: 2023: 3, 2019: 68, 2018: 182.");
+        assert_eq!(ask("i", "photos from summer 2023").0, "Found 3 photos from summer 2023.");
+        assert_eq!(ask("j", "what's taking up the most space?").0, "Files use 2.5 GB (254 files). Largest: surf.mov (2.5 GB), c.arw (9.0 KB), b.jpg (5.0 KB).");
+        ask("g", "dog photos");
+        assert_eq!(ask("g", "how many are from 2018?").0, "Found 182 photos matching “dog” from 2018, using 182.0 KB.");
     }
 
     #[test]

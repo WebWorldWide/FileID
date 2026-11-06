@@ -23,6 +23,12 @@ internal sealed partial class EngineClient
         return SendWorkbenchAsync<ModelCatalog>(id, new ListModelsCommand(id, role), TimeSpan.FromSeconds(30), ct);
     }
 
+    public Task<RootsList> ListRootsAsync(CancellationToken ct = default)
+    {
+        var id = "roots-" + Guid.NewGuid().ToString("N");
+        return SendWorkbenchAsync<RootsList>(id, new ListRootsCommand(id), TimeSpan.FromSeconds(30), ct);
+    }
+
     /// <summary>Benchmarks one installed model; tuning restarts the model several times, so allow an hour.</summary>
     public Task<BenchmarkResult> BenchmarkModelAsync(string modelKind, bool tune, CancellationToken ct = default)
     {
@@ -115,7 +121,10 @@ internal sealed partial class EngineClient
         }
     }
 
-    public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, CancellationToken ct = default)
+    public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, CancellationToken ct = default) =>
+        await CatalogSearchAsync(query, mode, null, null, ct).ConfigureAwait(false);
+
+    public async Task<CatalogResponse> CatalogSearchAsync(string query, string mode, double? capturedFrom, double? capturedTo, CancellationToken ct = default)
     {
         await WaitForReadyAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
         var generation = SpawnGeneration;
@@ -129,7 +138,7 @@ internal sealed partial class EngineClient
                 throw new InvalidOperationException("The engine changed while embedding this query. Retry, or use keyword search.");
             vector = embedding.Embedding;
         }
-        var request = CatalogEmbeddingSpace.SearchRequest(query, mode, vector);
+        var request = CatalogEmbeddingSpace.SearchRequest(query, mode, vector, capturedFrom, capturedTo);
         return await CatalogAsync(request, ct).ConfigureAwait(false);
     }
 
@@ -174,6 +183,9 @@ internal sealed partial class EngineClient
                 break;
             case ModelCatalogEvent models:
                 _workbenchRequests.Apply(models.Catalog.RequestId, generation, models.Catalog);
+                break;
+            case RootsListEvent roots:
+                _workbenchRequests.Apply(roots.Roots.RequestId, generation, roots.Roots);
                 break;
             case BenchmarkProgressEvent progress:
                 BenchmarkProgress = progress.Progress;

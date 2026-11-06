@@ -23,7 +23,7 @@ struct ScanCard {
     details_toggle: gtk::Button,
     sub: gtk::Label,
     next_step: gtk::Button,
-    details: gtk::Revealer,
+    details: crate::motion::SpringRevealer,
     stats: gtk::Box,
     scan: gtk::Button,
     scan_content: adw::ButtonContent,
@@ -58,8 +58,6 @@ impl Sidebar {
         root.append(&switcher);
 
         let area_stack = gtk::Stack::builder()
-            .transition_type(gtk::StackTransitionType::Crossfade)
-            .transition_duration(140)
             .vhomogeneous(false)
             .build();
         let mut rows = Vec::new();
@@ -141,7 +139,7 @@ impl Sidebar {
     }
 
     fn show_area(&self, area: Area) {
-        self.area_stack.set_visible_child_name(area.name());
+        crate::motion::show_child(&self.area_stack, area.name());
         for (index, button) in self.area_buttons.iter().enumerate() {
             if index == area.index() {
                 button.add_css_class("on");
@@ -317,12 +315,7 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     frame.set_margin_start(10);
     frame.set_margin_end(10);
     frame.set_margin_bottom(10);
-    let stack = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::Crossfade)
-        .transition_duration(160)
-        .vhomogeneous(false)
-        .interpolate_size(true)
-        .build();
+    let stack = gtk::Stack::builder().vhomogeneous(false).build();
     frame.append(&stack);
 
     let pick = vbox(8);
@@ -395,11 +388,7 @@ fn scan_card(act: &Rc<dyn Fn(Action)>) -> (gtk::Box, ScanCard) {
     pipeline.append(&next_step);
     let stats = vbox(4);
     stats.add_css_class("scan-stats");
-    let details = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .transition_duration(200)
-        .child(&stats)
-        .build();
+    let details = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &stats);
     pipeline.append(&details);
     details_toggle.connect_clicked(glib::clone!(
         #[weak]
@@ -502,10 +491,10 @@ impl ScanCard {
                 self.pick_button.remove_css_class("compact");
                 self.pick_button.add_css_class("secondary");
             }
-            self.stack.set_visible_child_name("pick");
+            crate::motion::show_child(&self.stack, "pick");
             return;
         }
-        self.stack.set_visible_child_name("pipeline");
+        crate::motion::show_child(&self.stack, "pipeline");
         let p = status.pipeline();
         self.title.set_text(&p.title);
         self.pct.set_text(&super::status::percent(p.fraction));

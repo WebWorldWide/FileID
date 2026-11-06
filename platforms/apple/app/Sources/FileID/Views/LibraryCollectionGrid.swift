@@ -12,6 +12,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
     let selectedID: Int64?
     let refreshToken: String
     var textSize: TextSize = .standard
+    var offline: OfflineRoots = .none
     var onSelect: (FileRow) -> Void
     var onOpen: (FileRow) -> Void
     var onToggleCheck: (FileRow) -> Void
@@ -58,6 +59,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
         private var lastChecked: Set<Int64> = []
         private var lastSelected: Int64?
         private var lastTextSize: TextSize = .standard
+        private var lastOffline: OfflineRoots = .none
         private var lastRows: [FileRow] = []
         private var lastTags: [Int64: [String]] = [:]
         private var lastClickRowID: Int64?
@@ -69,7 +71,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             guard let collection else { return }
             let newIDs = grid.rows.map(\.id)
             let stateChanged = grid.refreshToken != lastToken || grid.selectMode != lastSelectMode
-                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize
+                || grid.checkedIDs != lastChecked || grid.selectedID != lastSelected || grid.textSize != lastTextSize || grid.offline != lastOffline
             if !grid.selectMode { cursorID = nil }
             if let layout = collection.collectionViewLayout as? AdaptiveGridLayout, layout.textSize != grid.textSize {
                 layout.textSize = grid.textSize
@@ -98,6 +100,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
             lastChecked = grid.checkedIDs
             lastSelected = grid.selectedID
             lastTextSize = grid.textSize
+            lastOffline = grid.offline
             lastRows = grid.rows
             lastTags = grid.tagsByFile
         }
@@ -171,6 +174,7 @@ struct LibraryCollectionGrid: NSViewRepresentable {
                 selected: model.selectMode ? cursorID == row.id : model.selectedID == row.id,
                 selectMode: model.selectMode,
                 checked: model.checkedIDs.contains(row.id),
+                offline: model.offline.isOffline(row.pathText),
                 textSize: model.textSize,
                 reloadImage: reloadImage)
             tile.onClick = { [weak self] count in
@@ -364,6 +368,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     private let thumbLayer = CALayer()
     private let ringLayer = CALayer()
     private let badge = TextLayer(size: 10.5, weight: .semibold, color: NSColor(hex: 0xE2E5E8), align: .center)
+    private let offlineBadge = TextLayer(size: 10.5, weight: .semibold, color: LibraryTileItem.warning, align: .center)
     private let name = TextLayer(size: 13, weight: .medium, color: NSColor(hex: 0xF0F1F2), truncation: .middle)
     private let chips = [TextLayer(size: 11.5, weight: .medium, color: Theme.nsText2, align: .center),
                          TextLayer(size: 11.5, weight: .medium, color: Theme.nsText2, align: .center)]
@@ -397,6 +402,12 @@ final class LibraryTileItem: NSCollectionViewItem {
         root.layer?.addSublayer(ringLayer)
         badge.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
         badge.cornerRadius = 4
+        offlineBadge.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        offlineBadge.borderColor = Self.warning.withAlphaComponent(0.6).cgColor
+        offlineBadge.borderWidth = 1
+        offlineBadge.cornerRadius = 4
+        offlineBadge.text = "OFFLINE"
+        offlineBadge.isHidden = true
         for chip in chips {
             chip.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
             chip.cornerRadius = 4
@@ -412,7 +423,7 @@ final class LibraryTileItem: NSCollectionViewItem {
             .withSymbolConfiguration(.init(pointSize: 26, weight: .regular))
         unreadableGlyph.contentTintColor = Theme.nsText3
         unreadableGlyph.setAccessibilityElement(false)
-        for layer in [badge, name, size, date] + chips { root.layer?.addSublayer(layer) }
+        for layer in [badge, offlineBadge, name, size, date] + chips { root.layer?.addSublayer(layer) }
         root.addSubview(check)
         root.addSubview(textGlyph)
         root.addSubview(unreadableGlyph)
@@ -431,6 +442,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let metrics = TileTextMetrics(textSize)
         badge.frame = CGRect(x: 6, y: b.height - 6 - metrics.badge, width: badge.textWidth + 12, height: metrics.badge)
+        offlineBadge.frame = CGRect(x: badge.frame.maxX + 4, y: badge.frame.minY, width: offlineBadge.textWidth + 12, height: metrics.badge)
         check.frame = CGRect(x: b.width - 26, y: b.height - 26, width: 18, height: 18)
         textGlyph.frame = CGRect(x: b.width - 6 - 20, y: b.height - thumbHeight + 6, width: 20, height: 18)
         unreadableGlyph.frame = CGRect(x: thumbFrame.midX - 18, y: thumbFrame.midY - 18, width: 36, height: 36)
@@ -449,12 +461,12 @@ final class LibraryTileItem: NSCollectionViewItem {
         CATransaction.commit()
     }
 
-    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, textSize: TextSize, reloadImage: Bool) {
+    func configure(row: FileRow, tags: [String], selected: Bool, selectMode: Bool, checked: Bool, offline: Bool, textSize: TextSize, reloadImage: Bool) {
         let changedFile = rowID != row.id
         if textSize != self.textSize {
             self.textSize = textSize
             CATransaction.begin(); CATransaction.setDisableActions(true)
-            for layer in [badge, name, size, date] + chips { layer.apply(textSize) }
+            for layer in [badge, offlineBadge, name, size, date] + chips { layer.apply(textSize) }
             CATransaction.commit()
         }
         rowID = row.id
@@ -466,6 +478,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         name.text = hasSmartName ? (row.extension.isEmpty ? proposed : "\(proposed).\(row.extension)") : row.url.lastPathComponent
         textGlyph.isHidden = !row.hasText
         unreadableGlyph.isHidden = !row.failed
+        offlineBadge.isHidden = !offline
         for (index, chip) in chips.enumerated() {
             chip.isHidden = index >= tags.count
             if index < tags.count { chip.text = tags[index] }
@@ -480,6 +493,7 @@ final class LibraryTileItem: NSCollectionViewItem {
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.button)
         view.setAccessibilityLabel([row.url.lastPathComponent, hasSmartName ? "smart name \(name.text)" : nil, row.failed ? "couldn't be read" : FileKindLabel.title(row.kind),
+                                    offline ? "offline" : nil,
                                     row.displayDate?.formatted(date: .abbreviated, time: .omitted),
                                     row.hasFaces ? "contains faces" : nil, row.hasText ? "contains text" : nil]
             .compactMap { $0 }.joined(separator: ", "))
@@ -536,7 +550,7 @@ final class LibraryTileItem: NSCollectionViewItem {
     fileprivate func applyColors() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         view.effectiveAppearance.performAsCurrentDrawingAppearance {
-            for layer in [badge, size, date] + chips { layer.foregroundColor = layer.color.cgColor }
+            for layer in [badge, offlineBadge, size, date] + chips { layer.foregroundColor = layer.color.cgColor }
             name.foregroundColor = (hasSmartName ? NSColor(hex: 0xFFCC00) : name.color).cgColor
         }
         CATransaction.commit()
@@ -545,7 +559,7 @@ final class LibraryTileItem: NSCollectionViewItem {
 
     fileprivate func applyBackingScale(_ scale: CGFloat) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        for layer in [badge, name, size, date] + chips where layer.contentsScale != scale {
+        for layer in [badge, offlineBadge, name, size, date] + chips where layer.contentsScale != scale {
             layer.contentsScale = scale
             layer.setNeedsDisplay()
         }
@@ -572,6 +586,8 @@ final class LibraryTileItem: NSCollectionViewItem {
         field.alignment = .left
         return field
     }
+
+    nonisolated static let warning = NSColor(hex: 0xE0A340)
 
     nonisolated static func brandFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
         let base = NSFont(name: "Archivo", size: size) ?? .systemFont(ofSize: size, weight: weight)

@@ -1,64 +1,50 @@
 import Foundation
-import GRDB
 import Testing
 import FileIDShared
 @testable import FileID
 
-@Suite("Read store renames", .serialized)
+@Suite("Suggested-name renames")
 struct ReadStoreRenameTests {
-    @Test("apply and undo keep path_hash in step with path_text")
-    func renameRefreshesPathHash() throws {
+    private func folder() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileIDRename-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        return root
+    }
+
+    @Test("Names taken on disk or earlier in the batch get a numbered bump; a case-only rename keeps its slot")
+    func planBumpsCollisions() throws {
+        let root = try folder()
         defer { try? FileManager.default.removeItem(at: root) }
-        let dbURL = root.appendingPathComponent("catalog.sqlite")
-        var originals: [String] = []
-        let database = try DatabaseQueue(path: dbURL.path)
-        try database.write { db in
-            try db.execute(sql: """
-                CREATE TABLE files (
-                    id INTEGER PRIMARY KEY, path_text TEXT NOT NULL, path_hash INTEGER NOT NULL, path_search TEXT,
-                    size_bytes INTEGER NOT NULL DEFAULT 4, created_at REAL, modified_at REAL, scanned_at REAL NOT NULL DEFAULT 0,
-                    kind TEXT NOT NULL DEFAULT 'image', extension TEXT NOT NULL DEFAULT 'jpg', phash BLOB, aesthetic REAL,
-                    has_faces INTEGER DEFAULT 0, has_text INTEGER DEFAULT 0, camera_model TEXT, location_lat REAL, location_lon REAL,
-                    failed INTEGER DEFAULT 0, error_message TEXT, vlm_description TEXT, vlm_proposed_name TEXT,
-                    vlm_model TEXT, vlm_full_model TEXT, vlm_analyzed_at REAL, auto_tags TEXT)
-                """)
-            for id in 1...2 {
-                let path = root.appendingPathComponent("IMG_000\(id).jpg").path
-                try Data("img\(id)".utf8).write(to: URL(fileURLWithPath: path))
-                originals.append(path)
-                try db.execute(
-                    sql: "INSERT INTO files(id, path_text, path_hash, vlm_proposed_name) VALUES(?,?,?,?)",
-                    arguments: [id, path, StablePathHash.hash(path), "beach-day-\(id)"])
-            }
+        for name in ["beach.jpg", "IMG_1.jpg", "IMG_2.JPG", "Sunset.jpg", "keep.jpg"] {
+            try Data(name.utf8).write(to: root.appendingPathComponent(name))
         }
-        try database.close()
+        let candidates = [
+            CatalogWrites.RenameCandidate(fileID: 1, path: root.appendingPathComponent("IMG_1.jpg").path, proposed: "beach"),
+            CatalogWrites.RenameCandidate(fileID: 2, path: root.appendingPathComponent("IMG_2.JPG").path, proposed: "beach"),
+            CatalogWrites.RenameCandidate(fileID: 3, path: root.appendingPathComponent("Sunset.jpg").path, proposed: "sunset"),
+            CatalogWrites.RenameCandidate(fileID: 4, path: root.appendingPathComponent("keep.jpg").path, proposed: "keep"),
+            CatalogWrites.RenameCandidate(fileID: 5, path: root.appendingPathComponent("keep.jpg").path, proposed: nil)
+        ]
+        let (plans, unnamed) = CatalogWrites.planRenames(candidates)
+        #expect(plans.map(\.fileID) == [1, 2, 3])
+        #expect(plans.map(\.target.lastPathComponent) == ["beach_2.jpg", "beach_3.JPG", "sunset.jpg"])
+        #expect(unnamed == 1)
+    }
 
-        let store = ReadStore(dbURL: dbURL)
-        store.openIfPossible()
-        defer { store.close() }
+    @Test("Undo skips a file that moved, changed, or whose old name is taken")
+    func undoBlockers() throws {
+        let root = try folder()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let new = root.appendingPathComponent("beach.jpg")
+        try Data("photo".utf8).write(to: new)
+        let outcome = ReadStore.RenameOutcome(fileID: 1, oldPath: root.appendingPathComponent("IMG_1.jpg").path, newPath: new.path)
+        #expect(CatalogWrites.undoBlocker(outcome, catalogPath: new.path) == nil)
+        #expect(CatalogWrites.undoBlocker(outcome, catalogPath: root.appendingPathComponent("elsewhere.jpg").path) == "moved")
 
-        func rows() throws -> [(path: String, hash: Int64)] {
-            try DatabaseQueue(path: dbURL.path).read { db in
-                try Row.fetchAll(db, sql: "SELECT path_text, path_hash FROM files ORDER BY id")
-                    .map { ($0["path_text"], $0["path_hash"]) }
-            }
-        }
+        try Data("other".utf8).write(to: root.appendingPathComponent("IMG_1.jpg"))
+        #expect(CatalogWrites.undoBlocker(outcome, catalogPath: new.path) == "occupied")
 
-        let result = store.applyProposedNamesBulk(store.filesWithProposedNames())
-        #expect(result.renamed.count == 2)
-        for row in try rows() {
-            #expect(row.path.contains("beach-day-"))
-            #expect(row.hash == StablePathHash.hash(row.path))
-        }
-
-        let undo = store.undoRenames(result.renamed)
-        #expect(undo.undone == 2)
-        let restored = try rows()
-        #expect(restored.map(\.path) == originals)
-        for row in restored {
-            #expect(row.hash == StablePathHash.hash(row.path))
-        }
+        try Data("edited photo".utf8).write(to: new)
+        #expect(CatalogWrites.undoBlocker(outcome, catalogPath: new.path) == "changed")
     }
 }

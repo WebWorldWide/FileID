@@ -1,4 +1,5 @@
 ﻿using FileID.Services;
+using FileID.Theme.Motion;
 using FileID.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -62,12 +63,35 @@ public sealed partial class LibrarySelectedPane : UserControl
         SimilarButton.Visibility = visual ? Visibility.Visible : Visibility.Collapsed;
         SimilarColumn.Width = visual ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
 
+        ApplyOffline(tile.IsOffline, animate: false);
         RenderDetails(tile, null);
         RenderTags(tile.Tags);
         CaptionText.Visibility = Visibility.Collapsed;
         CaptionInheritedText.Visibility = Visibility.Collapsed;
 
         _ = DebugLog.SafeRunAsync("LibrarySelectedPane.Load", () => LoadAsync(tile, revision));
+    }
+
+    /// <summary>Shows the OFFLINE note and disables Explorer/Open while the file's drive is unplugged.</summary>
+    internal void ApplyOffline(bool offline, bool animate = true)
+    {
+        var wasVisible = OfflineRow.Visibility == Visibility.Visible;
+        OfflineRow.Visibility = offline ? Visibility.Visible : Visibility.Collapsed;
+        RevealButton.IsEnabled = !offline;
+        OpenButton.IsEnabled = !offline;
+        ToolTipService.SetToolTip(RevealButton, offline ? "Reconnect the drive to show this file in Explorer" : "Show in Explorer");
+        ToolTipService.SetToolTip(OpenButton, offline ? "Reconnect the drive to open this file" : "Open in the default app");
+        if (!offline || wasVisible) return;
+        var spring = SpringEasing.Tokens.Tight;
+        if (animate && !ReducedMotion.Instance.IsReduced)
+        {
+            SpringEasing.SetScalar(OfflineRow, "Opacity", 0f);
+            SpringEasing.AnimateOpacity(OfflineRow, 1f, spring.Response, spring.DampingFraction);
+        }
+        else
+        {
+            SpringEasing.SetScalar(OfflineRow, "Opacity", 1f);
+        }
     }
 
     private async Task LoadAsync(FileTile tile, int revision)
@@ -232,12 +256,12 @@ public sealed partial class LibrarySelectedPane : UserControl
     private void OnRevealClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnRevealClicked), () =>
         {
-            if (_tile is { } tile) SafeOpen.Reveal(tile.Path);
+            if (_tile is { IsOffline: false } tile) SafeOpen.Reveal(tile.Path);
         });
 
     private void OnOpenClicked(object sender, RoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnOpenClicked), () =>
         {
-            if (_tile is { } tile && !SafeOpen.TryOpenFile(tile.Path)) SafeOpen.Reveal(tile.Path);
+            if (_tile is { IsOffline: false } tile && !SafeOpen.TryOpenFile(tile.Path)) SafeOpen.Reveal(tile.Path);
         });
 }

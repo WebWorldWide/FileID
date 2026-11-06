@@ -261,7 +261,7 @@ actor TimelineAnalysis {
 
     private func analyzeTakeGoals(fileID: Int64, sourceURL: URL, sourceRevision: String, duration: Double,
                                   signals: [TimelineSignalAnalysis.Signal], model: String, modelVersion: String,
-                                  jobID: String, database: Database) async throws {
+                                  jobID: String, database: Database, pool: VideoFramePool.Pool? = nil) async throws {
         let goals = try await database.pool.read { db in try CatalogTakeEvidence.goals(db, fileID: fileID) }
         guard !goals.isEmpty else { return }
         let windows = TimelineMomentAnalysis.windows(duration: duration, signals: signals)
@@ -287,11 +287,19 @@ actor TimelineAnalysis {
             if pending.isEmpty { continue }
             var frames: [VideoFrameWorker.Sample] = []
             defer { for frame in frames { try? FileManager.default.removeItem(at: frame.url) } }
-            frames = try await sampleSequence(source: sourceURL, times: window.times)
-            guard frames.allSatisfy({ $0.metadata.revision == sourceRevision }) else { throw SourceChanged() }
-            let distinct = try TimelineMomentAnalysis.distinctFrameIndices(times: frames.map { $0.metadata.seconds }, window: window)
-            let urls = distinct.map { frames[$0].url }
-            let times = distinct.map { frames[$0].metadata.seconds }
+            let urls: [URL]
+            let times: [Double]
+            if let pool, let picked = Self.poolFrames(pool, near: window.times) {
+                // The video's frame pool is already decoded; no helper per window.
+                urls = picked.map { pool.url($0) }
+                times = picked.map(\.seconds)
+            } else {
+                frames = try await sampleSequence(source: sourceURL, times: window.times)
+                guard frames.allSatisfy({ $0.metadata.revision == sourceRevision }) else { throw SourceChanged() }
+                let distinct = try TimelineMomentAnalysis.distinctFrameIndices(times: frames.map { $0.metadata.seconds }, window: window)
+                urls = distinct.map { frames[$0].url }
+                times = distinct.map { frames[$0].metadata.seconds }
+            }
             for goal in pending {
                 try await requireRunning(jobID, database: database)
                 guard case .ready(let activeModel) = await DeepAnalyze.shared.loadState,
@@ -311,9 +319,7 @@ actor TimelineAnalysis {
                 guard !DeepAnalyzeRunner.isAnalysisFailure(result) else { throw UnreadableVideo() }
                 let observation = try TakeOutcomeAnalysis.parse(result.description, frameCount: times.count)
                 let evidence = try TakeOutcomeAnalysis.evidence(observation, times: times, window: window)
-                let verified = try await sample(source: sourceURL, seconds: window.times.last!)
-                defer { try? FileManager.default.removeItem(at: verified.url) }
-                guard verified.metadata.revision == sourceRevision else { throw SourceChanged() }
+                guard (try? VideoFrameWorker.currentRevision(sourceURL)) == sourceRevision else { throw SourceChanged() }
                 _ = try await database.pool.write { db in
                     guard try CatalogTakeEvidence.persist(db, evidence: evidence, goal: goal, fileID: fileID,
                                                           sourceRevision: sourceRevision, modelVersion: version,
@@ -427,6 +433,21 @@ actor TimelineAnalysis {
         return try await task.value
     }
 
+    /// The pool frame nearest each requested time (within one pool step), in
+    /// order and without repeats; nil when fewer than two remain.
+    nonisolated static func poolFrames(_ pool: VideoFramePool.Pool, near times: [Double]) -> [VideoFramePool.Frame]? {
+        let frames = pool.manifest.frames
+        guard !frames.isEmpty else { return nil }
+        var picked: [VideoFramePool.Frame] = []
+        for time in times {
+            guard let nearest = frames.min(by: { abs($0.seconds - time) < abs($1.seconds - time) }),
+                  abs(nearest.seconds - time) <= VideoSceneSelection.poolInterval,
+                  picked.last?.seconds != nearest.seconds else { continue }
+            picked.append(nearest)
+        }
+        return picked.count >= 2 ? picked.sorted { $0.seconds < $1.seconds } : nil
+    }
+
     /// CLIP vectors for every pool frame; luma signatures stand in when CLIP is unavailable.
     nonisolated static func poolFrames(_ pool: VideoFramePool.Pool) -> [VideoSceneSelection.Frame] {
         let clip = MobileCLIPService.shared.loadImageEncoder()
@@ -519,7 +540,7 @@ actor TimelineAnalysis {
                                                          modelVersion: modelVersion, fileIndex: fileIndex, totalFiles: totalFiles,
                                                          jobID: jobID, database: database, sink: sink)
             try await analyzeTakeGoals(fileID: fileID, sourceURL: sourceURL, sourceRevision: sourceRevision, duration: duration,
-                                       signals: signals, model: model, modelVersion: modelVersion, jobID: jobID, database: database)
+                                       signals: signals, model: model, modelVersion: modelVersion, jobID: jobID, database: database, pool: pool)
         }
         JSONLog.shared.info(ev: "timeline_scene_timing", extra: [
             "duration": AnyCodable(duration), "poolFrames": AnyCodable(frames.count), "scenes": AnyCodable(scenes.count),

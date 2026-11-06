@@ -191,7 +191,7 @@ fn mutate(value: &mut Value, rng: &mut Rng, tags: &[String], depth: usize) {
             0 if !items.is_empty() => {
                 let copy = items[rng.below(items.len())].clone();
                 let cap = if rng.chance(10) { 50_000 } else { 8 };
-                let times = 1 + rng.below(cap);
+                let times = bounded_copies(&copy, 1 + rng.below(cap));
                 items.extend(std::iter::repeat_n(copy, times));
             }
             1 => items.truncate(rng.below(items.len() + 1)),
@@ -200,6 +200,15 @@ fn mutate(value: &mut Value, rng: &mut Rng, tags: &[String], depth: usize) {
         },
         _ => *value = interesting(rng),
     }
+}
+
+/// Repeating an already large element (a 200 KB string 120,000 times) would
+/// build a multi-gigabyte frame that exhausts a CI runner's memory long before
+/// the engine's 64 MiB frame limit could reject it; keep each array growth near 8 MiB.
+fn bounded_copies(copy: &Value, wanted: usize) -> usize {
+    const BUDGET: usize = 8 << 20;
+    let size = serde_json::to_string(copy).map(|text| text.len()).unwrap_or(1).max(1);
+    wanted.min(BUDGET / size).max(usize::from(wanted > 0))
 }
 
 /// Keeps every value's JSON type so the frame still decodes and reaches the
@@ -219,7 +228,7 @@ fn mutate_typed(value: &mut Value, rng: &mut Rng) {
         Value::Array(items) if !items.is_empty() => {
             let copy = items[rng.below(items.len())].clone();
             let cap = if rng.chance(10) { 120_000 } else { 16 };
-            let times = rng.below(cap);
+            let times = bounded_copies(&copy, rng.below(cap));
             items.extend(std::iter::repeat_n(copy, times));
         }
         Value::String(text) => {

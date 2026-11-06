@@ -10,12 +10,15 @@ use adw::prelude::*;
 use fileid_engine::ipc::*;
 use gtk::glib;
 
+use super::moments_dates::DateFilter;
 use super::moments_timeline::{chapter_state, read_coverage, ChapterState, Coverage, Timeline};
 use super::workbench_state::*;
 use super::workbenches::{is_playable_media, Engine};
 use crate::engine_client::{texture_from_decoded, EngineState, ThumbReply};
 use crate::shell::status::Tone;
 use crate::v3;
+
+pub const SEARCH_HINT: &str = "Search files and videos";
 
 pub(super) struct ChapterRow {
     chapter: CatalogChapter,
@@ -42,6 +45,7 @@ pub(super) struct CatalogUi {
     pub(super) root: gtk::Box,
     query: gtk::Entry,
     mode: Rc<v3::Segmented>,
+    dates: Rc<DateFilter>,
     depth: Rc<v3::Segmented>,
     result_count: gtk::Label,
     searching: gtk::ProgressBar,
@@ -57,7 +61,7 @@ pub(super) struct CatalogUi {
     timeline: Rc<Timeline>,
     chapter_panel: v3::Panel,
     draft_note: gtk::Label,
-    editor: gtk::Revealer,
+    editor: crate::motion::SpringRevealer,
     editor_title: gtk::Label,
     save: gtk::Button,
     chapter_rows: RefCell<Vec<ChapterRow>>,
@@ -69,7 +73,15 @@ pub(super) struct CatalogUi {
 }
 
 impl CatalogUi {
-    pub(super) fn send(&self, slot: &str, request: CatalogRequest) {
+    pub(super) fn send(&self, slot: &str, mut request: CatalogRequest) {
+        if slot == "search" {
+            let Ok((from, to)) = self.dates.window() else {
+                self.searching.set_visible(false);
+                return;
+            };
+            request.captured_from = from;
+            request.captured_to = to;
+        }
         if slot == "mutation" {
             *self.mutation_file_id.borrow_mut() = request
                 .file_id
@@ -762,19 +774,19 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     let top = v3::vbox(10);
     top.add_css_class("v3-pane-top");
     let query = gtk::Entry::builder()
-        .placeholder_text("Search files and videos")
+        .placeholder_text(SEARCH_HINT)
         .primary_icon_name("system-search-symbolic")
         .css_classes(["v3-field"])
         .build();
-    query.update_property(&[gtk::accessible::Property::Label(
-        "Search files and videos",
-    )]);
+    query.update_property(&[gtk::accessible::Property::Label(SEARCH_HINT)]);
     top.append(&query);
     let mode = v3::Segmented::new(&["Keyword", "Hybrid"], 0);
     mode.root.set_tooltip_text(Some(
         "Hybrid also searches by what is in photos, using the Search by description model. Nothing downloads here.",
     ));
     top.append(&mode.root);
+    let dates = DateFilter::new();
+    top.append(&dates.root);
     let count_row = v3::hbox(8);
     let result_count = v3::meta("Search to find a moment");
     result_count.add_css_class("numeric");
@@ -922,15 +934,7 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
     times.append(&cancel);
     times.append(&save);
     editor_box.append(&times);
-    let editor = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .transition_duration(if crate::spring::animations_enabled() {
-            220
-        } else {
-            0
-        })
-        .child(&editor_box)
-        .build();
+    let editor = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &editor_box);
     chapter_panel.body.append(&editor);
     let chapters = v3::vbox(0);
     chapter_panel.body.append(&chapters);
@@ -984,6 +988,7 @@ pub(super) fn build_catalog(engine: Engine) -> (gtk::Widget, Rc<CatalogUi>) {
         root: root.clone(),
         query,
         mode,
+        dates,
         depth,
         result_count,
         searching,
@@ -1046,6 +1051,12 @@ fn wire(
     });
     let weak = Rc::downgrade(ui);
     ui.query.connect_activate(move |_| {
+        if let Some(ui) = weak.upgrade() {
+            run_search(&ui);
+        }
+    });
+    let weak = Rc::downgrade(ui);
+    ui.dates.connect_changed(move || {
         if let Some(ui) = weak.upgrade() {
             run_search(&ui);
         }
@@ -1213,6 +1224,11 @@ fn run_search(ui: &Rc<CatalogUi>) {
     if text.trim().is_empty() {
         return;
     }
+    if let Err(reason) = ui.dates.window() {
+        ui.set_status(reason);
+        return;
+    }
+    ui.set_status("");
     *ui.selected.borrow_mut() = None;
     ui.requests.borrow_mut().forget("detail");
     ui.reset_editor();

@@ -86,6 +86,8 @@ struct LibraryView: View {
     @State private var checkedFiles: [Int64: FileRow] = [:]
     @State private var bulkTagSheetOpen: Bool = false
 
+    private var offlineRoots: OfflineRoots { OfflineRoots(engine.libraryRoots) }
+
     private var scanActive: Bool {
         guard let p = engine.lastProgress else { return false }
         return p.phase == .discovering || p.phase == .tagging || p.phase == .postScan
@@ -134,6 +136,7 @@ struct LibraryView: View {
                     if let row = paneRow {
                         VHairline()
                         LibrarySelectedPane(row: row, store: store, engine: engine,
+                                            offline: offlineRoots.isOffline(row.pathText),
                                             onOpen: { openPreview(row) },
                                             onFindSimilar: { similarSeed = row },
                                             onClose: { paneSelectedID = nil })
@@ -158,7 +161,10 @@ struct LibraryView: View {
             store.openIfPossible()
             reload()
             refreshBulkState()
+            engine.refreshLibraryRoots()
         }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didMountNotification)) { _ in engine.refreshLibraryRoots() }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didUnmountNotification)) { _ in engine.refreshLibraryRoots() }
         .onChange(of: engine.lastBatch?.batchIndex ?? -1) { _, new in
             if new != lastSeenBatchIndex {
                 lastSeenBatchIndex = new
@@ -181,6 +187,7 @@ struct LibraryView: View {
             refreshOpenPreview()
             reload()
             refreshBulkState()
+            engine.refreshLibraryRoots()
         }
         .onChange(of: searchText) { _, _ in
             similarSeed = nil   // typing exits similarity mode
@@ -541,7 +548,7 @@ struct LibraryView: View {
             }
         }
         .sheet(isPresented: $bulkRenameSheetOpen, onDismiss: refreshBulkState) {
-            BulkRenameSheet(store: store)
+            BulkRenameSheet(engine: engine, store: store)
         }
         .sheet(isPresented: $bulkTagSheetOpen) {
             BulkTagSheet(
@@ -563,20 +570,17 @@ struct LibraryView: View {
 
     private func undoLastBatch() {
         guard let batch = BulkRenameSheet.loadLastBatch(), !batch.isEmpty else { return }
-        let storeRef = store
-        Task.detached(priority: .userInitiated) {
-            let result = storeRef.undoRenames(batch)
-            await MainActor.run {
-                if result.failed == 0 && result.skipped == 0 {
-                    BulkRenameSheet.clearLastBatch()
-                }
-                undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
-                    + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
-                    + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
-                editEpoch += 1   // refresh tiles (renamed files) even mid-scan
-                refreshBulkState()
-                reload()
+        Task {
+            let result = await CatalogWrites.undoRenames(batch, engine: engine, store: store)
+            if result.failed == 0 && result.skipped == 0 {
+                BulkRenameSheet.clearLastBatch()
             }
+            undoStatus = "Put back \(result.undone) original name\(result.undone == 1 ? "" : "s")"
+                + (result.skipped > 0 ? " · \(result.skipped) skipped because the file moved or changed" : "")
+                + (result.failed > 0 ? " · \(result.failed) couldn't be renamed back" : "")
+            editEpoch += 1   // refresh tiles (renamed files) even mid-scan
+            refreshBulkState()
+            reload()
         }
     }
 
@@ -657,6 +661,7 @@ struct LibraryView: View {
             selectedID: previewSelectedID ?? paneSelectedID,
             refreshToken: tileRefreshToken,
             textSize: ContentTextScale.shared.size,
+            offline: offlineRoots,
             onSelect: { paneSelectedID = $0.id },
             onOpen: { openPreview($0) },
             onToggleCheck: { row in
@@ -829,6 +834,7 @@ private struct FilePreviewSheet: View {
     @State private var preview: NSImage?
     @State private var tags: [String] = []
     @State private var people: [String] = []
+    @State private var renaming = false
     @AppStorage("preview.showInfo") private var showInfo = true
     /// Holds key focus so the arrow-key handlers fire; the tag field's
     /// focus is tracked separately to suppress nav while the user types.
@@ -1033,24 +1039,19 @@ private struct FilePreviewSheet: View {
                                 }
                                 Spacer(minLength: 6)
                                 Button("Rename") {
-                                    let oldPath = file.pathText
-                                    if let newURL = store.applyProposedName(file: file),
-                                       newURL.path != oldPath {
-                                        // Record the single-file rename so the
-                                        // Library "Undo last rename" button can revert
-                                        // it. Uses the same UserDefaults slot the
-                                        // bulk-rename sheet writes to.
-                                        let outcome = ReadStore.RenameOutcome(
-                                            fileID: file.id,
-                                            oldPath: oldPath,
-                                            newPath: newURL.path
-                                        )
-                                        BulkRenameSheet.saveLastBatch([outcome])
-                                        onEdit()
+                                    renaming = true
+                                    Task {
+                                        let result = await CatalogWrites.applyProposedNames([file], engine: engine, store: store)
+                                        // Same journal slot as the bulk-rename sheet, so
+                                        // Library's "Undo last rename" can revert it.
+                                        BulkRenameSheet.saveLastBatch(result.renamed)
+                                        if !result.renamed.isEmpty { onEdit() }
+                                        renaming = false
+                                        dismiss()
                                     }
-                                    dismiss()
                                 }
                                 .buttonStyle(.dsSecondary)
+                                .disabled(renaming)
                                 .help("Renames the file to the suggested name. Undo last rename at the top of Library puts the old name back.")
                             }
                             .padding(10)
@@ -1452,6 +1453,7 @@ private struct LibrarySelectedPane: View {
     let row: FileRow
     let store: ReadStore
     let engine: EngineClient
+    var offline = false
     let onOpen: () -> Void
     let onFindSimilar: () -> Void
     let onClose: () -> Void
@@ -1495,6 +1497,17 @@ private struct LibrarySelectedPane: View {
                         .lineLimit(1).truncationMode(.head)
                 }
 
+                if offline {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        StatusPill(text: "OFFLINE", color: Theme.warning)
+                        MetaText("Its drive or folder isn't connected. Tags and descriptions are kept.", size: 11.5)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Offline. Its drive or folder isn't connected. Tags and descriptions are kept.")
+                    .transition(.opacity)
+                }
+
                 VStack(spacing: 0) {
                     FileDetailRows(file: row, people: people)
                 }
@@ -1533,14 +1546,17 @@ private struct LibrarySelectedPane: View {
                         }
                         Button { NSWorkspace.shared.activateFileViewerSelecting([row.url]) } label: { Text("Finder").lineLimit(1).frame(maxWidth: .infinity) }
                             .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                            .help("Show in Finder")
+                            .disabled(offline)
+                            .help(offline ? "Reconnect the drive to show this file in Finder" : "Show in Finder")
                         Button { NSWorkspace.shared.open(row.url) } label: { Text("Open").lineLimit(1).frame(maxWidth: .infinity) }
                             .buttonStyle(DSSecondaryButtonStyle(height: 28))
-                            .help("Open in the default app")
+                            .disabled(offline)
+                            .help(offline ? "Reconnect the drive to open this file" : "Open in the default app")
                     }
                 }
             }
             .padding(16)
+            .animation(Theme.spring, value: offline)
         }
         .background(Theme.bg1.opacity(0.35), ignoresSafeAreaEdges: [])
         .task(id: row.id) {

@@ -24,6 +24,8 @@ pub enum Action {
     WipeAndRescan,
     AskChat(String),
     LibraryQuery(String),
+    MomentsQuery(String),
+    ScanFolder(String),
     FocusSearch,
     ToggleChat,
     DismissNote,

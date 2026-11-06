@@ -61,4 +61,23 @@ public class IpcCoderDecodeTests
         var dc = Assert.IsType<DiscoveryCompleteEvent>(rt.Payload);
         Assert.Equal(1ul, dc.TotalFiles);
     }
+
+    [Fact]
+    public void UndoRestructure_SendsTheShortcutTokenOnlyWhenThereIsOne()
+    {
+        var withToken = IpcCoder.Encode(new IpcCommand("u-1", new UndoRestructureCommand("/lib", "tok-1")));
+        var without = IpcCoder.Encode(new IpcCommand("u-2", new UndoRestructureCommand("/lib")));
+        Assert.Contains("\"shortcutUndoToken\":\"tok-1\"", withToken);
+        Assert.DoesNotContain("shortcutUndoToken", without);
+    }
+
+    [Fact]
+    public void RestructurePlan_ReadsTheEnginesPlanIdKey()
+    {
+        const string json = "{\"libraryRoot\":\"/lib\",\"moves\":[],\"categoryCounts\":[],\"truncated\":true,\"planID\":\"p-1\"}";
+        var plan = System.Text.Json.JsonSerializer.Deserialize<RestructurePlan>(json, IpcCoder.Options);
+        Assert.NotNull(plan);
+        Assert.Equal("p-1", plan!.PlanId);
+        Assert.Contains("\"planID\":\"p-1\"", System.Text.Json.JsonSerializer.Serialize(plan, IpcCoder.Options));
+    }
 }

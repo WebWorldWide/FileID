@@ -126,8 +126,6 @@ impl MapView {
 
         let stack = gtk::Stack::builder()
             .vhomogeneous(false)
-            .transition_type(gtk::StackTransitionType::Crossfade)
-            .transition_duration(if crate::spring::animations_enabled() { 180 } else { 0 })
             .build();
         stack.add_named(&map, Some("map"));
         stack.add_named(&tree, Some("tree"));
@@ -167,7 +165,7 @@ impl MapView {
         mode.connect_changed(move |index| {
             let Some(view) = weak.upgrade() else { return };
             let tree = index == 1;
-            view.stack.set_visible_child_name(if tree { "tree" } else { "map" });
+            crate::motion::show_child(&view.stack, if tree { "tree" } else { "map" });
             view.panel.set_title(if tree { "Now → After" } else { "Folder map" });
             view.hint.set_text(if tree {
                 "Click any folder to see its files."

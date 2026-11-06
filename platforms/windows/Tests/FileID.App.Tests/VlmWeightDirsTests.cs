@@ -11,6 +11,7 @@ public class VlmWeightDirsTests
     [InlineData("qwen3_vl_4b", "qwen3-vl-4b")]
     [InlineData("qwen3_vl_8b", "qwen3-vl-8b")]
     [InlineData("qwen2_5_vl_7b", "qwen2.5-vl-7b")]
+    [InlineData("smolvlm_256m_instruct_gguf_q8_0", "catalog-smolvlm_256m_instruct_gguf_q8_0")]
     public void ModelCard_OnlyReportsItsOwnCompleteWeightsInstalled(string kind, string dirName)
     {
         var modelsDir = Path.Combine(Path.GetTempPath(), "fileid-vlm-" + Guid.NewGuid());

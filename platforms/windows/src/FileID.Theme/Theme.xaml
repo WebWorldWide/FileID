@@ -101,6 +101,7 @@
     <SolidColorBrush x:Key="ImageBadgeStrokeBrush" Color="#99FFFFFF" />
     <SolidColorBrush x:Key="ImageBadgeAiStrokeBrush" Color="#99B19BCE" />
     <SolidColorBrush x:Key="ImageBadgeGoldStrokeBrush" Color="#99FFCC00" />
+    <SolidColorBrush x:Key="ImageBadgeWarningStrokeBrush" Color="#99E0A340" />
     <Style x:Key="ImageBadgeStyle" TargetType="Border">
         <Setter Property="Padding" Value="5,1,5,1" />
         <Setter Property="CornerRadius" Value="4" />

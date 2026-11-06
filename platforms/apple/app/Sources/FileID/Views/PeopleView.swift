@@ -71,7 +71,7 @@ struct PeopleView: View {
             switch sheet {
             case .personDetail(let pid):
                 if let person = personByID[pid] {
-                    PersonDetailSheet(person: person, store: store)
+                    PersonDetailSheet(person: person, engine: engine, store: store)
                 } else {
                     Text("This person no longer exists.")
                         .padding(40)
@@ -89,27 +89,19 @@ struct PeopleView: View {
                         let target = preferredTarget(a, b) ?? a ?? b
                         let source = (target?.id == a?.id) ? b : a
                         if let t = target, let s = source {
-                            // Run on a detached task — the mergePersons
-                            // SQL touches face_prints + persons in a
-                            // transaction; on libraries with thousands
-                            // of clusters this can take 5–15 s and would
-                            // freeze the UI on the main thread.
-                            let storeRef = store
                             let candidateID = candidate.id
                             let displayName = t.displayName
                             mergeInFlight = true
-                            Task.detached(priority: .userInitiated) {
-                                let n = storeRef.mergePersons(target: t.id, sources: [s.id])
-                                await MainActor.run {
-                                    if let n {
-                                        mergeStatus = "Merged into \"\(displayName)\" (\(n) photos)."
-                                        suggestions.removeAll { $0.id == candidateID }
-                                    } else {
-                                        mergeStatus = "Merge failed — see logs."
-                                    }
-                                    mergeInFlight = false
-                                    reload()
+                            Task {
+                                let n = await CatalogWrites.merge(engine, store: store, target: t.id, sources: [s.id])
+                                if let n {
+                                    mergeStatus = "Merged into \"\(displayName)\" (\(n) photos)."
+                                    suggestions.removeAll { $0.id == candidateID }
+                                } else {
+                                    mergeStatus = "Merge failed — see logs."
                                 }
+                                mergeInFlight = false
+                                reload()
                             }
                         } else {
                             suggestions.removeAll { $0.id == candidate.id }
@@ -118,9 +110,8 @@ struct PeopleView: View {
                     },
                     onAcceptMany: { batch in
                         guard !mergeInFlight else { return }
-                        // One transaction for the whole batch. ReadStore's
-                        // union-find resolves chains (A→B, B→C → A→C),
-                        // so we just submit raw (target, source) pairs.
+                        // ReadStore's union-find resolves chains (A→B, B→C →
+                        // A→C), so we just submit raw (target, source) pairs.
                         var pairs: [(target: Int64, source: Int64)] = []
                         pairs.reserveCapacity(batch.count)
                         for candidate in batch {
@@ -137,20 +128,19 @@ struct PeopleView: View {
                             reload()
                             return
                         }
-                        let storeRef = store
                         mergeInFlight = true
-                        Task.detached(priority: .userInitiated) {
-                            let merged = storeRef.mergePersonsBatch(pairs)
-                            await MainActor.run {
-                                if merged > 0 {
-                                    suggestions.removeAll { batchToRemove.contains($0) }
-                                    mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
-                                } else {
-                                    mergeStatus = "Merge failed — see logs."
-                                }
-                                mergeInFlight = false
-                                reload()
+                        let submitted = pairs
+                        Task {
+                            let plan = await Task.detached(priority: .userInitiated) { [store] in store.mergeBatchPlan(submitted) }.value
+                            let merged = await CatalogWrites.mergeBatch(engine, store: store, plan: plan)
+                            if merged > 0 {
+                                suggestions.removeAll { batchToRemove.contains($0) }
+                                mergeStatus = "Bulk-merged \(merged) cluster\(merged == 1 ? "" : "s")."
+                            } else {
+                                mergeStatus = "Merge failed — see logs."
                             }
+                            mergeInFlight = false
+                            reload()
                         }
                     },
                     onDismiss: { activeSheet = nil }
@@ -160,27 +150,20 @@ struct PeopleView: View {
                     checked: Array(mergeChecked).compactMap { personByID[$0] }
                         .sorted { $0.displayName < $1.displayName },
                     onPick: { target in
-                        let sources = mergeChecked.filter { $0 != target.id }
-                        let storeRef = store
+                        let sources = mergeChecked.filter { $0 != target.id }.sorted()
                         let displayName = target.displayName
                         let sourceCount = sources.count
-                        // Off the main thread — large merges hit
-                        // face_prints + persons in a transaction and
-                        // can take seconds.
                         mergeMode = false
                         mergeChecked.removeAll()
                         activeSheet = nil
-                        Task.detached(priority: .userInitiated) {
-                            let newCount = storeRef.mergePersons(target: target.id,
-                                                                  sources: Array(sources))
-                            await MainActor.run {
-                                if let newCount {
-                                    mergeStatus = "Merged \(sourceCount + 1) clusters into \"\(displayName)\" (\(newCount) photos)."
-                                } else {
-                                    mergeStatus = "Merge failed — see logs."
-                                }
-                                reload()
+                        Task {
+                            let newCount = await CatalogWrites.merge(engine, store: store, target: target.id, sources: sources)
+                            if let newCount {
+                                mergeStatus = "Merged \(sourceCount + 1) clusters into \"\(displayName)\" (\(newCount) photos)."
+                            } else {
+                                mergeStatus = "Merge failed — see logs."
                             }
+                            reload()
                         }
                     },
                     onCancel: { activeSheet = nil }
@@ -325,20 +308,14 @@ struct PeopleView: View {
     }
 
     private func bulkMarkUnknown() {
-        // One batched transaction off the main thread (the per-id
-        // updatePerson loop opened N connections + ran N main-thread transactions,
-        // freezing the UI for crowd-sized selections), mirroring the merge paths.
-        let ids = Array(unknownChecked)
+        let ids = unknownChecked.sorted()
         guard !ids.isEmpty else { return }
-        let storeRef = store
         unknownMode = false
         unknownChecked.removeAll()
-        Task.detached(priority: .userInitiated) {
-            let n = storeRef.markUnknownBatch(ids: ids)
-            await MainActor.run {
-                mergeStatus = "Marked \(n) cluster\(n == 1 ? "" : "s") as unknown."
-                reload()
-            }
+        Task {
+            let n = await CatalogWrites.markUnknown(engine, store: store, ids: ids)
+            mergeStatus = "Marked \(n) cluster\(n == 1 ? "" : "s") as unknown."
+            reload()
         }
     }
 
@@ -472,6 +449,7 @@ struct PeopleView: View {
                                 enabled: !mergeMode && !unknownMode,
                                 personID: person.id,
                                 personName: person.displayName,
+                                engine: engine,
                                 store: store,
                                 onMerged: { count in
                                     mergeStatus = "Merged into \(person.displayName) (\(count) photos)."
@@ -630,6 +608,7 @@ private struct PersonCardDragMergeModifier: ViewModifier {
     let enabled: Bool
     let personID: Int64
     let personName: String
+    let engine: EngineClient
     let store: ReadStore
     let onMerged: @Sendable @MainActor (Int) -> Void
 
@@ -641,16 +620,11 @@ private struct PersonCardDragMergeModifier: ViewModifier {
                     guard let s = items.first,
                           let sourceID = Int64(s),
                           sourceID != personID else { return false }
-                    // Merge reassigns face_prints + deletes the source row;
-                    // on large clusters it blocks for seconds. Run it off the
-                    // main thread, then report the result on the main actor.
-                    let storeRef = store
                     let targetID = personID
                     let completion = onMerged
-                    Task.detached(priority: .userInitiated) {
-                        let n = storeRef.mergePersons(target: targetID,
-                                                      sources: [sourceID]) ?? 0
-                        await completion(n)
+                    Task { [engine, store] in
+                        let n = await CatalogWrites.merge(engine, store: store, target: targetID, sources: [sourceID]) ?? 0
+                        completion(n)
                     }
                     return true
                 } isTargeted: { _ in }
@@ -817,6 +791,7 @@ enum FaceCropCache {
 
 private struct PersonDetailSheet: View {
     let person: ReadStore.PersonRow
+    let engine: EngineClient
     let store: ReadStore
     @Environment(\.dismiss) private var dismiss
 
@@ -965,6 +940,7 @@ private struct PersonDetailSheet: View {
         .sheet(isPresented: $showMoveTargetPicker) {
             MovePhotosTargetPicker(
                 sourcePerson: person,
+                engine: engine,
                 store: store,
                 fileIDs: Array(checked),
                 onMoved: { count, targetName in
@@ -985,11 +961,23 @@ private struct PersonDetailSheet: View {
             suffix = person.suffix ?? ""
             isUnknown = person.isUnknown
         }
-        .onDisappear {
-            store.updatePerson(id: person.id,
-                                title: title, firstName: firstName,
-                                middleName: middleName, lastName: lastName,
-                                suffix: suffix, isUnknown: isUnknown)
+        .onDisappear(perform: saveName)
+    }
+
+    private func saveName() {
+        let fields = [title, firstName, middleName, lastName, suffix].map { $0.trimmingCharacters(in: .whitespaces) }
+        let saved = [person.title, person.firstName ?? person.name, person.middleName, person.lastName, person.suffix]
+            .map { ($0 ?? "").trimmingCharacters(in: .whitespaces) }
+        guard isUnknown != person.isUnknown || (!isUnknown && fields != saved) else { return }
+        let id = person.id, unknown = isUnknown
+        Task { [engine, store] in
+            if unknown {
+                await CatalogWrites.markUnknown(engine, store: store, ids: [id])
+            } else {
+                let value: (Int) -> String? = { fields[$0].isEmpty ? nil : fields[$0] }
+                await CatalogWrites.renamePerson(engine, store: store, id: id, title: value(0), firstName: value(1),
+                                                 middleName: value(2), lastName: value(3), suffix: value(4))
+            }
         }
     }
 
@@ -1207,6 +1195,7 @@ private struct PersonFileTile: View {
 /// photo count. Tap to commit the move.
 private struct MovePhotosTargetPicker: View {
     let sourcePerson: ReadStore.PersonRow
+    let engine: EngineClient
     let store: ReadStore
     let fileIDs: [Int64]
     let onMoved: @Sendable @MainActor (_ count: Int, _ targetName: String) -> Void
@@ -1234,25 +1223,15 @@ private struct MovePhotosTargetPicker: View {
                           spacing: 12) {
                     ForEach(candidates) { p in
                         Button {
-                            // Off the main thread — movePersonFaces opens a
-                            // write connection and runs an UPDATE + two
-                            // COUNT(DISTINCT) recounts in a transaction over the
-                            // user's full multi-selection; on big clusters this
-                            // blocks for seconds. Mirror the merge paths.
-                            let storeRef = store
                             let sourceID = sourcePerson.id
                             let targetID = p.id
                             let ids = fileIDs
                             let targetName = p.displayName
                             let completion = onMoved
                             dismiss()
-                            Task.detached(priority: .userInitiated) {
-                                let moved = storeRef.movePersonFaces(
-                                    fromPersonID: sourceID,
-                                    toPersonID: targetID,
-                                    fileIDs: ids
-                                )
-                                await completion(moved, targetName)
+                            Task { [engine, store] in
+                                let moved = await CatalogWrites.moveFaces(engine, store: store, from: sourceID, to: targetID, fileIDs: ids)
+                                completion(moved, targetName)
                             }
                         } label: {
                             PersonCard(person: p, store: store)

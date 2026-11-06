@@ -71,9 +71,17 @@ struct ChatIntent: Codable, Equatable, Sendable {
         var reduced = ""
         /// File extensions named in the question ("RAW", "PNGs"), lowercase.
         var formats: [String]?
+        /// "the 3 largest", "top 10": how many files to list.
+        var limit: Int?
+        /// "bigger than 1 GB" / "under 500 KB", in bytes (exclusive).
+        var minBytes: Int64?
+        var maxBytes: Int64?
+        /// "per year" / "by month": counts grouped by "year" or "month".
+        var breakdown: String?
 
         var structured: Bool {
             measure != "list" || explicitOrder || date != nil || folder != nil || duplicates || undescribed || formats != nil
+                || limit != nil || minBytes != nil || maxBytes != nil || breakdown != nil
         }
     }
 
@@ -366,6 +374,43 @@ struct ChatIntent: Codable, Equatable, Sendable {
 
     // MARK: - Questions
 
+    /// "bigger than 1 GB", "over 500MB", "under 2.5 gb", "at least 10 MB": byte
+    /// bounds and the words they used. Decimal units, as sizes are shown.
+    static func sizeBounds(_ words: [String]) -> (Int64?, Int64?, Set<Int>)? {
+        let units: [String: Double] = ["b": 1, "byte": 1, "bytes": 1, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12]
+        let above: Set<String> = ["bigger", "larger", "over", "above", "more", "exceeding", "heavier"]
+        let below: Set<String> = ["smaller", "under", "below", "less", "lighter"]
+        func amount(at index: Int) -> (Double, Int)? {
+            guard index < words.count else { return nil }
+            let word = words[index]
+            if let number = Double(word), number >= 0, index + 1 < words.count, let unit = units[words[index + 1]] { return (number * unit, 2) }
+            let digits = word.prefix { $0.isNumber || $0 == "." }
+            if !digits.isEmpty, let number = Double(digits), let unit = units[String(word.dropFirst(digits.count))] { return (number * unit, 1) }
+            return nil
+        }
+        var minimum: Int64?, maximum: Int64?
+        var used = Set<Int>()
+        var index = 0
+        while index < words.count {
+            let word = words[index]
+            var isMin: Bool?
+            var start = index + 1
+            if above.contains(word) { isMin = true } else if below.contains(word) { isMin = false }
+            if word == "at", index + 1 < words.count, ["least", "most"].contains(words[index + 1]) {
+                isMin = words[index + 1] == "least"; start = index + 2
+            }
+            guard let direction = isMin else { index += 1; continue }
+            if start < words.count, words[start] == "than" { start += 1 }
+            // Int64(_:) traps on infinity or overflow ("over inf gb", "over 1e30 tb").
+            guard let (bytes, length) = amount(at: start), bytes.isFinite, bytes < 9e18 else { index += 1; continue }
+            let value = Int64(bytes.rounded())
+            if direction { minimum = value } else { maximum = value }
+            used.formUnion(index..<(start + length))
+            index = start + length
+        }
+        return used.isEmpty ? nil : (minimum, maximum, used)
+    }
+
     /// Parses the structured part of a question (counts, sizes, ordering,
     /// dates, folders, duplicates, descriptions).
     static func question(_ text: String) -> Question {
@@ -421,11 +466,46 @@ struct ChatIntent: Codable, Equatable, Sendable {
             }
         }
         if !formats.isEmpty { question.formats = formats }
+        let orderWords: Set<String> = ["largest", "biggest", "heaviest", "smallest", "tiniest", "newest", "latest", "recent", "oldest", "earliest"]
+        for (index, word) in words.enumerated() {
+            guard let n = Int(word), (1...500).contains(n), String(n) == word else { continue }
+            let before = index > 0 ? words[index - 1] : ""
+            let after = index + 1 < words.count ? words[index + 1] : ""
+            if before == "top" || before == "first" || orderWords.contains(after) {
+                question.limit = n; used.insert(index)
+                if before == "top" || before == "first" { used.insert(index - 1) }
+                if before == "top", !question.explicitOrder { question.order = "largest"; question.explicitOrder = true }
+                break
+            }
+        }
+        for index in words.indices.dropLast() where ["per", "by", "each", "every"].contains(words[index]) {
+            let unit = words[index + 1]
+            if ["size", "sizes"].contains(unit), !question.explicitOrder {
+                question.order = "largest"; question.explicitOrder = true; used.formUnion([index, index + 1])
+            } else if ["date", "time"].contains(unit), !question.explicitOrder {
+                question.order = "newest"; question.explicitOrder = true; used.formUnion([index, index + 1])
+            } else if ["year", "years", "month", "months"].contains(unit) {
+                question.breakdown = unit.hasPrefix("year") ? "year" : "month"
+                if question.measure == "list" { question.measure = "count" }
+                used.formUnion([index, index + 1])
+            }
+        }
+        if words.contains(where: { ["yearly", "annually"].contains($0) }) {
+            question.breakdown = "year"
+            if question.measure == "list" { question.measure = "count" }
+            for (index, word) in words.enumerated() where ["yearly", "annually"].contains(word) { used.insert(index) }
+        }
+        if question.measure == "size", words.contains("most"), !question.explicitOrder {
+            question.order = "largest"; question.explicitOrder = true
+        }
+        if let (minimum, maximum, range) = sizeBounds(words) {
+            question.minBytes = minimum; question.maxBytes = maximum; used.formUnion(range)
+        }
         if let (filter, range) = dateFilter(words) { question.date = filter; used.formUnion(range) }
         if let (folder, range) = questionFolder(words, raw) { question.folder = folder; used.formUnion(range) }
         if question.structured {
             let filler: Set<String> = [
-                "how", "many", "much", "what", "which", "is", "are", "there", "do", "does", "did", "i", "we", "you", "have", "has", "got",
+                "how", "many", "much", "what", "whats", "which", "is", "are", "there", "do", "does", "did", "i", "we", "you", "have", "has", "got",
                 "total", "number", "count", "use", "uses", "using", "used", "take", "takes", "taking", "up", "space", "storage", "room", "disk",
                 "size", "big", "large", "show", "list", "give", "tell", "me", "top", "been", "yet", "were", "was", "taken", "made", "created",
                 "shot", "recorded", "added", "any", "that", "those", "these", "by", "per", "most", "least", "first", "sorted", "files", "file",
@@ -607,6 +687,11 @@ struct ChatIntent: Codable, Equatable, Sendable {
                 }
                 return monthDay(m, d, length: 1)
             }
+        }
+        let seasons = ["spring": 3, "summer": 6, "fall": 9, "autumn": 9, "winter": 12]
+        if let first = seasons[word], let y = year(next) {
+            let start = String(format: "%04d-%02d-01", y, first)
+            return Span(filter: exact([start], [start, "+3 months"], "\(word) \(y)"), length: 2)
         }
         if let m = month(word) {
             if let d = day(next) {

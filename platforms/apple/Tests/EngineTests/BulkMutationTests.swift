@@ -142,6 +142,52 @@ struct BulkMutationTests {
         #expect(row.ext == "md")
     }
 
+    @Test("Renaming to the suggested name clears it; a case-only rename lands; other renames keep it")
+    func renameAppliesSuggestedName() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FileIDBulkSuggested-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let names = ["Beach.txt", "IMG_1.txt", "IMG_2.txt", "IMG_3.txt"]
+        let db = try makeDB(root)
+        for (index, name) in names.enumerated() {
+            let url = root.appendingPathComponent(name)
+            try Data("\(index)".utf8).write(to: url)
+            try await insert(db, id: Int64(index + 1), path: url.path)
+        }
+        try await db.pool.write { sql in
+            try sql.execute(sql: "UPDATE files SET vlm_proposed_name = 'beach' WHERE id IN (1, 2)")
+            try sql.execute(sql: "UPDATE files SET vlm_proposed_name = 'sunset' WHERE id IN (3, 4)")
+        }
+
+        let result = await FileIDEngineMain.renameFiles(database: db, renames: [
+            RenameEntry(fileID: 1, newName: "beach.txt"),
+            RenameEntry(fileID: 2, newName: "beach_2.txt"),
+            RenameEntry(fileID: 3, newName: "sunset_100.txt"),
+            RenameEntry(fileID: 4, newName: "notes.txt")
+        ])
+        #expect(result.succeeded == 4)
+        let rows: [(path: String, proposed: String?)] = try await db.pool.read { sql in
+            try Row.fetchAll(sql, sql: "SELECT path_text, vlm_proposed_name FROM files ORDER BY id")
+                .map { ($0["path_text"], $0["vlm_proposed_name"]) }
+        }
+        #expect(rows.map { URL(fileURLWithPath: $0.path).lastPathComponent } == ["beach.txt", "beach_2.txt", "sunset_100.txt", "notes.txt"])
+        #expect(rows.map(\.proposed) == [nil, nil, "sunset", "sunset"])
+        let listed = try FileManager.default.contentsOfDirectory(atPath: root.path)
+        #expect(listed.contains("beach.txt") && !listed.contains("Beach.txt"))
+    }
+
+    @Test("Suggested-name match accepts the name and its numbered bumps only")
+    func suggestedNameMatch() {
+        #expect(FileIDEngineMain.appliesProposedName("beach", newName: "beach.jpg", originalExtension: "jpg"))
+        #expect(FileIDEngineMain.appliesProposedName("beach", newName: "beach_7.jpg", originalExtension: "jpg"))
+        #expect(FileIDEngineMain.appliesProposedName("notes", newName: "notes", originalExtension: ""))
+        #expect(!FileIDEngineMain.appliesProposedName("beach", newName: "beach_1.jpg", originalExtension: "jpg"))
+        #expect(!FileIDEngineMain.appliesProposedName("beach", newName: "beach_+5.jpg", originalExtension: "jpg"))
+        #expect(!FileIDEngineMain.appliesProposedName("beach", newName: "beach.png", originalExtension: "jpg"))
+        #expect(!FileIDEngineMain.appliesProposedName("beach", newName: "beachside.jpg", originalExtension: "jpg"))
+    }
+
     @Test("Bulk rename rejects a same-path replacement by file identity")
     func renameRejectsReplacement() async throws {
         let root = FileManager.default.temporaryDirectory

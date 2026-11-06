@@ -16,6 +16,7 @@ use fileid_engine::ipc::{
 use fileid_engine::models::registry::{self, LookupResult};
 
 use super::util::glass_card;
+use super::vlm_picker::{self, VlmChoice};
 use crate::engine_client::{EngineClient, EngineEvent};
 
 #[path = "deep_scope.rs"]
@@ -26,9 +27,8 @@ const PROPOSED_LIMIT: i64 = 200;
 // ─── VLM registry (Linux mirror of macOS `AIModelKind`) ──────────────────────
 // `model_kind` keys are the exact strings the engine accepts (see the shared
 // engine `models::registry::lookup_full`). RAM / seconds-per-image are display
-// estimates only — macOS reads them from `AIModels.swift`; Linux has no RAM
-// probe wired yet (no new crate), so they're informational and the picker shows
-// every kind rather than OOM-gating per machine.
+// estimates; until the engine's `listModels` catalog arrives the picker shows
+// the ones that fit this machine.
 struct VlmKind {
     key: &'static str,
     display: &'static str,
@@ -132,7 +132,7 @@ pub fn recommended_vlm_display() -> &'static str {
     vlm_by_key(host_recommended_vlm_kind()).display
 }
 
-fn host_recommended_vlm_kind() -> &'static str {
+pub(super) fn host_recommended_vlm_kind() -> &'static str {
     let total = fileid_engine::platform::physical_memory_gb();
     let available = fileid_engine::platform::available_memory_mb() as f64 / 1024.0;
     let free = fileid_engine::paths::models_dir()
@@ -159,7 +159,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let explainer = build_explainer();
     content.append(&explainer);
 
-    let lbl_active = value_label(vlm_by_key(default_kind).display);
+    let lbl_active = value_label(&kind_display(default_kind));
     lbl_active.set_tooltip_text(Some("Change the description model below"));
     lbl_active.remove_css_class("numeric");
     let lbl_total = value_label("0 files");
@@ -202,7 +202,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
     let (naming_banner, naming_dismiss) = build_naming_banner();
     let skip_check = gtk::CheckButton::with_label("Only files not described yet");
     skip_check.set_active(true);
-    skip_check.set_tooltip_text(Some(&skip_tooltip(default_kind)));
+    skip_check.set_tooltip_text(Some(&skip_tooltip(&kind_display(default_kind))));
     let run_btn = gtk::Button::builder()
         .label("Describe files")
         .sensitive(false)
@@ -243,11 +243,7 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         .css_classes(["gold-button"])
         .halign(gtk::Align::Start)
         .build();
-    let smart_revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .child(&smart_list)
-        .reveal_child(false)
-        .build();
+    let smart_revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Down, &smart_list);
     let smart_card = build_smart_card(&smart_count, &review_btn, &smart_revealer);
     smart_card.set_visible(false);
     content.append(&smart_card);
@@ -363,6 +359,8 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
         apply_all,
         picker_box,
         pick_rows: RefCell::new(Vec::new()),
+        choices: RefCell::new(fallback_choices(default_kind)),
+        catalog_request: RefCell::new(String::new()),
         download_card,
         download_bar,
         download_label,
@@ -397,7 +395,8 @@ pub fn build_deep_analyze_tab(engine: Rc<RefCell<EngineClient>>) -> gtk::Widget 
             sync_run_state(&ui);
         });
     }
-    populate_picker(&ui);
+    render_picker(&ui);
+    request_catalog(&ui);
     wire_actions(&ui, &folder_btn);
     sync_run_state(&ui);
 
@@ -457,6 +456,8 @@ struct DeepUi {
 
     picker_box: gtk::Box,
     pick_rows: RefCell<Vec<PickRow>>,
+    choices: RefCell<Vec<VlmChoice>>,
+    catalog_request: RefCell<String>,
     download_card: gtk::Box,
     download_bar: gtk::ProgressBar,
     download_label: gtk::Label,
@@ -465,7 +466,7 @@ struct DeepUi {
     smart_count: gtk::Label,
     smart_list: gtk::ListBox,
     review_btn: gtk::Button,
-    smart_revealer: gtk::Revealer,
+    smart_revealer: crate::motion::SpringRevealer,
     proposed: RefCell<Vec<ProposedRow>>,
 
     starting_card: gtk::Box,
@@ -821,12 +822,10 @@ fn run_blocker(ui: &DeepUi) -> Option<String> {
                 .into(),
         );
     }
-    let kind = vlm_by_key(ui.active_kind.get());
-    let ram = fileid_engine::platform::physical_memory_gb();
-    if ram > 0.0 && !vlm_fits(kind.key, ram, 0.0, None) {
+    if !active_fits(ui) {
         return Some(format!(
             "{} needs more memory than this computer has. Choose a smaller model below.",
-            kind.display
+            active_display(ui)
         ));
     }
     if ui.in_flight.get() {
@@ -1009,6 +1008,20 @@ fn apply_event(ui: &Rc<DeepUi>, ev: EngineEvent) {
             ui.download_label.set_text(&m.message);
             ui.download_bar.set_fraction(m.fraction.clamp(0.0, 1.0));
             ui.download_card.set_visible(true);
+            if m.fraction >= 1.0 && ui.choices.borrow().iter().any(|choice| choice.id == m.model_kind) {
+                request_catalog(ui);
+            }
+        }
+        EngineEvent::Ready => request_catalog(ui),
+        EngineEvent::ModelCatalog(catalog) if catalog.request_id == *ui.catalog_request.borrow() => {
+            let shown = vlm_picker::choices(&catalog.models, ui.active_kind.get(), static_kind, |id| {
+                fileid_engine::models::license::policy_for(id).is_some()
+            });
+            if !shown.is_empty() {
+                ui.choices.replace(shown);
+                render_picker(ui);
+                refresh(ui);
+            }
         }
         EngineEvent::ScanComplete(_) => refresh(ui),
         EngineEvent::Error { kind, .. } if error_ends_deep_run(&kind) => end_run(ui),
@@ -1027,7 +1040,7 @@ pub(crate) fn error_ends_deep_run(kind: &str) -> bool {
 
 fn refresh(ui: &Rc<DeepUi>) {
     let active = ui.active_kind.get().to_string();
-    ui.lbl_active.set_text(vlm_by_key(&active).display);
+    ui.lbl_active.set_text(&active_display(ui));
 
     let rx = query_status(active.clone());
     glib::MainContext::default().spawn_local(clone!(
@@ -1058,7 +1071,7 @@ fn apply_status(ui: &Rc<DeepUi>, c: StatusCounts) {
         .set_text(&plural(c.total_files.max(0) as usize, "file"));
     ui.lbl_pending
         .set_text(&plural(c.pending.max(0) as usize, "file"));
-    let secs = c.pending as f64 * vlm_by_key(ui.active_kind.get()).secs_per_image;
+    let secs = c.pending as f64 * active_secs_per_image(ui);
     ui.lbl_eta.set_text(&format!("about {}", format_duration(secs)));
     ui.lbl_eta_key.set_visible(c.pending > 0);
     ui.lbl_eta.set_visible(c.pending > 0);
@@ -1187,116 +1200,215 @@ pub fn vlm_runtime_available() -> bool {
     std::env::var_os("FLATPAK_ID").is_none()
 }
 
-fn populate_picker(ui: &Rc<DeepUi>) {
-    for vlm in VLMS.iter() {
-        let (installed, gb) = model_install_info(vlm.key);
-
-        let is_default = vlm.key == ui.active_kind.get();
-
-        let indicator = gtk::Label::builder()
-            .label(if is_default { "●" } else { "○" })
-            .valign(gtk::Align::Start)
-            .build();
-        if is_default {
-            indicator.add_css_class("gold-accent");
-        }
-
-        let title = gtk::Label::builder().label(vlm.display).xalign(0.0).build();
-        if is_default {
-            title.add_css_class("gold-accent");
-        }
-
-        let badge = gtk::Label::builder()
-            .label(if installed {
-                "Ready".to_string()
-            } else {
-                format!("{gb:.1} GB download")
-            })
-            .css_classes(if installed {
-                ["kind-badge"]
-            } else {
-                ["dim-label"]
-            })
-            .valign(gtk::Align::Center)
-            .build();
-
-        let title_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .build();
-        title_row.append(&title);
-        title_row.append(&badge);
-
-        let stats = gtk::Label::builder()
-            .label(format!(
-                "Needs ≈ {:.1} GB memory · about {:.0} s a photo · {}",
-                vlm.ram_gb, vlm.secs_per_image, vlm.license
-            ))
-            .xalign(0.0)
-            .css_classes(["tile-caption"])
-            .build();
-
-        let text_col = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
-            .hexpand(true)
-            .build();
-        text_col.append(&title_row);
-        text_col.append(&stats);
-
-        let inner = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(10)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(10)
-            .margin_end(10)
-            .build();
-        inner.append(&indicator);
-        inner.append(&text_col);
-
-        let btn = gtk::Button::builder()
-            .css_classes(["glass-card"])
-            .child(&inner)
-            .build();
-        if is_default {
-            btn.add_css_class("file-tile-selected");
-        }
-        btn.set_sensitive(vlm_runtime_available());
-
-        let key = vlm.key;
-        btn.connect_clicked(clone!(
-            #[strong]
-            ui,
-            move |_| {
-                ui.active_kind.set(key);
-                for row in ui.pick_rows.borrow().iter() {
-                    let active = row.key == key;
-                    if active {
-                        row.btn.add_css_class("file-tile-selected");
-                        row.indicator.set_text("●");
-                        row.indicator.add_css_class("gold-accent");
-                        row.title.add_css_class("gold-accent");
-                    } else {
-                        row.btn.remove_css_class("file-tile-selected");
-                        row.indicator.set_text("○");
-                        row.indicator.remove_css_class("gold-accent");
-                        row.title.remove_css_class("gold-accent");
-                    }
-                }
-                ui.skip_check.set_tooltip_text(Some(&skip_tooltip(key)));
-                refresh(&ui);
+/// The engine-independent picker shown until `listModels` answers: the
+/// built-in description models that fit this machine, plus the active one.
+fn fallback_choices(active: &str) -> Vec<VlmChoice> {
+    let ram = fileid_engine::platform::physical_memory_gb();
+    VLMS.iter()
+        .map(|vlm| {
+            let (installed, gib) = model_install_info(vlm.key);
+            VlmChoice {
+                id: vlm.key,
+                name: vlm.display.to_owned(),
+                license: vlm.license.to_owned(),
+                terms_required: fileid_engine::models::license::policy_for(vlm.key).is_some(),
+                resident_gb: vlm.ram_gb,
+                download_gb: gib * 1.073_741_824,
+                installed,
+                curated: true,
+                fits: ram <= 0.0 || vlm_fits(vlm.key, ram, 0.0, None),
+                measured_secs_per_image: None,
             }
-        ));
+        })
+        .filter(|choice| choice.fits || choice.id == active)
+        .collect()
+}
 
-        ui.picker_box.append(&btn);
-        ui.pick_rows.borrow_mut().push(PickRow {
-            key,
-            btn,
-            indicator,
-            title,
-        });
+/// The engine's `'static` key for a model id (curated or runnable catalog).
+fn static_kind(id: &str) -> Option<&'static str> {
+    match registry::lookup_full(id) {
+        LookupResult::Found(model) => Some(model.id),
+        LookupResult::Unknown => None,
     }
+}
+
+fn kind_display(key: &str) -> String {
+    VLMS.iter()
+        .find(|vlm| vlm.key == key)
+        .map(|vlm| vlm.display.to_owned())
+        .or_else(|| match registry::lookup_full(key) {
+            LookupResult::Found(model) => Some(model.display_name.to_owned()),
+            LookupResult::Unknown => None,
+        })
+        .unwrap_or_else(|| key.to_owned())
+}
+
+fn active_choice(ui: &DeepUi) -> Option<VlmChoice> {
+    let active = ui.active_kind.get();
+    ui.choices.borrow().iter().find(|choice| choice.id == active).cloned()
+}
+
+fn active_display(ui: &DeepUi) -> String {
+    active_choice(ui).map_or_else(|| kind_display(ui.active_kind.get()), |choice| choice.name)
+}
+
+fn active_fits(ui: &DeepUi) -> bool {
+    active_choice(ui).is_none_or(|choice| choice.fits)
+}
+
+fn active_secs_per_image(ui: &DeepUi) -> f64 {
+    let active = ui.active_kind.get();
+    match active_choice(ui) {
+        Some(choice) if choice.measured_secs_per_image.is_some() => choice.secs_per_image(),
+        choice => VLMS
+            .iter()
+            .find(|vlm| vlm.key == active)
+            .map(|vlm| vlm.secs_per_image)
+            .or(choice.map(|choice| choice.secs_per_image()))
+            .unwrap_or(VLMS[0].secs_per_image),
+    }
+}
+
+fn request_catalog(ui: &DeepUi) {
+    if !ui.engine.borrow().is_ready() {
+        return;
+    }
+    let id = format!("describe-models-{}", glib::monotonic_time());
+    if ui.engine.borrow_mut().list_models(&id, Some("vision")).is_ok() {
+        ui.catalog_request.replace(id);
+    }
+}
+
+fn render_picker(ui: &Rc<DeepUi>) {
+    while let Some(child) = ui.picker_box.first_child() {
+        ui.picker_box.remove(&child);
+    }
+    ui.pick_rows.borrow_mut().clear();
+    let choices = ui.choices.borrow().clone();
+    let active = ui.active_kind.get();
+    let leading = vlm_picker::leading_count(&choices, active);
+    for choice in &choices[..leading] {
+        let row = pick_row(ui, choice);
+        ui.picker_box.append(&row);
+    }
+    if leading < choices.len() {
+        let more = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .margin_top(6)
+            .build();
+        for choice in &choices[leading..] {
+            more.append(&pick_row(ui, choice));
+        }
+        let expander = gtk::Expander::builder()
+            .label(format!(
+                "More models that fit this computer ({})",
+                choices.len() - leading
+            ))
+            .child(&more)
+            .build();
+        ui.picker_box.append(&expander);
+    }
+    ui.picker_box.append(&wrap_caption(
+        "Only models that fit this computer's memory and are free for commercial use are listed. Catalog models haven't been measured here yet; Settings → Model catalog can benchmark them.",
+    ));
+}
+
+fn pick_row(ui: &Rc<DeepUi>, choice: &VlmChoice) -> gtk::Button {
+    let is_active = choice.id == ui.active_kind.get();
+    let indicator = gtk::Label::builder()
+        .label(if is_active { "●" } else { "○" })
+        .valign(gtk::Align::Start)
+        .build();
+    let title = gtk::Label::builder().label(&choice.name).xalign(0.0).build();
+    if is_active {
+        indicator.add_css_class("gold-accent");
+        title.add_css_class("gold-accent");
+    }
+    let badge = gtk::Label::builder()
+        .label(choice.badge())
+        .css_classes(if choice.installed {
+            ["kind-badge"]
+        } else {
+            ["dim-label"]
+        })
+        .valign(gtk::Align::Center)
+        .build();
+    let title_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .build();
+    title_row.append(&title);
+    title_row.append(&badge);
+    let stats = gtk::Label::builder()
+        .label(choice.stats())
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["tile-caption"])
+        .build();
+    let text_col = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .build();
+    text_col.append(&title_row);
+    text_col.append(&stats);
+    let inner = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(10)
+        .margin_end(10)
+        .build();
+    inner.append(&indicator);
+    inner.append(&text_col);
+    let btn = gtk::Button::builder()
+        .css_classes(["glass-card"])
+        .child(&inner)
+        .sensitive(vlm_runtime_available())
+        .build();
+    if is_active {
+        btn.add_css_class("file-tile-selected");
+    }
+    btn.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{}, {}, {}",
+        choice.name,
+        choice.badge(),
+        choice.stats()
+    ))]);
+    let key = choice.id;
+    let name = choice.name.clone();
+    btn.connect_clicked(clone!(
+        #[strong]
+        ui,
+        move |_| {
+            ui.active_kind.set(key);
+            for row in ui.pick_rows.borrow().iter() {
+                let active = row.key == key;
+                if active {
+                    row.btn.add_css_class("file-tile-selected");
+                    row.indicator.set_text("●");
+                    row.indicator.add_css_class("gold-accent");
+                    row.title.add_css_class("gold-accent");
+                } else {
+                    row.btn.remove_css_class("file-tile-selected");
+                    row.indicator.set_text("○");
+                    row.indicator.remove_css_class("gold-accent");
+                    row.title.remove_css_class("gold-accent");
+                }
+            }
+            ui.skip_check.set_tooltip_text(Some(&skip_tooltip(&name)));
+            refresh(&ui);
+        }
+    ));
+    ui.pick_rows.borrow_mut().push(PickRow {
+        key,
+        btn: btn.clone(),
+        indicator,
+        title,
+    });
+    btn
 }
 
 /// (installed, approx-GB) for a VLM kind, read from the shared engine registry.
@@ -1491,11 +1603,8 @@ const STARTING_SUBTITLE: &str =
     "Loading the model on this computer. The first description usually appears within 15 seconds.";
 const NOT_READY: &str = "FileID is still getting ready. Try again in a moment.";
 
-fn skip_tooltip(kind: &str) -> String {
-    format!(
-        "Leave this on to skip files that already have a description from {}",
-        vlm_by_key(kind).display
-    )
+fn skip_tooltip(display: &str) -> String {
+    format!("Leave this on to skip files that already have a description from {display}")
 }
 
 fn build_header() -> gtk::Label {
@@ -1671,7 +1780,7 @@ fn build_naming_banner() -> (gtk::Box, gtk::Button) {
 fn build_smart_card(
     count: &gtk::Label,
     review_btn: &gtk::Button,
-    revealer: &gtk::Revealer,
+    revealer: &crate::motion::SpringRevealer,
 ) -> gtk::Box {
     let card = glass_card();
     let head = gtk::Box::builder()

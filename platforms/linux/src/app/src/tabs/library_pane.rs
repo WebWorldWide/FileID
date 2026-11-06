@@ -1,6 +1,7 @@
 // Library Selected pane (macOS `LibrarySelectedPane`): a 300 px side pane
 // that follows the grid's single-click selection with a 16:10 preview, the
 // file's facts, people, tags, caption and Open preview / Show in Files / Open.
+// A file whose location is offline shows the OFFLINE pill and can't be opened.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -8,12 +9,26 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 
+use super::offline_roots::OfflineRoots;
 use super::util::{fmt_date, icon_for_kind, icon_paintable};
 use fileid_engine::util::display::file_size_i64;
 use crate::engine_client::{texture_from_decoded, EngineClient, FileRow, ThumbReply};
 
 const PANE_PREVIEW_PX: i32 = 1024;
 const TAG_LIMIT: i64 = 24;
+pub(super) const OFFLINE_NOTE: &str = "Its drive or folder isn't connected. Tags and descriptions are kept.";
+
+/// Tooltips for Show in Files and Open: why they're off while offline.
+pub(super) fn action_tips(offline: bool) -> (&'static str, &'static str) {
+    if offline {
+        (
+            "Reconnect the drive to show this file in Files",
+            "Reconnect the drive to open this file",
+        )
+    } else {
+        ("Show in Files", "Open in the default app")
+    }
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct FileDetails {
@@ -122,9 +137,16 @@ pub(super) fn append_details(target: &gtk::Box, file_id: i64) {
 }
 
 pub(super) struct SelectedPane {
-    pub revealer: gtk::Revealer,
+    pub revealer: crate::motion::SpringRevealer,
     engine: Rc<RefCell<EngineClient>>,
     picture: gtk::Picture,
+    frame: gtk::AspectFrame,
+    actions: gtk::Box,
+    reveal: gtk::Button,
+    open: gtk::Button,
+    offline_note: gtk::Box,
+    offline: Rc<RefCell<OfflineRoots>>,
+    shown_offline: Cell<bool>,
     name: gtk::Label,
     folder: gtk::Label,
     facts: gtk::Box,
@@ -135,6 +157,7 @@ pub(super) struct SelectedPane {
 impl SelectedPane {
     pub fn new(
         engine: Rc<RefCell<EngineClient>>,
+        offline: Rc<RefCell<OfflineRoots>>,
         on_preview: Rc<dyn Fn()>,
         on_close: Rc<dyn Fn()>,
     ) -> Rc<Self> {
@@ -184,6 +207,14 @@ impl SelectedPane {
             .css_classes(["meta"])
             .build();
         body.append(&folder);
+        let offline_note = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        offline_note.append(&crate::v3::pill("OFFLINE", crate::shell::status::Tone::Warning));
+        let note = crate::v3::wrapped(OFFLINE_NOTE, &["meta"]);
+        note.set_hexpand(true);
+        offline_note.append(&note);
+        offline_note.set_visible(false);
+        offline_note.update_property(&[gtk::accessible::Property::Label(&format!("Offline. {OFFLINE_NOTE}"))]);
+        body.append(&offline_note);
         let facts = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.append(&facts);
 
@@ -215,17 +246,19 @@ impl SelectedPane {
             .width_request(300)
             .child(&body)
             .build();
-        let revealer = gtk::Revealer::builder()
-            .transition_type(gtk::RevealerTransitionType::SlideLeft)
-            .transition_duration(220)
-            .reveal_child(false)
-            .child(&scroller)
-            .build();
+        let revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Left, &scroller);
 
         let pane = Rc::new(Self {
             revealer,
             engine,
             picture,
+            frame,
+            actions,
+            reveal: reveal.clone(),
+            open: open.clone(),
+            offline_note,
+            offline,
+            shown_offline: Cell::new(false),
             name,
             folder,
             facts,
@@ -284,7 +317,30 @@ impl SelectedPane {
         }
     }
 
+    /// More than one file: the count and their combined size.
+    pub fn show_many(&self, count: usize, bytes: i64) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.current.replace(None);
+        self.frame.set_visible(false);
+        self.actions.set_visible(false);
+        self.set_offline(false);
+        self.name.set_text(&super::library_selection::many_title(count));
+        let detail = super::library_selection::many_detail(bytes);
+        self.folder.set_text(&detail);
+        self.folder.set_tooltip_text(None);
+        while let Some(child) = self.facts.first_child() {
+            self.facts.remove(&child);
+        }
+        self.revealer.update_property(&[gtk::accessible::Property::Label(&format!(
+            "{} selected, {detail}",
+            super::library_selection::many_title(count)
+        ))]);
+        self.revealer.set_reveal_child(true);
+    }
+
     fn render(&self, row: FileRow, picture: bool) {
+        self.frame.set_visible(true);
+        self.actions.set_visible(true);
         self.name.set_text(&row.name);
         let folder = crate::v3::parent_name(&row.path);
         self.folder.set_text(&folder);
@@ -317,6 +373,38 @@ impl SelectedPane {
             self.load_picture(&row);
         }
         self.current.replace(Some(row));
+        self.apply_offline();
+    }
+
+    /// Re-reads whether the file on the pane is offline (after the library's
+    /// roots refresh, or when a new file lands on the pane).
+    pub fn apply_offline(&self) {
+        let offline = self
+            .current
+            .borrow()
+            .as_ref()
+            .is_some_and(|row| self.offline.borrow().is_offline(&row.path));
+        self.set_offline(offline);
+    }
+
+    fn set_offline(&self, offline: bool) {
+        let (reveal_tip, open_tip) = action_tips(offline);
+        self.reveal.set_sensitive(!offline);
+        self.reveal.set_tooltip_text(Some(reveal_tip));
+        self.open.set_sensitive(!offline);
+        self.open.set_tooltip_text(Some(open_tip));
+        if self.shown_offline.replace(offline) == offline {
+            return;
+        }
+        self.offline_note.set_visible(offline);
+        if offline {
+            let note = self.offline_note.downgrade();
+            let _ = crate::spring::animate(&self.offline_note, 0.0, 1.0, move |value| {
+                if let Some(note) = note.upgrade() {
+                    note.set_opacity(value.clamp(0.0, 1.0));
+                }
+            });
+        }
     }
 
     pub fn hide(&self) {
@@ -427,6 +515,15 @@ mod tests {
                 picture: true
             }
         );
+    }
+
+    #[test]
+    fn offline_files_explain_why_files_and_open_are_off() {
+        assert_eq!(action_tips(false), ("Show in Files", "Open in the default app"));
+        let (reveal, open) = action_tips(true);
+        assert!(reveal.starts_with("Reconnect the drive"));
+        assert!(open.starts_with("Reconnect the drive"));
+        assert!(OFFLINE_NOTE.contains("Tags and descriptions are kept"));
     }
 
     #[test]

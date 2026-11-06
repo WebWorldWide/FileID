@@ -76,7 +76,7 @@ struct Shell {
     current: Cell<&'static str>,
     counting: Cell<bool>,
     scan_when_ready: Cell<bool>,
-    inspector: gtk::Revealer,
+    inspector: crate::motion::SpringRevealer,
 }
 
 fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
@@ -152,10 +152,7 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
         .show_sidebar(crate::app_settings::sidebar_visible())
         .build();
     split.set_sidebar(Some(&sidebar.root));
-    let inspector = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideLeft)
-        .transition_duration(if crate::spring::animations_enabled() { 240 } else { 0 })
-        .build();
+    let inspector = crate::motion::SpringRevealer::new(crate::motion::Slide::Left);
     let close_slot = slot.clone();
     inspector.set_child(Some(&crate::tabs::chat::inspector(
         engine.clone(),
@@ -169,7 +166,6 @@ fn build_window(app: &adw::Application, initial_folder: Option<PathBuf>) {
     content.append(&stack);
     content.append(&inspector);
     let detail = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::Crossfade)
         .hexpand(true)
         .vexpand(true)
         .build();
@@ -328,8 +324,18 @@ impl Shell {
             }
             Action::LibraryQuery(text) => {
                 self.navigate("library");
-                self.hand_off("library", LIBRARY_SEARCH_HINT, &text);
+                let _ = self.hand_off("library", LIBRARY_SEARCH_HINT, &text);
             }
+            Action::MomentsQuery(text) => {
+                self.navigate("moments");
+                if let Some(entry) = self
+                    .hand_off("moments", crate::tabs::moments::SEARCH_HINT, &text)
+                    .and_then(|editable| editable.downcast::<gtk::Entry>().ok())
+                {
+                    entry.emit_activate();
+                }
+            }
+            Action::ScanFolder(path) => self.choose(Path::new(&path)),
             Action::FocusSearch => self.title_bar.focus_search(),
             Action::ToggleChat => {
                 let open = !self.inspector.reveals_child() && self.current.get() != "chat";
@@ -367,15 +373,13 @@ impl Shell {
             }
     }
 
-    fn hand_off(&self, page: &str, placeholder: &str, text: &str) {
-        let Some((_, root)) = self.contents.iter().find(|(id, _)| *id == page) else {
-            return;
-        };
-        if let Some(editable) = find_editable(root, placeholder) {
-            editable.set_text(text);
-            editable.grab_focus();
-            editable.set_position(-1);
-        }
+    fn hand_off(&self, page: &str, placeholder: &str, text: &str) -> Option<gtk::Editable> {
+        let (_, root) = self.contents.iter().find(|(id, _)| *id == page)?;
+        let editable = find_editable(root, placeholder)?;
+        editable.set_text(text);
+        editable.grab_focus();
+        editable.set_position(-1);
+        Some(editable)
     }
 
     fn send(&self, payload: CommandPayload) {
@@ -553,9 +557,7 @@ impl Shell {
         } else {
             "pages"
         };
-        if self.detail.visible_child_name().as_deref() != Some(page) {
-            self.detail.set_visible_child_name(page);
-        }
+        crate::motion::show_child(&self.detail, page);
         for (id, header) in &self.headers {
             header.set_meta(&status.page_meta(id));
         }
@@ -762,16 +764,32 @@ fn install_shortcuts(window: &adw::ApplicationWindow, act: &Rc<dyn Fn(Action)>) 
     // Pages ask the shell to switch pages through `win.navigate` ("moments",
     // "tools", ...) without knowing about the window.
     let navigate = gtk::gio::SimpleAction::new(NAVIGATE_ACTION, Some(glib::VariantTy::STRING));
-    let act = act.clone();
+    let to_page = act.clone();
     navigate.connect_activate(move |_, parameter| {
         let page = parameter
             .and_then(|value| value.str())
             .and_then(shell::page);
         if let Some(page) = page {
-            act(Action::Navigate(page.id));
+            to_page(Action::Navigate(page.id));
         }
     });
     window.add_action(&navigate);
+
+    let hand_offs: [(&str, fn(String) -> Action); 3] = [
+        ("library-query", Action::LibraryQuery),
+        ("moments-query", Action::MomentsQuery),
+        ("scan-folder", Action::ScanFolder),
+    ];
+    for (name, make) in hand_offs {
+        let action = gtk::gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+        let act = act.clone();
+        action.connect_activate(move |_, parameter| {
+            if let Some(text) = parameter.and_then(|value| value.str()).filter(|text| !text.is_empty()) {
+                act(make(text.to_owned()));
+            }
+        });
+        window.add_action(&action);
+    }
 }
 
 const NAVIGATE_ACTION: &str = "navigate";

@@ -1,0 +1,744 @@
+{
+  "description": "Per-language details the JSON Schema cannot express. The schema decides which variants and fields exist; see shared/scripts/gen_ipc_dtos.py.",
+  "rust": {
+    "output": "platforms/windows/src/engine/src/ipc/generated.rs",
+    "helpers": [
+      "Empty",
+      "Wrap",
+      "HardwareInfo",
+      "default_true",
+      "is_false"
+    ],
+    "names": {
+      "command.applyRestructure.moves[]": "RestructureMove",
+      "RestructurePlan.moves[]": "RestructureMove",
+      "command.renameFiles.renames[]": "RenameEntry",
+      "command.trashFiles.exactIdentities[]": "ExactTrashIdentity",
+      "RestructurePlan.categoryCounts[]": "RestructureCategoryCount",
+      "RestructurePlan.confidenceCounts": "RestructureConfidenceCounts",
+      "RestructurePlan.folderClassifications": "FolderClassificationCounts",
+      "BulkActionResult.messages[]": "BulkActionItem",
+      "MergeSuggestions.pairs[]": "MergeSuggestion",
+      "ChatAction.renames[]": "ChatRename",
+      "command.catalogRequest": "CatalogRequestPayload",
+      "command.chatRequest": "ChatRequestPayload",
+      "command.toolRequest": "ToolRequestPayload",
+      "event.discoveryComplete": "DiscoveryCompletePayload"
+    },
+    "enums": {
+      "ScanPhase": {
+        "keys": [
+          "ScanPhase"
+        ],
+        "derive": [
+          "Copy",
+          "PartialEq",
+          "Eq"
+        ]
+      },
+      "TagMode": {
+        "keys": [
+          "command.applyTags.mode"
+        ],
+        "derive": [
+          "Copy",
+          "Default",
+          "PartialEq",
+          "Eq"
+        ],
+        "default": "add"
+      },
+      "LogLevel": {
+        "keys": [
+          "LogLine.level"
+        ],
+        "derive": [
+          "Copy",
+          "PartialEq",
+          "Eq"
+        ]
+      },
+      "DeepAnalyzeStartingPhase": {
+        "keys": [
+          "DeepAnalyzeStarting.phase"
+        ],
+        "derive": [
+          "Copy",
+          "PartialEq",
+          "Eq"
+        ]
+      },
+      "JobCategory": {
+        "keys": [
+          "QueuedJob.category"
+        ],
+        "derive": [
+          "Copy",
+          "PartialEq",
+          "Eq"
+        ]
+      }
+    },
+    "variants": {
+      "CommandPayload.catalogRequest": {
+        "box": true
+      }
+    },
+    "consts": {
+      "CHAT_ACTION_KINDS": "ChatAction.kind",
+      "CHAT_PAGES": "ChatPage",
+      "CHAT_JOBS": "ChatAction.job",
+      "CHAT_SETTINGS": "ChatAction.setting"
+    },
+    "types": {
+      "IpcEvent": {
+        "fields": {
+          "t": {
+            "type": "chrono::DateTime<chrono::Utc>"
+          }
+        }
+      },
+      "ToolRequest": {
+        "deny_unknown_fields": true,
+        "order": [
+          "requestID",
+          "action",
+          "fileIDs",
+          "destination",
+          "recipe",
+          "operationID",
+          "destinationBookmark"
+        ]
+      },
+      "ToolRecipe": {
+        "deny_unknown_fields": true,
+        "fields": {
+          "maxDimension": {
+            "type": "u32"
+          }
+        }
+      },
+      "StartScanPayload": {
+        "fields": {
+          "rescan": {
+            "mode": "default"
+          }
+        }
+      },
+      "DeepAnalyzeAllPayload": {
+        "deny_unknown_fields": true,
+        "order": [
+          "modelKind",
+          "skipExisting",
+          "fileIDs",
+          "tagsOnly",
+          "proposeRenames",
+          "excludedFolders"
+        ],
+        "fields": {
+          "tagsOnly": {
+            "mode": "default"
+          },
+          "proposeRenames": {
+            "mode": "default_true"
+          }
+        }
+      },
+      "CancelPrewarmPayload": {
+        "derive": [
+          "Default"
+        ],
+        "fields": {
+          "modelKind": {
+            "mode": "option_keep_null"
+          }
+        }
+      },
+      "PlanRestructurePayload": {
+        "fields": {
+          "supportsPagedPlans": {
+            "mode": "skip_false"
+          }
+        }
+      },
+      "ApplyRestructurePayload": {
+        "fields": {
+          "moves": {
+            "mode": "default"
+          },
+          "useSymlinks": {
+            "mode": "default"
+          }
+        }
+      },
+      "RestructureMove": {
+        "derive": [
+          "Default"
+        ],
+        "fields": {
+          "confidence": {
+            "mode": "skip_empty"
+          },
+          "sizeBytes": {
+            "type": "u64"
+          },
+          "fileRef": {
+            "type": "u64"
+          }
+        }
+      },
+      "ApplyTagsPayload": {
+        "fields": {
+          "mode": {
+            "mode": "default"
+          }
+        }
+      },
+      "CatalogRequestPayload": {
+        "deny_unknown_fields": true
+      },
+      "CatalogRequest": {
+        "deny_unknown_fields": true,
+        "order": [
+          "timelineMode",
+          "requestID",
+          "action",
+          "query",
+          "fileID",
+          "chapter",
+          "chapterID",
+          "jobID",
+          "fileIDs",
+          "searchMode",
+          "resultScope",
+          "queryVector",
+          "embeddingModel",
+          "limit",
+          "capturedFrom",
+          "capturedTo",
+          "event",
+          "eventID",
+          "takeFeedback",
+          "takeDecision"
+        ],
+        "fields": {
+          "queryVector": {
+            "type": "Vec<f32>"
+          },
+          "limit": {
+            "type": "usize"
+          }
+        }
+      },
+      "CatalogChapter": {
+        "deny_unknown_fields": true
+      },
+      "CatalogEvent": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeFeedback": {
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeDecision": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "ChatRequestPayload": {
+        "deny_unknown_fields": true
+      },
+      "ChatRequest": {
+        "derive": [
+          "Default"
+        ],
+        "deny_unknown_fields": true,
+        "fields": {
+          "queryVector": {
+            "type": "Vec<f32>"
+          }
+        }
+      },
+      "ChatContext": {
+        "derive": [
+          "Default",
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "ReassignFacePayload": {
+        "fields": {
+          "destinationPersonID": {
+            "mode": "option_keep_null"
+          },
+          "createNewPerson": {
+            "mode": "default"
+          }
+        }
+      },
+      "ToolResponse": {
+        "deny_unknown_fields": true
+      },
+      "ToolOutput": {
+        "deny_unknown_fields": true
+      },
+      "ToolCapability": {
+        "deny_unknown_fields": true
+      },
+      "BenchmarkProgress": {
+        "derive": [
+          "PartialEq"
+        ],
+        "fields": {
+          "completed": {
+            "type": "u32"
+          },
+          "total": {
+            "type": "u32"
+          }
+        }
+      },
+      "BenchmarkResult": {
+        "derive": [
+          "PartialEq"
+        ]
+      },
+      "ModelBenchmark": {
+        "derive": [
+          "PartialEq"
+        ]
+      },
+      "RootsList": {
+        "derive": [
+          "PartialEq"
+        ]
+      },
+      "LibraryRoot": {
+        "derive": [
+          "PartialEq"
+        ]
+      },
+      "ModelCatalog": {
+        "fields": {
+          "vramMB": {
+            "type": "u64"
+          }
+        }
+      },
+      "ModelCatalogItem": {
+        "derive": [
+          "PartialEq"
+        ],
+        "fields": {
+          "downloadBytes": {
+            "type": "u64"
+          }
+        }
+      },
+      "HealthCheckResult": {
+        "fields": {
+          "pid": {
+            "type": "i32"
+          }
+        }
+      },
+      "EngineInfo": {
+        "fields": {
+          "pid": {
+            "type": "i32"
+          },
+          "workerCap": {
+            "type": "u32"
+          },
+          "hardware": {
+            "type": "HardwareInfo"
+          }
+        }
+      },
+      "ScanProgress": {
+        "fields": {
+          "total": {
+            "type": "u64"
+          },
+          "discovered": {
+            "type": "u64"
+          },
+          "processed": {
+            "type": "u64"
+          },
+          "failed": {
+            "type": "u64"
+          },
+          "residentMB": {
+            "type": "u64"
+          },
+          "availableMB": {
+            "type": "u64"
+          }
+        }
+      },
+      "DiscoveryCompletePayload": {
+        "fields": {
+          "totalFiles": {
+            "type": "u64"
+          }
+        }
+      },
+      "FileDoneEvent": {
+        "fields": {
+          "skippedStages": {
+            "mode": "skip_empty"
+          }
+        }
+      },
+      "BatchSummary": {
+        "fields": {
+          "batchIndex": {
+            "type": "u32"
+          },
+          "filesInBatch": {
+            "type": "u32"
+          },
+          "processedTotal": {
+            "type": "u64"
+          },
+          "residentMB": {
+            "type": "u64"
+          },
+          "availableMB": {
+            "type": "u64"
+          }
+        }
+      },
+      "ScanComplete": {
+        "fields": {
+          "totalFiles": {
+            "type": "u64"
+          },
+          "processedFiles": {
+            "type": "u64"
+          },
+          "failedFiles": {
+            "type": "u64"
+          }
+        }
+      },
+      "FaceClusteringResult": {
+        "fields": {
+          "personCount": {
+            "type": "u32"
+          },
+          "faceCount": {
+            "type": "u64"
+          },
+          "unmatchedFaces": {
+            "type": "u64"
+          },
+          "deferredFaces": {
+            "type": "u64"
+          }
+        }
+      },
+      "DeepAnalyzeProgress": {
+        "order": [
+          "processed",
+          "total",
+          "etaSeconds",
+          "currentPath",
+          "modelKind",
+          "currentCaption"
+        ],
+        "fields": {
+          "processed": {
+            "type": "u64"
+          },
+          "total": {
+            "type": "u64"
+          }
+        }
+      },
+      "DeepAnalyzeComplete": {
+        "fields": {
+          "processed": {
+            "type": "u64"
+          },
+          "failed": {
+            "type": "u64"
+          }
+        }
+      },
+      "ModelDownloadProgress": {
+        "fields": {
+          "bytesDone": {
+            "type": "u64"
+          },
+          "totalBytes": {
+            "type": "u64"
+          }
+        }
+      },
+      "RestructurePlan": {
+        "fields": {
+          "totalMoves": {
+            "type": "u64"
+          },
+          "truncated": {
+            "mode": "skip_false"
+          }
+        }
+      },
+      "RestructureCategoryCount": {
+        "fields": {
+          "count": {
+            "type": "u32"
+          }
+        }
+      },
+      "RestructureConfidenceCounts": {
+        "derive": [
+          "PartialEq",
+          "Eq"
+        ],
+        "fields": {
+          "auto": {
+            "type": "u64"
+          },
+          "review": {
+            "type": "u64"
+          },
+          "ask": {
+            "type": "u64"
+          },
+          "unknown": {
+            "type": "u64"
+          }
+        }
+      },
+      "FolderClassificationCounts": {
+        "fields": {
+          "anchorFolders": {
+            "type": "u32"
+          },
+          "mixedFolders": {
+            "type": "u32"
+          },
+          "junkFolders": {
+            "type": "u32"
+          }
+        }
+      },
+      "RestructureApplyResult": {
+        "fields": {
+          "applied": {
+            "type": "u32"
+          },
+          "failed": {
+            "type": "u32"
+          },
+          "cancelled": {
+            "mode": "skip_false"
+          },
+          "planned": {
+            "type": "u64"
+          },
+          "remaining": {
+            "type": "u64"
+          }
+        }
+      },
+      "BulkActionResult": {
+        "fields": {
+          "succeeded": {
+            "type": "u32"
+          },
+          "failed": {
+            "type": "u32"
+          }
+        }
+      },
+      "ClipTextEmbedding": {
+        "fields": {
+          "embedding": {
+            "type": "Vec<f32>"
+          }
+        }
+      },
+      "MergeSuggestion": {
+        "fields": {
+          "similarity": {
+            "type": "f32"
+          }
+        }
+      },
+      "HardwareReprobed": {
+        "fields": {
+          "hardware": {
+            "type": "HardwareInfo"
+          }
+        }
+      },
+      "CatalogResponse": {
+        "deny_unknown_fields": true,
+        "order": [
+          "requestID",
+          "status",
+          "message",
+          "hits",
+          "chapters",
+          "jobs",
+          "events",
+          "takes",
+          "recommendation",
+          "suggestedTakeGroups",
+          "takeGroups",
+          "takeQualities",
+          "takeGoalRanking"
+        ],
+        "fields": {
+          "takeGoalRanking": {
+            "type": "Box<CatalogTakeGoalRanking>"
+          }
+        }
+      },
+      "CatalogHit": {
+        "deny_unknown_fields": true
+      },
+      "CatalogTake": {
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeRecommendation": {
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeGroupSuggestion": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeGroupMember": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeAutoGroup": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeShot": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeQuality": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true,
+        "fields": {
+          "rank": {
+            "type": "usize"
+          },
+          "faceCount": {
+            "type": "usize"
+          }
+        }
+      },
+      "CatalogTakeBox": {
+        "derive": [
+          "Copy",
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogTakeGoalRanking": {
+        "derive": [
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "CatalogJob": {
+        "deny_unknown_fields": true
+      },
+      "ChatResponse": {
+        "deny_unknown_fields": true
+      },
+      "ChatMessage": {
+        "deny_unknown_fields": true
+      },
+      "ChatAction": {
+        "derive": [
+          "Default",
+          "PartialEq"
+        ],
+        "deny_unknown_fields": true
+      },
+      "ChatRename": {
+        "derive": [
+          "PartialEq",
+          "Eq"
+        ],
+        "deny_unknown_fields": true
+      }
+    }
+  },
+  "csharp": {
+    "sources": [
+      "platforms/windows/src/FileID.IpcSchema/IpcCommand.cs",
+      "platforms/windows/src/FileID.IpcSchema/IpcEvent.cs",
+      "platforms/windows/src/FileID.IpcSchema/CommandPayload.cs",
+      "platforms/windows/src/FileID.IpcSchema/EventPayload.cs",
+      "platforms/windows/src/FileID.IpcSchema/Dtos.cs",
+      "platforms/windows/src/FileID.IpcSchema/CatalogProtocol.cs",
+      "platforms/windows/src/FileID.IpcSchema/ChatProtocol.cs",
+      "platforms/windows/src/FileID.IpcSchema/ToolProtocol.cs"
+    ],
+    "names": {
+      "command.applyRestructure.moves[]": "RestructureMove",
+      "RestructurePlan.moves[]": "RestructureMove",
+      "command.renameFiles.renames[]": "RenameEntry",
+      "command.trashFiles.exactIdentities[]": "ExactTrashIdentity",
+      "RestructurePlan.categoryCounts[]": "RestructureCategoryCount",
+      "RestructurePlan.confidenceCounts": "RestructureConfidenceCounts",
+      "RestructurePlan.folderClassifications": "FolderClassificationCounts",
+      "BulkActionResult.messages[]": "BulkActionItem",
+      "ChatAction.renames[]": "ChatRename",
+      "event.hardwareReprobed._0": "HardwareReprobed",
+      "MergeSuggestions.pairs[]": "MergeSuggestion",
+      "IPCCommand": "IpcCommand",
+      "IPCEvent": "IpcEvent"
+    },
+    "known_drift": {
+      "CommandPayload.planRestructure: schema fields missing from csharp: supportsPagedPlans": "Windows app never opts into paged plans; the engine sends it the legacy full plan.",
+      "CommandPayload.applyRestructure: schema fields missing from csharp: planID": "Follows from the missing supportsPagedPlans opt-in."
+    }
+  },
+  "swift": {
+    "sources": [
+      "platforms/apple/shared/Sources/FileIDShared/IPCProtocol.swift",
+      "platforms/apple/shared/Sources/FileIDShared/CatalogProtocol.swift",
+      "platforms/apple/shared/Sources/FileIDShared/ChatProtocol.swift",
+      "platforms/apple/shared/Sources/FileIDShared/ToolProtocol.swift"
+    ],
+    "names": {
+      "command.applyRestructure.moves[]": "RestructureMove",
+      "RestructurePlan.moves[]": "RestructureMove",
+      "command.renameFiles.renames[]": "RenameEntry",
+      "command.trashFiles.exactIdentities[]": "ExactTrashIdentity",
+      "RestructurePlan.categoryCounts[]": "RestructureCategoryCount",
+      "RestructurePlan.confidenceCounts": "RestructureConfidenceCounts",
+      "RestructurePlan.folderClassifications": "FolderClassificationCounts",
+      "BulkActionResult.messages[]": "BulkActionItem",
+      "ChatAction.renames[]": "ChatRename",
+      "event.hardwareReprobed._0": "HardwareReprobed",
+      "MergeSuggestions.pairs[]": "MergeSuggestionPair"
+    },
+    "known_drift": {}
+  }
+}

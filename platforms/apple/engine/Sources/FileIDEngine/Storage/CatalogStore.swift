@@ -247,7 +247,8 @@ public enum CatalogStore {
                 OR (p.start_seconds IS NOT NULL AND ABS(p.start_seconds - ?) <= 15)
               ))
               AND (c.stale=0 OR p.stale=0)
-            ORDER BY bm25(catalog_evidence_fts) LIMIT 100
+            ORDER BY CASE WHEN e.kind='chapter' THEN 0 WHEN p.start_seconds IS NOT NULL AND p.confidence=0 THEN 2 ELSE 1 END,
+                     bm25(catalog_evidence_fts) LIMIT 100
             """, arguments: [
                 match, filter, filter, peopleFilter, peopleFilter, peopleFilter,
                 eventFilter, eventFilter,

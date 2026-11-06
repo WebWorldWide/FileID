@@ -9,6 +9,7 @@ use adw::prelude::*;
 use fileid_engine::ipc::*;
 use gtk::glib;
 
+use super::chat_cards::Cards;
 use super::moments::hit_kind;
 use super::workbench_state::*;
 use super::workbenches::{is_playable_media, Engine};
@@ -44,6 +45,7 @@ struct ChatUi {
     active_source: Cell<Option<usize>>,
     hits: RefCell<Vec<CatalogHit>>,
     has_messages: Cell<bool>,
+    cards: Rc<Cards>,
 }
 
 impl ChatUi {
@@ -70,6 +72,7 @@ impl ChatUi {
             action: action.into(),
             text: (action == "send").then(|| text.chars().take(2000).collect()),
             use_model: Some(false),
+            context: (action == "send").then(context),
             ..ChatRequest::default()
         };
         let dispatch = self.state.borrow_mut().begin(&request);
@@ -77,7 +80,11 @@ impl ChatUi {
             Ok(true) => {
                 if action == "send" {
                     self.composer.buffer().set_text("");
+                    self.cards.clear();
                     self.set_busy(true);
+                }
+                if action == "clear" {
+                    self.cards.clear();
                 }
                 self.status.set_label("");
                 send_request(&self.engine, &self.state, &self.status, request);
@@ -91,6 +98,7 @@ impl ChatUi {
 
     fn set_busy(&self, busy: bool) {
         self.busy.set_visible(busy);
+        self.cards.set_hidden(busy);
         self.send.set_visible(!busy);
         self.stop.set_visible(busy);
     }
@@ -117,6 +125,9 @@ impl ChatUi {
             }
         }
         self.render_sources(response.hits);
+        if let Some(actions) = response.actions {
+            self.cards.show(actions);
+        }
     }
 
     fn citations(self: &Rc<Self>, hits: &[CatalogHit]) -> gtk::FlowBox {
@@ -258,6 +269,21 @@ impl ChatUi {
     }
 }
 
+/// What the user is looking at, so "this folder" resolves. It only scopes
+/// proposals; it never runs anything.
+fn context() -> ChatContext {
+    let folder = crate::app_settings::last_folder().map(|path| path.to_string_lossy().into_owned());
+    let page = crate::app_settings::active_tab().unwrap_or_default();
+    let (file_ids, person_ids) = super::chat_handoff::context_ids();
+    ChatContext {
+        page: Some(super::chat_actions::context_page(&page).to_owned()),
+        file_ids,
+        person_ids,
+        folder: folder.clone(),
+        library_root: folder,
+    }
+}
+
 fn citation_meta(hit: &CatalogHit) -> String {
     match (hit.start_seconds, hit.page) {
         (Some(start), _) => v3::timecode(start),
@@ -392,6 +418,9 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
     thread.add_css_class(if compact { "v3-inspector-pad" } else { "v3-page-pad" });
     thread.append(&empty);
     thread.append(&messages);
+    let overlay = adw::ToastOverlay::new();
+    let cards = Cards::new(&engine, &overlay);
+    thread.append(&cards.root);
     thread.append(&busy);
     let clamp = adw::Clamp::builder()
         .maximum_size(760)
@@ -542,6 +571,7 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
         active_source: Cell::new(None),
         hits: RefCell::new(Vec::new()),
         has_messages: Cell::new(false),
+        cards,
     });
     ui.render_sources(Vec::new());
     for text in SUGGESTIONS {
@@ -565,8 +595,9 @@ fn build(engine: Engine, inspector: Option<Rc<dyn Fn()>>) -> gtk::Widget {
         });
         suggestions.append(&suggestion);
     }
-    wire(&ui, &root, inspector);
-    root.upcast()
+    overlay.set_child(Some(&root));
+    wire(&ui, overlay.upcast_ref(), inspector);
+    overlay.upcast()
 }
 
 /// The inspector's 34 px "SOURCES · N" row: a chevron that turns 90° on the
@@ -601,11 +632,7 @@ fn collapsible_sources(header: &gtk::Box, pane: &gtk::Box) -> gtk::Box {
     toggle.update_property(&[gtk::accessible::Property::Label("Sources")]);
     toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
     section.append(&toggle);
-    let revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideUp)
-        .transition_duration(if crate::spring::animations_enabled() { 220 } else { 0 })
-        .child(pane)
-        .build();
+    let revealer = crate::motion::SpringRevealer::with_child(crate::motion::Slide::Up, pane);
     section.append(&revealer);
     let animation: Rc<RefCell<Option<adw::SpringAnimation>>> = Rc::new(RefCell::new(None));
     toggle.connect_clicked(move |toggle| {
@@ -626,7 +653,7 @@ fn collapsible_sources(header: &gtk::Box, pane: &gtk::Box) -> gtk::Box {
     section
 }
 
-fn wire(ui: &Rc<ChatUi>, root: &gtk::Box, inspector: Option<Rc<dyn Fn()>>) {
+fn wire(ui: &Rc<ChatUi>, root: &gtk::Widget, inspector: Option<Rc<dyn Fn()>>) {
     if let Some(on_close) = inspector {
         let escape = gtk::EventControllerKey::new();
         escape.connect_key_pressed(move |_, key, _, _| {

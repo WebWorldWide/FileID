@@ -54,4 +54,21 @@ struct CatalogSearchErrorTests {
             #expect(!error.localizedDescription.contains("RequestError"))
         }
     }
+
+    @Test("a dated search reaches files beyond the hundred best matches")
+    func windowReachesPastTheRankedHundred() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            for id in 100..<400 {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,created_at,scanned_at,kind,extension,vlm_description) VALUES(?,?,?,10,?,0,'image','jpg','harbor boats')",
+                               arguments: [id, "/lib/harbor_\(id).jpg", id, id < 380 ? 50_000.0 : 100.0])
+            }
+        }
+        let request = CatalogRequest(requestID: "r", action: "search", query: "harbor", capturedTo: 200)
+        let hits = try await CatalogSearch.handle(request, database: database).hits.map(\.fileID)
+        #expect(hits.count == 20)
+        #expect(hits.allSatisfy { $0 >= 380 })
+    }
 }

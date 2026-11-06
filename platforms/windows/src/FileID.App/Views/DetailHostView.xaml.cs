@@ -148,16 +148,18 @@ public sealed partial class DetailHostView : UserControl
 
     // File Tools keeps its session (selection, plan, running export) across
     // page switches, so it is built once and re-hosted like the old overlay.
+    // Search & Moments does the same so its results are still there after a
+    // trip to Best Takes (the macOS sheet returns to the same search).
     private Workbenches.ToolsWorkbench? _toolsWorkbench;
+    private Workbenches.CatalogWorkbench? _catalogWorkbench;
 
     private UIElement BuildWorkbench(string id)
     {
         Workbenches.WorkbenchPanel panel = id switch
         {
-            "moments" => new Workbenches.CatalogWorkbench(),
+            "moments" => _catalogWorkbench ??= new Workbenches.CatalogWorkbench(),
             "chat" => new Workbenches.ChatWorkbench(),
             "takes" => new Workbenches.TakesWorkbench(),
-            "models" => new Workbenches.ModelsWorkbench(),
             _ => _toolsWorkbench ??= new Workbenches.ToolsWorkbench(HostWindowHandle()),
         };
         return panel;

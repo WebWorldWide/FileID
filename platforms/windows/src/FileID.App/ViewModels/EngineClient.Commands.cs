@@ -938,7 +938,7 @@ internal sealed partial class EngineClient
         UndoRestructureInFlight = true;
         try
         {
-            await SendCommandAsync(new UndoRestructureCommand(libraryRoot)).ConfigureAwait(false);
+            await SendCommandAsync(new UndoRestructureCommand(libraryRoot, UndoRestructureShortcutToken)).ConfigureAwait(false);
         }
         catch
         {

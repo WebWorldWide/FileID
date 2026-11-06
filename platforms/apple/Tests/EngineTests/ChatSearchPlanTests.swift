@@ -48,6 +48,19 @@ import FileIDShared
         }
     }
 
+    @Test("named chapters rank above verified passages, which rank above unverified sampled frames")
+    func chaptersRankFirst() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("catalog.sqlite"))
+        try await db.pool.write { sql in
+            try sql.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(1,'/v/game.mov',1,100,0,'video','mov')")
+            try sql.execute(sql: "INSERT INTO catalog_passages(id,file_id,start_seconds,end_seconds,text,source_revision,model_version,confidence,stale) VALUES('frame',1,5,5,'goal goal goal kick','r','m',0,0),('verified',1,NULL,NULL,'a goal is scored','r','m',1,0)")
+            try sql.execute(sql: "INSERT INTO catalog_chapters(id,file_id,start_seconds,end_seconds,title,summary,source_revision,model_version,confidence,user_edited,stale) VALUES('chapter',1,40,60,'Winning goal','late in the game','r','m',1,1,0)")
+            #expect(try CatalogStore.search(sql, query: "goal").compactMap(\.evidenceID) == ["chapter", "verified", "frame"])
+        }
+    }
+
     @Test func filtersApplyBeforeLimitsAndToEvidence() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

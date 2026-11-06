@@ -124,10 +124,13 @@ internal sealed class AppSettings
         { "qwen2_5_vl_7b", "qwen3_vl_4b", "qwen3_vl_8b", "gemma_3_4b", "mistral_small_3_2" };
 
     /// <summary>True if <paramref name="kind"/> is a VLM model_kind the engine
-    /// can install. The Deep Analyze card guards use this to reject removed /
-    /// non-commercial models (e.g. the dropped qwen2_5_vl_3b).</summary>
+    /// can install: a curated kind, or a catalog GGUF id picked in the model
+    /// browser (the engine only resolves ids in its validated catalog). Removed
+    /// non-commercial kinds (e.g. the dropped qwen2_5_vl_3b) match neither.</summary>
     public static bool IsAllowedVlmKind(string? kind) =>
-        kind is { } k && AllowedVlmKinds.Contains(k);
+        kind is { } k && (AllowedVlmKinds.Contains(k) || ViewModels.ModelCatalogPresentation.IsCatalogModelKind(k));
+
+    public static bool IsCuratedVlmKind(string? kind) => kind is { } k && AllowedVlmKinds.Contains(k);
 
     public static AppSettings Load()
     {
@@ -213,7 +216,7 @@ internal sealed class AppSettings
         if (string.IsNullOrWhiteSpace(s.ActiveTab)) s.ActiveTab = "library";
         if (string.IsNullOrWhiteSpace(s.LibraryKindFilter)) s.LibraryKindFilter = "all";
         if (string.IsNullOrWhiteSpace(s.SelectedVlmModelKind)
-            || !AllowedVlmKinds.Contains(s.SelectedVlmModelKind))
+            || !IsAllowedVlmKind(s.SelectedVlmModelKind))
         {
             s.SelectedVlmModelKind = "qwen2_5_vl_7b";
         }

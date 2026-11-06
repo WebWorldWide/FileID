@@ -124,6 +124,9 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
     protected override void OnOpened()
     {
         Engine.PropertyChanged += OnEngineChanged;
+        AppViewModel.Instance.ToolFilesRequested -= OnToolFilesRequested;
+        AppViewModel.Instance.ToolFilesRequested += OnToolFilesRequested;
+        UseToolFiles();
         ApplyExecutionSnapshot();
         Run(async ct =>
         {
@@ -132,6 +135,23 @@ internal sealed class ToolsWorkbench : WorkbenchPanel
         });
     }
     protected override void OnClosed() => Engine.PropertyChanged -= OnEngineChanged;
+
+    private void OnToolFilesRequested(object? sender, EventArgs e)
+        => DebugLog.SafeRun("ToolsWorkbench.OnToolFilesRequested", () => DispatcherQueue.TryEnqueue(UseToolFiles));
+
+    /// <summary>Files Chat handed over: listed and ticked (up to the 100 an export takes).</summary>
+    private void UseToolFiles()
+    {
+        if (AppViewModel.Instance.TakeToolFiles() is not { Count: > 0 } files) return;
+        var items = files.DistinctBy(hit => hit.FileID).Select(hit => new HitItem(hit)).ToArray();
+        _files.ItemsSource = items;
+        _files.SelectedItems.Clear();
+        foreach (var item in items.Take(100)) _files.SelectedItems.Add(item);
+        Invalidate();
+        Status.Text = items.Length > 100
+            ? $"{items.Length:N0} files from Chat. The first 100 are ticked; an export takes up to 100."
+            : $"{items.Length:N0} file{(items.Length == 1 ? "" : "s")} from Chat, ticked. Pick a format and a folder.";
+    }
     private void OnEngineChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName != nameof(EngineClient.ToolExecution)) return;

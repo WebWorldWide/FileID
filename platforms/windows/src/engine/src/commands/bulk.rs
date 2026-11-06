@@ -355,6 +355,31 @@ fn renamed_extension(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// True when `new_name` is the suggested name taken as-is or with the `_2`…`_99`
+/// bump the apps add when that name is taken (same rule as the macOS engine).
+fn applies_proposed_name(proposed: &str, new_name: &str, original_extension: &str) -> bool {
+    let proposed = proposed.trim();
+    if proposed.is_empty() {
+        return false;
+    }
+    let suffix = if original_extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{original_extension}")
+    };
+    let Some(stem) = new_name.strip_suffix(suffix.as_str()) else {
+        return false;
+    };
+    if stem == proposed {
+        return true;
+    }
+    stem.strip_prefix(proposed)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .filter(|bump| !bump.is_empty() && bump.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|bump| bump.parse::<u32>().ok())
+        .is_some_and(|bump| (2..=99).contains(&bump))
+}
+
 pub(crate) async fn handle_rename_files(
     sink: Sink,
     db: std::sync::Arc<parking_lot::Mutex<rusqlite::Connection>>,
@@ -376,6 +401,7 @@ pub(crate) async fn handle_rename_files(
             src: PathBuf,
             dest: PathBuf,
             identity: crate::platform::FileIdentity,
+            applied_suggestion: Option<String>,
         }
         let mut planned: Vec<PlannedRename> = Vec::with_capacity(payload.renames.len());
         {
@@ -394,18 +420,19 @@ pub(crate) async fn handle_rename_files(
                     });
                     continue;
                 }
-                let identity: Result<(String, Option<u64>), _> = conn.query_row(
-                    "SELECT path_text, file_ref FROM files WHERE id = ?1",
+                let identity: Result<(String, Option<u64>, Option<String>), _> = conn.query_row(
+                    "SELECT path_text, file_ref, vlm_proposed_name FROM files WHERE id = ?1",
                     rusqlite::params![entry.file_id],
                     |r| {
                         Ok((
                             r.get::<_, String>(0)?,
                             r.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                            r.get::<_, Option<String>>(2)?,
                         ))
                     },
                 );
-                let (path, file_ref) = match identity {
-                    Ok((path, file_ref)) => (PathBuf::from(path), file_ref),
+                let (path, file_ref, proposed) = match identity {
+                    Ok((path, file_ref, proposed)) => (PathBuf::from(path), file_ref, proposed),
                     Err(err) => {
                         failed += 1;
                         messages.push(BulkActionItem {
@@ -456,11 +483,19 @@ pub(crate) async fn handle_rename_files(
                     continue;
                 }
                 let dest = dir.join(&entry.new_name);
+                let original_extension = path
+                    .extension()
+                    .map(|extension| extension.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let applied_suggestion = proposed.filter(|proposed| {
+                    applies_proposed_name(proposed, &entry.new_name, &original_extension)
+                });
                 planned.push(PlannedRename {
                     file_id: entry.file_id,
                     src: path,
                     dest,
                     identity,
+                    applied_suggestion,
                 });
             }
         }
@@ -507,13 +542,18 @@ pub(crate) async fn handle_rename_files(
                 // silently REPLACE-delete that row + cascade its user metadata. OR
                 // ABORT raises instead, routing into the Err arm below (record +
                 // report failed) rather than losing data. (audit 2026-07 sibling)
-                "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5 WHERE id = ?3",
+                // An applied suggestion is cleared only if it is still the one
+                // validated above, so a newer Deep Analyze proposal survives.
+                "UPDATE OR ABORT files SET path_text = ?1, path_hash = ?2, path_search = ?4, extension = ?5, \
+                 vlm_proposed_name = CASE WHEN ?6 IS NOT NULL AND vlm_proposed_name IS ?6 THEN NULL ELSE vlm_proposed_name END \
+                 WHERE id = ?3",
                 rusqlite::params![
                     dest_text,
                     dest_hash,
                     p.file_id,
                     crate::pipeline::dbwriter::nfc_path_search(&dest_text),
-                    renamed_extension(&dest_text)
+                    renamed_extension(&dest_text),
+                    p.applied_suggestion
                 ],
             );
             match updated {
@@ -3299,6 +3339,87 @@ mod tests {
             .unwrap();
         assert_eq!(extension, "md");
         assert_eq!(renamed_extension("/a/b/README"), "");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn applied_suggestion_matches_the_name_or_its_bump() {
+        assert!(applies_proposed_name("Beach Day", "Beach Day.jpg", "jpg"));
+        assert!(applies_proposed_name(" Beach Day ", "Beach Day_2.jpg", "jpg"));
+        assert!(applies_proposed_name("Beach Day", "Beach Day_99.jpg", "jpg"));
+        assert!(!applies_proposed_name("Beach Day", "Beach Day_100.jpg", "jpg"));
+        assert!(!applies_proposed_name("Beach Day", "Beach Day_1.jpg", "jpg"));
+        assert!(!applies_proposed_name("Beach Day", "Beach Day_x.jpg", "jpg"));
+        assert!(!applies_proposed_name("Beach Day", "Beach Day.png", "jpg"));
+        assert!(!applies_proposed_name("Beach Day", "Beach Days.jpg", "jpg"));
+        assert!(!applies_proposed_name("", "x.jpg", "jpg"));
+        assert!(applies_proposed_name("README notes", "README notes", ""));
+    }
+
+    #[tokio::test]
+    async fn rename_allows_case_only_and_clears_the_applied_suggestion() {
+        let directory = std::env::temp_dir().join(format!(
+            "fileid-rename-case-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::apply(&conn).unwrap();
+        for (id, name, proposed) in [
+            (1, "beach.jpg", None),
+            (2, "IMG_1.jpg", Some("Sunset Pier")),
+            (3, "IMG_2.jpg", Some("Sunset Pier")),
+            (4, "IMG_3.jpg", Some("Sunset Pier")),
+        ] {
+            let path = directory.join(name);
+            std::fs::write(&path, name.as_bytes()).unwrap();
+            let file_ref = crate::platform::file_identity(&path).unwrap().file as i64;
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,file_ref,vlm_proposed_name) \
+                 VALUES(?1,?2,?1,5,0,'image','jpg',?3,?4)",
+                rusqlite::params![id, path.to_string_lossy(), file_ref, proposed],
+            )
+            .unwrap();
+        }
+        let db = std::sync::Arc::new(parking_lot::Mutex::new(conn));
+        let (sink, mut events) = Sink::channel_for_test(1);
+        handle_rename_files(
+            sink,
+            db.clone(),
+            ipc::RenameFilesPayload {
+                renames: vec![
+                    ipc::RenameEntry { file_id: 1, new_name: "Beach.jpg".into() },
+                    ipc::RenameEntry { file_id: 2, new_name: "Sunset Pier.jpg".into() },
+                    ipc::RenameEntry { file_id: 3, new_name: "Sunset Pier_2.jpg".into() },
+                    ipc::RenameEntry { file_id: 4, new_name: "My own name.jpg".into() },
+                ],
+            },
+        )
+        .await;
+        let EventPayload::BulkActionResult(result) = events.recv().await.unwrap().payload else {
+            panic!("expected BulkActionResult");
+        };
+        assert_eq!((result.inner.succeeded, result.inner.failed), (4, 0), "{:?}", result.inner.messages);
+        let row = |id: i64| -> (String, Option<String>) {
+            db.lock()
+                .query_row("SELECT path_text, vlm_proposed_name FROM files WHERE id=?1", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .unwrap()
+        };
+        assert_eq!(row(1).0, directory.join("Beach.jpg").to_string_lossy());
+        let names: Vec<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|name| name == "Beach.jpg"), "{names:?}");
+        assert_eq!(row(2).1, None);
+        assert_eq!(row(3).1, None);
+        assert_eq!(row(4).1.as_deref(), Some("Sunset Pier"));
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
