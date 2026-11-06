@@ -33,7 +33,7 @@ public enum SmartNameCompanions {
         }
     }
 
-    static func base(_ name: String) -> (stem: String, suffix: String, role: Role)? {
+    public static func base(_ name: String) -> (stem: String, suffix: String, role: Role)? {
         guard name.unicodeScalars.first != "." else { return nil }
         var (stem, ext) = S.splitName(name)
         guard let role = role(ext) else { return nil }
@@ -89,6 +89,43 @@ public enum SmartNameCompanions {
             if free { return names }
         }
         return nil
+    }
+
+    /// Sidecars in `listing` that follow a rename of a `planned` RAW, JPEG/HEIC
+    /// or MOV: `<stem>.xmp`/`.aae` or `<name>.xmp` (extension in any case), not
+    /// hidden and not planned themselves. One is kept only when every same-stem
+    /// RAW, JPEG/HEIC or MOV in the folder is planned, and goes to the first
+    /// planned member with that stem, with its suffix after the stem.
+    public static func followingSidecars(planned: [String], listing: [String]) -> [(owner: Int, name: String, suffix: String)] {
+        let plannedNames = Set(planned.map(S.key))
+        func primary(_ name: String) -> S.Key? {
+            guard let parts = base(name), parts.role != .sidecar else { return nil }
+            return S.key(parts.stem)
+        }
+        func named(_ candidate: S.Key, _ prefix: S.Key, _ extensions: Set<String>) -> Bool {
+            guard candidate.count > prefix.count + 1, Array(candidate[..<prefix.count]) == prefix, candidate[prefix.count] == "." else { return false }
+            return extensions.contains(asciiLower(S.string(Array(candidate[(prefix.count + 1)...]))))
+        }
+        var taken = Set<S.Key>()
+        var found: [(owner: Int, name: String, suffix: String)] = []
+        for (index, name) in planned.enumerated() {
+            guard let stem = primary(name) else { continue }
+            let key = S.key(S.lower(S.string(stem)))
+            let complete = listing.allSatisfy { other in
+                plannedNames.contains(S.key(other)) || primary(other).map { S.key(S.lower(S.string($0))) != key } ?? true
+            }
+            guard complete else { continue }
+            let owner = planned.firstIndex { primary($0) == stem } ?? index
+            for candidate in listing {
+                let scalars = S.key(candidate)
+                guard scalars.first != ".", !plannedNames.contains(scalars), !taken.contains(scalars) else { continue }
+                if named(scalars, stem, ["xmp", "aae"]) || named(scalars, S.key(name), ["xmp"]) {
+                    taken.insert(scalars)
+                    found.append((owner, candidate, S.string(Array(scalars[stem.count...]))))
+                }
+            }
+        }
+        return found
     }
 
     /// Lower is better evidence, in the order `SmartNameStyle.propose` reads its sources.

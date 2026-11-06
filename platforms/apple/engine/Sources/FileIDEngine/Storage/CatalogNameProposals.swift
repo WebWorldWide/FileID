@@ -99,7 +99,7 @@ enum CatalogNameProposals {
                 let path = file.parent == "/" ? "/" + member.name : file.parent + "/" + member.name
                 let row = S.key(member.name) == S.key(file.name)
                     ? id : try Int64.fetchOne(db, sql: "SELECT id FROM files WHERE path_text=?", arguments: [path])
-                if row != nil || isRegularFile(path) { resolved.append(Companion(member: member, path: path, row: row)) }
+                if row != nil || (member.role != .sidecar && isRegularFile(path)) { resolved.append(Companion(member: member, path: path, row: row)) }
             }
             guard C.isGroup(resolved.map(\.member)) else { single(id, file); return }
             seen.formUnion(resolved.compactMap(\.row))

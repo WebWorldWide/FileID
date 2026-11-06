@@ -34,6 +34,20 @@ struct SmartNameCompanionsTests {
         #expect(C.sharedNames(stem: "beach", members: twins, taken: [], claimed: []) == nil)
     }
 
+    @Test func sidecarsFollowOnlyACompleteGroup() {
+        let folder = [
+            "IMG_1.JPG", "IMG_1.ARW", "IMG_1.xmp", "IMG_1.ARW.XMP", "IMG_1.aae", ".IMG_1.xmp", "IMG_1.txt.xmp", "img_1.jpg.xmp",
+            "IMG_2.HEIC", "IMG_2.AAE", "IMG_3.JPG", "IMG_3.xmp",
+        ]
+        let flat = { (found: [(owner: Int, name: String, suffix: String)]) in found.map { "\($0.owner) \($0.name) \($0.suffix)" } }
+        #expect(flat(C.followingSidecars(planned: ["IMG_1.JPG", "IMG_1.ARW", "IMG_2.HEIC"], listing: folder))
+                == ["0 IMG_1.xmp .xmp", "0 IMG_1.aae .aae", "0 IMG_1.ARW.XMP .ARW.XMP", "2 IMG_2.AAE .AAE"])
+        #expect(C.followingSidecars(planned: ["IMG_1.JPG"], listing: folder).isEmpty)
+        #expect(flat(C.followingSidecars(planned: ["IMG_3.JPG"], listing: folder)) == ["0 IMG_3.xmp .xmp"])
+        #expect(C.followingSidecars(planned: ["IMG_3.JPG", "IMG_3.xmp"], listing: folder).isEmpty)
+        #expect(C.followingSidecars(planned: ["IMG_3.xmp"], listing: folder).isEmpty)
+    }
+
     @Test func evidenceRankAndReasonTags() {
         #expect(C.sourceRank("chapter", style: .short) < C.sourceRank("proposedName", style: .short))
         #expect(C.sourceRank("proposedName", style: .short) < C.sourceRank("description", style: .short))
