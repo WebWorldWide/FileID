@@ -92,6 +92,21 @@ public sealed class LibraryScopeTests
     }
 
     [Fact]
+    public void ChangingTheLocationRunsTheCurrentMomentsSearchAgain()
+    {
+        Assert.Equal(MomentsScopePolicy.Step.Search, MomentsScopePolicy.OnScopeChanged(null, 2, "birthday", busy: false));
+        Assert.Equal(MomentsScopePolicy.Step.Search, MomentsScopePolicy.OnScopeChanged(2, null, "birthday", busy: false));
+        Assert.Equal(MomentsScopePolicy.Step.AfterCurrent, MomentsScopePolicy.OnScopeChanged(1, 2, "birthday", busy: true));
+        Assert.Equal(MomentsScopePolicy.Step.Nothing, MomentsScopePolicy.OnScopeChanged(2, 2, "birthday", busy: false));
+        Assert.Equal(MomentsScopePolicy.Step.Nothing, MomentsScopePolicy.OnScopeChanged(null, 2, "  ", busy: false));
+        Assert.Equal(MomentsScopePolicy.Step.Nothing, MomentsScopePolicy.OnScopeChanged(null, 2, null, busy: false));
+        Assert.True(MomentsScopePolicy.RunPending(true, "birthday", busy: false));
+        Assert.False(MomentsScopePolicy.RunPending(true, "birthday", busy: true));
+        Assert.False(MomentsScopePolicy.RunPending(false, "birthday", busy: false));
+        Assert.False(MomentsScopePolicy.RunPending(true, "", busy: false));
+    }
+
+    [Fact]
     public void SearchAndChatSendTheChosenLocation()
     {
         var search = JsonSerializer.Serialize(CatalogEmbeddingSpace.SearchRequest("beach", "keyword", null, null, null, 3), IpcCoder.Options);

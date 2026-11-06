@@ -67,7 +67,7 @@
   },
   {
     "name": "search-root-scope-keeps-one-location",
-    "description": "rootID keeps files of one library location: its path and below, not a lookalike sibling (/Camera vs /Camera2 and /Cameras) and not a deeper location of its own. It applies before the 100-candidate cut, the capture window and the subject fill, scopes Chat answers through context.rootID, and an unknown id is an error.",
+    "description": "rootID keeps files of one library location: its path and below, not a lookalike sibling (/Camera vs /Camera2 and /Cameras) and not a deeper location of its own; listRoots counts each file only in its most specific location. It applies before the 100-candidate cut, the capture window and the subject fill, scopes Chat answers through context.rootID, and an unknown id is an error.",
     "sql": [
       "INSERT INTO library_roots(id,path,display,kind,added_at) VALUES(1,'{root}/Camera','{root}/Camera','external',1),(2,'{root}/Camera2','{root}/Camera2','external',2),(3,'{root}/Camera/Synced','{root}/Camera/Synced','external',3)",
       "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension,created_at) VALUES(1,'{root}/Camera/IMG_0001.jpg',1,10,0,'image','jpg',1709467200),(2,'{root}/Camera/2020/IMG_0002.jpg',2,10,0,'image','jpg',1600000000),(3,'{root}/Camera2/IMG_0003.jpg',3,10,0,'image','jpg',1709467200),(5,'{root}/Camera/Synced/IMG_0005.jpg',5,10,0,'image','jpg',1709467200),(6,'{root}/Camera/IMG_0006.jpg',6,10,0,'image','jpg',1709467200)",
@@ -76,6 +76,7 @@
       "INSERT INTO tags(file_id,tag,source,score) VALUES(6,'beach','auto',0.9)"
     ],
     "steps": [
+      {"label": "listRoots counts each file once, in its most specific location", "command": {"listRoots": {"requestID": "scope-roots"}}, "await": "rootsList", "expect": {"requestID": "scope-roots", "roots": [{"id": 1, "fileCount": 3, "totalBytes": 30}, {"id": 2, "fileCount": 1, "totalBytes": 10}, {"id": 3, "fileCount": 1, "totalBytes": 10}]}},
       {"label": "every location: the newest hundred are all lookalikes", "catalog": {"action": "search", "query": "dogs"}, "expect": {"status": "ok", "hits": {"$tol": "count", "value": 100}}},
       {"label": "every location: first hit", "catalog": {"action": "search", "query": "dogs", "limit": 1}, "expect": {"hits": [{"fileID": 229, "path": "{root}/Cameras/IMG_229.jpg"}]}},
       {"label": "Camera, before the cut, without Camera2, Cameras or Synced", "catalog": {"action": "search", "query": "dogs", "rootID": 1}, "expect": {"status": "ok", "hits": [{"fileID": 2, "path": "{root}/Camera/2020/IMG_0002.jpg", "text": "Tags: dog"}, {"fileID": 1, "path": "{root}/Camera/IMG_0001.jpg"}]}},

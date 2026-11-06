@@ -616,8 +616,8 @@
         "kind": { "type": "string", "enum": ["internal", "external", "network"] },
         "enabled": { "type": "boolean" },
         "online": { "type": "boolean", "description": "True when the folder exists and is not empty right now. An unplugged drive reads as offline, and its catalog rows are kept." },
-        "fileCount": { "type": "integer", "minimum": 0, "description": "Cataloged files (failed=0) under this location." },
-        "totalBytes": { "type": "integer", "minimum": 0 },
+        "fileCount": { "type": "integer", "minimum": 0, "description": "Cataloged files (failed=0) whose most specific location is this one (schema 1.20.0): a location nested inside this one counts its own files, so counts never overlap and match what rootID shows." },
+        "totalBytes": { "type": "integer", "minimum": 0, "description": "Bytes of the files counted in fileCount." },
         "lastScanAt": { "type": ["number", "null"], "description": "Unix seconds of the last finished scan." },
         "lastStatus": { "type": ["string", "null"] }
       }

@@ -60,9 +60,9 @@ Minimum hit target 28.
 - Picking a row closes the popover and applies at once. Opening the popover refreshes `listRoots`.
 - Keyboard and screen readers: rows are buttons in the popover's focus chain (Tab, plus arrow keys on WinUI and GTK); Space or Return picks; Esc closes. Rows carry the 2 pt gold focus ring. WinUI adds position-in-set and item status "Selected"; GTK sets the Selected state.
 - Library: listing, paging, the "N of M shown" and kind counts, the Unreadable count, the page meta ("N files in Camera") and the sidebar badge count only the chosen location. Visual and find-similar searches send `rootID`.
-- Search & Moments: every search sends `rootID`. On macOS changing the location re-runs the current search.
+- Search & Moments: every search sends `rootID`. On macOS and WinUI changing the location re-runs the current search.
 - Chat: every send carries `context.rootID`; answers, counts, lists and proposed actions cover that location only.
-- Membership: a file belongs to the most specific location whose path holds it (the `OfflineRoots` rule), so `/Camera` never matches `/Camera2`, and a location nested inside another owns its own files. A parent's `fileCount` can therefore be larger than what its scope shows.
+- Membership: a file belongs to the most specific location whose path holds it (the `OfflineRoots` rule), so `/Camera` never matches `/Camera2`, and a location nested inside another owns its own files. `listRoots` counts by the same rule, so each row's count and bytes equal what its scope shows (the Locations card too).
 - The choice persists per app: macOS `UserDefaults` `libraryScopeRootID` (0 = all), WinUI and GTK `app-settings.json` `libraryScopeRootId`. It is kept while the location list loads and falls back to "All locations" once its location is gone. An unknown `rootID` is an engine error ("That location is no longer in the library.").
 
 ## Search & Moments

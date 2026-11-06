@@ -26,6 +26,22 @@ struct LibraryRootsTests {
         #expect(!roots[0].online)
     }
 
+    @Test func aNestedLocationCountsItsOwnFilesAndItsParentDoesNot() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try FileIDEngine.Database(at: directory.appendingPathComponent("catalog.sqlite"))
+        try await database.pool.write { db in
+            try db.execute(sql: "INSERT INTO library_roots(path,display,kind,added_at) VALUES('/Volumes/__absent__/Camera','Camera','external',1),('/Volumes/__absent__/Camera/Synced','Synced','external',2)")
+            for (id, path, size) in [(1, "/Volumes/__absent__/Camera/a.jpg", 100), (2, "/Volumes/__absent__/Camera/Synced/b.jpg", 200),
+                                     (3, "/Volumes/__absent__/Camera/Synced/x/c.jpg", 400), (4, "/Volumes/__absent__/Camera/Synced2/d.jpg", 800)] {
+                try db.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES(?,?,?,?,0,'image','jpg')", arguments: [id, path, id, size])
+            }
+        }
+        let roots = try await database.pool.read { try LibraryRoots.list($0) }
+        #expect(roots[0].fileCount == 2 && roots[0].totalBytes == 900)
+        #expect(roots[1].fileCount == 2 && roots[1].totalBytes == 600)
+    }
+
     @Test func aMissingOrEmptyFolderIsOfflineAndAPopulatedOneOnline() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

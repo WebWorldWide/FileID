@@ -967,8 +967,11 @@ pub struct LibraryRoot {
     /// True when the folder exists and is not empty right now. An unplugged drive reads as offline,
     /// and its catalog rows are kept.
     pub online: bool,
-    /// Cataloged files (failed=0) under this location.
+    /// Cataloged files (failed=0) whose most specific location is this one (schema 1.20.0): a
+    /// location nested inside this one counts its own files, so counts never overlap and match what
+    /// rootID shows.
     pub file_count: i64,
+    /// Bytes of the files counted in fileCount.
     pub total_bytes: i64,
     /// Unix seconds of the last finished scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]

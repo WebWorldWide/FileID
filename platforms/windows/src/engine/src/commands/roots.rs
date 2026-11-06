@@ -1,5 +1,6 @@
 //! `listRoots`: the library locations the catalog has scanned, with whether each is
-//! reachable right now and how many files it holds. Read-only; never scans.
+//! reachable right now and how many files it holds (a nested location's files count only
+//! there). Read-only; never scans.
 
 use std::sync::Arc;
 
@@ -120,11 +121,18 @@ pub fn list(conn: &Connection) -> rusqlite::Result<Vec<LibraryRoot>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut roots = Vec::with_capacity(rows.len());
+    let paths: Vec<(i64, String)> = rows.iter().map(|row| (row.0, row.1.clone())).collect();
+    let totals = format!(
+        "SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM files WHERE failed=0 AND (path_text=?1 OR (path_text>=?2 AND path_text<?3)) AND {}",
+        clause("path_text", "?4")
+    );
     for (id, path, display, kind, enabled, last_scan_at, last_status) in rows {
         let (exact, low, high) = subtree_bounds(&path);
+        let others: Vec<String> = paths.iter().filter(|(other, _)| *other != id).map(|(_, other)| other.clone()).collect();
+        let scope = RootScope::new(&path, &others);
         let (file_count, total_bytes): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM files WHERE failed=0 AND (path_text=?1 OR (path_text>=?2 AND path_text<?3))",
-            rusqlite::params![exact, low, high],
+            &totals,
+            rusqlite::params![exact, low, high, scope.param()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let online = is_online(&path);
@@ -190,6 +198,23 @@ mod tests {
         assert_eq!(roots[0].last_status.as_deref(), Some("completed"));
         assert_eq!(roots[1].last_scan_at, None);
         assert!(!roots[0].online, "a folder that is not on this machine reads as offline");
+    }
+
+    #[test]
+    fn a_nested_location_counts_its_own_files_and_its_parent_does_not() {
+        let conn = conn();
+        conn.execute_batch(
+            "INSERT INTO library_roots(path,display,kind,added_at) VALUES('/Volumes/__fileid_test_absent__/Camera','Camera','external',1),('/Volumes/__fileid_test_absent__/Camera/Synced','Synced','external',2);
+             INSERT INTO files(id,path_text,path_hash,size_bytes,scanned_at,kind,extension) VALUES
+              (1,'/Volumes/__fileid_test_absent__/Camera/a.jpg',1,100,0,'image','jpg'),
+              (2,'/Volumes/__fileid_test_absent__/Camera/Synced/b.jpg',2,200,0,'image','jpg'),
+              (3,'/Volumes/__fileid_test_absent__/Camera/Synced/x/c.jpg',3,400,0,'image','jpg'),
+              (4,'/Volumes/__fileid_test_absent__/Camera/Synced2/d.jpg',4,800,0,'image','jpg');",
+        )
+        .unwrap();
+        let roots = list(&conn).unwrap();
+        assert_eq!((roots[0].file_count, roots[0].total_bytes), (2, 900), "the parent leaves the nested location's files out");
+        assert_eq!((roots[1].file_count, roots[1].total_bytes), (2, 600));
     }
 
     #[test]

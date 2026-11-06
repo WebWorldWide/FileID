@@ -3,7 +3,8 @@ import GRDB
 import FileIDShared
 
 /// The scanned locations (`library_roots`), each with whether it is reachable right now and
-/// how many files it holds. Read-only: never scans and never touches the files.
+/// how many files it holds (a nested location's files count only there). Read-only: never
+/// scans and never touches the files.
 enum LibraryRoots {
     /// Half-open range matching every stored path under `root`: `root/` up to `root0`
     /// (`0` is the character after `/`; `]` follows `\`).
@@ -76,13 +77,16 @@ enum LibraryRoots {
 
     static func list(_ db: GRDB.Database, online: (String) -> Bool = { ScanRootGuard.isReachable($0) }) throws -> [LibraryRoot] {
         let rows = try Row.fetchAll(db, sql: "SELECT id,path,display,kind,enabled,last_scan_at,last_status FROM library_roots ORDER BY added_at,id")
+        let paths = rows.map { (($0["id"] as Int64), ($0["path"] as String)) }
         return try rows.map { row in
             let path: String = row["path"]
+            let id: Int64 = row["id"]
             let bounds = subtreeBounds(path)
+            let scope = Scope(root: path, others: paths.filter { $0.0 != id }.map(\.1))
             let totals = try Row.fetchOne(db, sql: """
                 SELECT COUNT(*) AS c,COALESCE(SUM(size_bytes),0) AS b FROM files
-                WHERE failed=0 AND (path_text=? OR (path_text>=? AND path_text<?))
-                """, arguments: [bounds.exact, bounds.low, bounds.high])
+                WHERE failed=0 AND (path_text=? OR (path_text>=? AND path_text<?)) AND \(scopeSQL("path_text"))
+                """, arguments: [bounds.exact, bounds.low, bounds.high, scope.param])
             return LibraryRoot(
                 id: row["id"], path: path, display: Self.displayName(path: path, stored: row["display"]), kind: row["kind"], enabled: (row["enabled"] as Int64) != 0,
                 online: online(path), fileCount: totals?["c"] ?? 0, totalBytes: totals?["b"] ?? 0,
