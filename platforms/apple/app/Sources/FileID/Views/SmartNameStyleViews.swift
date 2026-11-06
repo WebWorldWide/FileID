@@ -109,8 +109,12 @@ struct SmartNamePreviewSheet: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    ForEach($rows) { $row in
-                        SmartNameRow(row: $row)
+                    ForEach(rows) { row in
+                        SmartNameRow(row: row,
+                                     chip: NameStyle.companionChip(row, in: rows),
+                                     label: NameStyle.accessibilityLabel(row, in: rows),
+                                     checked: Binding(get: { row.checked }, set: { NameStyle.setChecked(&rows, fileID: row.fileID, $0) }),
+                                     edited: Binding(get: { row.edited }, set: { NameStyle.edit(&rows, fileID: row.fileID, $0) }))
                             .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .top)))
                     }
                 }
@@ -194,32 +198,61 @@ struct SmartNamePreviewSheet: View {
 }
 
 private struct SmartNameRow: View {
-    @Binding var row: NameStyle.Row
+    let row: NameStyle.Row
+    let chip: String?
+    let label: String
+    @Binding var checked: Bool
+    @Binding var edited: String
 
     var body: some View {
         HStack(spacing: 10) {
-            Toggle(isOn: $row.checked) { EmptyView() }
+            Toggle(isOn: $checked) { EmptyView() }
                 .toggleStyle(DSCheckboxToggleStyle())
                 .disabled(!row.canCheck)
                 .accessibilityLabel("Rename \(row.currentName)")
-            Text(row.currentName)
-                .font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
-                .lineLimit(1).truncationMode(.middle)
-                .frame(width: 190, alignment: .leading)
-                .help(row.path)
+            HStack(spacing: 5) {
+                if row.isFollower {
+                    Image(systemName: "arrow.turn.down.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.text3)
+                        .accessibilityHidden(true)
+                }
+                Text(row.currentName)
+                    .font(Theme.Font.body(12.5)).foregroundStyle(Theme.text2)
+                    .lineLimit(1).truncationMode(.middle)
+                    .help(row.path)
+            }
+            .padding(.leading, row.isFollower ? 14 : 0)
+            .frame(width: 190, alignment: .leading)
             Image(systemName: "arrow.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.text3)
                 .accessibilityHidden(true)
-            if row.canCheck {
-                TextField("New name", text: $row.edited)
+            if row.canCheck && row.isFollower {
+                Text(edited)
+                    .font(Theme.Font.body(12.5, .medium))
+                    .foregroundStyle(Theme.gold.opacity(checked ? 0.8 : 0.4))
+                    .lineLimit(1).truncationMode(.middle)
+                    .padding(.horizontal, 7).padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .help("Follows the name above")
+            } else if row.canCheck {
+                TextField("New name", text: $edited)
                     .textFieldStyle(.plain)
                     .font(Theme.Font.body(12.5, .medium))
                     .foregroundStyle(Theme.gold)
                     .padding(.horizontal, 7).padding(.vertical, 4)
                     .background(Color.black.opacity(0.25), in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
-                    .disabled(!row.checked)
+                    .disabled(!checked)
             } else {
                 Text("Keeps its name").font(Theme.Font.body(12.5)).foregroundStyle(Theme.text3)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let chip {
+                Text(chip)
+                    .font(Theme.Font.mono(11, .medium))
+                    .foregroundStyle(Theme.gold)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Theme.gold.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.Radius.xs))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help("Renamed together with this file")
             }
             Text(NameStyle.reasonLabel(row.reason))
                 .font(Theme.Font.body(11.5, .medium))
@@ -233,6 +266,6 @@ private struct SmartNameRow: View {
         .background(Color.white.opacity(row.canCheck ? 0.04 : 0.02), in: RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous))
         .opacity(row.canCheck ? 1 : 0.5)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(NameStyle.accessibilityLabel(row))
+        .accessibilityLabel(label)
     }
 }

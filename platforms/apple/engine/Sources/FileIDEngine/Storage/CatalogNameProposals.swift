@@ -7,6 +7,7 @@ import FileIDShared
 /// `commands/catalog_names.rs`.
 enum CatalogNameProposals {
     typealias S = SmartNameStyle
+    typealias C = SmartNameCompanions
     static let maxFiles = 1000
 
     static func handle(_ request: CatalogRequest, database: Database) async throws -> CatalogResponse {
@@ -20,41 +21,127 @@ enum CatalogNameProposals {
     }
 
     static func propose(_ db: GRDB.Database, ids: [Int64], options: S.Options) throws -> [CatalogHit] {
-        let personWords = try personWords(db)
-        var listings: [String: Set<S.Key>] = [:]
+        var run = Run(db: db, options: options, personWords: try personWords(db))
+        for id in ids where run.seen.insert(id).inserted {
+            guard let file = try load(db, id: id) else { continue }
+            let members = C.members(file.name, listing: run.folder(file.parent).names)
+            if members.isEmpty { run.single(id, file) } else { try run.group(id, file, members) }
+        }
+        return run.hits
+    }
+
+    struct Folder {
+        let names: [String]
+        let taken: Set<S.Key>
+    }
+
+    struct Companion {
+        let member: C.Member
+        let path: String
+        let row: Int64?
+    }
+
+    static func leaderFirst(_ leader: Int, _ count: Int) -> [Int] { [leader] + (0..<count).filter { $0 != leader } }
+
+    struct Run {
+        let db: GRDB.Database
+        let options: S.Options
+        let personWords: Set<S.Key>
+        var folders: [String: Folder] = [:]
         var claimed: [String: Set<S.Key>] = [:]
         var seen = Set<Int64>()
         var hits: [CatalogHit] = []
-        for id in ids where seen.insert(id).inserted {
-            guard var loaded = try load(db, id: id) else { continue }
-            loaded.evidence.personWords = personWords
-            let outcome = S.propose(loaded.evidence, options)
+
+        mutating func folder(_ directory: String) -> Folder {
+            if let known = folders[directory] { return known }
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            let folder = Folder(names: names, taken: Set(names.map { S.key(S.lower($0)) }))
+            folders[directory] = folder
+            return folder
+        }
+
+        func outcome(_ evidence: S.Evidence) -> S.Outcome {
+            var evidence = evidence
+            evidence.personWords = personWords
+            return S.propose(evidence, options)
+        }
+
+        mutating func names(_ parent: String, stem: String, members: [(suffix: String, own: S.Key)]) -> [String]? {
+            let taken = folder(parent).taken
+            guard let names = C.sharedNames(stem: stem, members: members, taken: taken, claimed: claimed[parent] ?? []) else { return nil }
+            if zip(names, members).contains(where: { S.key(S.lower($0)) != $1.own }) {
+                claimed[parent, default: []].formUnion(names.map { S.key(S.lower($0)) })
+            }
+            return names
+        }
+
+        mutating func push(_ id: Int64, _ path: String, _ text: String, _ reason: String) {
+            hits.append(CatalogHit(fileID: id, path: path, kind: "proposedName", text: text, evidenceID: reason))
+        }
+
+        mutating func single(_ id: Int64, _ file: Loaded) {
+            let outcome = outcome(file.evidence)
             var text = "", reason = outcome.reason
             if let stem = outcome.stem {
-                let own = S.key(S.lower(loaded.name))
-                if listings[loaded.parent] == nil { listings[loaded.parent] = listing(loaded.parent) }
-                let taken = listings[loaded.parent] ?? []
-                let batch = claimed[loaded.parent] ?? []
-                let free = (1...99).lazy.map { bump -> String in
-                    let bumped = bump == 1 ? stem : "\(stem)_\(bump)"
-                    return loaded.ext.isEmpty ? bumped : bumped + "." + loaded.ext
-                }.first { candidate in
-                    let k = S.key(S.lower(candidate))
-                    return k == own || (!taken.contains(k) && !batch.contains(k))
+                let own = S.key(S.lower(file.name))
+                switch names(file.parent, stem: stem, members: [(file.ext.isEmpty ? "" : "." + file.ext, own)]) {
+                case let names? where S.key(S.lower(names[0])) == own: reason = "unchanged"
+                case let names?: text = names[0]
+                case nil: reason = "collision"
                 }
-                if let free {
-                    if S.key(S.lower(free)) == own { reason = "unchanged" }
-                    else { text = free; claimed[loaded.parent, default: []].insert(S.key(S.lower(free))) }
-                } else { reason = "collision" }
             }
-            hits.append(CatalogHit(fileID: id, path: loaded.path, kind: "proposedName", text: text, evidenceID: reason))
+            push(id, file.path, text, reason)
         }
-        return hits
-    }
 
-    static func listing(_ directory: String) -> Set<S.Key> {
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
-        return Set(names.map { S.key(S.lower($0)) })
+        mutating func group(_ id: Int64, _ file: Loaded, _ members: [C.Member]) throws {
+            var resolved: [Companion] = []
+            for member in members {
+                let path = file.parent == "/" ? "/" + member.name : file.parent + "/" + member.name
+                let row = S.key(member.name) == S.key(file.name)
+                    ? id : try Int64.fetchOne(db, sql: "SELECT id FROM files WHERE path_text=?", arguments: [path])
+                if row != nil || isRegularFile(path) { resolved.append(Companion(member: member, path: path, row: row)) }
+            }
+            guard C.isGroup(resolved.map(\.member)) else { single(id, file); return }
+            seen.formUnion(resolved.compactMap(\.row))
+            let known = resolved.compactMap { c in c.row.map { (c, $0) } }
+            if known.count < resolved.count {
+                let leader = known.firstIndex { $0.0.member.role != .sidecar } ?? 0
+                let reason = C.groupReason(C.unscanned, leader: known[leader].1)
+                for index in leaderFirst(leader, known.count) { push(known[index].1, known[index].0.path, "", reason) }
+                return
+            }
+            var outcomes: [S.Outcome?] = []
+            for (c, row) in known {
+                let loaded = row == id ? file : try load(db, id: row)
+                outcomes.append(c.member.role != .sidecar ? loaded.map { outcome($0.evidence) } : nil)
+            }
+            var best: (index: Int, rank: Int)?
+            for (index, outcome) in outcomes.enumerated() {
+                guard let outcome else { continue }
+                let rank = C.sourceRank(outcome.source, style: options.style)
+                if best.map({ rank < $0.rank }) ?? true { best = (index, rank) }
+            }
+            let leader = best?.index ?? known.firstIndex { $0.0.member.role != .sidecar } ?? 0
+            let order = leaderFirst(leader, known.count)
+            let outcome = outcomes[leader] ?? S.Outcome(stem: nil, reason: "noEvidence", source: "noEvidence")
+            var texts = Array(repeating: "", count: order.count)
+            var reason = outcome.reason
+            if let stem = outcome.stem {
+                let specs = order.map { (suffix: known[$0].0.member.suffix, own: S.key(S.lower(known[$0].0.member.name))) }
+                switch names(file.parent, stem: stem, members: specs) {
+                case let names? where zip(names, specs).allSatisfy({ S.key(S.lower($0)) == $1.own }): reason = "unchanged"
+                case let names?: texts = names
+                case nil: reason = "collision"
+                }
+            }
+            let tagged = C.groupReason(reason, leader: known[leader].1)
+            for (text, index) in zip(texts, order) { push(known[index].1, known[index].0.path, text, tagged) }
+        }
+
+        func isRegularFile(_ path: String) -> Bool {
+            var info = stat()
+            return stat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFREG
+        }
     }
 
     static func personWords(_ db: GRDB.Database) throws -> Set<S.Key> {

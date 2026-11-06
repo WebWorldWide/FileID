@@ -41,6 +41,36 @@ struct CatalogNameProposalsTests {
     }
 }
 
+extension CatalogNameProposalsTests {
+    @Test func companionsShareOneStemAndBumpTogether() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("fileid-companions-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let db = try FileIDEngine.Database(at: root.appendingPathComponent("test.sqlite"))
+        let files: [(Int64, String, String, String?)] = [
+            (10, "DSC_1.ARW", "image", nil), (11, "DSC_1.JPG", "image", "beach sunset"), (12, "DSC_1.xmp", "other", nil),
+            (13, "IMG_2.HEIC", "image", "dog park"), (14, "DSC_3.ARW", "image", "lone hill"),
+        ]
+        try await db.pool.write { d in
+            for (id, name, kind, proposed) in files {
+                let url = root.appendingPathComponent(name)
+                try Data(name.utf8).write(to: url)
+                try d.execute(sql: "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?,?,?,1,10.0,0,?,'x',0,?)",
+                              arguments: [id, url.path, id, kind, proposed])
+            }
+        }
+        try Data("m".utf8).write(to: root.appendingPathComponent("IMG_2.MOV"))
+        try Data("t".utf8).write(to: root.appendingPathComponent("beach-sunset.ARW"))
+        let naming = CatalogNaming(style: "short", maxLength: 40)
+        let response = await CatalogStore.handle(CatalogRequest(requestID: "n", action: "proposeNames", fileIDs: [10, 13, 14, 12], naming: naming), database: db)
+        #expect(response.status == "ok")
+        #expect(response.hits.map(\.fileID) == [11, 10, 12, 13, 14])
+        #expect(response.hits.map(\.text) == ["beach-sunset_2.JPG", "beach-sunset_2.ARW", "beach-sunset_2.xmp", "", "lone-hill.ARW"])
+        #expect(response.hits.map { $0.evidenceID ?? "" } == ["proposedName|group:11", "proposedName|group:11", "proposedName|group:11",
+                                                                "unscannedCompanion|group:13", "proposedName"])
+    }
+}
+
 private extension UInt32 {
     var littleEndianBytes: [UInt8] { withUnsafeBytes(of: littleEndian) { Array($0) } }
 }
