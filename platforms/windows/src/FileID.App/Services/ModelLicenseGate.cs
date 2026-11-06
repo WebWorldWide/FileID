@@ -88,7 +88,30 @@ internal static class ModelLicenseGate
         return declined;
     }
 
-    private static Policy? PolicyForModelKind(string modelKind) => PolicyKeyForModelKind(modelKind) switch
+    /// <summary>Show a catalog model's separately accepted terms (Gemma) before it downloads.
+    /// Permissive weights pass; anything else that claims to need terms is refused.</summary>
+    internal static async Task<bool> EnsureCatalogTermsAcceptedAsync(IpcSchema.ModelCatalogItem model)
+    {
+        if (!ViewModels.ModelCatalogPresentation.IsOfferable(model)) return false;
+        var key = ViewModels.ModelCatalogPresentation.TermsPolicyKey(model);
+        if (key is null) return !model.TermsRequired;
+        if (PolicyForKey(key) is not { } policy) return false;
+        await Gate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            if (IsAccepted(policy)) return true;
+            return await ShowTermsAsync(policy).ConfigureAwait(true) && RememberAcceptance(policy);
+        }
+        finally
+        {
+            Gate.Release();
+        }
+    }
+
+    private static Policy? PolicyForModelKind(string modelKind) =>
+        PolicyKeyForModelKind(modelKind) is { } key ? PolicyForKey(key) : null;
+
+    private static Policy? PolicyForKey(string key) => key switch
     {
         "Gemma" => new Policy(
             "Gemma",

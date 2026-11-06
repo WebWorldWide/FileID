@@ -171,17 +171,18 @@ public sealed class TakeReviewPolicyTests
 
 public sealed class SidebarTabShortcutTests
 {
-    private static readonly string[] AnalyzeOrder = { "deepanalyze", "chat", "takes", "models" };
+    private static readonly string[] AnalyzeOrder = { "deepanalyze", "chat", "takes" };
     [Fact]
     public void BestTakesIsCtrlSixAndTheOtherPagesKeepTheMacNumbers()
     {
         Assert.Equal(6, SidebarTab.Takes.ShortcutNumber);
         Assert.Equal(7, SidebarTab.Cleanup.ShortcutNumber);
         Assert.Equal(9, SidebarTab.Tools.ShortcutNumber);
-        Assert.Equal(0, SidebarTab.Models.ShortcutNumber);
         Assert.Equal("Analyze", SidebarTab.Takes.Area);
         Assert.Equal(AnalyzeOrder, SidebarTab.InArea("Analyze").Select(t => t.Id).ToArray());
         Assert.Equal("Analyze / Best Takes", SidebarTab.Takes.Crumb);
         Assert.Equal("takes", SidebarTab.ById("takes").Id);
+        Assert.Equal("settings", SidebarTab.ById("models").Id);
+        Assert.DoesNotContain(SidebarTab.All, t => t.Id == "models");
     }
 }

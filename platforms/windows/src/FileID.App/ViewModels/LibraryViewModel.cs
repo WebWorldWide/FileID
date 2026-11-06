@@ -107,6 +107,17 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
 
     public BatchObservableCollection<FileTile> Items { get; } = new();
 
+    private OfflineRoots _offline = OfflineRoots.None;
+
+    /// <summary>Marks every tile under an offline location; new tiles pick it up as they arrive.</summary>
+    internal bool ApplyOfflineRoots(OfflineRoots roots)
+    {
+        if (_offline.Equals(roots)) return false;
+        _offline = roots;
+        foreach (var t in Items) t.IsOffline = roots.IsOffline(t.Path);
+        return true;
+    }
+
     private readonly HashSet<FileTile> _selected = new();
     private IReadOnlyList<FileTile>? _selectedItemsCache;
 
@@ -169,6 +180,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
         {
             foreach (FileTile t in e.NewItems)
             {
+                t.IsOffline = _offline.IsOffline(t.Path);
                 t.PropertyChanged += OnTilePropertyChanged;
                 if (t.IsSelected && _selected.Add(t)) selectionChanged = true;
             }
@@ -180,6 +192,7 @@ internal sealed class LibraryViewModel : INotifyPropertyChanged, IDisposable
             _selected.Clear();
             foreach (var t in Items)
             {
+                t.IsOffline = _offline.IsOffline(t.Path);
                 t.PropertyChanged -= OnTilePropertyChanged;
                 t.PropertyChanged += OnTilePropertyChanged;
                 if (t.IsSelected) _selected.Add(t);
@@ -852,6 +865,20 @@ internal sealed class FileTile : INotifyPropertyChanged
     }
     public bool HasProposedName => !string.IsNullOrWhiteSpace(ProposedName);
 
+    private bool _isOffline;
+    /// <summary>True while this file's library location reads offline (unplugged drive).</summary>
+    public bool IsOffline
+    {
+        get => _isOffline;
+        set
+        {
+            if (_isOffline == value) return;
+            _isOffline = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsOffline)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(AccessibleName)));
+        }
+    }
+
     /// <summary>Copy the engine-mutable display fields from a freshly-queried
     /// row onto this surviving instance during the identity-stable merge.
     /// Deliberately does NOT touch IsSelected (selection survives a refresh,
@@ -895,6 +922,7 @@ internal sealed class FileTile : INotifyPropertyChanged
         get
         {
             var parts = new List<string> { FileName, KindDisplay };
+            if (IsOffline) parts.Add("offline");
             if (DateDisplay.Length > 0) parts.Add(DateDisplay);
             if (HasFaces) parts.Add("contains faces");
             if (HasText) parts.Add("contains text");

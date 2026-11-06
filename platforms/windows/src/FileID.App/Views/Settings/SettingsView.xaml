@@ -244,8 +244,18 @@
                     <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
                                TextWrapping="Wrap"
-                               Text="The optional Descriptions and Chat models (Qwen 2.5-VL · Qwen3-VL 4B/8B · Gemma 3 · Mistral-Small 3.2) are on the Describe Files page."/>
+                               Text="The optional Descriptions models (Qwen 2.5-VL · Qwen3-VL 4B/8B · Gemma 3 · Mistral-Small 3.2) are on the Describe Files page, which can also browse every catalog model that fits this PC."/>
                 </StackPanel>
+            </Border>
+
+            <!-- Model catalog: every curated and pinned catalog model for this
+                 PC, filtered by memory, with download and benchmarks. -->
+            <Border CornerRadius="12"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    Padding="20">
+                <settings:ModelCatalogCard />
             </Border>
 
             <!-- Engine info. -->

@@ -20,6 +20,7 @@ internal static class VlmWeightDirs
         "qwen3_vl_4b" => "qwen3-vl-4b",
         "qwen3_vl_8b" => "qwen3-vl-8b",
         "gemma_3_4b" => "gemma-3-4b",
+        _ when ViewModels.ModelCatalogPresentation.IsCatalogModelKind(kind) => "catalog-" + kind,
         _ => kind,
     };
 
