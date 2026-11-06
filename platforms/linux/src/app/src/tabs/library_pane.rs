@@ -125,6 +125,8 @@ pub(super) struct SelectedPane {
     pub revealer: gtk::Revealer,
     engine: Rc<RefCell<EngineClient>>,
     picture: gtk::Picture,
+    frame: gtk::AspectFrame,
+    actions: gtk::Box,
     name: gtk::Label,
     folder: gtk::Label,
     facts: gtk::Box,
@@ -226,6 +228,8 @@ impl SelectedPane {
             revealer,
             engine,
             picture,
+            frame,
+            actions,
             name,
             folder,
             facts,
@@ -284,7 +288,29 @@ impl SelectedPane {
         }
     }
 
+    /// More than one file: the count and their combined size.
+    pub fn show_many(&self, count: usize, bytes: i64) {
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.current.replace(None);
+        self.frame.set_visible(false);
+        self.actions.set_visible(false);
+        self.name.set_text(&super::library_selection::many_title(count));
+        let detail = super::library_selection::many_detail(bytes);
+        self.folder.set_text(&detail);
+        self.folder.set_tooltip_text(None);
+        while let Some(child) = self.facts.first_child() {
+            self.facts.remove(&child);
+        }
+        self.revealer.update_property(&[gtk::accessible::Property::Label(&format!(
+            "{} selected, {detail}",
+            super::library_selection::many_title(count)
+        ))]);
+        self.revealer.set_reveal_child(true);
+    }
+
     fn render(&self, row: FileRow, picture: bool) {
+        self.frame.set_visible(true);
+        self.actions.set_visible(true);
         self.name.set_text(&row.name);
         let folder = crate::v3::parent_name(&row.path);
         self.folder.set_text(&folder);

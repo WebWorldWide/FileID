@@ -9,6 +9,7 @@ pub mod deep_analyze;
 pub mod file_tools;
 pub mod library;
 mod library_pane;
+mod library_selection;
 mod locations;
 mod model_catalog;
 pub mod moments;
