@@ -139,11 +139,12 @@ internal static class ChatActionPolicy
         _ => "library",
     };
 
-    public static ChatContext Context(IReadOnlyList<long>? selection, string? libraryRoot)
+    public static ChatContext Context(IReadOnlyList<long>? selection, string? libraryRoot, IReadOnlyList<long>? people = null)
     {
         var ids = selection is { Count: > 0 } ? selection.Take(MaxContextFiles).ToArray() : null;
+        var persons = people is { Count: > 0 } ? people.Take(PersonSelectionRegistry.MaxPeople).ToArray() : null;
         var root = string.IsNullOrWhiteSpace(libraryRoot) ? null : libraryRoot;
-        return new ChatContext("chat", ids, null, root, root);
+        return new ChatContext("chat", ids, persons, root, root);
     }
 
     public static string PrimaryTitle(ChatAction action, ChatPlanSummary? plan) =>
