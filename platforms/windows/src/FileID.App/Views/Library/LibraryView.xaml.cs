@@ -108,6 +108,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             SyncUndoPill();
             SyncBanners();
             ApplyLibraryQueryHandoff();
+            StartOfflineRoots();
         };
     }
 
@@ -142,6 +143,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
                     {
                         Services.DebugLog.Debug($"[ENGINE-SUB:LibraryView] {e.PropertyName}=Completed");
                         RequestLibraryRefresh(force: true);
+                        DispatcherQueue.TryEnqueue(RefreshOfflineRoots);
                     }
                     break;
                 case nameof(EngineClient.LastBatch):
@@ -327,6 +329,7 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
         try { UndoStack.Instance.PropertyChanged -= OnUndoStackChanged; } catch { /* swallow */ }
         try { EngineClient.Instance.PropertyChanged -= OnEngineChanged; } catch { /* swallow */ }
         try { AppViewModel.Instance.LibraryQueryRequested -= OnLibraryQueryRequested; } catch { /* swallow */ }
+        try { StopOfflineRoots(); } catch (Exception ex) { DebugLog.Warn("LibraryView: stop offline roots failed: " + ex.Message); }
         // Step 1: cancel + dispose every in-flight thumb load so closing
         // the tab doesn't leave background tasks holding BitmapImage refs.
         foreach (var (_, cts) in _inflight)
@@ -795,13 +798,6 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
             }
         });
 
-    // Single tap toggles selection when Ctrl is held; Shift extends from
-    // the last clicked tile; otherwise sets a single selection.
-    // tile hover scale matching macOS LibraryView.swift:681-682
-    // (scaleEffect 1.012 + 0.18s spring). Composition spring runs on the
-    // GPU; visual fidelity matches SwiftUI's .spring system. CenterPoint
-    // is reset on every hover so resized tiles scale around their actual
-    // current center.
     private void OnTilePointerEntered(object sender, PointerRoutedEventArgs e)
         => DebugLog.SafeRun(nameof(OnTilePointerEntered), () =>
         {
@@ -818,19 +814,12 @@ public sealed partial class LibraryView : UserControl, INotifyPropertyChanged
 
     private static void ApplyTileScale(FrameworkElement el, float scale)
     {
-        var visual = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(el);
-        visual.CenterPoint = new System.Numerics.Vector3(
-            (float)(el.ActualWidth / 2), (float)(el.ActualHeight / 2), 0);
-        // macOS hover uses .easeOut(0.18) — no spring overshoot.
-        // SwiftUI LibraryView.swift:681-682.
-        FileID.Theme.Motion.SpringEasing.AnimateScalarEaseOut(el, "Scale.X", scale, 0.18);
-        FileID.Theme.Motion.SpringEasing.AnimateScalarEaseOut(el, "Scale.Y", scale, 0.18);
+        FileID.Theme.Motion.SpringEasing.SpringScale(el, scale, FileID.Theme.Motion.SpringEasing.Tokens.Tight);
         ApplyTileStrokeOpacity(el, hovering: scale > 1.0f);
     }
 
-    // macOS LibraryView.swift:676-677 ramps the tile's white stroke opacity
-    // 0.08 → 0.18 alongside the scale on pointer enter. The brush is defined
-    // inline in the DataTemplate so each tile owns its own instance.
+    // A brush colour is not a Composition visual property, so the hover stroke keeps the
+    // Mac's quick ease-out (Theme.quick) rather than a spring. Each tile owns its brush.
     private static void ApplyTileStrokeOpacity(FrameworkElement el, bool hovering)
     {
         if (el is not Grid grid) return;

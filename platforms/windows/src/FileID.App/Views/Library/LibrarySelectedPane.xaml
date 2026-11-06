@@ -2,8 +2,8 @@
 <!--
     LibrarySelectedPane: the 300 px details pane a single click opens beside
     the Library grid (macOS LibrarySelectedPane). 16:10 preview, name and
-    folder, Kind / Captured / Size / Camera / People rows, caption, tags,
-    Open preview / Similar / Show in Explorer / Open.
+    folder, OFFLINE note, Kind / Captured / Size / Camera / People rows,
+    caption, tags, Open preview / Similar / Show in Explorer / Open.
 -->
 <UserControl
     x:Class="FileID.Views.Library.LibrarySelectedPane"
@@ -70,6 +70,31 @@
                                TextTrimming="CharacterEllipsis" />
                 </StackPanel>
 
+                <Grid x:Name="OfflineRow"
+                      Visibility="Collapsed"
+                      ColumnSpacing="8"
+                      AutomationProperties.Name="Offline. Its drive or folder isn't connected. Tags and descriptions are kept.">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource ImageBadgeStyle}"
+                            Background="Transparent"
+                            BorderBrush="{StaticResource ImageBadgeWarningStrokeBrush}"
+                            VerticalAlignment="Top">
+                        <TextBlock Text="OFFLINE"
+                                   FontSize="10.5"
+                                   FontWeight="SemiBold"
+                                   Foreground="{StaticResource WarningBrush}" />
+                    </Border>
+                    <TextBlock Grid.Column="1"
+                               Text="Its drive or folder isn't connected. Tags and descriptions are kept."
+                               FontFamily="{StaticResource BodyFontFamily}"
+                               FontSize="11.5"
+                               Foreground="{ThemeResource Text3Brush}"
+                               TextWrapping="Wrap" />
+                </Grid>
+
                 <StackPanel x:Name="DetailRows" />
 
                 <TextBlock x:Name="CaptionText"
@@ -114,14 +139,16 @@
                                 Content="Similar"
                                 Click="OnSimilarClicked"
                                 ToolTipService.ToolTip="Find visually similar files" />
-                        <Button Grid.Column="1"
+                        <Button x:Name="RevealButton"
+                                Grid.Column="1"
                                 Style="{StaticResource ShellSecondaryButtonStyle}"
                                 HorizontalAlignment="Stretch"
                                 Content="Explorer"
                                 Click="OnRevealClicked"
                                 ToolTipService.ToolTip="Show in Explorer"
                                 AutomationProperties.Name="Show in Explorer" />
-                        <Button Grid.Column="2"
+                        <Button x:Name="OpenButton"
+                                Grid.Column="2"
                                 Style="{StaticResource ShellSecondaryButtonStyle}"
                                 HorizontalAlignment="Stretch"
                                 Content="Open"

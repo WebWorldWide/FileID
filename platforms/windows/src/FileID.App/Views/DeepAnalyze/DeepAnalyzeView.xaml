@@ -374,6 +374,25 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+                <Grid ColumnSpacing="12" Margin="0,4,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="CatalogModelText"
+                               Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                               TextWrapping="Wrap"
+                               VerticalAlignment="Center"
+                               Text="More vision models from the pinned catalog, filtered to what fits this PC." />
+                    <Button x:Name="BrowseModelsButton"
+                            Grid.Column="1"
+                            Style="{StaticResource ShellSecondaryButtonStyle}"
+                            Content="Browse all models…"
+                            Click="OnBrowseModelsClicked"
+                            ToolTipService.ToolTip="Find a vision model that fits this PC's memory, download it and benchmark it"
+                            AutomationProperties.Name="Browse all models" />
+                </Grid>
             </StackPanel>
 
             <Border CornerRadius="12"

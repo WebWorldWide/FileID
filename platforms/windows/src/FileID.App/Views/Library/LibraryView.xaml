@@ -275,9 +275,8 @@
 
                 <ItemsRepeater.ItemTemplate>
                     <DataTemplate x:DataType="vm:FileTile">
-                        <!-- PointerEntered/Exited drive a spring
-                             scale (1.012, response 0.18s) matching macOS
-                             LibraryView.swift:681-682 hover affordance.
+                        <!-- PointerEntered/Exited drive a 1.012 hover scale on
+                             the tight spring (response 0.35, damping 0.78).
                              Height = width + 68 (caption row) so the image
                              area is exactly square regardless of how long
                              the caption is. Mirrors macOS's
@@ -415,6 +414,14 @@
                                 <Border Style="{StaticResource ImageBadgeStyle}"
                                         ToolTipService.ToolTip="{x:Bind KindDisplay}">
                                     <FontIcon Glyph="{x:Bind KindBadgeGlyph}" FontSize="12" Foreground="White" />
+                                </Border>
+                                <Border Style="{StaticResource ImageBadgeStyle}"
+                                        BorderBrush="{StaticResource ImageBadgeWarningStrokeBrush}"
+                                        Visibility="{x:Bind IsOffline, Mode=OneWay, Converter={StaticResource BoolToVisibility}}">
+                                    <TextBlock Text="OFFLINE"
+                                               FontSize="10.5"
+                                               FontWeight="SemiBold"
+                                               Foreground="{StaticResource WarningBrush}" />
                                 </Border>
                                 <Border Style="{StaticResource ImageBadgeStyle}"
                                         BorderBrush="{StaticResource ImageBadgeAiStrokeBrush}"

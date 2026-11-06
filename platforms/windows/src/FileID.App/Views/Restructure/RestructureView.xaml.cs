@@ -97,26 +97,23 @@ public sealed partial class RestructureView : UserControl
         };
     }
 
-    // macOS parity (RestructureApplyBar.swift): gold primary + outline secondary
-    // scale to 1.02x on hover with a response 0.28 / dampingFraction 0.7 spring.
     private void WireApplyBarHoverSprings()
     {
-        const double SpringResponse = 0.28;
-        const double SpringDamping = 0.7;
+        var spring = FileID.Theme.Motion.SpringEasing.Tokens.Tight;
         ApplySymlinkButton.PointerEntered += (_, _) =>
         {
             if (ApplySymlinkButton.IsEnabled)
-                FileID.Theme.Motion.SpringEasing.AnimateScale(ApplySymlinkButton, 1.02f, SpringResponse, SpringDamping);
+                FileID.Theme.Motion.SpringEasing.SpringScale(ApplySymlinkButton, 1.02f, spring);
         };
         ApplySymlinkButton.PointerExited += (_, _) =>
-            FileID.Theme.Motion.SpringEasing.AnimateScale(ApplySymlinkButton, 1.0f, SpringResponse, SpringDamping);
+            FileID.Theme.Motion.SpringEasing.SpringScale(ApplySymlinkButton, 1.0f, spring);
         ApplyMovesButton.PointerEntered += (_, _) =>
         {
             if (ApplyMovesButton.IsEnabled)
-                FileID.Theme.Motion.SpringEasing.AnimateScale(ApplyMovesButton, 1.02f, SpringResponse, SpringDamping);
+                FileID.Theme.Motion.SpringEasing.SpringScale(ApplyMovesButton, 1.02f, spring);
         };
         ApplyMovesButton.PointerExited += (_, _) =>
-            FileID.Theme.Motion.SpringEasing.AnimateScale(ApplyMovesButton, 1.0f, SpringResponse, SpringDamping);
+            FileID.Theme.Motion.SpringEasing.SpringScale(ApplyMovesButton, 1.0f, spring);
     }
 
     // macOS parity (RestructureView.swift `.task`): auto-generate the plan on
@@ -789,7 +786,7 @@ public sealed partial class RestructureView : UserControl
     {
         bool active = _hovered == outcome;
         tile.BorderBrush = active ? tint : _idleTileStroke;
-        FileID.Theme.Motion.SpringEasing.AnimateScale(tile, active ? 1.012f : 1.0f, 0.28, 0.7);
+        FileID.Theme.Motion.SpringEasing.SpringScale(tile, active ? 1.012f : 1.0f, FileID.Theme.Motion.SpringEasing.Tokens.Tight);
     }
 
     // ---- Flow / Tree toggle ---------------------------------------------

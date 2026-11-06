@@ -99,6 +99,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // Qwen3 working-set peaks are not measured. Do not reject an
         // explicitly selected model using an invented RAM threshold.
         if (kind is "qwen3_vl_4b" or "qwen3_vl_8b") return true;
+        if (ModelCatalogPresentation.IsCatalogModelKind(kind)) return true;
         var headroom = Math.Max(0, ramGB - 8.0);
         return RamBudgetGB(kind) <= headroom;
     }
@@ -121,6 +122,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         // per-FileDone during a run; this seeds it from the authoritative DB count
         // so the pill is correct even after a tab switch between runs.
         _ = RestorePendingNamesCountAsync();
+        ResolveCatalogModelName();
     }
 
     private async System.Threading.Tasks.Task RestorePendingNamesCountAsync()
@@ -466,6 +468,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     private void UpdateActiveModelLabel()
     {
         ActiveModelText.Text = ModelDisplayName(AppSettings.IsAllowedVlmKind(_activeModel) ? _activeModel : "qwen2_5_vl_7b");
+        SyncCatalogModelText();
     }
 
     private int _proposedNameCount;
@@ -612,7 +615,7 @@ public sealed partial class DeepAnalyzeView : UserControl
         "qwen3_vl_8b" => "Qwen3-VL 8B",
         "gemma_3_4b" => "Gemma 3 4B",
         "mistral_small_3_2" => "Mistral-Small 3.2",
-        _ => kind,
+        _ => s_catalogNames.TryGetValue(kind, out var name) ? name : kind,
     };
 
     private string? ModelBlocker()

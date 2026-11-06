@@ -158,7 +158,7 @@ internal sealed class CatalogWorkbench : WorkbenchPanel
             _timeline,
             _coverage,
             Row(_timelineMode, findMoments, Ghost(ActionButton("Refresh chapters", RefreshDetailAsync))),
-            Meta("Pick one or more videos in the results, then press Find moments. Quick looks at one frame every ten seconds; Detailed also watches short four-second sequences and takes longer. With a speech model from the Models page (such as Qwen3-ASR), speech becomes searchable text on this PC. Nothing is downloaded automatically, and problems show under Video analysis."),
+            Meta("Pick one or more videos in the results, then press Find moments. Quick looks at one frame every ten seconds; Detailed also watches short four-second sequences and takes longer. With a speech model from Settings ▸ Model catalog (such as Qwen3-ASR), speech becomes searchable text on this PC. Nothing is downloaded automatically, and problems show under Video analysis."),
             Meta("Keyword search works without a model. Hybrid and semantic search need the Search by description model. FileID looks at frames, so very short moments can be missed."));
         _playerPanel.Visibility = Visibility.Collapsed;
         Inputs.Children.Add(_playerPanel);
