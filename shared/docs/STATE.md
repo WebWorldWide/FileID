@@ -1,5 +1,12 @@
 # FileID — State
 
+## 2026-11-06 — Common-media File Tools finished: Rust runs the vetted FFmpeg; Video sub-picker in all three apps
+
+- **Owner approved the `commands/video_export.rs` digest refresh.** It gains `run_to_stage` and `probe_json` on the existing launcher helpers (vetted-build check, parent-death signal, Windows job and timeouts unchanged; any argument list without one `-i`, a file-only protocol whitelist and `pipe:1` is refused). The Rust engine runs trim, remux, audio, proxy and rotate through the vetted LGPL/OpenH264 FFmpeg and reports them available only when that runtime is found; Homebrew's GPL build stays refused (unit-tested). A stand-in run showed keyframe trims carry audio back to the keyframe too; verification now allows it for keyframe trims only.
+- **All three apps** (agent): Video has Export · Trim · Remux · Audio · Proxy · Rotate, each shown only when the engine reports it available; trim has start/end with "Set from playhead" and Keyframe/Exact; remux greys out the source's own container; proxy 640/960; rotate 90° right/180°/90° left. The Mac rotate test reads back a marker's pixels to confirm clockwise.
+- IPC 1.20.0 now covers both this and the Mac video-thumbnail size (neither had shipped).
+- Combined checks on `integrate/batch-8`: Rust 1,155, GTK 189, C# 62, Swift 842 (serial), conformance Rust 40 / Swift 46. Not yet run against the vetted FFmpeg (not on this Mac); no app seen running.
+
 ## 2026-11-06 — Mac app uses the engine for merge suggestions, CLIP query vectors and video thumbnails
 
 - **Mac** (agent; owner-approved digest refreshes of `EngineClient.swift`, `ThumbnailService.swift` and `CLIPModelInstaller.swift`): the app awaits `mergeSuggestions`, `clipTextEmbedding` and `thumbnailGenerated` through a new `EngineQueryReplies` (vectors by query id, thumbnails by path, `modifiedAt` and size; timeouts 60/30/15 s; cancellation, engine exit and restart release every waiter). People ▸ Suggest merges, Library search and Chat call the engine; keyword results show before the vector arrives. The app process no longer builds a CLIP text session at all (the 254 MB model now loads only in the engine). Video thumbnails come from the engine at the size shown: `generateVideoThumbnail` gains optional `maxPixelSize` (schema 1.20.0), both engines clamp it to 64–2048, default to 192 and never upscale (the Rust helper did upscale before); Quick Look only when the engine is down or silent.
