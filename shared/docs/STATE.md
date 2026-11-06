@@ -1,5 +1,11 @@
 # FileID — State
 
+## 2026-11-06 — Smart names keep companions together (RAW+JPEG, Live Photo, sidecars)
+
+- **Both engines and all three apps** (agent): `proposeNames` returns companions in one folder as one group — a RAW with its JPEG/HEIC, a Live Photo with its MOV, and `.xmp`/`.aae` sidecars — with one shared new stem (each member keeps its extension) and `evidenceID` `"<reason>|group:<leader>"` (no schema change). The group takes a `_N` bump that is free for every member, or keeps all its names when none is (`collision`), so a pair is never half-renamed; a companion on disk but not yet scanned holds the group (`unscannedCompanion`). The apps show followers indented under the leader with a "+ ARW, XMP" chip; ticking any member ticks the group, editing the leader rewrites the followers, and all members go in one `renameFiles` batch so the existing Undo restores them together.
+- Not yet: `renameFiles` carrying uncatalogued `.xmp`/`.aae` (needs the digest-locked `commands/bulk.rs`); such groups are held instead.
+- Checks: Rust 1,137, GTK 185, Swift 804 (serial), C# 21 policy + 62 IPC, conformance with `names-companions-share-one-stem` (Rust 37, Swift 43, same in UTC and America/Los_Angeles). None of the apps seen running.
+
 ## 2026-11-05 (night, latest) — Smart-name style UI on Mac, WinUI and GTK
 
 - **All three apps** (agent): Describe Files has a "Name style" section (Short / Descriptive / Date first, 4–120 characters, Add confirmed people / Add event / Add date; Add date is off for Date first), saved per app (Mac `@AppStorage naming.*`, WinUI `AppSettings.Naming*`, GTK the shared `app-settings.json` keys); defaults short, 40, people and event on, date off. "Preview names" asks `proposeNames` for the Library selection (or the files with suggested names) and re-runs 300 ms after a change, dropping stale replies. Rows show the current name, an editable gold proposed name, a lavender reason chip and a checkbox; rows without a name are greyed out with their reason. Rename sends the edited names through `renameFiles` with no app-side `_N`; Undo is the existing rename Undo on each app. Rows spring in and appear without motion under Reduce Motion.

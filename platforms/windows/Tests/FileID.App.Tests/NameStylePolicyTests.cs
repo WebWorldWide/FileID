@@ -132,4 +132,63 @@ public sealed class NameStylePolicyTests
         Assert.Equal("IMG_0001.jpg, rename to sam-baseball-hit.jpg, from the AI name", NameStylePolicy.AccessibleName(rows[0]));
         Assert.Equal("Beach.jpg, keeps its name, already well named", NameStylePolicy.AccessibleName(rows[1]));
     }
+
+    private static readonly long[] PairOrder = { 11, 10, 12, 14 };
+    private static readonly string[] PairSuffixes = { ".JPG", ".ARW", ".ARW.xmp", "" };
+    private static readonly bool[] GroupUnticked = { false, false, false, true };
+    private static readonly string[] EditedStems = { " sunset-walk.JPG ", "sunset-walk.ARW", "sunset-walk.ARW.xmp", "lone-hill.ARW" };
+
+    private static CatalogHit[] Pair() => new[]
+    {
+        Hit(11, "DSC_1.JPG", "beach-sunset_2.JPG", "proposedName|group:11"),
+        Hit(10, "DSC_1.ARW", "beach-sunset_2.ARW", "proposedName|group:11"),
+        Hit(12, "DSC_1.ARW.xmp", "beach-sunset_2.ARW.xmp", "proposedName|group:11"),
+        Hit(14, "DSC_3.ARW", "lone-hill.ARW", "proposedName"),
+    };
+
+    [Fact]
+    public void CompanionsArriveTogetherLeaderFirst()
+    {
+        var rows = NameStylePolicy.Rows(Pair(), Array.Empty<NameProposalRow>());
+        Assert.Equal(PairOrder, rows.Select(r => r.FileId));
+        Assert.All(rows, r => Assert.Equal("proposedName", r.Reason));
+        Assert.True(rows[0].IsLeader && rows[1].IsFollower && rows[2].IsFollower && rows[3].Group is null);
+        Assert.Equal(PairSuffixes, rows.Select(r => r.Suffix));
+        Assert.Equal("+ ARW, XMP", NameStylePolicy.CompanionChip(rows[0], rows));
+        Assert.Null(NameStylePolicy.CompanionChip(rows[1], rows));
+        Assert.Equal("Its partner file isn't scanned yet", NameStylePolicy.ReasonLabel("unscannedCompanion"));
+        Assert.Equal("DSC_1.ARW, rename to beach-sunset_2.ARW, from the AI name, together with DSC_1.JPG, DSC_1.ARW.xmp",
+            NameStylePolicy.AccessibleName(rows[1], rows));
+        Assert.Equal(("collision", (long?)30), NameStylePolicy.ParseReason("collision|group:30"));
+        Assert.Equal(("tags", (long?)null), NameStylePolicy.ParseReason("tags"));
+        Assert.Equal(("noEvidence", (long?)null), NameStylePolicy.ParseReason(null));
+    }
+
+    [Fact]
+    public void TickingTheLeaderTicksTheWholeGroupAndStaysUnticked()
+    {
+        var rows = NameStylePolicy.Rows(Pair(), Array.Empty<NameProposalRow>());
+        Assert.Equal(3, NameStylePolicy.SetChecked(rows, 11, false).Count);
+        Assert.Equal(GroupUnticked, rows.Select(r => r.Checked));
+        Assert.Equal(GroupUnticked, NameStylePolicy.Rows(Pair(), rows).Select(r => r.Checked));
+        NameStylePolicy.SetChecked(rows, 11, true);
+        Assert.All(rows, r => Assert.True(r.Checked));
+    }
+
+    [Fact]
+    public void EditingTheLeaderGivesEveryCompanionTheSameStem()
+    {
+        var rows = NameStylePolicy.Rows(Pair(), Array.Empty<NameProposalRow>());
+        Assert.Equal(2, NameStylePolicy.Edit(rows, 11, " sunset-walk.JPG ").Count);
+        Assert.Equal(EditedStems, rows.Select(r => r.Edited));
+        Assert.Empty(NameStylePolicy.Edit(rows, 10, "rogue.ARW"));
+        Assert.Equal("sunset-walk.ARW", rows[1].Edited);
+        Assert.Equal(new[]
+        {
+            new RenameEntry(11, "sunset-walk.JPG"), new RenameEntry(10, "sunset-walk.ARW"),
+            new RenameEntry(12, "sunset-walk.ARW.xmp"), new RenameEntry(14, "lone-hill.ARW"),
+        }, NameStylePolicy.Renames(rows));
+        NameStylePolicy.Edit(rows, 11, "bad/name.JPG");
+        Assert.Equal(new[] { new RenameEntry(14, "lone-hill.ARW") }, NameStylePolicy.Renames(rows));
+    }
 }

@@ -54,6 +54,7 @@ pub struct Evidence {
 pub struct Outcome {
     pub stem: Option<String>,
     pub reason: &'static str,
+    pub source: &'static str,
 }
 
 pub const MIN_LENGTH: usize = 4;
@@ -207,7 +208,7 @@ fn first_sentence(text: &str) -> &str {
 }
 
 pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
-    let none = |reason| Outcome { stem: None, reason };
+    let none = |reason, source| Outcome { stem: None, reason, source };
     let pw = &evidence.person_words;
     let chapter = evidence.chapter.as_deref().map(|t| words(t, pw)).unwrap_or_default();
     let stored = evidence.stored_name.as_deref().map(|t| words(t, pw)).unwrap_or_default();
@@ -232,7 +233,7 @@ pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
         .unwrap_or((Vec::new(), "noEvidence"));
     if core.is_empty() {
         if event.is_empty() {
-            return none("noEvidence");
+            return none("noEvidence", "noEvidence");
         }
         core = std::mem::take(&mut event);
         reason = "event";
@@ -271,7 +272,7 @@ pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
     };
     let mut pick = Pick { people: vec![false; people.len()], core: 1, date: false, event: false };
     if !fits(&pick) {
-        return none("budget");
+        return none("budget", reason);
     }
     let try_with = |pick: &mut Pick, change: &dyn Fn(&mut Pick)| {
         let mut next = pick.clone();
@@ -298,12 +299,12 @@ pub fn propose(evidence: &Evidence, options: &Options) -> Outcome {
     }
     let stem = render(&pick);
     if RESERVED.contains(&stem.as_str()) {
-        return none("reserved");
+        return none("reserved", reason);
     }
     if lower(&stem) == lower(&evidence.original_stem) {
-        return none("unchanged");
+        return none("unchanged", reason);
     }
-    Outcome { stem: Some(stem), reason }
+    Outcome { stem: Some(stem), reason, source: reason }
 }
 
 #[derive(Clone)]

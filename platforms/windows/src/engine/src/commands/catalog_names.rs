@@ -9,7 +9,8 @@ use anyhow::{bail, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::ipc::{CatalogHit, CatalogRequest};
-use crate::util::smart_name_style::{self as style, Evidence, Options, Style};
+use crate::util::smart_name_companions::{self as companions, Member, Role};
+use crate::util::smart_name_style::{self as style, Evidence, Options, Outcome, Style};
 
 const MAX_FILES: usize = 1000;
 
@@ -29,61 +30,189 @@ pub(crate) fn propose(conn: &Connection, request: &CatalogRequest) -> Result<Vec
         event: naming.include_event,
         date: naming.include_date,
     };
-    let mut person_words = person_words(conn)?;
-    let mut listings: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut claimed: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut seen = HashSet::new();
-    let mut hits = Vec::new();
+    let mut run = Run {
+        conn,
+        options,
+        person_words: person_words(conn)?,
+        folders: HashMap::new(),
+        claimed: HashMap::new(),
+        seen: HashSet::new(),
+        hits: Vec::new(),
+    };
     for &id in ids {
-        if !seen.insert(id) {
+        if !run.seen.insert(id) {
             continue;
         }
-        let Some(mut evidence) = load(conn, id)? else { continue };
-        let path = evidence.path.clone();
-        evidence.evidence.person_words = std::mem::take(&mut person_words);
-        let outcome = style::propose(&evidence.evidence, &options);
-        person_words = std::mem::take(&mut evidence.evidence.person_words);
+        let Some(file) = load(conn, id)? else { continue };
+        let parent = Path::new(&file.path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let names = run.folder(&parent).names.clone();
+        let members = companions::members(&file.name, &names);
+        if members.is_empty() {
+            run.single(id, file, &parent);
+        } else {
+            run.group(id, file, &parent, members)?;
+        }
+    }
+    Ok(run.hits)
+}
+
+struct Folder {
+    names: Vec<String>,
+    taken: HashSet<String>,
+}
+
+struct Run<'a> {
+    conn: &'a Connection,
+    options: Options,
+    person_words: HashSet<String>,
+    folders: HashMap<String, Folder>,
+    claimed: HashMap<String, HashSet<String>>,
+    seen: HashSet<i64>,
+    hits: Vec<CatalogHit>,
+}
+
+impl Run<'_> {
+    fn folder(&mut self, directory: &str) -> &Folder {
+        self.folders.entry(directory.to_string()).or_insert_with(|| {
+            let names: Vec<String> = std::fs::read_dir(directory)
+                .map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                .unwrap_or_default();
+            let taken = names.iter().map(|name| style::lower(name)).collect();
+            Folder { names, taken }
+        })
+    }
+
+    fn outcome(&mut self, evidence: &mut Evidence) -> Outcome {
+        evidence.person_words = std::mem::take(&mut self.person_words);
+        let outcome = style::propose(evidence, &self.options);
+        self.person_words = std::mem::take(&mut evidence.person_words);
+        outcome
+    }
+
+    fn names_for(&mut self, parent: &str, stem: &str, members: &[(String, String)]) -> Option<Vec<String>> {
+        self.folder(parent);
+        let taken = &self.folders[parent].taken;
+        let batch = self.claimed.entry(parent.to_string()).or_default();
+        let names = companions::shared_names(stem, members, taken, batch)?;
+        if names.iter().zip(members).any(|(name, (_, own))| style::lower(name) != *own) {
+            batch.extend(names.iter().map(|name| style::lower(name)));
+        }
+        Some(names)
+    }
+
+    fn push(&mut self, file_id: i64, path: String, text: String, reason: String) {
+        self.hits.push(CatalogHit {
+            file_id,
+            path,
+            kind: "proposedName".into(),
+            text,
+            evidence_id: Some(reason),
+            start_seconds: None,
+            page: None,
+        });
+    }
+
+    fn single(&mut self, id: i64, mut file: Loaded, parent: &str) {
+        let outcome = self.outcome(&mut file.evidence);
         let (text, reason) = match outcome.stem {
             Some(stem) => {
-                let parent = Path::new(&path).parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-                let own = style::lower(&evidence.name);
-                let taken = listings.entry(parent.clone()).or_insert_with(|| listing(&parent));
-                let batch = claimed.entry(parent).or_default();
-                let free = (1..=99).map(|bump| {
-                    let stem = if bump == 1 { stem.clone() } else { format!("{stem}_{bump}") };
-                    if evidence.extension.is_empty() { stem } else { format!("{stem}.{}", evidence.extension) }
-                }).find(|candidate| {
-                    let key = style::lower(candidate);
-                    key == own || (!taken.contains(&key) && !batch.contains(&key))
-                });
-                match free {
-                    Some(name) if style::lower(&name) == own => (String::new(), "unchanged"),
-                    Some(name) => {
-                        batch.insert(style::lower(&name));
-                        (name, outcome.reason)
-                    }
+                let suffix = if file.extension.is_empty() { String::new() } else { format!(".{}", file.extension) };
+                let own = style::lower(&file.name);
+                match self.names_for(parent, &stem, &[(suffix, own.clone())]) {
+                    Some(names) if style::lower(&names[0]) == own => (String::new(), "unchanged"),
+                    Some(mut names) => (names.remove(0), outcome.reason),
                     None => (String::new(), "collision"),
                 }
             }
             None => (String::new(), outcome.reason),
         };
-        hits.push(CatalogHit {
-            file_id: id,
-            path,
-            kind: "proposedName".into(),
-            text,
-            evidence_id: Some(reason.into()),
-            start_seconds: None,
-            page: None,
-        });
+        self.push(id, file.path, text, reason.into());
     }
-    Ok(hits)
+
+    fn group(&mut self, id: i64, file: Loaded, parent: &str, members: Vec<Member>) -> Result<()> {
+        let mut resolved: Vec<Companion> = Vec::new();
+        for member in members {
+            let path = Path::new(parent).join(&member.name).to_string_lossy().into_owned();
+            let row = if member.name == file.name {
+                Some(id)
+            } else {
+                self.conn.query_row("SELECT id FROM files WHERE path_text=?1", [&path], |r| r.get(0)).optional()?
+            };
+            if row.is_some() || std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+                resolved.push(Companion { member, path, row });
+            }
+        }
+        if !companions::is_group(&resolved.iter().map(|c| c.member.clone()).collect::<Vec<_>>()) {
+            self.single(id, file, parent);
+            return Ok(());
+        }
+        self.seen.extend(resolved.iter().filter_map(|c| c.row));
+        let known: Vec<(&Companion, i64)> = resolved.iter().filter_map(|c| c.row.map(|row| (c, row))).collect();
+        if known.len() < resolved.len() {
+            let leader = known.iter().position(|(c, _)| c.member.role != Role::Sidecar).unwrap_or(0);
+            let reason = companions::group_reason(companions::UNSCANNED, known[leader].1);
+            for index in leader_first(leader, known.len()) {
+                let (c, row) = known[index];
+                self.push(row, c.path.clone(), String::new(), reason.clone());
+            }
+            return Ok(());
+        }
+        let mut file = Some(file);
+        let mut outcomes: Vec<Option<Outcome>> = Vec::with_capacity(known.len());
+        for (c, row) in &known {
+            let loaded = if *row == id { file.take() } else { load(self.conn, *row)? };
+            outcomes.push(match loaded {
+                Some(mut loaded) if c.member.role != Role::Sidecar => Some(self.outcome(&mut loaded.evidence)),
+                _ => None,
+            });
+        }
+        let mut best: Option<(usize, u8)> = None;
+        for (index, outcome) in outcomes.iter().enumerate() {
+            let Some(outcome) = outcome else { continue };
+            let rank = companions::source_rank(outcome.source, self.options.style);
+            if best.is_none_or(|(_, top)| rank < top) {
+                best = Some((index, rank));
+            }
+        }
+        let leader = best
+            .map(|(index, _)| index)
+            .or_else(|| known.iter().position(|(c, _)| c.member.role != Role::Sidecar))
+            .unwrap_or(0);
+        let order: Vec<usize> = leader_first(leader, known.len()).collect();
+        let outcome = outcomes[leader].clone().unwrap_or(Outcome { stem: None, reason: "noEvidence", source: "noEvidence" });
+        let mut texts = vec![String::new(); order.len()];
+        let reason = match &outcome.stem {
+            Some(stem) => {
+                let specs: Vec<(String, String)> =
+                    order.iter().map(|&i| (known[i].0.member.suffix.clone(), style::lower(&known[i].0.member.name))).collect();
+                match self.names_for(parent, stem, &specs) {
+                    Some(names) if names.iter().zip(&specs).all(|(name, (_, own))| style::lower(name) == *own) => "unchanged",
+                    Some(names) => {
+                        texts = names;
+                        outcome.reason
+                    }
+                    None => "collision",
+                }
+            }
+            None => outcome.reason,
+        };
+        let reason = companions::group_reason(reason, known[leader].1);
+        for (text, index) in texts.into_iter().zip(order) {
+            let (c, row) = known[index];
+            self.push(row, c.path.clone(), text, reason.clone());
+        }
+        Ok(())
+    }
 }
 
-fn listing(directory: &str) -> HashSet<String> {
-    std::fs::read_dir(directory)
-        .map(|entries| entries.flatten().map(|e| style::lower(&e.file_name().to_string_lossy())).collect())
-        .unwrap_or_default()
+struct Companion {
+    member: Member,
+    path: String,
+    row: Option<i64>,
+}
+
+fn leader_first(leader: usize, count: usize) -> impl Iterator<Item = usize> {
+    std::iter::once(leader).chain((0..count).filter(move |index| *index != leader))
 }
 
 fn person_words(conn: &Connection) -> Result<HashSet<String>> {
@@ -278,6 +407,49 @@ mod tests {
         assert!(propose(&conn, &bad).is_err());
         assert!(propose(&conn, &request(serde_json::json!({"requestID":"n","action":"proposeNames","fileIDs":[1]}))).is_err());
         assert_eq!(capture_date(f64::NAN), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn companions_share_one_stem_and_bump_together() {
+        let dir = std::env::temp_dir().join(format!("fileid-companions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::db::test_support::memory_db();
+        for (id, name, kind, proposed) in [
+            (10, "DSC_1.ARW", "image", None),
+            (11, "DSC_1.JPG", "image", Some("beach sunset")),
+            (12, "DSC_1.xmp", "other", None),
+            (13, "IMG_2.HEIC", "image", Some("dog park")),
+            (14, "DSC_3.ARW", "image", Some("lone hill")),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, name).unwrap();
+            conn.execute(
+                "INSERT INTO files(id,path_text,path_hash,size_bytes,modified_at,scanned_at,kind,extension,failed,vlm_proposed_name) VALUES(?1,?2,?1,1,10.0,0,?3,'x',0,?4)",
+                params![id, path.to_string_lossy(), kind, proposed],
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.join("IMG_2.MOV"), b"m").unwrap();
+        std::fs::write(dir.join("beach-sunset.ARW"), b"t").unwrap();
+        let hits = propose(
+            &conn,
+            &request(serde_json::json!({"requestID":"n","action":"proposeNames","fileIDs":[10,13,14,12],"naming":{"style":"short","maxLength":40}})),
+        )
+        .unwrap();
+        let got: Vec<(i64, &str, &str)> =
+            hits.iter().map(|h| (h.file_id, h.text.as_str(), h.evidence_id.as_deref().unwrap_or(""))).collect();
+        assert_eq!(
+            got,
+            [
+                (11, "beach-sunset_2.JPG", "proposedName|group:11"),
+                (10, "beach-sunset_2.ARW", "proposedName|group:11"),
+                (12, "beach-sunset_2.xmp", "proposedName|group:11"),
+                (13, "", "unscannedCompanion|group:13"),
+                (14, "lone-hill.ARW", "proposedName"),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

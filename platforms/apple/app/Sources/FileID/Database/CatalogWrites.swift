@@ -201,6 +201,25 @@ enum CatalogWrites {
     struct NamedRename: Sendable, Equatable {
         let fileID: Int64
         let newName: String
+        var group: Int64? = nil
+    }
+
+    /// Chunks of at most `size` renames that never split a companion group,
+    /// so each group's members land in one renameFiles batch.
+    nonisolated static func groupedChunks(_ renames: [NamedRename], size: Int) -> [[NamedRename]] {
+        var chunks: [[NamedRename]] = []
+        var start = 0
+        while start < renames.count {
+            var end = min(start + size, renames.count)
+            while end < renames.count, end > start, let group = renames[end].group, renames[end - 1].group == group { end -= 1 }
+            if end == start {
+                end = start + 1
+                while end < renames.count, renames[end].group != nil, renames[end].group == renames[start].group { end += 1 }
+            }
+            chunks.append(Array(renames[start..<end]))
+            start = end
+        }
+        return chunks
     }
 
     /// Renames files to names the user confirmed, exactly as given. A name
@@ -210,12 +229,14 @@ enum CatalogWrites {
         let current = await Task.detached(priority: .userInitiated) {
             Dictionary(store.files(forFileIDs: renames.map(\.fileID)).map { ($0.id, $0.pathText) }, uniquingKeysWith: { first, _ in first })
         }.value
-        let known = renames.filter { current[$0.fileID] != nil }
+        let missingGroups = Set(renames.filter { current[$0.fileID] == nil }.compactMap(\.group))
+        let known = renames.filter { current[$0.fileID] != nil && !($0.group.map(missingGroups.contains) ?? false) }
         var renamed: [ReadStore.RenameOutcome] = []
         var failed = renames.count - known.count
         var firstError: String?
-        for start in stride(from: 0, to: known.count, by: renameChunk) {
-            let chunk = Array(known[start..<min(start + renameChunk, known.count)])
+        var sent = 0
+        for chunk in groupedChunks(known, size: renameChunk) {
+            sent += chunk.count
             let result = await request(engine, .renameFiles(renames: chunk.map { RenameEntry(fileID: $0.fileID, newName: $0.newName) }),
                                        action: "renameFiles", id: chunk[0].fileID, timeout: 60 + Double(chunk.count) / 4)
             let byID = Dictionary(chunk.map { ($0.fileID, $0) }, uniquingKeysWith: { first, _ in first })
@@ -231,7 +252,7 @@ enum CatalogWrites {
             failed += chunk.count - landed.count
             if firstError == nil { firstError = result.messages.first { !$0.ok }?.message }
             if !answered(result) {
-                failed += known.count - start - chunk.count
+                failed += known.count - sent
                 break
             }
         }

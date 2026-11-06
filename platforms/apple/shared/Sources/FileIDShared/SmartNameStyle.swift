@@ -43,6 +43,8 @@ public enum SmartNameStyle {
     public struct Outcome: Sendable, Equatable {
         public let stem: String?
         public let reason: String
+        public var source: String
+        public init(stem: String?, reason: String, source: String) { self.stem = stem; self.reason = reason; self.source = source }
     }
 
     public static let minLength = 4
@@ -209,7 +211,7 @@ public enum SmartNameStyle {
         var event = options.event ? Array((evidence.event.map { words($0, personWords: pw) } ?? []).prefix(maxEventWords)) : []
         var (core, reason) = sources.first { !$0.0.isEmpty } ?? ([], "noEvidence")
         if core.isEmpty {
-            guard !event.isEmpty else { return Outcome(stem: nil, reason: "noEvidence") }
+            guard !event.isEmpty else { return Outcome(stem: nil, reason: "noEvidence", source: "noEvidence") }
             core = event; event = []; reason = "event"
         }
         core = Array(core.prefix(options.style.coreLimit))
@@ -233,7 +235,7 @@ public enum SmartNameStyle {
             return text.unicodeScalars.count <= options.maxLength && text.utf8.count <= maxStemBytes
         }
         var pick = Pick(people: Array(repeating: false, count: people.count), core: 1)
-        guard fits(pick) else { return Outcome(stem: nil, reason: "budget") }
+        guard fits(pick) else { return Outcome(stem: nil, reason: "budget", source: reason) }
         func attempt(_ change: (inout Pick) -> Void) -> Bool {
             var next = pick
             change(&next)
@@ -250,8 +252,8 @@ public enum SmartNameStyle {
             coreOpen = attempt { $0.core = next }
         }
         let stem = render(pick)
-        if reserved.contains(stem) { return Outcome(stem: nil, reason: "reserved") }
-        if key(lower(stem)) == key(lower(evidence.originalStem)) { return Outcome(stem: nil, reason: "unchanged") }
-        return Outcome(stem: stem, reason: reason)
+        if reserved.contains(stem) { return Outcome(stem: nil, reason: "reserved", source: reason) }
+        if key(lower(stem)) == key(lower(evidence.originalStem)) { return Outcome(stem: nil, reason: "unchanged", source: reason) }
+        return Outcome(stem: stem, reason: reason, source: reason)
     }
 }

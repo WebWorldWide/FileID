@@ -300,5 +300,863 @@
         }
       }
     ]
+  },
+  {
+    "name": "names-companions-share-one-stem",
+    "description": "proposeNames keeps companions on one stem: a RAW+JPEG pair with its .xmp, and a Live Photo HEIC+MOV, come back together, leader first (the image with the best evidence), each member with its own extension and evidenceID '<reason>|group:<leader fileID>'. A companion on disk but not in the catalog holds the whole group (unscannedCompanion). Names taken in the folder bump every member together (_2); when no shared bump is free for one member the whole group keeps its names (collision). A lone RAW and hidden tag sidecars are not grouped. renameFiles applies and undoes the group in one batch.",
+    "tree": [
+      {
+        "path": "pairs/DSC_0012.ARW",
+        "content": "DSC_0012.ARW",
+        "mtime": 1000,
+        "row": {
+          "id": 21,
+          "kind": "image"
+        }
+      },
+      {
+        "path": "pairs/DSC_0012.JPG",
+        "content": "DSC_0012.JPG",
+        "mtime": 1000,
+        "row": {
+          "id": 22,
+          "kind": "image",
+          "vlm_proposed_name": "Beach Sunset"
+        }
+      },
+      {
+        "path": "pairs/DSC_0012.xmp",
+        "content": "DSC_0012.xmp",
+        "mtime": 1000,
+        "row": {
+          "id": 23,
+          "kind": "other"
+        }
+      },
+      {
+        "path": "pairs/.DSC_0012.JPG.fileid-tags.json",
+        "content": ".DSC_0012.JPG.fileid-tags.json",
+        "mtime": 1000
+      },
+      {
+        "path": "live/IMG_0001.HEIC",
+        "content": "IMG_0001.HEIC",
+        "mtime": 1000,
+        "row": {
+          "id": 24,
+          "kind": "image",
+          "vlm_proposed_name": "Dog Park"
+        }
+      },
+      {
+        "path": "live/IMG_0001.MOV",
+        "content": "IMG_0001.MOV",
+        "mtime": 1000,
+        "row": {
+          "id": 25,
+          "kind": "video",
+          "vlm_proposed_name": "dog running"
+        }
+      },
+      {
+        "path": "live/IMG_0002.HEIC",
+        "content": "IMG_0002.HEIC",
+        "mtime": 1000,
+        "row": {
+          "id": 26,
+          "kind": "image",
+          "vlm_proposed_name": "Cake Candles"
+        }
+      },
+      {
+        "path": "live/IMG_0002.MOV",
+        "content": "IMG_0002.MOV",
+        "mtime": 1000
+      },
+      {
+        "path": "taken/DSC_0100.ARW",
+        "content": "DSC_0100.ARW",
+        "mtime": 1000,
+        "row": {
+          "id": 27,
+          "kind": "image"
+        }
+      },
+      {
+        "path": "taken/DSC_0100.JPG",
+        "content": "DSC_0100.JPG",
+        "mtime": 1000,
+        "row": {
+          "id": 28,
+          "kind": "image",
+          "vlm_proposed_name": "Red Barn"
+        }
+      },
+      {
+        "path": "taken/red-barn.ARW",
+        "content": "red-barn.ARW",
+        "mtime": 1000
+      },
+      {
+        "path": "full/DSC_0200.ARW",
+        "content": "DSC_0200.ARW",
+        "mtime": 1000,
+        "row": {
+          "id": 29,
+          "kind": "image"
+        }
+      },
+      {
+        "path": "full/DSC_0200.JPG",
+        "content": "DSC_0200.JPG",
+        "mtime": 1000,
+        "row": {
+          "id": 30,
+          "kind": "image",
+          "vlm_proposed_name": "Old Mill"
+        }
+      },
+      {
+        "path": "full/old-mill.JPG",
+        "content": "old-mill.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_2.JPG",
+        "content": "old-mill_2.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_3.JPG",
+        "content": "old-mill_3.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_4.JPG",
+        "content": "old-mill_4.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_5.JPG",
+        "content": "old-mill_5.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_6.JPG",
+        "content": "old-mill_6.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_7.JPG",
+        "content": "old-mill_7.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_8.JPG",
+        "content": "old-mill_8.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_9.JPG",
+        "content": "old-mill_9.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_10.JPG",
+        "content": "old-mill_10.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_11.JPG",
+        "content": "old-mill_11.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_12.JPG",
+        "content": "old-mill_12.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_13.JPG",
+        "content": "old-mill_13.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_14.JPG",
+        "content": "old-mill_14.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_15.JPG",
+        "content": "old-mill_15.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_16.JPG",
+        "content": "old-mill_16.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_17.JPG",
+        "content": "old-mill_17.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_18.JPG",
+        "content": "old-mill_18.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_19.JPG",
+        "content": "old-mill_19.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_20.JPG",
+        "content": "old-mill_20.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_21.JPG",
+        "content": "old-mill_21.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_22.JPG",
+        "content": "old-mill_22.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_23.JPG",
+        "content": "old-mill_23.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_24.JPG",
+        "content": "old-mill_24.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_25.JPG",
+        "content": "old-mill_25.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_26.JPG",
+        "content": "old-mill_26.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_27.JPG",
+        "content": "old-mill_27.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_28.JPG",
+        "content": "old-mill_28.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_29.JPG",
+        "content": "old-mill_29.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_30.JPG",
+        "content": "old-mill_30.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_31.JPG",
+        "content": "old-mill_31.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_32.JPG",
+        "content": "old-mill_32.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_33.JPG",
+        "content": "old-mill_33.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_34.JPG",
+        "content": "old-mill_34.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_35.JPG",
+        "content": "old-mill_35.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_36.JPG",
+        "content": "old-mill_36.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_37.JPG",
+        "content": "old-mill_37.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_38.JPG",
+        "content": "old-mill_38.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_39.JPG",
+        "content": "old-mill_39.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_40.JPG",
+        "content": "old-mill_40.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_41.JPG",
+        "content": "old-mill_41.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_42.JPG",
+        "content": "old-mill_42.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_43.JPG",
+        "content": "old-mill_43.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_44.JPG",
+        "content": "old-mill_44.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_45.JPG",
+        "content": "old-mill_45.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_46.JPG",
+        "content": "old-mill_46.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_47.JPG",
+        "content": "old-mill_47.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_48.JPG",
+        "content": "old-mill_48.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_49.JPG",
+        "content": "old-mill_49.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_50.JPG",
+        "content": "old-mill_50.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_51.JPG",
+        "content": "old-mill_51.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_52.JPG",
+        "content": "old-mill_52.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_53.JPG",
+        "content": "old-mill_53.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_54.JPG",
+        "content": "old-mill_54.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_55.JPG",
+        "content": "old-mill_55.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_56.JPG",
+        "content": "old-mill_56.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_57.JPG",
+        "content": "old-mill_57.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_58.JPG",
+        "content": "old-mill_58.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_59.JPG",
+        "content": "old-mill_59.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_60.JPG",
+        "content": "old-mill_60.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_61.JPG",
+        "content": "old-mill_61.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_62.JPG",
+        "content": "old-mill_62.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_63.JPG",
+        "content": "old-mill_63.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_64.JPG",
+        "content": "old-mill_64.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_65.JPG",
+        "content": "old-mill_65.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_66.JPG",
+        "content": "old-mill_66.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_67.JPG",
+        "content": "old-mill_67.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_68.JPG",
+        "content": "old-mill_68.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_69.JPG",
+        "content": "old-mill_69.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_70.JPG",
+        "content": "old-mill_70.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_71.JPG",
+        "content": "old-mill_71.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_72.JPG",
+        "content": "old-mill_72.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_73.JPG",
+        "content": "old-mill_73.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_74.JPG",
+        "content": "old-mill_74.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_75.JPG",
+        "content": "old-mill_75.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_76.JPG",
+        "content": "old-mill_76.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_77.JPG",
+        "content": "old-mill_77.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_78.JPG",
+        "content": "old-mill_78.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_79.JPG",
+        "content": "old-mill_79.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_80.JPG",
+        "content": "old-mill_80.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_81.JPG",
+        "content": "old-mill_81.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_82.JPG",
+        "content": "old-mill_82.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_83.JPG",
+        "content": "old-mill_83.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_84.JPG",
+        "content": "old-mill_84.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_85.JPG",
+        "content": "old-mill_85.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_86.JPG",
+        "content": "old-mill_86.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_87.JPG",
+        "content": "old-mill_87.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_88.JPG",
+        "content": "old-mill_88.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_89.JPG",
+        "content": "old-mill_89.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_90.JPG",
+        "content": "old-mill_90.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_91.JPG",
+        "content": "old-mill_91.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_92.JPG",
+        "content": "old-mill_92.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_93.JPG",
+        "content": "old-mill_93.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_94.JPG",
+        "content": "old-mill_94.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_95.JPG",
+        "content": "old-mill_95.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_96.JPG",
+        "content": "old-mill_96.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_97.JPG",
+        "content": "old-mill_97.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_98.JPG",
+        "content": "old-mill_98.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "full/old-mill_99.JPG",
+        "content": "old-mill_99.JPG",
+        "mtime": 1000
+      },
+      {
+        "path": "lone/DSC_0300.ARW",
+        "content": "DSC_0300.ARW",
+        "mtime": 1000,
+        "row": {
+          "id": 31,
+          "kind": "image",
+          "vlm_proposed_name": "Lone Hill"
+        }
+      }
+    ],
+    "steps": [
+      {
+        "label": "companion groups",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            21,
+            24,
+            26,
+            27,
+            29,
+            31,
+            23
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 22,
+                "path": "{path:pairs/DSC_0012.JPG}",
+                "kind": "proposedName",
+                "text": "beach-sunset.JPG",
+                "evidenceID": "proposedName|group:22"
+              },
+              {
+                "fileID": 21,
+                "path": "{path:pairs/DSC_0012.ARW}",
+                "kind": "proposedName",
+                "text": "beach-sunset.ARW",
+                "evidenceID": "proposedName|group:22"
+              },
+              {
+                "fileID": 23,
+                "path": "{path:pairs/DSC_0012.xmp}",
+                "kind": "proposedName",
+                "text": "beach-sunset.xmp",
+                "evidenceID": "proposedName|group:22"
+              },
+              {
+                "fileID": 24,
+                "path": "{path:live/IMG_0001.HEIC}",
+                "kind": "proposedName",
+                "text": "dog-park.HEIC",
+                "evidenceID": "proposedName|group:24"
+              },
+              {
+                "fileID": 25,
+                "path": "{path:live/IMG_0001.MOV}",
+                "kind": "proposedName",
+                "text": "dog-park.MOV",
+                "evidenceID": "proposedName|group:24"
+              },
+              {
+                "fileID": 26,
+                "path": "{path:live/IMG_0002.HEIC}",
+                "kind": "proposedName",
+                "text": "",
+                "evidenceID": "unscannedCompanion|group:26"
+              },
+              {
+                "fileID": 28,
+                "path": "{path:taken/DSC_0100.JPG}",
+                "kind": "proposedName",
+                "text": "red-barn_2.JPG",
+                "evidenceID": "proposedName|group:28"
+              },
+              {
+                "fileID": 27,
+                "path": "{path:taken/DSC_0100.ARW}",
+                "kind": "proposedName",
+                "text": "red-barn_2.ARW",
+                "evidenceID": "proposedName|group:28"
+              },
+              {
+                "fileID": 30,
+                "path": "{path:full/DSC_0200.JPG}",
+                "kind": "proposedName",
+                "text": "",
+                "evidenceID": "collision|group:30"
+              },
+              {
+                "fileID": 29,
+                "path": "{path:full/DSC_0200.ARW}",
+                "kind": "proposedName",
+                "text": "",
+                "evidenceID": "collision|group:30"
+              },
+              {
+                "fileID": 31,
+                "path": "{path:lone/DSC_0300.ARW}",
+                "kind": "proposedName",
+                "text": "lone-hill.ARW",
+                "evidenceID": "proposedName"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "apply the pair together",
+        "command": {
+          "renameFiles": {
+            "renames": [
+              {
+                "fileID": 22,
+                "newName": "beach-sunset.JPG"
+              },
+              {
+                "fileID": 21,
+                "newName": "beach-sunset.ARW"
+              },
+              {
+                "fileID": 23,
+                "newName": "beach-sunset.xmp"
+              }
+            ]
+          }
+        },
+        "await": "bulkActionResult",
+        "expect": {
+          "action": "renameFiles",
+          "succeeded": 3,
+          "failed": 0
+        }
+      },
+      {
+        "label": "pair renamed",
+        "fs": {
+          "exists": [
+            "pairs/beach-sunset.JPG",
+            "pairs/beach-sunset.ARW",
+            "pairs/beach-sunset.xmp"
+          ],
+          "absent": [
+            "pairs/DSC_0012.JPG",
+            "pairs/DSC_0012.ARW",
+            "pairs/DSC_0012.xmp"
+          ]
+        }
+      },
+      {
+        "label": "renamed pair is unchanged",
+        "catalog": {
+          "action": "proposeNames",
+          "fileIDs": [
+            21
+          ],
+          "naming": {
+            "style": "short",
+            "maxLength": 40
+          }
+        },
+        "expect": {
+          "status": "ok",
+          "hits": {
+            "$tol": "exact",
+            "value": [
+              {
+                "fileID": 22,
+                "path": "{path:pairs/beach-sunset.JPG}",
+                "kind": "proposedName",
+                "text": "",
+                "evidenceID": "unchanged|group:22"
+              },
+              {
+                "fileID": 21,
+                "path": "{path:pairs/beach-sunset.ARW}",
+                "kind": "proposedName",
+                "text": "",
+                "evidenceID": "unchanged|group:22"
+              },
+              {
+                "fileID": 23,
+                "path": "{path:pairs/beach-sunset.xmp}",
+                "kind": "proposedName",
+                "text": "",
+                "evidenceID": "unchanged|group:22"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "label": "undo the pair together",
+        "command": {
+          "renameFiles": {
+            "renames": [
+              {
+                "fileID": 22,
+                "newName": "DSC_0012.JPG"
+              },
+              {
+                "fileID": 21,
+                "newName": "DSC_0012.ARW"
+              },
+              {
+                "fileID": 23,
+                "newName": "DSC_0012.xmp"
+              }
+            ]
+          }
+        },
+        "await": "bulkActionResult",
+        "expect": {
+          "action": "renameFiles",
+          "succeeded": 3,
+          "failed": 0
+        }
+      },
+      {
+        "label": "pair restored",
+        "fs": {
+          "exists": [
+            "pairs/DSC_0012.JPG",
+            "pairs/DSC_0012.ARW",
+            "pairs/DSC_0012.xmp",
+            "pairs/.DSC_0012.JPG.fileid-tags.json",
+            "live/IMG_0002.MOV",
+            "full/DSC_0200.JPG",
+            "full/DSC_0200.ARW"
+          ],
+          "absent": [
+            "pairs/beach-sunset.JPG",
+            "pairs/beach-sunset.ARW",
+            "pairs/beach-sunset.xmp"
+          ]
+        }
+      }
+    ]
   }
 ]
