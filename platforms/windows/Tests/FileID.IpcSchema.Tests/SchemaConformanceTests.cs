@@ -207,6 +207,7 @@ public class SchemaConformanceTests
         new ToolRequestCommand(new ToolRequest("tool", "preview", _exampleFileIds, "/internal", new ToolRecipe("photo", "png", 64, AllowUpscale: true), "plan", DestinationBookmark: "AQID")),
         new GrantFolderAccessCommand(@"C:\Users\adam\Pictures", "AQID"),
         new CatalogRequestCommand(new CatalogRequest("r1", "search", "birthday", 42, ExampleChapter(), "chapter-1", "job-1", new long[] { 42 }, TimelineMode: "moments")),
+        new CatalogRequestCommand(new CatalogRequest("r2", "proposeNames", null, null, null, null, null, new long[] { 42 }, Naming: new CatalogNaming("dateFirst", 40, IncludePeople: true))),
         new StartScanCommand(@"C:\Users\adam\Pictures", "Pictures", Rescan: true, RootBookmark: "AQID", ExcludedPaths: [@"C:\Users\adam\Pictures\.cache"]),
         new PauseScanCommand(),
         new ResumeScanCommand(),

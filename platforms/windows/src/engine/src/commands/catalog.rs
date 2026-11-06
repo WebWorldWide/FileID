@@ -316,6 +316,9 @@ pub fn execute(conn: &mut Connection, request: &CatalogRequest) -> Result<Catalo
             let decision = request.take_decision.as_ref().ok_or_else(|| anyhow::anyhow!("Decision required"))?;
             super::catalog_take_auto::decide(conn, decision)?;
         }
+        "proposeNames" => {
+            result.hits = super::catalog_names::propose(conn, request)?;
+        }
         "rankTakesWithGoal" => {
             let goal = request.query.as_deref().unwrap_or("").trim();
             let ids = request.file_ids.as_deref().unwrap_or(&[]);
