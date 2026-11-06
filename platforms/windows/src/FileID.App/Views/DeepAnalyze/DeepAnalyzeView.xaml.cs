@@ -51,6 +51,7 @@ public sealed partial class DeepAnalyzeView : UserControl
     public DeepAnalyzeView()
     {
         InitializeComponent();
+        NameStyleHost.Content = new NameStyleCard();
         // Restore the user's last VLM choice so the auto-chain after
         // face clustering and a manual Analyze All both use the same
         // weights the user last picked. Falls back to qwen2_5_vl_7b.

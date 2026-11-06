@@ -481,6 +481,7 @@ button.next-step:hover { background: transparent; color: shade(@fileid_gold, 1.1
     border: 1px solid alpha(#FFFFFF, 0.14);
 }
 .numeric { font-feature-settings: "tnum"; }
+.chip.reason-chip { color: @fileid_lavender; border-color: alpha(@fileid_lavender, 0.35); background-color: alpha(@fileid_lavender, 0.12); }
 
 /* ── Focus (DESIGN_V3_PORT "Focus"): one 2 px gold ring 3 px outside every
    control, replacing Adwaita's own ring so there is never a double ring. ── */
