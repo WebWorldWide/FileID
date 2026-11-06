@@ -60,6 +60,7 @@ extension CatalogNameProposalsTests {
             }
         }
         try Data("m".utf8).write(to: root.appendingPathComponent("IMG_2.MOV"))
+        try Data("x".utf8).write(to: root.appendingPathComponent("DSC_3.xmp"))
         try Data("t".utf8).write(to: root.appendingPathComponent("beach-sunset.ARW"))
         let naming = CatalogNaming(style: "short", maxLength: 40)
         let response = await CatalogStore.handle(CatalogRequest(requestID: "n", action: "proposeNames", fileIDs: [10, 13, 14, 12], naming: naming), database: db)

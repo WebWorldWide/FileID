@@ -138,7 +138,7 @@ impl Run<'_> {
             } else {
                 self.conn.query_row("SELECT id FROM files WHERE path_text=?1", [&path], |r| r.get(0)).optional()?
             };
-            if row.is_some() || std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+            if row.is_some() || (member.role != Role::Sidecar && std::fs::metadata(&path).is_ok_and(|m| m.is_file())) {
                 resolved.push(Companion { member, path, row });
             }
         }
@@ -432,6 +432,7 @@ mod tests {
             .unwrap();
         }
         std::fs::write(dir.join("IMG_2.MOV"), b"m").unwrap();
+        std::fs::write(dir.join("DSC_3.xmp"), b"x").unwrap();
         std::fs::write(dir.join("beach-sunset.ARW"), b"t").unwrap();
         let hits = propose(
             &conn,

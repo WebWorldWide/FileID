@@ -214,6 +214,78 @@ struct BulkMutationTests {
             atPath: root.appendingPathComponent("renamed.txt").path))
     }
 
+    private func renameFixture(_ tag: String, _ files: [(Int64, String)]) async throws -> (URL, EngineDatabase) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileID\(tag)-\(UUID().uuidString)")
+        let folder = root.appendingPathComponent("files")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let db = try makeDB(root)
+        for (id, name) in files {
+            let url = folder.appendingPathComponent(name)
+            try Data(name.utf8).write(to: url)
+            try await insert(db, id: id, path: url.path)
+        }
+        return (folder, db)
+    }
+
+    private func listed(_ folder: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted()
+    }
+
+    @Test("Uncatalogued sidecars follow a complete group and come back on undo")
+    func sidecarsFollowRename() async throws {
+        let (folder, db) = try await renameFixture("Sidecars", [(1, "IMG_1.JPG"), (2, "IMG_1.ARW"), (3, "IMG_2.JPG"), (4, "IMG_9.JPG")])
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        for name in ["IMG_1.xmp", "IMG_1.ARW.xmp", ".IMG_1.xmp", "IMG_2.ARW", "IMG_2.xmp", "IMG_9.xmp", "taken.xmp"] {
+            try Data(name.utf8).write(to: folder.appendingPathComponent(name))
+        }
+        let result = await FileIDEngineMain.renameFiles(database: db, renames: [
+            RenameEntry(fileID: 1, newName: "beach.JPG"), RenameEntry(fileID: 2, newName: "beach.ARW"),
+            RenameEntry(fileID: 3, newName: "lone.JPG"), RenameEntry(fileID: 4, newName: "taken.JPG"),
+        ])
+        #expect(result.succeeded == 4 && result.failed == 0)
+        #expect(try listed(folder) == [".IMG_1.xmp", "IMG_2.ARW", "IMG_2.xmp", "IMG_9.xmp", "beach.ARW", "beach.ARW.xmp", "beach.JPG",
+                                       "beach.xmp", "lone.JPG", "taken.JPG", "taken.xmp"])
+        #expect(try Data(contentsOf: folder.appendingPathComponent("beach.xmp")) == Data("IMG_1.xmp".utf8))
+        #expect(result.messages.first { $0.fileID == 4 }?.message == "IMG_9.xmp kept its name because taken.xmp already exists.")
+        #expect(result.messages.first { $0.fileID == 1 }?.message == nil)
+
+        let undo = await FileIDEngineMain.renameFiles(database: db, renames: [
+            RenameEntry(fileID: 1, newName: "IMG_1.JPG"), RenameEntry(fileID: 2, newName: "IMG_1.ARW"),
+        ])
+        #expect(undo.succeeded == 2 && undo.failed == 0)
+        let names = try listed(folder)
+        #expect(["IMG_1.JPG", "IMG_1.ARW", "IMG_1.xmp", "IMG_1.ARW.xmp"].allSatisfy(names.contains))
+        #expect(!names.contains { $0.hasPrefix("beach") })
+    }
+
+    @Test("A member that fails to rename rolls back its whole group")
+    func failedMemberRollsBackGroup() async throws {
+        let (folder, db) = try await renameFixture("Rollback", [(1, "IMG_5.JPG"), (2, "IMG_5.ARW"), (3, "solo.txt")])
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        try Data("x".utf8).write(to: folder.appendingPathComponent("IMG_5.xmp"))
+        let result = await FileIDEngineMain.renameFiles(database: db, renames: [
+            RenameEntry(fileID: 1, newName: "sun.JPG"), RenameEntry(fileID: 2, newName: "sun.ARW"), RenameEntry(fileID: 3, newName: "solo2.txt"),
+        ]) { source, target in
+            if source.lastPathComponent == "IMG_5.ARW" { throw FileIDEngineMain.BulkRefusal("Injected failure.") }
+            try FileManager.default.moveItem(at: source, to: target)
+        }
+        #expect(result.succeeded == 1 && result.failed == 2)
+        #expect(try listed(folder) == ["IMG_5.ARW", "IMG_5.JPG", "IMG_5.xmp", "solo2.txt"])
+        let first = result.messages.first { $0.fileID == 1 }
+        #expect(first?.ok == false && first?.message?.contains("IMG_5.ARW couldn't be renamed") == true && first?.message?.hasSuffix("Injected failure.") == true)
+        #expect(result.messages.first { $0.fileID == 2 }?.message == "Injected failure. The group keeps its names.")
+        let paths: [String] = try await db.pool.read { sql in try String.fetchAll(sql, sql: "SELECT path_text FROM files ORDER BY id") }
+        #expect(paths.map { URL(fileURLWithPath: $0).lastPathComponent } == ["IMG_5.JPG", "IMG_5.ARW", "solo2.txt"])
+
+        try await db.pool.write { sql in try sql.execute(sql: "UPDATE files SET file_ref = file_ref + 1 WHERE id = 2") }
+        let refused = await FileIDEngineMain.renameFiles(database: db, renames: [
+            RenameEntry(fileID: 1, newName: "sun.JPG"), RenameEntry(fileID: 2, newName: "sun.ARW"),
+        ])
+        #expect(refused.succeeded == 0 && refused.failed == 2)
+        #expect(refused.messages.first { $0.fileID == 1 }?.message?.hasSuffix("File changed since it was indexed.") == true)
+        #expect(try listed(folder) == ["IMG_5.ARW", "IMG_5.JPG", "IMG_5.xmp", "solo2.txt"])
+    }
+
     @Test("Trash request IDs are deduplicated in stable order")
     func trashIDsAreOrderedUnique() {
         #expect(FileIDEngineMain.orderedUniqueFileIDs([3, 1, 3, 2, 1]) == [3, 1, 2])

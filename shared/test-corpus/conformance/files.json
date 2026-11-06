@@ -39,6 +39,43 @@
     ]
   },
   {
+    "name": "files-rename-sidecars-follow-their-group",
+    "description": "renameFiles carries an uncatalogued .xmp/.aae sidecar (<stem>.xmp or <name>.xmp) to the new stem when every RAW, JPEG/HEIC or MOV of that stem in the folder is in the batch, and the inverse batch (Undo) brings it back. A JPEG renamed without its uncatalogued RAW leaves the RAW's .xmp alone, and hidden files never move.",
+    "tree": [
+      {"path": "side/IMG_0007.JPG", "content": "jpeg", "row": {"id": 41, "kind": "image"}},
+      {"path": "side/IMG_0007.ARW", "content": "raw", "row": {"id": 42, "kind": "image"}},
+      {"path": "side/IMG_0007.xmp", "content": "xmp"},
+      {"path": "side/IMG_0007.ARW.xmp", "content": "darktable"},
+      {"path": "side/.IMG_0007.xmp", "content": "hidden"},
+      {"path": "side/IMG_0008.JPG", "content": "lone", "row": {"id": 43, "kind": "image"}},
+      {"path": "side/IMG_0008.ARW", "content": "unscanned raw"},
+      {"path": "side/IMG_0008.xmp", "content": "raw xmp"}
+    ],
+    "steps": [
+      {"label": "rename the pair and a lone JPEG", "command": {"renameFiles": {"renames": [{"fileID": 41, "newName": "harbor-boats.JPG"}, {"fileID": 42, "newName": "harbor-boats.ARW"}, {"fileID": 43, "newName": "lone-tree.JPG"}]}}, "await": "bulkActionResult", "expect": {"action": "renameFiles", "succeeded": 3, "failed": 0}},
+      {"label": "sidecars followed", "fs": {"exists": ["side/harbor-boats.JPG", "side/harbor-boats.ARW", "side/.IMG_0007.xmp", "side/lone-tree.JPG", "side/IMG_0008.ARW"], "absent": ["side/IMG_0007.xmp", "side/IMG_0007.ARW.xmp", "side/.harbor-boats.xmp", "side/lone-tree.xmp"], "contents": {"side/harbor-boats.xmp": "xmp", "side/harbor-boats.ARW.xmp": "darktable", "side/IMG_0008.xmp": "raw xmp"}}},
+      {"label": "sidecars stay uncatalogued", "db": "SELECT id FROM files ORDER BY id", "expect": [[41], [42], [43]]},
+      {"label": "undo", "command": {"renameFiles": {"renames": [{"fileID": 41, "newName": "IMG_0007.JPG"}, {"fileID": 42, "newName": "IMG_0007.ARW"}, {"fileID": 43, "newName": "IMG_0008.JPG"}]}}, "await": "bulkActionResult", "expect": {"action": "renameFiles", "succeeded": 3, "failed": 0}},
+      {"label": "sidecars came back", "fs": {"exists": ["side/IMG_0007.JPG", "side/IMG_0007.ARW", "side/IMG_0008.JPG"], "absent": ["side/harbor-boats.xmp", "side/harbor-boats.ARW.xmp"], "contents": {"side/IMG_0007.xmp": "xmp", "side/IMG_0007.ARW.xmp": "darktable", "side/.IMG_0007.xmp": "hidden", "side/IMG_0008.xmp": "raw xmp"}}}
+    ]
+  },
+  {
+    "name": "files-rename-group-rolls-back",
+    "description": "When one member of a companion group in a renameFiles batch can't be renamed (here its target appeared since the preview), the members already renamed are put back and every member is reported failed; a file outside the group still renames.",
+    "tree": [
+      {"path": "roll/IMG_0009.JPG", "content": "jpeg", "row": {"id": 51, "kind": "image"}},
+      {"path": "roll/IMG_0009.ARW", "content": "raw", "row": {"id": 52, "kind": "image"}},
+      {"path": "roll/IMG_0009.xmp", "content": "xmp"},
+      {"path": "roll/sun.ARW", "content": "occupant"},
+      {"path": "roll/notes.txt", "content": "notes", "row": {"id": 53, "kind": "doc"}}
+    ],
+    "steps": [
+      {"label": "rename", "command": {"renameFiles": {"renames": [{"fileID": 51, "newName": "sun.JPG"}, {"fileID": 52, "newName": "sun.ARW"}, {"fileID": 53, "newName": "notes-2.txt"}]}}, "await": "bulkActionResult", "expect": {"action": "renameFiles", "succeeded": 1, "failed": 2, "messages": [{"fileID": 51, "ok": false}, {"fileID": 52, "ok": false}, {"fileID": 53, "ok": true}]}},
+      {"label": "group put back", "fs": {"exists": ["roll/IMG_0009.JPG", "roll/IMG_0009.ARW", "roll/notes-2.txt"], "absent": ["roll/sun.JPG", "roll/sun.xmp", "roll/notes.txt"], "contents": {"roll/sun.ARW": "occupant", "roll/IMG_0009.xmp": "xmp"}}},
+      {"label": "catalog unchanged for the group", "db": "SELECT id,path_text FROM files ORDER BY id", "expect": [[51, "{path:roll/IMG_0009.JPG}"], [52, "{path:roll/IMG_0009.ARW}"], [53, "{path:roll/notes-2.txt}"]]}
+    ]
+  },
+  {
     "name": "files-trash-and-restore-round-trip",
     "description": "trashFiles moves the file to the platform Trash, drops its row and returns the undo batch id; restoreFromTrash with that id puts the file back byte for byte and re-catalogs it.",
     "knownDivergences": [

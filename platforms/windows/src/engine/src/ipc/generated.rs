@@ -657,9 +657,12 @@ pub struct CatalogRequest {
     /// come back together, catalogued members added even when not requested, leader first (the
     /// member with the best evidence, preferring the image), each with its own extension and
     /// evidenceID '<reason>|group:<leader fileID>'. The group bumps together; when no shared bump
-    /// is free every member keeps its name (collision), and a companion on disk but not in the
-    /// catalog holds the whole group (unscannedCompanion). Apply with renameFiles, every member in
-    /// one batch.
+    /// is free every member keeps its name (collision), and a RAW, JPEG/HEIC or MOV companion on
+    /// disk but not in the catalog holds the whole group (unscannedCompanion); an uncatalogued
+    /// .xmp/.aae does not hold it. Apply with renameFiles, every member in one batch: renameFiles
+    /// carries an uncatalogued .xmp/.aae to the new stem when every RAW, JPEG/HEIC and MOV of that
+    /// stem in the folder is in the batch, and when one member of a group fails it puts the others
+    /// back and reports the whole group failed.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
